@@ -122,7 +122,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// `(from, into)` pair under one collecting session; `None` when a
     /// relation stops at its budget or a conditional reading does not
     /// settle.
-    fn signature_inference_inputs(
+    pub(super) fn signature_inference_inputs(
         &self,
         type_parameters: &[TypeParamDecl],
         pairs: &[(SemanticNodeId, SemanticNodeId)],
@@ -216,7 +216,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// `signature` declaring no type parameters: an instantiated generic
     /// signature, whose parameters were all substituted.
-    fn signature_without_type_parameters(&self, signature: SemanticNodeId) -> SemanticNodeId {
+    pub(super) fn signature_without_type_parameters(
+        &self,
+        signature: SemanticNodeId,
+    ) -> SemanticNodeId {
+        self.signature_with_type_parameters(signature, Vec::new())
+    }
+
+    /// `signature` declaring `type_parameters` in place of its own.
+    pub(super) fn signature_with_type_parameters(
+        &self,
+        signature: SemanticNodeId,
+        type_parameters: Vec<TypeParamDecl>,
+    ) -> SemanticNodeId {
         let graph = self.graph();
         let Some(data) = graph.node_data(signature) else {
             return signature;
@@ -243,7 +255,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 params: params.share(),
                 return_type: *return_type,
                 type_parameters: crate::semantic_query::PayloadArray::from(
-                    Vec::new().into_boxed_slice(),
+                    type_parameters.into_boxed_slice(),
                 ),
                 occurrence: occurrence.clone(),
                 return_carrier: match return_carrier {

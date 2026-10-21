@@ -479,3 +479,69 @@ fn a_one_level_closure_bounds_the_exported_walk_depth() {
         ),
     }
 }
+
+/// Resolving an alias whose instantiation is a circular type alias answers
+/// the checker's error type and, when the request asks for diagnostics,
+/// carries the checker's TS2456 at the circular alias's name — measured on
+/// TypeScript 7.0.2 as `grow.ts(1,13): error TS2456: Type alias 'Grow'
+/// circularly references itself.` — on a cold and a warm request alike. The
+/// graph carries the root's TS2456 only; the checker's two TS2315 lines on the
+/// same text (`Type 'Grow' is not generic.`) are outside it. A
+/// request that does not ask for diagnostics carries none.
+#[test]
+fn resolve_symbol_graph_reports_the_checkers_ts2456_at_the_alias_name() {
+    const GROW: &str = "export type Grow<T> = Grow<[T]>;\nexport type G = Grow<string>;\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/grow.ts".to_string()),
+        input_id: "/grow.ts".to_string(),
+        source: Arc::from(GROW),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/grow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let diagnostics = |include: bool| {
+        let mut envelope = resolve_envelope("/grow.ts", "G", ProjectionMode::Expanded);
+        if let Some(type_info_graph_request::Payload::ResolveSymbol(resolve)) =
+            envelope.payload.as_mut()
+        {
+            resolve.include_diagnostics = include;
+        }
+        let (response, _) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+        let Some(type_info_graph_response::Kind::Graph(graph)) =
+            response.expect("the graph arm").kind
+        else {
+            panic!("the resolve-symbol operation answers with the graph arm");
+        };
+        let strings = graph.strings.map(|table| table.entries).unwrap_or_default();
+        graph
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                (
+                    diagnostic.severity,
+                    strings[diagnostic.message_name_id as usize].clone(),
+                    strings[diagnostic.span_canonical_name_id as usize].clone(),
+                    diagnostic.has_span,
+                    &GROW[diagnostic.span_start as usize..diagnostic.span_end as usize],
+                    diagnostic.span_start,
+                )
+            })
+            .map(|(severity, message, file, has_span, text, start)| {
+                (severity, message, file, has_span, text.to_owned(), start)
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![(
+        verter_protocol::verter::v1::GraphDiagnosticSeverity::Error as i32,
+        "TS2456: Type alias 'Grow' circularly references itself.".to_string(),
+        "/grow.ts".to_string(),
+        true,
+        "Grow".to_string(),
+        12,
+    )];
+    assert_eq!(diagnostics(true), expected, "cold");
+    assert_eq!(diagnostics(true), expected, "warm");
+    assert_eq!(diagnostics(false), Vec::new(), "not asked for");
+}

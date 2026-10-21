@@ -176,6 +176,31 @@ An interface/class declaration body with heritage is a third construction
 outside the funnel, the `CompositeList::heritage` mint (§6, rule 8): it is a
 declaration, not a commutative intersection, and is never re-decided.
 
+A written union or intersection stays as written through lowering — its
+`AuthoredShell`, or a declaration body's order-preserving `PreservingRebuild`
+view. Where a named type is PUBLISHED (the typeinfo materializer
+`materialize_through_aliases`, both the named-resolve and evaluate entries),
+a written intersection at the alias root is reduced by `ReduceIntersection`
+for a written type node (under the root file's `strictNullChecks`), and a
+union by `ProjectSemanticDispatch::reduced_written_union`, which asks
+`ReduceUnion` (under the same root-file `strictNullChecks`) for the type the
+checker constructs from it when that construction absorbs a literal: `"a" | string` is `string`, a pattern
+template absorbs the literals it matches. An alias is transparent to that
+construction, so a named arm (a declaration reference or placeholder) is
+resolved first, through the whole alias chain (a chain that revisits a node
+is recursive and stays by its name): it stands for its literal, primitive or
+pattern-template resolution, or contributes its resolved union's arms
+(`type A = "a"`: `A | string` is `string`); any other named arm stays by its
+name. Only a union holding a literal beside a primitive or pattern template is
+offered, decided in one pass over the arms (each arm classified once, so a
+large literal union with no absorber costs linear work, warm or cold); every
+other union (and one whose reduction absorbs nothing, `A | "b"`) stays as it
+was published. The reducer's outcome, or a named arm's failed resolution,
+returns typed, so a fault fails the publication through the materializer's
+fault/miss split while a miss keeps the union. Only the published alias body
+is reduced; a composite nested in a member or element stays shallow until the
+consumer walks to it.
+
 **Retired spellings.** `NormalizeUnion`, `NormalizeIntersection`,
 `SemanticMeet`, `canonical_intersection`,
 `build_normalize_union` and `UnionSelected` are retired names. Each is an entry

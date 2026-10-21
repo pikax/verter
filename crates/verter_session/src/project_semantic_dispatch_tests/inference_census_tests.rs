@@ -231,10 +231,10 @@ fn call_inference() {
             tsc: [r#"number"#, r#"number"#, r#"number"#, r#"number"#],
             diagnostics: [&[2322], &[2322], &[2322], &[2322]],
             baseline: [
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
+                Class::Recovery,
+                Class::Recovery,
+                Class::Recovery,
+                Class::Recovery,
             ],
         },
         Row {
@@ -259,10 +259,10 @@ fn call_inference() {
             tsc: [r#"number"#, r#"number"#, r#"number"#, r#"number"#],
             diagnostics: [&[2322], &[2322], &[2322], &[2322]],
             baseline: [
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
+                Class::Recovery,
+                Class::Recovery,
+                Class::Recovery,
+                Class::Recovery,
             ],
         },
         Row {
@@ -270,10 +270,10 @@ fn call_inference() {
             tsc: [r#"number"#, r#"number"#, r#"number"#, r#"number"#],
             diagnostics: [&[2322], &[2322], &[2322], &[2322]],
             baseline: [
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
+                Class::Recovery,
+                Class::Recovery,
+                Class::Recovery,
+                Class::Recovery,
             ],
         },
         Row {
