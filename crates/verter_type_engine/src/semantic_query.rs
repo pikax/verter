@@ -1723,11 +1723,14 @@ impl CanonicalTypeSubstitution {
     /// substitution owns its operands in `graph`.
     #[must_use]
     pub fn new(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        graph: impl AsRef<crate::semantic_query_memo::SemanticGraphStore>,
         bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
     ) -> Self {
         Self::rooted(bindings, |operands| {
-            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(graph, operands)
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+                graph.as_ref(),
+                operands,
+            )
         })
     }
 

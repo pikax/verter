@@ -33,6 +33,12 @@ impl<M: ObserveExec> Clone for GraphIn<'_, M> {
 
 impl<M: ObserveExec> Copy for GraphIn<'_, M> {}
 
+impl<M: ObserveExec> AsRef<SemanticGraphStore> for GraphIn<'_, M> {
+    fn as_ref(&self) -> &SemanticGraphStore {
+        self.store
+    }
+}
+
 impl<'a, M: ObserveExec> GraphIn<'a, M> {
     /// The store `store`, reached by execution compiled for `M`.
     #[inline(always)]

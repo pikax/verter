@@ -785,6 +785,12 @@ pub(super) const fn records_telemetry<M: verter_audit::observe::ObserveExec>() -
     cfg!(any(test, feature = "test-support")) || M::CAPTURED
 }
 
+impl AsRef<SemanticGraphStore> for SemanticGraphStore {
+    fn as_ref(&self) -> &SemanticGraphStore {
+        self
+    }
+}
+
 impl SemanticGraphStore {
     /// The one store constructor: the store and its graph storage charge
     /// the same account, bound before the first node is interned. Binds

@@ -241,9 +241,10 @@ In a debug instrumented build a dispatcher bound to a request context asserts
 its compiled mode equals the mode the installed root entry selected, so a
 misrouted unit fails in the instrumentation lane rather than dropping a
 request's observations. The process-wide work-attribution table
-(`verter_audit::attribute!`, `count_resolver_context_call!`) and the hosts'
-provenance counters are selected by the instrumented build as a whole, not per
-request, and are outside this specialisation.
+(`verter_audit::attribute!`, `count_resolver_context_call!`) is selected by
+the instrumented build as a whole. Per-execution provenance in typed store
+and host paths follows the selected mode; test-support retains deterministic
+work accounting in both modes.
 
 A default build has no audit envelope at all. The observer slot, the
 per-request accumulator, the record store, the scheduler and VFS audit sinks

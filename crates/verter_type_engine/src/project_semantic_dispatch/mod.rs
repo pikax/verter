@@ -6354,6 +6354,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
             BuiltinUtilityResolution::Unknown
         }
     }
+
+    /// The compiler-provided utility an authored `intrinsic` alias selects.
+    pub fn resolve_intrinsic_alias(&self, name: &str) -> Option<BuiltinUtility> {
+        match self.resources.intrinsics.lookup::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(self.ctx),
+            name,
+        ) {
+            crate::intrinsic_registry::IntrinsicLookup::Found(intrinsic) => {
+                intrinsic.as_builtin_utility()
+            }
+            crate::intrinsic_registry::IntrinsicLookup::Unsupported { .. } => None,
+        }
+    }
 }
 
 pub mod memo;
