@@ -144,18 +144,25 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
         SemanticNodeData::Intersection(members) => {
             // Presence-aware recurse (a PRESENT-but-unraisable arm fails the
             // WHOLE composite), then drop the typed `UnrepresentableSurface`
-            // degradation arms and the empty-object arms (`{} & X ≡ X`), then
+            // degradation arms and the empty-object arms (`{} & X ≡ X`) — but
+            // not from the written `string & {}` pair the checker keeps — then
             // collapse: empty -> empty object, len==1 -> that arm, else
             // Intersection. The recurse is materialised into a Vec FIRST so the
             // arm-drop inspection (an immutable `alg` borrow) does not overlap
             // the recurse closure's unique `alg` borrow.
+            let keeps_empty_object =
+                crate::project_semantic_dispatch::canonical_algebra::is_kept_primitive_over_empty_object(
+                    dispatch.graph(),
+                    members.as_ref(),
+                );
             let arms: Vec<A::Out> = members
                 .iter()
                 .map(|member| fold_node(alg, dispatch, *member, active))
                 .collect::<Option<_>>()?;
             let (mut kept, dropped): (Vec<A::Out>, Vec<A::Out>) =
                 arms.into_iter().partition(|arm| {
-                    !(alg.is_object_surface_sentinel(arm) || alg.is_empty_object(arm))
+                    !(alg.is_object_surface_sentinel(arm)
+                        || (!keeps_empty_object && alg.is_empty_object(arm)))
                 });
             let result = if kept.is_empty() {
                 alg.empty_object()

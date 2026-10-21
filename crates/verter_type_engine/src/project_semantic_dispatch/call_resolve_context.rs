@@ -1618,6 +1618,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// node, and for a recovery whose message needs an argument it does not
     /// carry.
     pub fn checker_recovery_message(&self, node: SemanticNodeId) -> Option<String> {
+        let (diagnostic, arguments) = self.checker_recovery_arguments(node)?;
+        let code = diagnostic.code;
+        Some(format!("TS{}: {}", code.code(), code.format(&arguments)))
+    }
+
+    /// The diagnostic a recovery node carries with the printed values of its
+    /// message's placeholders, in order: TS2456 names the alias its origin
+    /// refers to, a message with no placeholder takes none. `None` for any
+    /// other node, and for a recovery whose message needs an argument it
+    /// does not carry — never a message with a placeholder left unfilled.
+    pub fn checker_recovery_arguments(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(crate::semantic_query::CheckerDiagnostic, Vec<String>)> {
         let data = self.graph().node_data(node)?;
         let SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
             diagnostic,
@@ -1640,7 +1654,47 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ if !code.message().contains('{') => Vec::new(),
             _ => return None,
         };
-        Some(format!("TS{}: {}", code.code(), code.format(&arguments)))
+        Some((*diagnostic, arguments))
+    }
+
+    /// The occurrence of the diagnostic a recovery node carries, bound NOW
+    /// to where the checker reports it for the body of `canonical`: its
+    /// bound message arguments ([`Self::checker_recovery_arguments`]) and
+    /// its authored report location. A recovery with an authored location
+    /// (TS2456, at the circular alias's name) is reported there, and only
+    /// by the body of the alias's own file — a name span of another file
+    /// is no position of this one; any other recovery is reported at the
+    /// call's `call_span`. The location is read freshly on every bind,
+    /// never kept from the first caller. `None` when the recovery has no
+    /// complete message or no position in this file.
+    pub fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        let (diagnostic, arguments) = self.checker_recovery_arguments(node)?;
+        let span = match diagnostic.code {
+            crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias => {
+                let (alias_file, span) = self.checker_recovery_location(node)?;
+                if alias_file.as_ref() != canonical {
+                    return None;
+                }
+                span
+            }
+            _ => call_span,
+        };
+        Some(crate::semantic_query::CheckerDiagnosticOccurrence::new(
+            span.start,
+            span.end,
+            diagnostic,
+            arguments
+                .into_iter()
+                .map(String::into_boxed_str)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            Box::default(),
+        ))
     }
 
     /// Where the checker reports the diagnostic a recovery node carries

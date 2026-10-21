@@ -1495,8 +1495,21 @@ Workspace resolution carries the same distinction through
 `ResolutionOutcome`. A result-only compatibility query must consume
 `into_transient_result()` and must not retain the target. Any provider, route,
 exact-edge, parsed-edge, or artifact sink must instead consume
-`into_publication()`, whose `ResolutionPublication::{Admitted, Refused}` shape
-keeps an admitted miss distinct from a typed refusal. `AdmittedResolution`
+`into_publication()`, whose `ResolutionPublication::{Admitted, Unretained,
+Refused}` shape keeps an admitted miss distinct from a typed refusal.
+`Unretained` is a complete, current answer the retention account declined to
+keep (`RetentionPressure` at the Engine's workspace-lane reservation): it is
+DELIVERED to its consumer, never withheld like an untrustworthy non-admission
+(torn, partial, superseded, cancelled, budget-exceeded), and never admitted —
+there is no conversion to `AdmittedResolution`, so no persistent or shared
+sink can root on it. A consumer answers from it (`delivered()` /
+`into_delivered()`), import-graph bookkeeping (dependency edges, stage
+blockers, provider sync) follows it, and every session entry that converts an
+outcome into a publication marks the reading compute non-cacheable through
+`NonCacheableReadReason::UnretainedResolution` (transitive), so nothing derived
+from it is retained either; request-scoped normalization memos replay that
+mark. A composed answer that depends on an unretained lane is itself
+unretained (`or_else_publication`, `unretained_with`). `AdmittedResolution`
 has no external constructor: only the Engine transaction finalizer can mint
 one, and projections (`map_result`, `map_admitted`, `replace_result`) require an
 existing admitted carrier. The former `from_admitted_state` escape hatch is

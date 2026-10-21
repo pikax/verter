@@ -265,7 +265,9 @@ export function timerResolution(run) {
     : null;
   const coarse = zeroShare !== null && zeroShare > 0;
   const pool = coarse ? server : calibration.filter((t) => t > 0);
-  const quantum = pool.length ? Math.min(...pool) : null;
+  // A fold, not `Math.min(...pool)`: a run's calibration samples can
+  // outnumber the arguments one call may spread.
+  const quantum = pool.length ? pool.reduce((least, t) => (t < least ? t : least)) : null;
   return {
     tscQuantumMs: quantum,
     clock: calibration.length === 0 ? "uncalibrated" : coarse ? "coarse" : "fine",
