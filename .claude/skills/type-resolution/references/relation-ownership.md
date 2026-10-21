@@ -152,6 +152,72 @@ Guards: `many_distinct_relations_under_tiny_retention_keep_operand_only_residenc
 
 **Superseding notes for other owners' documents** (folded in by the documentation closure): `.claude/skills/host-session/SKILL.md` still lists relation proofs among what a close releases and names `semantic_query_memo/intern_table.rs` as the proof/relate-key table storage — both are gone; `docs/contributing/semantic-benchmark.md` still lists interned relation proofs among the retention/work counts — the counter no longer exists (the benchmark records, `session-analyze.mjs` required state and the dx-harness churn counters dropped it).
 
+### Library generic interfaces and generic-method relations
+
+A runtime nominal's `__builtin__` carrier (`Promise<T>`, `Map<K, V>`,
+`Set<T>`, `Date`, …; never `Function`, which relations decide by tag) is, to
+the relation, the project's global interface of that name
+(`relation_declaration_identity` → `runtime_nominal_global_declaration`,
+through `first_global_declaration`, read from the library
+`relation_wrapper_canonical` names). Two applications relate by their
+arguments under the interface's measured variance (`generic_reference`), and
+the identity unwrap expands an application to the interface's members, the
+members a walk's read already takes. A project that declares no such
+interface keeps the carrier unresolvable. Such a carrier is a reference, not a
+builtin utility: `infer_inventory` infers through `Promise<infer O>`'s
+arguments and the permissive test's wildcard check does not read it as an
+operation.
+
+`keyof T[]` is `keyof` the project's `Array<T>` (`ReadonlyArray<T>`):
+`scope_apparent_wrapper_subject` rewrites a reducing `KeyOf` of a scope-less
+array before memo admission, and `build_array_key_of` serves a file-scoped
+one. The wrapper is read under structural transit, so member values stay
+carriers: `Array`'s `[Symbol.unscopables]` maps over `keyof any[]`.
+
+Generic method relations follow `compareSignaturesRelated`:
+
+- A generic source is instantiated in the context of the target's canonical
+  signature (`canonical_signature`, the checker's `getCanonicalSignature`):
+  an unconstrained target parameter is its declaration's own binder whatever
+  default an instantiation gave it, so `then<R = T>` of `A<R>` against
+  `B<R>` meets its own pair one level down instead of recursing on fresh
+  binders.
+- A source parameter the target's clause declares too (a binder no
+  instantiation moved, `R2 = never`) binds to itself and asks the return for
+  nothing.
+- An instantiation whose inference does not settle while a conditional's
+  `infer` is collecting and the target names one of its declarations
+  (`Promise<number> extends PromiseLike<infer U>`: `then`'s callback reads
+  `U`) leaves the signature pair undecided
+  (`InContextInstantiation::Unsettled`): the instantiation's own session takes
+  only the source's parameters, so the uninstantiated pair would decide a
+  branch it never related. Inference through a lib thenable's `then` into an
+  enclosing inference (`thenOf(p1)`) is not done yet; such calls are typed
+  `UnrepresentableCallee` gaps.
+- Two callback parameters (one non-generic call signature each, nullable
+  alike, no predicate) relate target-to-source with strictly contravariant
+  parameters, never the method-bivariant fallback (`callback_parameter_pair`,
+  `SignatureCheckMode::Callback`). Where the enclosing relation is not strict
+  (a method target, or `strictFunctionTypes` off) the callback's RETURN
+  relates in either direction (the checker's `BivariantCallback`): `add(cb:
+  () => T)` is bivariant in `T`; otherwise it is covariant
+  (`StrictCallback`). The callback relation runs inside the enclosing frame,
+  so its parameters infer at `InferPosition::CallbackParam` (the two flips
+  cancel) and its return at `InferPosition::ContravariantParam`.
+- Inference into a union with one naked parameter matches a source member to
+  another member referencing the same generic declaration by its type
+  arguments (`members_unmatched_by_inference`, the checker's
+  `inferToMultipleTypes` + `inferFromTypeArguments`): `PromiseLike<R'>` into
+  `R | PromiseLike<R>` infers `R'`, a declaration's reference to itself in
+  its own body (a `RecursiveRef` carrier, `raw_generic_reference`) matching
+  like any other reference. Only the arguments relate, so two
+  recursive declarations never expand into each other. Matching a member
+  through another declaration's structure is not done (the checker's
+  `inferFromObjectTypes`); `thenables_of_different_declarations_infer_through_their_structure`
+  pins the rows that need it.
+
+Guards: the `lib_generic_relation_tests` suite (`verter_session`).
+
 ### Object-literal spreads: canonical construction programs
 
 Every spread-bearing object is a `SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram)` — one immutable, source-ordered effect list (`DirectProperty` / `DirectMethod` / `DirectGet` / `DirectSet` / `DirectIndex` / `DirectCall` / `DirectConstruct` / `Spread`). It is the sole stored description of the object: no folded member surface, completeness mirror, replay cursor, or side log coexists. A non-spread object stays a closed `SemanticNodeData::Object` surface (every `SurfaceView` is closed by construction; the open-operand representation is gone). Direct effects carry lossless typed facts: typed key or computed-key child, value/signature children, optional/readonly, method/get/set kind, implementation-body fact, visibility, spans/declaration origin, and excess origin.
@@ -220,3 +286,5 @@ resolved type surfaces.
 - A second `fn shallow_lower_type_expr` — FORBIDDEN (besides `project_semantic_dispatch::lower`).
 - A second struct owning a `RelationMemo` field — FORBIDDEN (besides `SemanticGraphStore`).
 - A second struct owning the semantic node map — FORBIDDEN (besides `SemanticGraphStore`).
+
+**Closed mapped operands reduce relation-locally.** The identity-carrier unwrap reduces a `Mapped` operand whose source, key domain and template are closed, such as a signature's mapped parameter after substitution. It handles identity templates, index-key domains and enumerable keys alike: each key reads the template with the binder bound to it, and `Keep` modifiers come from the modifiers type (the source of a homomorphic mapping). The object is interned for the relation alone, without member edges, matching the identity and index-key reducers. Open sources, name remaps, distributing homomorphic sources (unions, arrays, tuples), unique-symbol keys and templates that read as `Opaque` keep the carrier, so the relation stays undecided. The mapped build still carrier-stops under structural transit.

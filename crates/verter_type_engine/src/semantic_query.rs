@@ -2170,6 +2170,14 @@ pub struct ArgumentRegularPosition {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArgumentLiteralProvenance {
     pub positions: Arc<[ArgumentRegularPosition]>,
+    /// The paths of the nested positions an expression writes by reading a
+    /// binding that keeps a widening literal (`{ v: s }` for `const s =
+    /// "a"`): their literals are fresh, but the read is no literal of its
+    /// own (`isValidConstAssertionArgument`), so a `const` type parameter
+    /// typing the position is no const context for it and the literal
+    /// widens there (`f<const T>(x: { v: T })` over `{ v: s }` infers
+    /// `string`).
+    pub fresh_reads: Arc<[Arc<[ArgumentPathStep]>]>,
 }
 
 impl ArgumentLiteralProvenance {
@@ -2179,6 +2187,13 @@ impl ArgumentLiteralProvenance {
         self.positions
             .iter()
             .find(|position| &*position.path == path)
+    }
+
+    /// Whether an expression writing the position at `path` reads a binding
+    /// that keeps a widening literal.
+    #[must_use]
+    pub fn reads_fresh(&self, path: &[ArgumentPathStep]) -> bool {
+        self.fresh_reads.iter().any(|read| &**read == path)
     }
 }
 
