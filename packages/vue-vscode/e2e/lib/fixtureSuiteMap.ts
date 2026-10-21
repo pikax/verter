@@ -32,6 +32,7 @@ const LEGACY_SUITE_GLOBS = [
   "import-resolution.test",
   "imported-props.test",
   "inlay-hints.test",
+  "lifecycle.test",
   "native-hover-default.test",
   "provider-parity.test",
   "references.test",

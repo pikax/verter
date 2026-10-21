@@ -349,13 +349,23 @@
         ]
       },
       {
+        "id": "desktop-language-lifecycle",
+        "behavior": "one activation epoch per started client; an exit, connection failure, failed start or silent server of the current epoch enters recovery exactly once, a replaced client's reports are stale, and the status bar shows restarting (n/max) and then a stopped state that restarts on click",
+        "evidence": [
+          "packages/vue-vscode/src/desktopLanguageLifecycle.ts",
+          "packages/vue-vscode/src/statusBar.ts",
+          "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts",
+          "packages/vue-vscode/e2e/suite/lifecycle.test.ts"
+        ]
+      },
+      {
         "id": "heartbeat-watchdog",
-        "behavior": "$/verter/heartbeat watchdog: 30s window after first heartbeat, 60s initial grace, auto-restart only over a server that actually started",
+        "behavior": "$/verter/heartbeat watchdog: 30s window after first heartbeat, 60s initial grace, armed only over a server that actually started; a trip reports the epoch lost",
         "evidence": ["packages/vue-vscode/src/extension.ts"]
       },
       {
         "id": "restart-supervisor",
-        "behavior": "bounded manual/automatic restart with give-up UX and orphaned type-provider pid cleanup",
+        "behavior": "the single crash-recovery authority (the language client's own restart-on-close is disabled): bounded backed-off automatic restarts with give-up UX, manual restart re-arms, orphaned owned type-provider pids are killed when the server process is lost",
         "evidence": ["packages/vue-vscode/src/restart.ts", "packages/vue-vscode/src/extension.ts"]
       },
       {
@@ -393,13 +403,13 @@
   "sourceModules": {
     "policy": "Per-module tier classification lives in DesktopWebSharedBoundary (desktop-web-shared-boundary.v1.json) and is re-derived from the live tree; this inventory pins only the population counts.",
     "counts": {
-      "productionModules": 47,
+      "productionModules": 50,
       "desktop": 20,
       "presentation": 6,
-      "pure": 21,
-      "specFiles": 46,
+      "pure": 24,
+      "specFiles": 48,
       "testSupportFiles": 1,
-      "totalSourceFiles": 94
+      "totalSourceFiles": 99
     }
   },
   "e2eSurface": {

@@ -22,6 +22,8 @@ import {
   extensions,
 } from "vscode";
 import {
+  CloseAction,
+  ErrorAction,
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
@@ -47,7 +49,11 @@ import {
 } from "@verter/language-shared";
 import type { StatisticsSnapshot, StatisticsSummary } from "@verter/language-shared";
 import { computeCarrierUnsupportedNotice } from "./carrierProviderSupport";
-import { computeProviderRecommendationNotice, computeStatusBarState } from "./statusBar";
+import {
+  computeLifecycleStatusBarState,
+  computeProviderRecommendationNotice,
+  computeStatusBarState,
+} from "./statusBar";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
 import { VirtualFileContentProvider } from "./VirtualFileManager";
 import { UnifiedVirtualFilesProvider } from "./UnifiedVirtualFilesProvider";
@@ -62,7 +68,8 @@ import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
 import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
 import { createCssDiagnosticsUpdater } from "./css/cssDiagnosticsPublisher";
-import { createRestartSupervisor, restartLanguageServer } from "./restart";
+import { DEFAULT_RESTART_POLICY, createRestartSupervisor, restartLanguageServer } from "./restart";
+import { DesktopLanguageLifecycle, connectionErrorDisposition } from "./desktopLanguageLifecycle";
 import {
   checkClaudeCodeAndNotify,
   setupMcpForClaudeCode,
@@ -424,18 +431,14 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
         // and stop the process here instead of leaving it ownerless.
         if (lifetime.isDisposed) {
           runtime.stopHeartbeatTimer();
-          void runtime.getClient().stop();
+          void stopClientQuietly(runtime.getClient());
           return runtime;
         }
         server = runtime;
         lifetime.add({
           dispose() {
             runtime.stopHeartbeatTimer();
-            try {
-              void runtime.getClient().stop();
-            } catch {
-              // Deactivate may already have stopped this client.
-            }
+            void stopClientQuietly(runtime.getClient());
           },
         });
         return runtime;
@@ -583,20 +586,9 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
         ? ConfigurationTarget.Workspace
         : ConfigurationTarget.Global;
       await config.update("typeProvider", picked.value, target);
-      // The restart is driven by the configuration listener below, so a choice
-      // made here and a hand-edited setting take exactly the same path.
-    }),
-    // `verter.typeProvider` documents itself as restarting the server. Nothing
-    // honoured that, so a hand-edited setting silently kept the old engine.
-    workspace.onDidChangeConfiguration(async (event) => {
-      if (!event.affectsConfiguration("verter.typeProvider")) {
-        return;
-      }
-      if (!server) {
-        await ensureLanguageServerStarted();
-        return;
-      }
-      await server.restart(true);
+      // The restart is driven by the restart-required settings listener above,
+      // so a choice made here and a hand-edited setting take exactly the same
+      // path — one restart per change.
     }),
     commands.registerCommand("verter.setupMcpForClaudeCode", async () => {
       if (!workspace.workspaceFolders?.[0]) {
@@ -649,7 +641,7 @@ export function deactivate(): Thenable<void> | undefined {
   runtime?.stopHeartbeatTimer();
   let stopping: Thenable<void> | undefined;
   try {
-    stopping = runtime?.getClient().stop();
+    stopping = runtime ? stopClientQuietly(runtime.getClient()) : undefined;
   } catch {
     stopping = undefined;
   }
@@ -757,12 +749,8 @@ interface LanguageServerActivationOptions {
   onTypeProviderSyncComplete?: () => void;
   /** The LSP wrote the carrier store; says nothing about readiness. */
   onCarrierStoreChanged?: () => void;
-  /**
-   * Activation-owned lifetime. When omitted (direct tests of a start attempt),
-   * the attempt is pushed onto `context.subscriptions` and spliced out on
-   * failure, matching the pre-cutover test contract.
-   */
-  lifetime?: Lifetime;
+  /** The activation-owned lifetime the start attempt is registered with. */
+  lifetime: Lifetime;
   /** Session-owned MCP endpoint/retry handles; absent in start-attempt unit tests. */
   mcpHandles?: ActivationSession;
 }
@@ -770,29 +758,17 @@ interface LanguageServerActivationOptions {
 export async function activateVueLanguageServer(
   context: ExtensionContext,
   log: LogOutputChannel,
-  startupProbe?: StartupProbe,
-  options?: LanguageServerActivationOptions,
+  startupProbe: StartupProbe | undefined,
+  options: LanguageServerActivationOptions,
 ) {
   const attempt = new StartAttemptScope();
-  const lifetime = options?.lifetime;
-  if (lifetime) {
-    lifetime.add(attempt);
-  } else {
-    context.subscriptions.push(attempt);
-  }
+  options.lifetime.add(attempt);
   try {
     return await startVueLanguageServer(attempt, context, log, startupProbe, options);
   } catch (error) {
-    // The attempt failed. Release everything it created now rather than leaving
-    // it for deactivation, and unregister the scope so a retry cannot stack a
-    // spent entry onto the extension's subscription list.
+    // The attempt failed before it had a server to recover. Release everything
+    // it created now rather than leaving it for deactivation.
     attempt.dispose();
-    if (!lifetime) {
-      const registered = context.subscriptions.indexOf(attempt);
-      if (registered !== -1) {
-        context.subscriptions.splice(registered, 1);
-      }
-    }
     throw error;
   }
 }
@@ -801,8 +777,8 @@ async function startVueLanguageServer(
   attempt: StartAttemptScope,
   context: ExtensionContext,
   log: LogOutputChannel,
-  startupProbe?: StartupProbe,
-  options?: LanguageServerActivationOptions,
+  startupProbe: StartupProbe | undefined,
+  options: LanguageServerActivationOptions,
 ) {
   const { workspaceFolders } = workspace;
   const rootPath = Array.isArray(workspaceFolders) ? workspaceFolders[0].uri.fsPath : undefined;
@@ -827,7 +803,7 @@ async function startVueLanguageServer(
       ? await establishEditorTsserverPlugin(effectiveTypeProvider, rootPath, log)
       : NO_EDITOR_TSSERVER;
   attempt.add({ dispose: () => editorTsserver.dispose() });
-  options?.onEditorCarrierSourceFeatureOwnership?.(
+  options.onEditorCarrierSourceFeatureOwnership?.(
     editorTsserverOwnsCarrierSourceFeatures(editorTsserver.lspArgs),
   );
 
@@ -856,6 +832,11 @@ async function startVueLanguageServer(
   const cssDiagnostics = languages.createDiagnosticCollection("verter-css");
   attempt.add(cssDiagnostics);
 
+  // Which client is current, and what the user is told about it. Every client
+  // below — the first and each restart — starts under its own epoch.
+  const lifecycle = new DesktopLanguageLifecycle(DEFAULT_RESTART_POLICY.maxAutomaticRestarts);
+  attempt.add(lifecycle);
+
   // The active framework carriers are EVERY registered adapter — derived from
   // the descriptor-generated client framework manifest, NOT an opt-in client
   // gate. Svelte is first-class (no opt-in). Each attaches to its manifest
@@ -866,7 +847,7 @@ async function startVueLanguageServer(
   // Build options for each client instance. Initialization-only settings must
   // be read here so every restart initializes the replacement server from the
   // workspace's current configuration.
-  const buildClientOptions = (): LanguageClientOptions => ({
+  const buildClientOptions = (epoch: number): LanguageClientOptions => ({
     documentSelector: [
       // Framework carriers only. Plain TS/JS buffers are synchronized below
       // without registering competing editor features.
@@ -934,6 +915,29 @@ async function startVueLanguageServer(
     outputChannel: log,
     traceOutputChannel: log,
     revealOutputChannelOn: RevealOutputChannelOn.Never,
+    // One recovery authority. The client's own restart-on-close retries behind
+    // the restart supervisor and forgets crashes older than three minutes, so a
+    // server that keeps dying slowly would be restarted forever. A lost server
+    // is reported to the supervisor instead, and the client never restarts
+    // itself.
+    errorHandler: {
+      error: (error, _message, count) => {
+        if (connectionErrorDisposition(count) === "continue") {
+          return { action: ErrorAction.Continue };
+        }
+        onServerLost(epoch, `its connection kept failing: ${error.message}`);
+        return { action: ErrorAction.Shutdown, handled: true };
+      },
+      closed: () => {
+        // The process is gone, so the engines it announced as its own have no
+        // owner left. Shared engines are never announced, so they survive.
+        if (lifecycle.isCurrent(epoch)) {
+          killTrackedTypeProvider();
+        }
+        onServerLost(epoch, "the server process exited");
+        return { action: CloseAction.DoNotRestart, handled: true };
+      },
+    },
     middleware: {
       handleDiagnostics: (uri, diagnostics, next) => {
         const openDocument = workspace.textDocuments.find(
@@ -1086,12 +1090,13 @@ async function startVueLanguageServer(
     },
   });
 
+  const initialEpoch = lifecycle.beginEpoch();
   let client = createLanguageServer(
     buildServerOptions(binaryPath, rootPath, context.extensionPath, log, [
       ...sharedTsgo.lspArgs,
       ...editorTsserver.lspArgs,
     ]),
-    buildClientOptions(),
+    buildClientOptions(initialEpoch),
   );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
   const plainScriptSync = new PlainScriptDocumentSync();
@@ -1223,7 +1228,7 @@ async function startVueLanguageServer(
         } catch (e) {
           log.warn(`Failed to register MCP server with VS Code: ${e}`);
         }
-        options?.mcpHandles?.setMcpEndpoint(record);
+        options.mcpHandles?.setMcpEndpoint(record);
 
         // Update .mcp.json for Claude Code CLI
         const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -1234,7 +1239,7 @@ async function startVueLanguageServer(
       onStopped(reason) {
         // A dead URL must not stay registered with VS Code or advertised to
         // the setup command.
-        options?.mcpHandles?.setMcpEndpoint(undefined);
+        options.mcpHandles?.setMcpEndpoint(undefined);
         mcpProviderDisposable?.dispose();
         mcpProviderDisposable = undefined;
         if (reason === "crash") {
@@ -1247,13 +1252,13 @@ async function startVueLanguageServer(
     dispose: () => {
       mcpProviderDisposable?.dispose();
       mcpProviderDisposable = undefined;
-      options?.mcpHandles?.setMcpEndpoint(undefined);
-      options?.mcpHandles?.setMcpRetry(undefined);
+      options.mcpHandles?.setMcpEndpoint(undefined);
+      options.mcpHandles?.setMcpRetry(undefined);
       mcpLifecycle.dispose();
     },
   });
   const syncMcpServer = () => mcpLifecycle.sync(desiredMcpLaunchConfig());
-  options?.mcpHandles?.setMcpRetry(syncMcpServer);
+  options.mcpHandles?.setMcpRetry(syncMcpServer);
   syncMcpServer();
 
   // ── Vite config trust prompt ────────────────────────────────────
@@ -1353,7 +1358,23 @@ async function startVueLanguageServer(
     | undefined;
 
   function renderTypeProviderStatusBar() {
-    if (!lastTypeProviderStatus) return;
+    const lifecycleState = computeLifecycleStatusBarState(lifecycle.snapshot());
+    if (lifecycleState) {
+      typeProviderStatusBar.text = lifecycleState.text;
+      typeProviderStatusBar.tooltip = lifecycleState.tooltip;
+      typeProviderStatusBar.command = lifecycleState.command;
+      typeProviderStatusBar.backgroundColor = new ThemeColor(
+        lifecycleState.error ? "statusBarItem.errorBackground" : "statusBarItem.warningBackground",
+      );
+      return;
+    }
+    typeProviderStatusBar.command = "verter.selectTypeProvider";
+    if (!lastTypeProviderStatus) {
+      typeProviderStatusBar.text = "$(sync~spin) Verter";
+      typeProviderStatusBar.tooltip = "Verter: waiting for type provider status...";
+      typeProviderStatusBar.backgroundColor = undefined;
+      return;
+    }
     const state = computeStatusBarState(lastTypeProviderStatus, {
       typeProvider: workspace.getConfiguration("verter").get<string>("typeProvider", "auto"),
       carrierOpen: workspace.textDocuments.some(
@@ -1369,6 +1390,7 @@ async function startVueLanguageServer(
   }
 
   attempt.add(
+    lifecycle.onDidChange(renderTypeProviderStatusBar),
     workspace.onDidOpenTextDocument(renderTypeProviderStatusBar),
     workspace.onDidCloseTextDocument(renderTypeProviderStatusBar),
     workspace.onDidChangeConfiguration((event) => {
@@ -1376,10 +1398,12 @@ async function startVueLanguageServer(
     }),
   );
 
-  function registerTypeProviderStatusHandler(lc: LanguageClient) {
+  function registerTypeProviderStatusHandler(lc: LanguageClient, epoch: number) {
     lc.onNotification(
       NotificationType.TypeProviderStatus,
       (params: NotificationParams[typeof NotificationType.TypeProviderStatus]) => {
+        // A replaced client's engine is not the one serving now.
+        if (!lifecycle.isCurrent(epoch)) return;
         lastTypeProviderStatus = params;
         renderTypeProviderStatusBar();
         log.info(
@@ -1397,7 +1421,7 @@ async function startVueLanguageServer(
       },
     );
   }
-  registerTypeProviderStatusHandler(client);
+  registerTypeProviderStatusHandler(client, initialEpoch);
 
   // ── Heartbeat watchdog ──────────────────────────────────────────
   // The Rust server sends $/verter/heartbeat every 5 seconds. If we don't
@@ -1415,9 +1439,10 @@ async function startVueLanguageServer(
   function armHeartbeatTimer(timeout: number) {
     if (heartbeatTimer) clearTimeout(heartbeatTimer);
     heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = undefined;
       const reason = `no heartbeat from Verter LSP for ${timeout / 1000}s`;
       log.error(`No heartbeat from Verter LSP for ${timeout / 1000}s — server appears frozen.`);
-      void restartSupervisor.requestAutomaticRestart(reason);
+      onServerLost(lifecycle.currentEpoch, reason);
     }, timeout);
   }
 
@@ -1454,20 +1479,20 @@ async function startVueLanguageServer(
     lc.onNotification(NotificationType.Ready, (params: { gen: number }) => {
       log.info(`Verter ready (init generation ${params.gen})`);
       startupProbe?.markReady();
-      options?.onReady?.();
+      options.onReady?.();
     });
     lc.onNotification(NotificationType.TypeProviderSyncComplete, (params: { gen: number }) => {
       log.info(`TypeProviderSyncComplete (init generation ${params.gen})`);
-      options?.onTypeProviderSyncComplete?.();
+      options.onTypeProviderSyncComplete?.();
     });
     lc.onNotification(NotificationType.CarrierStoreChanged, () => {
-      options?.onCarrierStoreChanged?.();
+      options.onCarrierStoreChanged?.();
     });
     lc.onNotification(NotificationType.CarrierStoreReady, (params: { carrierStoreDir: string }) => {
       log.info(`Carrier store dir reported by LSP: ${params.carrierStoreDir}`);
       // Forward to VS Code's own TS server plugin so a plain `.ts` served by
       // VS Code's TS service reads the same store the LSP publishes into.
-      options?.onCarrierStoreReady?.(params.carrierStoreDir);
+      options.onCarrierStoreReady?.(params.carrierStoreDir);
     });
   }
 
@@ -1482,6 +1507,22 @@ async function startVueLanguageServer(
   // from exactly one place: a failed attempt, a superseding retry (which re-arms
   // through the same function) and deactivation all disarm it.
   attempt.add({ dispose: stopHeartbeatTimer });
+
+  /**
+   * The single entry into automatic recovery: an exited process, a connection
+   * that kept failing, a start that failed and a silent server all land here.
+   * The lifecycle admits each epoch once, so the client's close and the failed
+   * start it causes cannot schedule two recoveries for one server.
+   */
+  function onServerLost(epoch: number, reason: string) {
+    if (attempt.isDisposed || !lifecycle.reportLost(epoch, reason)) {
+      return;
+    }
+    stopHeartbeatTimer();
+    log.error(`Verter language server lost: ${reason}`);
+    void restartSupervisor.requestAutomaticRestart(reason);
+  }
+
   registerServerNotifications(client);
 
   // ── Extension-hosted TypeScript language service (Experiment E) ──
@@ -1597,12 +1638,15 @@ async function startVueLanguageServer(
             // extension instance owns, and nothing would ever shut it down.
             throw new Error("Verter extension was disposed before the restart could start");
           }
+          // The replaced engine's status must not read as this one's.
+          lastTypeProviderStatus = undefined;
+          const epoch = lifecycle.beginEpoch();
           client = createLanguageServer(
             buildServerOptions(binaryPath, rootPath, context.extensionPath, log, [
               ...sharedTsgo.lspArgs,
               ...editorTsserver.lspArgs,
             ]),
-            buildClientOptions(),
+            buildClientOptions(epoch),
           );
           bindPlainScriptSync(client);
           registerTypeProviderPidListener(client);
@@ -1612,7 +1656,7 @@ async function startVueLanguageServer(
           // config-change restart re-reads the `verter.mcp.*` settings here.
           syncMcpServer();
           registerViteConfigTrustHandler(client);
-          registerTypeProviderStatusHandler(client);
+          registerTypeProviderStatusHandler(client, epoch);
           tsQueryHandler = undefined; // Drop every project's TS service on restart
           registerTsQueryHandler(client);
           await client.start();
@@ -1623,6 +1667,7 @@ async function startVueLanguageServer(
             await client.stop();
             return;
           }
+          lifecycle.markRunning(epoch);
           // Only a server that is actually up gets a freeze watchdog.
           armHeartbeatWatchdog();
         },
@@ -1634,7 +1679,11 @@ async function startVueLanguageServer(
         },
         log,
       }),
+    onAutomaticAttempt: (attemptNumber, reason) => lifecycle.markRecovering(attemptNumber, reason),
     onGiveUp: (message) => {
+      lifecycle.markStopped(
+        `${DEFAULT_RESTART_POLICY.maxAutomaticRestarts} automatic restarts failed; last loss: ${lifecycle.snapshot().reason}`,
+      );
       const RETRY = "Restart Language Server";
       void Promise.resolve(window.showErrorMessage(message, RETRY)).then((picked) => {
         if (picked === RETRY) {
@@ -1651,12 +1700,41 @@ async function startVueLanguageServer(
     if (outcome === "restarted" && showMsg) {
       window.showInformationMessage("Verter Language server restarted");
     }
+    if (outcome === "failed") {
+      // A requested restart that did not come back is not retried behind the
+      // user's back: the server stays visibly stopped until asked again.
+      stopHeartbeatTimer();
+      lifecycle.markStopped("the requested restart failed");
+      void window.showErrorMessage(
+        "Verter language server could not be restarted. Check the Verter output channel for the failure.",
+      );
+    }
   }
 
   // Start the language server — must be after all notification handlers and
   // listeners are registered so they're ready when the server responds.
   writeTimingMarker("client_start_begin", Date.now());
-  await client.start();
+  try {
+    await client.start();
+  } catch (error) {
+    if (attempt.isDisposed) {
+      throw error;
+    }
+    writeTimingMarker("client_start_end", Date.now(), "failed");
+    // A server that cannot start is recovered like one that crashed: bounded
+    // restarts, then a visible stopped state. Failing the attempt instead
+    // discarded that state, and the next carrier document opened a fresh
+    // attempt with a fresh budget — a crashing binary was retried without end.
+    onServerLost(
+      initialEpoch,
+      `the server failed to start: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {
+      getClient,
+      stopHeartbeatTimer,
+      restart: restartLS,
+    };
+  }
   writeTimingMarker("client_start_end", Date.now());
   if (attempt.isDisposed) {
     // Deactivation landed during the initial start: the composition root
@@ -1670,6 +1748,7 @@ async function startVueLanguageServer(
       restart: restartLS,
     };
   }
+  lifecycle.markRunning(initialEpoch);
   // Only a server that is actually up gets a freeze watchdog.
   armHeartbeatWatchdog();
 
@@ -2060,6 +2139,19 @@ function buildServerOptions(
       },
     },
   };
+}
+
+/**
+ * Stop a client at teardown whatever state it reached. A client whose start
+ * failed refuses `stop()`; at teardown that is not an error, and a rejected
+ * promise left unobserved there would surface as an unhandled rejection.
+ */
+function stopClientQuietly(client: Pick<LanguageClient, "stop">): Promise<void> {
+  try {
+    return Promise.resolve(client.stop()).catch(() => undefined);
+  } catch {
+    return Promise.resolve();
+  }
 }
 
 function bindClientStopOnce(client: LanguageClient): LanguageClient {

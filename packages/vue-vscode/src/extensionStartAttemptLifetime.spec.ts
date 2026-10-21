@@ -1,18 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * A failed `client.start()` must leave nothing behind.
+ * One language-server start attempt owns everything it creates — event
+ * subscriptions, the type-provider status bar item, the heartbeat watchdog and
+ * the recovery of every server it starts — and leaves nothing behind when its
+ * owner disposes it.
  *
- * Everything one language-server start attempt creates — event subscriptions,
- * the type-provider status bar item, and the heartbeat watchdog timer — belongs
- * to that attempt, not to the extension. Before the per-attempt disposal scope
- * existed, each failed attempt leaked its whole subscription set, another status
- * bar item, and an UNCANCELLABLE 60s restart timer that kept firing against a
- * dead client, so an LSP that cannot launch produced an ever-growing row of
- * status bar items and a restart storm.
+ * Without that ownership a server that could not launch produced an
+ * ever-growing row of status bar items, an uncancellable restart timer firing
+ * against a dead client, and a fresh attempt with a fresh retry budget for
+ * every document opened afterwards: a restart storm with no visible end.
  *
- * The assertions are on DISPOSAL (`context.subscriptions`, `item.dispose()`
- * calls, armed timer count), never on rendered UI text.
+ * The assertions are on DISPOSAL (`item.dispose()` calls, armed timer count),
+ * OBSERVED PROCESS STARTS and STOPS, and the state the status bar item is left
+ * in — the stopped state is the user-visible outcome under test.
  */
 
 const mocks = vi.hoisted(() => {
@@ -31,6 +32,7 @@ const mocks = vi.hoisted(() => {
     releaseConfigurePlugin: undefined as (() => void) | undefined,
     configurePluginConfigs: [] as unknown[],
     closeListeners: [] as Array<(document: unknown) => void>,
+    configurationListeners: [] as Array<(event: unknown) => void>,
     infoMessages: [] as string[],
     createdClients: [] as Array<{
       handlers: Map<string, Array<(params: unknown) => void>>;
@@ -123,7 +125,17 @@ vi.mock("vscode", () => {
         };
       },
       onDidSaveTextDocument: subscribe,
-      onDidChangeConfiguration: subscribe,
+      onDidChangeConfiguration: (listener: (event: unknown) => void) => {
+        mocks.state.configurationListeners.push(listener);
+        return {
+          dispose() {
+            const index = mocks.state.configurationListeners.indexOf(listener);
+            if (index >= 0) {
+              mocks.state.configurationListeners.splice(index, 1);
+            }
+          },
+        };
+      },
       onDidChangeWorkspaceFolders: subscribe,
       registerTextDocumentContentProvider: () => disposable(),
       createFileSystemWatcher: () => ({
@@ -301,6 +313,8 @@ vi.mock("vscode-languageclient/node", () => ({
     }
   },
   State: { Stopped: 1, Running: 2, Starting: 3 },
+  ErrorAction: { Continue: 1, Shutdown: 2 },
+  CloseAction: { DoNotRestart: 1, Restart: 2 },
   TransportKind: { stdio: 0, ipc: 1, pipe: 2, socket: 3 },
   RevealOutputChannelOn: { Info: 1, Warn: 2, Error: 3, Never: 4 },
 }));
@@ -308,8 +322,17 @@ vi.mock("vscode-languageclient/node", () => ({
 import { window, workspace } from "vscode";
 import { activate, activateVueLanguageServer, deactivate } from "./extension";
 import { DEFAULT_RESTART_POLICY } from "./restart";
+import { StartAttemptScope } from "./startAttemptScope";
 
 type ActivateParams = Parameters<typeof activateVueLanguageServer>;
+
+/** Start one language-server attempt owned by `lifetime`, as the activation root does. */
+function startAttempt(
+  context: ActivateParams[0],
+  lifetime: StartAttemptScope = new StartAttemptScope(),
+) {
+  return activateVueLanguageServer(context, log, undefined, { lifetime });
+}
 
 const log = {
   info() {},
@@ -350,6 +373,7 @@ function resetHostRuntimeMocks() {
   mocks.state.releaseConfigurePlugin = undefined;
   mocks.state.configurePluginConfigs.length = 0;
   mocks.state.closeListeners.length = 0;
+  mocks.state.configurationListeners.length = 0;
   mocks.state.infoMessages.length = 0;
   mocks.state.createdClients.length = 0;
   mocks.state.createdClientOptions.length = 0;
@@ -359,6 +383,18 @@ function resetHostRuntimeMocks() {
 }
 
 const liveStatusBarItems = () => mocks.statusBarItems.filter((item) => !item.disposed).length;
+
+type MockStatusBarItem = { disposed: boolean; text: string; command: string };
+const liveStatusBarItem = () =>
+  (mocks.statusBarItems as MockStatusBarItem[]).find((item) => !item.disposed);
+
+type ErrorHandlerLike = {
+  error(error: Error, message: unknown, count: number | undefined): { action: number };
+  closed(): { action: number; handled?: boolean };
+};
+/** The error handler the extension installed on the `index`-th client it created. */
+const errorHandlerOf = (index: number) =>
+  (mocks.state.createdClientOptions[index] as { errorHandler?: ErrorHandlerLike }).errorHandler!;
 
 describe("language server start attempt lifetime", () => {
   beforeEach(() => {
@@ -372,44 +408,46 @@ describe("language server start attempt lifetime", () => {
     vi.useRealTimers();
   });
 
-  it("releases every subscription, status bar item and armed timer when a start attempt fails", async () => {
+  it("recovers a server that cannot start within the budget, then shows it stopped and releases everything on disposal", async () => {
     const context = makeContext();
+    const lifetime = new StartAttemptScope();
 
-    const readings: { subscriptions: number; statusBarItems: number; timers: number }[] = [];
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      await expect(activateVueLanguageServer(context, log)).rejects.toThrow(
-        /exited before the initialize handshake/,
-      );
-      readings.push({
-        subscriptions: context.subscriptions.length,
-        statusBarItems: liveStatusBarItems(),
-        timers: vi.getTimerCount(),
-      });
-    }
+    // The attempt survives its failed first start: recovery, not the next
+    // opened document, decides whether another process is spawned.
+    await startAttempt(context, lifetime);
+    expect(mocks.state.startCalls).toBe(1);
 
-    // A failed attempt owns nothing afterwards — not "fewer than before", zero.
-    for (const reading of readings) {
-      expect(reading).toEqual({ subscriptions: 0, statusBarItems: 0, timers: 0 });
-    }
-    // The status bar items were genuinely created and genuinely disposed, so a
-    // mock that never created one cannot make this test pass by accident.
-    expect(mocks.statusBarItems.length).toBe(4);
-    expect(mocks.statusBarItems.every((item) => item.disposed)).toBe(true);
+    // Far more virtual time than the whole budget needs (2+4+8+16+32s).
+    await vi.advanceTimersByTimeAsync(900_000);
+
+    expect(mocks.state.startCalls).toBe(1 + DEFAULT_RESTART_POLICY.maxAutomaticRestarts);
+    // ONE status bar item across every retry, now in the stopped state that
+    // restarts the server when clicked.
+    expect(liveStatusBarItems()).toBe(1);
+    expect(liveStatusBarItem()?.text).toMatch(/stopped/);
+    expect(liveStatusBarItem()?.command).toBe("verter.restartLanguageServer");
+    expect(mocks.errorMessages.some((m) => /Restart Language Server/.test(m))).toBe(true);
+    // Quiescent: nothing is armed after the give-up.
+    expect(vi.getTimerCount()).toBe(0);
+
+    lifetime.dispose();
+
+    expect(liveStatusBarItems()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(mocks.statusBarItems.length).toBe(1);
     expect(mocks.diagnosticCollections.every((collection) => collection.disposed)).toBe(true);
   });
 
   it("cancels the heartbeat watchdog when the extension disposes a started server", async () => {
     mocks.state.startShouldFail = false;
-    const context = makeContext();
+    const lifetime = new StartAttemptScope();
 
-    await activateVueLanguageServer(context, log);
+    await startAttempt(makeContext(), lifetime);
     // A live attempt is armed: the watchdog timer and the status bar item exist.
     expect(vi.getTimerCount()).toBeGreaterThan(0);
     expect(liveStatusBarItems()).toBe(1);
 
-    for (const subscription of context.subscriptions.splice(0)) {
-      subscription.dispose();
-    }
+    lifetime.dispose();
 
     expect(vi.getTimerCount()).toBe(0);
     expect(liveStatusBarItems()).toBe(0);
@@ -419,7 +457,7 @@ describe("language server start attempt lifetime", () => {
   it("rebuilds initialization options from current settings when restarting", async () => {
     mocks.state.startShouldFail = false;
     const context = makeContext();
-    const server = await activateVueLanguageServer(context, log);
+    const server = await startAttempt(context);
 
     type ClientOptions = {
       initializationOptions: {
@@ -478,7 +516,7 @@ describe("automatic restart bounding", () => {
   });
 
   it("stops restarting a server that can never start, and says how to retry", async () => {
-    await activateVueLanguageServer(makeContext(), log);
+    await startAttempt(makeContext());
     expect(mocks.state.startCalls).toBe(1);
 
     // From here every start throws. Let far more virtual time pass than the
@@ -497,7 +535,7 @@ describe("automatic restart bounding", () => {
   });
 
   it("still restarts a frozen server that can come back", async () => {
-    await activateVueLanguageServer(makeContext(), log);
+    await startAttempt(makeContext());
     expect(mocks.state.startCalls).toBe(1);
 
     // One watchdog trip (60s) plus the first backoff (2s).
@@ -531,8 +569,8 @@ describe("disposal during an in-flight recovery", () => {
   });
 
   it("starts no server when disposal lands inside the restart backoff", async () => {
-    const context = makeContext();
-    await activateVueLanguageServer(context, log);
+    const lifetime = new StartAttemptScope();
+    await startAttempt(makeContext(), lifetime);
     expect(mocks.state.startCalls).toBe(1);
 
     // The watchdog trips at 60s and recovery enters its 2s backoff.
@@ -540,9 +578,7 @@ describe("disposal during an in-flight recovery", () => {
     expect(mocks.state.startCalls).toBe(1);
 
     // The user disables the extension / reloads the window mid-backoff.
-    for (const subscription of context.subscriptions.splice(0)) {
-      subscription.dispose();
-    }
+    lifetime.dispose();
 
     // The backoff delay expires afterwards, and every later window passes.
     await vi.advanceTimersByTimeAsync(600_000);
@@ -552,8 +588,8 @@ describe("disposal during an in-flight recovery", () => {
   });
 
   it("shuts down a server whose start completed after disposal", async () => {
-    const context = makeContext();
-    await activateVueLanguageServer(context, log);
+    const lifetime = new StartAttemptScope();
+    await startAttempt(makeContext(), lifetime);
     expect(mocks.state.startCalls).toBe(1);
 
     // The next start parks, so disposal lands while the restart is executing.
@@ -563,9 +599,7 @@ describe("disposal during an in-flight recovery", () => {
     expect(mocks.state.releaseStart).toBeDefined();
     const stopsBeforeDisposal = mocks.state.stopCalls;
 
-    for (const subscription of context.subscriptions.splice(0)) {
-      subscription.dispose();
-    }
+    lifetime.dispose();
     // The process finishes coming up — for an owner that no longer exists.
     mocks.state.releaseStart?.();
     await vi.advanceTimersByTimeAsync(600_000);
@@ -577,14 +611,14 @@ describe("disposal during an in-flight recovery", () => {
   });
 
   it("shuts down an initial server whose start completed after disposal", async () => {
-    const context = makeContext();
+    const lifetime = new StartAttemptScope();
 
     // The FIRST start parks, so deactivation lands while the initial
     // language-server start is still pending: the runtime was never
     // published, so deactivate() had no client to stop and disposal of the
     // attempt is all the ownership this start ever had.
     mocks.state.holdStart = true;
-    const activating = activateVueLanguageServer(context, log);
+    const activating = startAttempt(makeContext(), lifetime);
     for (let i = 0; i < 10_000 && !mocks.state.releaseStart; i += 1) {
       await Promise.resolve();
     }
@@ -592,9 +626,7 @@ describe("disposal during an in-flight recovery", () => {
     expect(mocks.state.startCalls).toBe(1);
     expect(mocks.state.stopCalls).toBe(0);
 
-    for (const subscription of context.subscriptions.splice(0)) {
-      subscription.dispose();
-    }
+    lifetime.dispose();
     expect(vi.getTimerCount()).toBe(0);
 
     // The process finishes coming up — for an owner that no longer exists.
@@ -856,6 +888,193 @@ describe("language server ownership through runtime publication", () => {
     }
   });
 });
+
+/**
+ * A lost server — its process exited, its connection kept failing — is
+ * recovered by the restart supervisor alone. The language client's own
+ * restart-on-close forgets crashes older than three minutes, so behind the
+ * supervisor it would restart a slowly leaking server forever.
+ */
+describe("one crash-recovery authority", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetHostRuntimeMocks();
+    mocks.state.startShouldFail = false;
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("restarts a crashed server through the supervisor once, never through the client", async () => {
+    const lifetime = new StartAttemptScope();
+    await startAttempt(makeContext(), lifetime);
+    const first = errorHandlerOf(0);
+
+    // The client is told not to restart itself, and the crash is shown.
+    expect(first.closed()).toEqual({ action: 1, handled: true });
+    // The same loss reported again (the failed start a close causes) is one loss.
+    first.closed();
+    expect(liveStatusBarItem()?.text).toMatch(/restarting \(1\/5\)/);
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_RESTART_POLICY.initialBackoffMs);
+    expect(mocks.state.startCalls).toBe(2);
+    expect(liveStatusBarItem()?.text).toBe("$(sync~spin) Verter");
+
+    // A late close from the replaced client is stale and recovers nothing.
+    first.closed();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mocks.state.startCalls).toBe(2);
+
+    lifetime.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("ends a crash loop in a visible stopped state that only a manual restart leaves", async () => {
+    const lifetime = new StartAttemptScope();
+    const server = await startAttempt(makeContext(), lifetime);
+    const latest = () => errorHandlerOf(mocks.state.createdClientOptions.length - 1);
+    const max = DEFAULT_RESTART_POLICY.maxAutomaticRestarts;
+
+    // Every restarted server dies again well inside the sustained-health window.
+    for (let attempt = 1; attempt <= max; attempt += 1) {
+      latest().closed();
+      await vi.advanceTimersByTimeAsync(
+        DEFAULT_RESTART_POLICY.initialBackoffMs * 2 ** (attempt - 1),
+      );
+      expect(mocks.state.startCalls).toBe(1 + attempt);
+    }
+    latest().closed();
+
+    expect(liveStatusBarItem()?.text).toMatch(/stopped/);
+    expect(liveStatusBarItem()?.command).toBe("verter.restartLanguageServer");
+    expect(mocks.errorMessages.some((m) => /Restart Language Server/.test(m))).toBe(true);
+    await vi.advanceTimersByTimeAsync(900_000);
+    expect(mocks.state.startCalls).toBe(1 + max);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await server.restart(true);
+    expect(mocks.state.startCalls).toBe(2 + max);
+    expect(liveStatusBarItem()?.text).toBe("$(sync~spin) Verter");
+    expect(liveStatusBarItem()?.command).toBe("verter.selectTypeProvider");
+
+    lifetime.dispose();
+  });
+
+  it("shuts down a connection that keeps failing and recovers it", async () => {
+    const lifetime = new StartAttemptScope();
+    await startAttempt(makeContext(), lifetime);
+    const handler = errorHandlerOf(0);
+
+    expect(handler.error(new Error("write EPIPE"), undefined, 3)).toEqual({ action: 1 });
+    expect(mocks.state.startCalls).toBe(1);
+    expect(handler.error(new Error("write EPIPE"), undefined, 4)).toEqual({
+      action: 2,
+      handled: true,
+    });
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_RESTART_POLICY.initialBackoffMs);
+    expect(mocks.state.startCalls).toBe(2);
+
+    lifetime.dispose();
+  });
+
+  it("never shows a replaced client's engine status as the current one", async () => {
+    const lifetime = new StartAttemptScope();
+    const server = await startAttempt(makeContext(), lifetime);
+    const status = { kind: "tsgo", topology: "managed-tsgo" };
+
+    fireNotificationOn(0, "$/verter/typeProviderStatus", status);
+    expect(liveStatusBarItem()?.text).toMatch(/tsgo \(managed\)/);
+
+    await server.restart(false);
+    expect(liveStatusBarItem()?.text).toBe("$(sync~spin) Verter");
+    fireNotificationOn(0, "$/verter/typeProviderStatus", status);
+    expect(liveStatusBarItem()?.text).toBe("$(sync~spin) Verter");
+
+    fireNotificationOn(1, "$/verter/typeProviderStatus", status);
+    expect(liveStatusBarItem()?.text).toMatch(/tsgo \(managed\)/);
+
+    lifetime.dispose();
+  });
+});
+
+/**
+ * The extension starts a server for a framework document, not for activation
+ * itself or for a setting change, and restarts a running one once per change.
+ */
+describe("activation on demand", () => {
+  const vueDocument = {
+    languageId: "vue",
+    version: 1,
+    getText: () => "",
+    uri: {
+      scheme: "file",
+      fsPath: "/proj/App.vue",
+      toString: () => "file:///proj/App.vue",
+    },
+  };
+  const documents = () => workspace.textDocuments as unknown as unknown[];
+  const editor = window as unknown as { activeTextEditor?: { document: unknown } };
+  const changeSetting = (setting: string) => {
+    for (const listener of [...mocks.state.configurationListeners]) {
+      listener({ affectsConfiguration: (section: string) => section === setting });
+    }
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"],
+    });
+    resetHostRuntimeMocks();
+    mocks.state.startShouldFail = false;
+    mocks.configurationValues["verter.mcp.enabled"] = false;
+    documents().length = 0;
+    editor.activeTextEditor = undefined;
+  });
+
+  afterEach(() => {
+    deactivate();
+    documents().length = 0;
+    editor.activeTextEditor = undefined;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("starts no server without a framework document, even when a server setting changes", async () => {
+    await activate(makeContext());
+
+    changeSetting("verter.typeProvider");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(mocks.state.createdClients).toHaveLength(0);
+    expect(mocks.state.startCalls).toBe(0);
+  });
+
+  it("restarts a running server exactly once when the type provider changes", async () => {
+    documents().push(vueDocument);
+    editor.activeTextEditor = { document: vueDocument };
+    await activate(makeContext());
+    for (let i = 0; i < 40 && mocks.state.startCalls < 1; i += 1) {
+      await Promise.resolve();
+    }
+    expect(mocks.state.startCalls).toBe(1);
+
+    changeSetting("verter.typeProvider");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(mocks.state.createdClients).toHaveLength(2);
+    expect(mocks.state.startCalls).toBe(2);
+    expect(mocks.state.stopCalls).toBe(1);
+  });
+});
+
+function fireNotificationOn(clientIndex: number, type: string, params: unknown) {
+  for (const handler of mocks.state.createdClients[clientIndex]?.handlers.get(type) ?? []) {
+    handler(params);
+  }
+}
 
 function fireLatestNotification(type: string, params: unknown) {
   const client = mocks.state.createdClients.at(-1);

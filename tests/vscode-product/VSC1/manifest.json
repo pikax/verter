@@ -1,0 +1,56 @@
+{
+  "node": "VSC1",
+  "kind": "implementation",
+  "finalOwner": "expansion.vscode-product",
+  "products": [
+    "DesktopLanguageLifecycle (packages/vue-vscode/src/desktopLanguageLifecycle.ts): one activation epoch per started client (the initial start and every restart). Exit, connection-failure, failed-start and silent-server reports carry their epoch; the current epoch enters recovery exactly once and a replaced client's reports (including its type-provider status) are stale",
+    "Bounded crash-recovery policy and failure UX: the restart supervisor (packages/vue-vscode/src/restart.ts) is the single recovery authority. The language client's own restart-on-close is disabled through an errorHandler that reports the loss and returns DoNotRestart; three connection errors are tolerated and the fourth shuts the connection down and recovers it. A start that fails enters the same bounded recovery. The type-provider status bar item shows `restarting (n/max)` during recovery and `stopped` (click restarts) after the give-up or a failed manual restart (computeLifecycleStatusBarState in packages/vue-vscode/src/statusBar.ts)",
+    "Subscription/process disposal tests: packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts (start attempt, recovery and activation-on-demand cases), packages/vue-vscode/src/desktopLanguageLifecycle.spec.ts, and the real extension-host suite packages/vue-vscode/e2e/suite/lifecycle.test.ts (OS process table under the extension host plus the diagnostics VS Code holds)"
+  ],
+  "retiredRoutes": [
+    "The language client's DefaultErrorHandler restart-on-close, which restarted the server behind the supervisor and forgot crashes older than three minutes, so a server that kept dying slowly was restarted forever",
+    "Failing the start attempt on a failed initial client.start(): the attempt and its status were discarded and the next opened framework document started a fresh attempt with a fresh retry budget",
+    "The second verter.typeProvider configuration listener in activateExtension, which restarted a running server a second time beside the debounced restart-required listener, and started a server nobody asked for when none was running",
+    "The context.subscriptions fallback in activateVueLanguageServer (a start attempt without an owning lifetime); the activation-owned lifetime is now a required option"
+  ],
+  "migration": "No setting, command, activation event or protocol message changes. A failed manual restart now leaves the server visibly stopped instead of silently stopped. Changing verter.typeProvider restarts a running server once (through the restart-required settings listener) and no longer starts one when none is running; the next framework document starts it.",
+  "preservedOwners": [
+    "activation gate and activation session (activationGate.ts, activationSession.ts)",
+    "start attempt scope (startAttemptScope.ts)",
+    "heartbeat watchdog (now reporting the epoch lost instead of calling the supervisor directly)",
+    "attempt-owned verter-mcp child lifetime (mcpServer.ts)",
+    "--client-pid process lifetime binding (clientProcessLifetime.ts)",
+    "shared editor engines: only server-announced owned type-provider pids are ever killed; the shared tsgo tier is never announced",
+    "semantic algorithms, project resolution, TypeScript projection and edit transactions (untouched)"
+  ],
+  "cases": [
+    {
+      "id": "VSC1-AC1",
+      "binding": "e2e/suite/lifecycle.test.ts `restart loops replace the one server and never duplicate diagnostics` (three restarts in the real host: exactly one verter-lsp under the extension host, each replaced pid gone, the unsaved edit's diagnostic count unchanged) and `a crashed server is replaced once by the bounded recovery and keeps the unsaved edit`; src/extensionStartAttemptLifetime.spec.ts `restarts a running server exactly once when the type provider changes`, `restarts a crashed server through the supervisor once, never through the client`, and the existing ownership/disposal cases"
+    },
+    {
+      "id": "VSC1-AC2",
+      "binding": "src/extensionStartAttemptLifetime.spec.ts `recovers a server that cannot start within the budget, then shows it stopped and releases everything on disposal` and `ends a crash loop in a visible stopped state that only a manual restart leaves` (1 + maxAutomaticRestarts starts, one status bar item in the stopped state, quiescent timers); src/restart.spec.ts supervisor cap/backoff/health-window cases"
+    },
+    {
+      "id": "VSC1-AC3",
+      "binding": "deterministic cells only: activation awaits no server start and spawns none without a framework document (`starts no server without a framework document, even when a server setting changes`); concurrent demand shares one start (existing `language server ownership through runtime publication` cases); the eleven activation events are unchanged (no workspaceContains scan). The startup-latency cell is row VSC1-resource-startup-latency of evidence run vsc8-vscode-desktop-canaries on bench-m3 (VSC8)"
+    },
+    {
+      "id": "VSC1-AC-OWNER",
+      "binding": "the restart supervisor is the one recovery authority and DesktopLanguageLifecycle the one epoch/state owner; errorHandler.closed returns DoNotRestart (asserted by `restarts a crashed server through the supervisor once, never through the client`, and in the real host by the crash case's absence of the client's `Server will restart` line). Retired routes are listed above"
+    },
+    {
+      "id": "VSC1-AC-BASIS",
+      "binding": "no cache, mapping, snapshot, result-handle or incremental-publication change. The only basis rule touched is stale rejection of a replaced client's reports: `never shows a replaced client's engine status as the current one` and the desktopLanguageLifecycle.spec.ts epoch cases"
+    },
+    {
+      "id": "VSC1-AC-RESOURCE",
+      "binding": "deterministic cells: server process count (one verter-lsp under the extension host), client start counts per crash/restart, and zero armed timers after give-up or disposal are asserted. Rows predeclared for VSC8's vsc8-vscode-desktop-canaries run on bench-m3: VSC1-resource-startup-latency (activation to first ready), VSC1-resource-restart-latency (restart command to replacement ready), VSC1-resource-crash-recovery-latency (process exit to replacement ready), VSC1-resource-retained-memory (extension host RSS after ten restarts versus after the first start). Those timing and memory cells are unavailable on the landing worker and are not reported as numbers"
+    },
+    {
+      "id": "VSC1-AC-EXPOSURE",
+      "binding": "not applicable: no new command, view or protocol operation is introduced; the lifecycle state is shown on the existing type-provider status bar item and runs the existing verter.restartLanguageServer command"
+    }
+  ]
+}
