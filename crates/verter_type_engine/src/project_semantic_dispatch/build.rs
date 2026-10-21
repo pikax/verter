@@ -5668,6 +5668,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
 
+        self.begin_prepared_instantiation(
+            base,
+            args,
+            &builtin_identity,
+            is_non_file_base,
+            scope,
+            prepared,
+            authored_resolution_debt,
+            context,
+            suspend,
+        )
+    }
+
+    /// Keep declaration binding and its suspended build frame off the builtin
+    /// utility path's recursive stack. In debug builds, the unused locals of
+    /// this path otherwise enlarge every nested builtin instantiation frame.
+    #[inline(never)]
+    fn begin_prepared_instantiation(
+        &self,
+        base: SemanticNodeId,
+        args: &Arc<[SemanticNodeId]>,
+        identity: &crate::semantic_query::DeclIdentity,
+        is_non_file_base: bool,
+        scope: NodeScopeId,
+        prepared: verter_retention::heap_size::OwnedValue<PreparedTypeDecl>,
+        authored_resolution_debt: Option<
+            crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame,
+        >,
+        context: crate::semantic_query::ProjectionReductionContext,
+        suspend: bool,
+    ) -> InstantiateStart {
+        let decl_canonical = &identity.canonical_id;
+        let decl_owner = identity.owner;
+        let decl_name = &identity.decl_name;
+        let decl_whole_hash = identity.whole_hash;
+        let body_mode = context.mode;
+
         // 4. Bind type parameters to args (positional). When a
         // parameter has no explicit arg but carries a default
         // expression, lower the default in the decl's scope and bind
