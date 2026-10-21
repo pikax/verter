@@ -50,6 +50,19 @@ export function allScenarios() {
 
   out.push(
     scenario(
+      "edge-array-literal-normalization",
+      "literal-union",
+      "fresh object literal siblings gain optional undefined properties for absent keys",
+      "type Exclude<T, U> = T extends U ? never : T;\n" +
+        "type Extract<T, U> = T extends U ? T : never;\n" +
+        "type Uppercase<S extends string> = intrinsic;\n" +
+        "type Lowercase<S extends string> = intrinsic;\n" +
+        "type Capitalize<S extends string> = intrinsic;\n" +
+        "type Uncapitalize<S extends string> = intrinsic;\n" +
+        'const arr = [{ a: 1 }, { b: "x" }];\n',
+      "typeof arr",
+    ),
+    scenario(
       "edge-equal-identity-idiom",
       "conditional",
       "generic signatures with identical deferred conditional returns",
@@ -863,6 +876,7 @@ export const UNCOVERED = [
  * Tiers nest: standard includes quick, stress includes both.
  */
 export const SCENARIO_TIERS = {
+  "edge-array-literal-normalization": "quick",
   "scale-path-depth-22": "standard",
   "scale-path-depth-23": "quick",
   "scale-path-depth-200": "standard",

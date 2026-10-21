@@ -517,7 +517,10 @@ fn normalize_object(
 
     let mut properties = unordered;
     properties.extend(ordered);
-    Ok(ObjectExpr { properties })
+    Ok(ObjectExpr {
+        empty_literal: obj.empty_literal,
+        properties,
+    })
 }
 
 fn normalize_function(
@@ -821,6 +824,7 @@ fn member_to_json(member: &ObjectMember) -> Value {
     // value, reusing the production encoder so the key never drifts from the
     // stored encoding.
     let obj = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![member.clone()],
     }));
     obj.to_json_value()["properties"][0].clone()

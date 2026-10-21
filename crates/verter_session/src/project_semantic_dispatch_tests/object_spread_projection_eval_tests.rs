@@ -107,6 +107,7 @@ fn program(
     effects: impl IntoIterator<Item = ObjectConstructionEffect>,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+        is_literal: true,
         effects: verter_type_engine::semantic_query::PayloadArray::from(
             effects.into_iter().collect::<Vec<_>>(),
         ),
@@ -740,6 +741,7 @@ fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
     let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let expr = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![
             verter_type_expr::ObjectMember::Spread(verter_type_expr::SpreadMember::new(
                 verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Object),
@@ -1287,6 +1289,46 @@ fn relate(
     target: SemanticNodeId,
 ) -> verter_type_engine::semantic_query::RelationResult {
     dispatch.execute_relate_pair_as_result_for_tests(source, target)
+}
+
+#[test]
+fn strict_subtype_empty_literal_keeps_its_inferable_index() {
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep;
+    use verter_type_engine::semantic_query::RelationKind;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let fresh = program(graph, []);
+    let regular = object(graph, []);
+    let regular_program =
+        graph.intern_node(SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+            is_literal: false,
+            effects: verter_type_engine::semantic_query::PayloadArray::from(Vec::new()),
+        }));
+    let index = index_object(graph, string, number);
+    assert!(matches!(
+        dispatch.execute_relate_pair_kind(fresh, index, RelationKind::StrictSubtype),
+        RelationStep::Assignable { .. }
+    ));
+    for source in [regular, regular_program] {
+        assert!(matches!(
+            dispatch.execute_relate_pair_kind(source, index, RelationKind::StrictSubtype),
+            RelationStep::NotAssignable
+        ));
+    }
+    let required = object(graph, [surface_member("value", number, false)]);
+    assert!(matches!(
+        dispatch.execute_relate_pair_kind(fresh, required, RelationKind::StrictSubtype),
+        RelationStep::NotAssignable
+    ));
+    assert!(matches!(
+        dispatch.execute_relate_pair_kind(fresh, number, RelationKind::StrictSubtype),
+        RelationStep::NotAssignable
+    ));
 }
 
 #[test]

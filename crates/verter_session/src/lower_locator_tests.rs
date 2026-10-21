@@ -371,6 +371,7 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key(
                 "a".to_string().into(),
@@ -677,6 +678,7 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
     };
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "left".to_string().into(),
@@ -685,6 +687,7 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
                 false,
             )),
             ObjectMember::Spread(SpreadMember::new(TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: Vec::new(),
             })))),
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
@@ -778,6 +781,7 @@ fn locator_predeclares_carrier_template_and_signature_bound_infers() {
         }],
     )));
     let true_type = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "carrier".to_string().into(),
@@ -932,6 +936,7 @@ fn locator_spread_shape_is_one_ordered_program() {
         ))
     };
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             property("a"),
             ObjectMember::Spread(SpreadMember::new(TypeExpr::Ref {

@@ -6958,6 +6958,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![
             verter_type_expr::ObjectMember::Property(
                 verter_type_expr::ObjectProperty::synthetic_public_key(
@@ -7170,6 +7171,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     let _builder = dispatch.enter_construction_scope();
 
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![
             verter_type_expr::ObjectMember::Property(
                 verter_type_expr::ObjectProperty::synthetic_public_key(
@@ -8337,6 +8339,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     });
     let open_branch = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
