@@ -47,7 +47,8 @@ once-per-phase boundaries only. See docs/arch/semantic-observe.md →
 "Concrete execution modes".
 VFS reads follow the same split: plain `WorkspaceRead::read_file` is uncaptured;
 `read_file_captured` borrows bound `VfsReadCapture` identity/timing. Source jobs
-bind the captured loader once after installing their winner context, and
+bind the captured loader once from their submitted context, falling back to
+the DAG waiter group's winner context; synchronous jobs need no ambient slot. Typed
 session dependency reads pass their existing capture targets. Uncaptured reads
 never lock the sink registry, poll timing/context TLS, or build read details.
 The whole audit envelope compiles only under `semantic-observe`: the observer

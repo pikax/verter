@@ -252,7 +252,13 @@ pub(super) fn run_file_stage(
         )
     });
     #[cfg(feature = "semantic-observe")]
-    let captured_loader = verter_execution::request_context::current_context()
+    let captured_loader = job
+        .request_context
+        .clone()
+        .or_else(|| {
+            dag.lock()
+                .winner_context_for(&Arc::from(node.canonical_id.as_str()), generation)
+        })
         .filter(|ctx| ctx.0.captured())
         .map(|ctx| CapturedSourceLoader {
             inner: source_loader,

@@ -253,6 +253,7 @@ implementation. `VfsReadProbe<Uncaptured>` touches no clock, request slot or
 sink registry. Read-detail strings are likewise absent from production defaults
 and skipped by instrumented uncaptured reads; the workspace unit-test seam
 retains its existing detail assertions. Source jobs bind `CapturedSourceLoader`
-at their execution boundary after the winning request context is installed;
+at their execution boundary from the submitted context (or the DAG waiter
+group's winner context when no submission context is carried);
 the session loader forwards that data, and typed dependency-source reads borrow
 their existing capture targets. There is no per-read timing-context accessor.

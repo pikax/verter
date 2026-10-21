@@ -1331,8 +1331,9 @@ for the ownership contract, the close and the sidecar cleanup.
 
 ## Workspace source capture
 
-A scheduler file stage binds source capture once from its installed winning
-request. The bound loader forwards request identity and timing to
+A scheduler file stage binds source capture once from its submitted request,
+falling back to the DAG waiter group's winner context. Synchronous jobs use
+the same owner even when caller TLS is empty. The bound loader forwards request identity and timing to
 `WorkspaceRead::read_file_captured`; ordinary reads use the uncaptured
 specialization and never consult optional context state or the sink registry.
 Session dependency-source reads use their existing typed capture receivers.
