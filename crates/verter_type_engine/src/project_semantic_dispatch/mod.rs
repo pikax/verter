@@ -700,6 +700,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> std::ops::Deref for Thre
     }
 }
 
+/// The connected-demand entry of a query decided in place
+/// ([`ProjectSemanticDispatch::enter_in_place_query`]): its nested level
+/// is released before its demand, as a query's are.
+pub(super) struct InPlaceQuery<'g> {
+    _depth: Option<connected_demand::ConnectedDemandGuard<'g>>,
+    _demand: connected_demand::ConnectedDemandGuard<'g>,
+}
+
 /// One operation of a dispatcher: a query execution or a root connected
 /// demand. The outermost operation entered with no construction owner of the
 /// graph open on its thread opens its own, which owns everything the
@@ -4124,6 +4132,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             );
         }
         cache_read
+    }
+
+    /// Enter a query that is decided in place rather than executed, charged
+    /// and refused exactly as its cold execution would be: the nested
+    /// connected demand, the query entry's work unit and nested level (a
+    /// tripped or cancelled demand, or a spent projection budget, refuses
+    /// it), and the cold build's budget gate, which spends one request
+    /// operation for a kind the request budget counts. `Err` is the output
+    /// that query would answer with. The returned guards hold the entry's
+    /// demand and level open while the caller decides it.
+    pub(super) fn enter_in_place_query(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Result<InPlaceQuery<'_>, Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>>
+    {
+        let (demand, preexisting_trip) = self.enter_connected_demand(false);
+        let depth = match self.charge_query_entry(key, preexisting_trip, true) {
+            Ok(depth) => depth,
+            Err(read) => {
+                return Err(Box::new(
+                    self.conditional_read_output(narrow_value_cache_read(read)),
+                ))
+            }
+        };
+        if let Some(refusal) = self.cold_build_budget_refusal(key) {
+            return Err(Box::new(refusal));
+        }
+        Ok(InPlaceQuery {
+            _depth: depth,
+            _demand: demand,
+        })
     }
 
     /// The operational refusal of a cold build before it starts: the

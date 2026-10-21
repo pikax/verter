@@ -33,6 +33,7 @@ pub(super) fn has_children(data: &SemanticNodeData) -> bool {
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static OPERAND_WALK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MEMBER_QUERIES_FORCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Count one node a conditional's operand classification read
@@ -373,8 +374,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
         let literal_extends = *self
             .literal_extends
             .get_or_insert_with(|| dispatch.is_literal_only_union(extends));
+        let key = SemanticQueryKey::Conditional {
+            check: member,
+            extends,
+            true_branch: self.true_branch,
+            false_branch: self.false_branch,
+            distributive: false,
+            pending: pending.clone(),
+        };
         if literal_extends && dispatch.decides_member_in_place(member) {
-            // Evaluated in place, as a query the running decision reaches.
+            // Charged and refused exactly as the member's own cold query
+            // would be, then evaluated in place, as a query the running
+            // decision reaches.
+            let _entry = match dispatch.enter_in_place_query(&key) {
+                Ok(entry) => entry,
+                Err(refusal) => return *refusal,
+            };
             let _nested = dispatch.nested_decision_query();
             return dispatch.decide_conditional(
                 member,
@@ -388,14 +403,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
                 },
             );
         }
-        dispatch.conditional_query_output(SemanticQueryKey::Conditional {
-            check: member,
-            extends,
-            true_branch: self.true_branch,
-            false_branch: self.false_branch,
-            distributive: false,
-            pending,
-        })
+        dispatch.conditional_query_output(key)
     }
 
     fn committed(
@@ -1314,15 +1322,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// lookup — and binds the selected branch by structural substitution,
     /// which evaluates nothing (its only query builds a template whose holes
     /// are closed literals), so it reaches no query that could re-enter it.
-    /// It runs the same decision with the same reads and charges as the
-    /// member's query would; a memo entry for each member of a wide union
+    /// It runs the same decision with the same reads as the member's query,
+    /// charged and refused as that query's cold entry would be
+    /// ([`ProjectSemanticDispatch::enter_in_place_query`]); a memo entry for
+    /// each member of a wide union
     /// would be read only by another distribution over the same member, which
     /// decides it in place as cheaply.
     fn decides_member_in_place(&self, member: SemanticNodeId) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        if MEMBER_QUERIES_FORCED.get() {
+            return false;
+        }
         matches!(
             self.graph().node_data(member).as_deref(),
             Some(SemanticNodeData::Literal(_))
         )
+    }
+
+    /// Test-only: every distributed member is decided as its own
+    /// conditional query on this thread while the guard lives, so a test
+    /// can compare the in-place decision with the query it stands for.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_member_queries_for_tests() -> impl Drop {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                MEMBER_QUERIES_FORCED.set(self.0);
+            }
+        }
+        Restore(MEMBER_QUERIES_FORCED.replace(true))
     }
 
     /// Whether `node` is a union whose every arm is a literal.
@@ -1347,7 +1375,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     fn conditional_query_output(&self, key: SemanticQueryKey) -> super::walk::QueryBuildOutput {
-        let read = self.execute_read(key);
+        self.conditional_read_output(self.execute_read(key))
+    }
+
+    /// A conditional query's read as the output a decision folds in.
+    pub(super) fn conditional_read_output(
+        &self,
+        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> super::walk::QueryBuildOutput {
         // Conditional branches and their union normalization already carry
         // a bounded positional representation. Forward the adopted value,
         // including its gaps, rather than discarding its producer guarantee.

@@ -2493,15 +2493,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the roots it inspected and consuming the index's receipt in the asking
     /// build. The pair takes this path whenever its operands are these
     /// shapes, never according to what an earlier read prepared. Any other
-    /// pair, an open inference session and a preparation the connected
-    /// demand refuses take the relation authority's ordinary path, whose
-    /// frame records that refusal.
+    /// pair, a pair asked inside an open relation chain, an open inference
+    /// session and a preparation the connected demand refuses take the
+    /// relation authority's ordinary path, whose frame records that
+    /// refusal.
     fn literal_union_membership_of(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> Option<RelationStep> {
         if self.relation_session_active() {
+            return None;
+        }
+        // A pair asked while a relation frame is on top joins that frame's
+        // chain: the ordinary path weighs it against the chain's overflow,
+        // depth and comparison limits, which can answer false where
+        // membership answers true. Only a pair that starts a chain of its
+        // own skips the relation.
+        if self.current_relation_chain().is_some() {
             return None;
         }
         // Only these shapes may skip the relation: the guard also keeps
@@ -2519,7 +2528,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) {
             return None;
         }
-        if let Some(step) = self.relation_warm_step(&self.relate_key_for(source, target), false) {
+        let key = self.relate_key_for(source, target);
+        // A pair already open lower on the obligation stack is the
+        // relation's coinductive assumption, never a membership verdict.
+        let reentered = self
+            .dispatch_txn
+            .borrow()
+            .reentry()
+            .find(&ObligationIdentity::Relate {
+                key: key.clone(),
+                occurrence: InferenceOccurrence::ARGUMENT_COVARIANT,
+            })
+            .is_some();
+        if reentered {
+            return None;
+        }
+        if let Some(step) = self.relation_warm_step(&key, false) {
             return Some(step);
         }
         match self.literal_members_in_union(

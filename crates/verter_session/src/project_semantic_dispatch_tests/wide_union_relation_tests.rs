@@ -274,6 +274,73 @@ fn a_reused_composite_proof_prices_a_demand_as_reducing_again() {
     );
 }
 
+/// A distributed member decided in place is charged and refused as its own
+/// conditional query would be. Under every request budget from one that
+/// refuses before the distribution finishes to one that answers whole, the
+/// in-place decisions and the member queries give the same answer, the same
+/// checker recovery and the same walker diagnostics.
+#[test]
+fn in_place_members_answer_and_refuse_as_member_queries_under_a_request_budget() {
+    use std::sync::Arc;
+    type Dispatch<'a> = super::ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
+    let source = format!(
+        "type Exclude<T, U> = T extends U ? never : T;\n{}type Most = Exclude<W, \"m3\" | \"m5\">;\n\
+         type __Probe = Exclude<W, Most>;\nexport {{}};\n",
+        wide_union(32)
+    );
+    // The answer's wire form, its checker recovery and the request's walker
+    // diagnostics under `budget`, with every member its own query or not.
+    let observe = |budget: usize, member_queries: bool| {
+        let _forced = member_queries.then(Dispatch::force_member_queries_for_tests);
+        let host = crate::VerterHost::new_standalone(crate::HostConfig {
+            audit_enabled: true,
+            projection_op_budget: budget,
+            ..crate::HostConfig::default()
+        });
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some("/scenario.ts".to_owned()),
+                input_id: "/scenario.ts".to_owned(),
+                source: Arc::from(source.as_str()),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert the scenario");
+        let (outcome, audit) = host
+            .resolve_named_symbol_with_audit("/scenario.ts", "__Probe", None)
+            .into_parts();
+        let answer = match outcome {
+            Ok(Some(node)) => Some((
+                host.project_node_to_type_expr_json_bytes(&node)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+                node.checker_recovery_code(),
+            )),
+            Ok(None) => None,
+            Err(error) => panic!("budget {budget}: the request fails: {error:?}"),
+        };
+        let diagnostics = match &audit.kind_payload {
+            verter_audit::RequestKindPayload::TypeResolution(payload) => {
+                format!("{:?}", payload.walker_diagnostics)
+            }
+            other => panic!("not a type resolution audit: {other:?}"),
+        };
+        (answer, diagnostics)
+    };
+    let whole = observe(1_000_000, false);
+    assert_eq!(whole, observe(1_000_000, true), "an unbounded request");
+    let mut refused = 0;
+    for budget in [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128] {
+        let in_place = observe(budget, false);
+        assert_eq!(
+            in_place,
+            observe(budget, true),
+            "budget {budget}: in-place members must answer as member queries do"
+        );
+        refused += usize::from(in_place != whole);
+    }
+    assert!(refused > 0, "some budget must refuse the distribution");
+}
+
 #[test]
 fn a_partly_warm_literal_membership_demand_pays_preparation_once() {
     use super::ProjectSemanticDispatch;

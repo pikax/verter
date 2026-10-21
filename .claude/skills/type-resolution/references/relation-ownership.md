@@ -26,7 +26,11 @@ does: a distributive conditional asks one per member. It replays a memoized
 answer for the pair first (paying its receipt, which is never below the index
 price), then answers from the index, the lookup's roots and the index receipt
 going to the asking build. The path depends on the operands' shapes alone,
-never on what an earlier read prepared. A preparation ahead of any relation
+never on what an earlier read prepared. A pair asked while a relation frame is
+on top joins that frame's chain, and a pair already open lower on the
+obligation stack is the relation's coinductive assumption: both take the
+ordinary path, which applies the chain's overflow, depth and comparison limits
+and the assumption. A preparation ahead of any relation
 frame starts only when the demand can pay for every arm and records no budget
 edge (a frame on top never asked for it); a refused one falls back to the
 relation authority, whose own frame records the refusal. Inside a relation, a
