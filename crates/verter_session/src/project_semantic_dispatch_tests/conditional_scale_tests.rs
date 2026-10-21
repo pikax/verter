@@ -40,7 +40,9 @@ use std::sync::Arc;
 use verter_type_engine::project_semantic_dispatch::raise::{
     enable_dispatch_trace_for_test, keys_built_cold_more_than_once, DISPATCH_TRACE,
 };
-use verter_type_engine::project_semantic_dispatch::seam_need_probes_for_tests;
+use verter_type_engine::project_semantic_dispatch::{
+    seam_need_probes_for_tests, seam_need_questions_for_tests,
+};
 use verter_type_expr::{LiteralValue, TypeExpr};
 
 const SCENARIO: &str = "/scale/scenario.ts";
@@ -195,6 +197,7 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         .expect("fixture admitted");
     let _trace = enable_dispatch_trace_for_test();
     let probes_before = seam_need_probes_for_tests();
+    let questions_before = seam_need_questions_for_tests();
     let ((outcome, _), usage) =
         verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
             || {
@@ -208,6 +211,15 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
     let stats = host.project_type_store().semantic_graph().stats_snapshot();
     let dispatches = DISPATCH_TRACE.with(|trace| trace.borrow().len()) as u64;
     let seam_need_probes = seam_need_probes_for_tests() - probes_before;
+    let seam_need_questions = seam_need_questions_for_tests() - questions_before;
+    // Asking whether a read is already one of a decision's needs compares
+    // it with the need that shares its demand's hash: on average at most one
+    // stored need per question, whatever the number of needs. Comparing the
+    // read with every need reached before it is quadratic in the members.
+    assert!(
+        seam_need_probes <= seam_need_questions,
+        "{seam_need_probes} stored needs compared over {seam_need_questions} need questions"
+    );
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
         .expect("the answer projects");
@@ -233,7 +245,7 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         ("decided conditionals", stats.conditional_decided_count),
         ("relation checks", stats.relation_check_count),
         ("substitutions", stats.substitute_memo_misses),
-        ("decision need probes", seam_need_probes),
+        ("decision need questions", seam_need_questions),
     ];
     (literals, work)
 }
@@ -385,7 +397,9 @@ fn repeated_infer_answers_at_every_size_with_linear_work() {
 /// over its operand passes, and asks for each whether it is already one of
 /// its needs. Comparing a read with every need reached before it made that
 /// question quadratic in the members, which was most of the work at 6,000
-/// members; it is one probe per read. Measured: the numbers `0` to `n - 1`.
+/// members; each question compares at most one stored need on average
+/// ([`named_probe`] checks it on every probe), and the questions grow with
+/// the members. Measured: the numbers `0` to `n - 1`.
 #[test]
 fn repeated_infer_decision_needs_grow_linearly_across_three_sizes() {
     let work = [30, 100, 300].map(|members| {
@@ -396,12 +410,12 @@ fn repeated_infer_decision_needs_grow_linearly_across_three_sizes() {
             checker_instantiations_repeated_infer(members),
         );
         assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
-        let probes = work
+        let questions = work
             .iter()
-            .find(|(what, _)| *what == "decision need probes")
+            .find(|(what, _)| *what == "decision need questions")
             .map(|(_, value)| *value);
         assert!(
-            probes.is_some_and(|probes| probes > 0),
+            questions.is_some_and(|questions| questions > 0),
             "Pat over {members}: the decision asked no need question"
         );
         (members, work)

@@ -121,8 +121,9 @@ pub mod query_error_disposition;
 mod query_frames;
 #[cfg(any(test, feature = "test-support"))]
 pub use query_frames::{
-    seam_need_probes_for_tests, take_call_suspensions_for_tests, CallSuspensionForTests,
-    ContextualRouteEventForTests, OpenRequestStateForTests, SemanticTask, TaskOutcomeForTests,
+    seam_need_probes_for_tests, seam_need_questions_for_tests, take_call_suspensions_for_tests,
+    CallSuspensionForTests, ContextualRouteEventForTests, OpenRequestStateForTests, SemanticTask,
+    TaskOutcomeForTests,
 };
 pub mod signature_discovery;
 pub mod signature_utility;
@@ -5173,6 +5174,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let is_cold = cold_build_ran.get();
         (cache_read, is_cold, refusal_carrier)
     }
+}
+
+/// Whether every one of `arms` is among `members`. Past a few members the
+/// lookup is hashed, so comparing a written union with its reduction costs
+/// the union's width rather than its width squared: a distributed check
+/// over thousands of members is compared with its reduction once per pass.
+pub(super) fn every_arm_among(arms: &[SemanticNodeId], members: &[SemanticNodeId]) -> bool {
+    const SCANNED_MEMBERS: usize = 16;
+    if members.len() <= SCANNED_MEMBERS {
+        return arms.iter().all(|arm| members.contains(arm));
+    }
+    let members: rustc_hash::FxHashSet<SemanticNodeId> = members.iter().copied().collect();
+    arms.iter().all(|arm| members.contains(arm))
 }
 
 /// Whether a read of `key` nested in another computation completes for the

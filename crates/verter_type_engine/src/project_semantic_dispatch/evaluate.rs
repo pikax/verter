@@ -3926,7 +3926,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if views == arms {
             let kept = match graph.node_data(reduced).as_deref() {
                 Some(SemanticNodeData::Union(members)) => {
-                    members.len() == arms.len() && arms.iter().all(|arm| members.contains(arm))
+                    members.len() == arms.len() && super::every_arm_among(arms, members)
                 }
                 _ => false,
             };
@@ -3946,15 +3946,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         // The checker's union origin: the named unions, when they do not
         // overlap and the reduction kept every member they name.
-        let in_named = |member: &SemanticNodeId| {
-            named_unions
-                .iter()
-                .any(|(_, members)| members.contains(member))
-        };
+        // Every member a named union names, looked up by hash: a named
+        // union of thousands of members is read once, not once per member.
+        let named_members: rustc_hash::FxHashSet<SemanticNodeId> = named_unions
+            .iter()
+            .flat_map(|(_, members)| members.iter().copied())
+            .collect();
         let remaining: Vec<SemanticNodeId> = type_set
             .iter()
             .copied()
-            .filter(|member| !in_named(member))
+            .filter(|member| !named_members.contains(member))
             .collect();
         let named_count: usize = named_unions.iter().map(|(_, members)| members.len()).sum();
         let result = match named_unions.as_slice() {
@@ -3966,7 +3967,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .chain(named_unions.iter().map(|(named, _)| *named))
                     .collect();
                 // The written arms ARE the origin: the union stays as written.
-                if origin.len() == arms.len() && origin.iter().all(|arm| arms.contains(arm)) {
+                if origin.len() == arms.len() && super::every_arm_among(&origin, arms) {
                     return None;
                 }
                 self.intern_normalized_union_or_intersection(&origin, true)

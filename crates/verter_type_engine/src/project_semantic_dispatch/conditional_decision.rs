@@ -933,8 +933,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // distribution (a reference to `type Nv = never` distributes as
         // `never`), while the selected branch binds the check as written
         // (`O extends infer K ? K : 2` is `O`).
+        // A check written as a union is its own declared type: it is
+        // constructed, reduced and read for its extreme once, not once more
+        // as the declared check (each read visits every member).
         let declared_check = self.declared_operand_where_written(check);
-        let declared_check = self.union_as_constructed(declared_check);
+        let declared_is_check = declared_check == check;
+        let declared_check = if declared_is_check {
+            check
+        } else {
+            self.union_as_constructed(declared_check)
+        };
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
@@ -943,12 +951,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // `ThisParameterType<F>`'s branch); one still open stays itself.
         let check = self.reduced_conditional_operand(check);
         let extends = self.reduced_conditional_operand(extends);
-        let declared_check = self.reduced_conditional_operand(declared_check);
-        let check = self.conditional_operand_extreme(check).unwrap_or(check);
+        let declared_check = if declared_is_check {
+            check
+        } else {
+            self.reduced_conditional_operand(declared_check)
+        };
+        let check_extreme = self.conditional_operand_extreme(check);
         let extends = self.conditional_operand_extreme(extends).unwrap_or(extends);
-        let declared_check = self
-            .conditional_operand_extreme(declared_check)
-            .unwrap_or(declared_check);
+        let declared_check = if declared_is_check {
+            check_extreme.unwrap_or(check)
+        } else {
+            self.conditional_operand_extreme(declared_check)
+                .unwrap_or(declared_check)
+        };
+        let check = check_extreme.unwrap_or(check);
         let check_tuple = self.conditional_tuple_operand(check);
         let extends_tuple = self.conditional_tuple_operand(extends);
         let recovery = check_tuple.is_some_and(|(_, recovered)| recovered)
@@ -1910,7 +1926,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let same_members = match self.graph().node_data(constructed).as_deref() {
             Some(SemanticNodeData::Union(kept)) => {
                 let kept = kept.members_arc();
-                kept.len() == members.len() && kept.iter().all(|member| members.contains(member))
+                kept.len() == members.len() && super::every_arm_among(&kept, &members)
             }
             _ => false,
         };

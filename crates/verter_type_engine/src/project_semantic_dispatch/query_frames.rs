@@ -273,23 +273,47 @@ pub(super) struct ConditionalBuild {
 }
 
 /// The reads a seam's run reached that no answer holds, in the order it
-/// reached them, each with the claim it entered with, and the demands among
-/// them. A run over a wide union reaches a read per member; asking whether
-/// one of them is already needed answers from the demands, not by comparing
-/// the read with every need before it.
+/// reached them, each with the claim it entered with, and an index of them
+/// by demand. A run over a wide union reaches a read per member; asking
+/// whether one of them is already needed compares it with the needs that
+/// share its demand's hash, not with every need before it. Each need's key
+/// is stored once, in `reached`, and a membership question borrows the key
+/// it asks about.
 #[derive(Default)]
 pub(super) struct SeamNeeds {
     reached: Vec<(SemanticQueryKey, ClaimAttempt)>,
-    demands: rustc_hash::FxHashSet<QueryDemand>,
+    /// Positions in `reached`, by the hash of each need's demand.
+    demands: hashbrown::HashTable<usize>,
+}
+
+/// Whether the reached need `(need, claim)` is the demand of `key` at
+/// `site`: the one comparison a membership question makes with a stored
+/// need, counted for the growth tests.
+fn is_need(
+    (need, claim): &(SemanticQueryKey, ClaimAttempt),
+    key: &SemanticQueryKey,
+    site: TupleSplicePosition,
+) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    SEAM_NEED_PROBES.with(|probes| probes.set(probes.get() + 1));
+    claim.checking_site() == site && need == key
+}
+
+/// The hash a need's demand — its key at its checking site — is indexed by.
+fn demand_hash(key: &SemanticQueryKey, site: TupleSplicePosition) -> u64 {
+    std::hash::BuildHasher::hash_one(&rustc_hash::FxBuildHasher, (key, site))
 }
 
 impl SeamNeeds {
     fn push(&mut self, key: SemanticQueryKey, claim: ClaimAttempt) {
-        self.demands.insert(QueryDemand {
-            key: key.clone(),
-            site: claim.checking_site(),
-        });
+        let hash = demand_hash(&key, claim.checking_site());
+        let position = self.reached.len();
         self.reached.push((key, claim));
+        let reached = &self.reached;
+        self.demands.insert_unique(hash, position, |&stored| {
+            let (key, claim) = &reached[stored];
+            demand_hash(key, claim.checking_site())
+        });
     }
 
     /// Whether `key`, at `site`, is one of the needs.
@@ -298,11 +322,13 @@ impl SeamNeeds {
             return false;
         }
         #[cfg(any(test, feature = "test-support"))]
-        SEAM_NEED_PROBES.with(|probes| probes.set(probes.get() + 1));
-        self.demands.contains(&QueryDemand {
-            key: key.clone(),
-            site,
-        })
+        SEAM_NEED_QUESTIONS.with(|questions| questions.set(questions.get() + 1));
+        let reached = &self.reached;
+        self.demands
+            .find(demand_hash(key, site), |&stored| {
+                is_need(&reached[stored], key, site)
+            })
+            .is_some()
     }
 
     fn is_empty(&self) -> bool {
@@ -2615,11 +2641,20 @@ thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static SEAM_NEED_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SEAM_NEED_QUESTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// The needs a seam's membership queries examined on this thread since it
-/// started: whether a read is already needed costs one hashed probe, never
-/// a comparison with every need the run reached before it.
+/// The membership questions seams asked on this thread since it started:
+/// whether a read is already one of the needs its run reached.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seam_need_questions_for_tests() -> u64 {
+    SEAM_NEED_QUESTIONS.with(std::cell::Cell::get)
+}
+
+/// The stored needs a seam's membership queries compared a read with on
+/// this thread since it started: a read already needed is compared with the
+/// need that shares its demand's hash, never with every need the run
+/// reached before it.
 #[cfg(any(test, feature = "test-support"))]
 pub fn seam_need_probes_for_tests() -> u64 {
     SEAM_NEED_PROBES.with(std::cell::Cell::get)
