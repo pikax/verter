@@ -2,13 +2,15 @@
 //! back as a flow-return answer and, where the form is a returned test, as
 //! the type predicate the checker infers from it.
 //!
-//! Every expected answer is measured on the pinned TypeScript 7.0.2: the
+//! Checker-parity answers are measured on the pinned TypeScript 7.0.2: the
 //! strict column is the function's `.d.ts` line (`tsc --declaration
 //! --emitDeclarationOnly --strict`), the loose column the same under
 //! `--strictNullChecks false`, read from a TS2322 message quoting the type
 //! where the loose `.d.ts` reprints an authored annotation instead. A
 //! branch that does not return `throw`s, so each answer is the narrowed
 //! read alone, never a join.
+//! Symbol-abbreviation controls instead pin the documented stable-spelling
+//! policy where the native checker's messages depend on process history.
 
 use super::signature_predicate_inference_tests::{
     assert_predicate, assert_prints, host_with, LOOSE_ROOT, STRICT_ROOT,
@@ -3100,6 +3102,60 @@ fn an_assertion_every_conditional_arm_applies_narrows_past_it() {
         rows.push((name, "string | number", "string | number"));
     }
     check_rows(CONDITIONAL_ASSERTIONS, &rows);
+}
+
+/// Symbol abbreviation depends on spelling, not unrelated interning or query history.
+#[test]
+fn symbol_abbreviation_keeps_diagnostics_across_query_histories() {
+    use super::signature_predicate_inference_tests::checker_report;
+
+    let padding = "x".repeat(91);
+    let mut source = String::from("declare function one(x: string): number;\n");
+    for i in 0..12 {
+        source.push_str(&format!("declare const s{i}: unique symbol;\n"));
+    }
+    source.push_str(&format!(
+        "export function target(x: {{ padding: \"{padding}\"; "
+    ));
+    for i in 0..12 {
+        source.push_str(&format!("[s{i}]: number; "));
+    }
+    source.push_str("last: string }) { return [one(x), one(x)]; }\n");
+    for i in 0..128 {
+        source.push_str(&format!("declare const u{i}: unique symbol;\n"));
+    }
+    source.push_str("export function unrelated(x: { ");
+    for i in 0..128 {
+        source.push_str(&format!("[u{i}]: {i}; "));
+    }
+    source.push_str("}) { return x; }\n");
+    let message = format!("error TS2345: Argument of type '{{ padding: \"{padding}\"; [s0]: number; [s1]: number; [s2]: number; [s3]: number; [s4]: number; ... 7 more ...; last: string; }}' is not assignable to parameter of type 'string'.");
+    let expected: Vec<_> = source
+        .match_indices("one(x)")
+        .map(|(start, _)| {
+            let before = &source[..start + "one(".len()];
+            let line = before.matches('\n').count() + 1;
+            let column = before.len() - before.rfind('\n').unwrap();
+            format!("({line},{column}): {message}")
+        })
+        .collect();
+    assert_eq!(expected.len(), 2, "the fixture has two authored call sites");
+    for prewarm in [false, true] {
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            for root in [STRICT_ROOT, LOOSE_ROOT] {
+                if prewarm {
+                    assert!(checker_report(&host, root, "unrelated", &source).is_empty());
+                }
+                assert_eq!(
+                    checker_report(&host, root, "target", &source),
+                    expected,
+                    "{pass} {root}, unrelated prewarm: {prewarm}"
+                );
+                assert_prints(&host, root, "target", "number[]");
+            }
+        }
+    }
 }
 
 /// Printable residual kinds retain the call's diagnostic through cold and warm reads.

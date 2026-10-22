@@ -384,10 +384,6 @@ struct NodeBuilderLength {
     /// add: while it could take the count past the truncation length, which
     /// entries the checker elides is not known.
     unmodeled: usize,
-    /// Extra bytes a process-local checker symbol id can add. Only an
-    /// abbreviation decision that actually depends on them is ambiguous.
-    symbol_id_extra: usize,
-    ambiguous_symbol_abbreviation: bool,
 }
 
 /// Printed in place of what the display depth cap or a missing node cut
@@ -416,9 +412,6 @@ impl DisplayContext {
     pub(crate) fn checker_text(&self, printed: String) -> Option<String> {
         use super::checker_policy::MAXIMUM_TRUNCATION_LENGTH;
         let length = self.length.as_ref()?;
-        if length.ambiguous_symbol_abbreviation {
-            return None;
-        }
         if length.unmodeled > 0
             && (length.truncating
                 || length.approximate + length.unmodeled > MAXIMUM_TRUNCATION_LENGTH)
@@ -493,22 +486,17 @@ impl DisplayContext {
         };
         if !length.truncating {
             let limit = super::checker_policy::MAXIMUM_TRUNCATION_LENGTH;
-            if length.approximate <= limit && length.approximate + length.symbol_id_extra > limit {
-                length.ambiguous_symbol_abbreviation = true;
-            }
             length.truncating = length.approximate > limit;
         }
         length.truncating
     }
 
-    /// A unique-symbol property uses the checker's internal symbol name:
-    /// one sentinel byte, two separators, its name and a decimal u64 id.
-    /// The id is external process history, so bound just its digit count.
+    /// Symbol-keyed properties count the stable leaf spelling plus five
+    /// fixed bytes. The native checker's decimal symbol id depends on
+    /// process history; it cannot control provider-free abbreviation or
+    /// suppress an otherwise printable diagnostic.
     fn symbol_property_length(&mut self, name: &str) {
         self.add_length(name.len() + 5);
-        if let Some(length) = &mut self.length {
-            length.symbol_id_extra += 19;
-        }
     }
 
     /// Record `printed`, the text of a node whose node-builder count is not
