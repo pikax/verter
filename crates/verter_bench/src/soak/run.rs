@@ -20,10 +20,13 @@ use verter_execution::cancellation::CancellationToken;
 use verter_session::host_flow_return_audit::FlowReturnError;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::retention::active_window::ActiveWindowReport;
+use verter_session_query::retention::witness::{AllocationId, ChargeObservation};
+use verter_session_query::retention::ChargeClass;
 use verter_type_engine::semantic_query::{
-    BinderScopeId, ProjectionMode, ResolveDeclKey, ReturnProjectionDemand, ScopeId,
-    SemanticQueryKey,
+    BinderScopeId, FlowReturnResult, ProjectionMode, ResolveDeclKey, ReturnProjectionDemand,
+    ScopeId, SemanticQueryKey,
 };
+use verter_type_engine::semantic_query_memo::charge_witness::HeldChargeWitness;
 use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
@@ -133,10 +136,16 @@ pub struct ActionRecord {
     /// For a cancellation: the uncancelled retry's outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<Outcome>,
-    /// For a cancellation: the digest of the retry's complete delivered
-    /// answer; absent when the retry delivered none or a degraded one.
+    /// For a cancellation: the digest of the retry's exact return value,
+    /// materialized from the delivered result's own return root; absent when
+    /// the retry delivered none, a degraded one or one that projects nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_digest: Option<String>,
+    /// For a cancellation: the same digest from a fresh cold host published
+    /// the same configuration and sources; absent when that host delivered
+    /// no exact, materializable return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_digest: Option<String>,
     /// For a surge: reservations the account refused for aggregate pressure
     /// while the surge ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -180,6 +189,7 @@ impl ActionRecord {
             flight: None,
             retry: None,
             retry_digest: None,
+            oracle_digest: None,
             refusals_pressure: None,
             refusals_oversized: None,
             isolation: None,
@@ -190,6 +200,15 @@ impl ActionRecord {
             published: Vec::new(),
         }
     }
+}
+
+/// What one cancellation action observed.
+struct Cancelled {
+    first: Outcome,
+    retry: Outcome,
+    retry_digest: Option<String>,
+    oracle_digest: Option<String>,
+    published: Vec<String>,
 }
 
 /// What a flight rendezvous observed of one overlap group.
@@ -292,23 +311,140 @@ impl ActiveEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OwnerStepKind {
+    /// The answer was just delivered into its pin slot.
+    Acquired,
     /// Before the public copy was made.
     BeforeCopy,
+    /// After the public copy was made.
+    AfterCopy,
     /// Before either handle was released.
     BeforeRelease,
     /// After the answer's cache entries were retired, both handles live.
     AfterRetirement,
-    /// After the public copy was made.
-    AfterCopy,
     /// After the first handle was released.
     AfterFirstRelease,
-    /// After the last handle was released.
+    /// After the last handle was released, the return node's external
+    /// reader still live.
     AfterFinalRelease,
-    /// After the final release, the same answer demanded once more (the
-    /// transfer probe), releases settled.
-    ProbeAcquired,
-    /// After the probe's handle was released, releases settled.
-    ProbeReleased,
+    /// After the return node's external reader was released too.
+    AfterNodeRelease,
+}
+
+/// An observed charge's class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChargeKind {
+    Active,
+    Retained,
+    Pinned,
+}
+
+impl ChargeKind {
+    fn of(class: ChargeClass) -> Self {
+        match class {
+            ChargeClass::Active => ChargeKind::Active,
+            ChargeClass::Retained => ChargeKind::Retained,
+            ChargeClass::Pinned => ChargeKind::Pinned,
+        }
+    }
+}
+
+/// One allocation's own charge, as the held answer's charge witness read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChargeFigure {
+    /// The allocation, numbered in the order the action first observed it:
+    /// the same number at two steps is the same allocation.
+    pub allocation: u32,
+    /// Its charge's class; `None` while nothing charges it.
+    pub class: Option<ChargeKind>,
+    /// Bytes its charge holds.
+    pub charged: u64,
+    /// Bytes its charge must hold, measured from the allocation itself.
+    pub measured: u64,
+    /// The pinned share on its block (charged, measured), when weak views
+    /// keep one.
+    pub block: Option<(u64, u64)>,
+}
+
+impl ChargeFigure {
+    /// Charged, and charged exactly what it measures.
+    #[must_use]
+    pub fn is_exact(&self) -> bool {
+        self.class.is_some()
+            && self.charged == self.measured
+            && self
+                .block
+                .is_none_or(|(charged, measured)| charged == measured)
+    }
+
+    /// Every byte this allocation's charges hold.
+    #[must_use]
+    pub fn charged_total(&self) -> u64 {
+        self.charged + self.block.map_or(0, |(charged, _)| charged)
+    }
+}
+
+/// What a held answer keeps charged, allocation by allocation: the
+/// self-charged payload it hands its readers, its cost receipts and its
+/// delivery's own bookkeeping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WitnessFigures {
+    pub payload: Vec<ChargeFigure>,
+    pub cost_receipts: Vec<ChargeFigure>,
+    pub root_metadata: Vec<ChargeFigure>,
+}
+
+impl WitnessFigures {
+    /// The three sections, in observation order.
+    #[must_use]
+    pub fn sections(&self) -> [&[ChargeFigure]; 3] {
+        [&self.payload, &self.cost_receipts, &self.root_metadata]
+    }
+
+    /// Every observed allocation.
+    pub fn figures(&self) -> impl Iterator<Item = &ChargeFigure> {
+        self.sections().into_iter().flatten()
+    }
+
+    /// Bytes every observed charge holds together.
+    #[must_use]
+    pub fn charged_total(&self) -> u64 {
+        self.figures().map(ChargeFigure::charged_total).sum()
+    }
+}
+
+/// Numbers the allocations one action observes, in first-seen order.
+#[derive(Default)]
+struct Allocations(HashMap<AllocationId, u32>);
+
+impl Allocations {
+    fn observe(&mut self, witness: &HeldChargeWitness) -> WitnessFigures {
+        let mut section = |observation: &ChargeObservation| -> Vec<ChargeFigure> {
+            observation
+                .entries()
+                .iter()
+                .map(|entry| {
+                    let next = self.0.len() as u32;
+                    ChargeFigure {
+                        allocation: *self.0.entry(entry.allocation).or_insert(next),
+                        class: entry.class.map(ChargeKind::of),
+                        charged: entry.charged_bytes as u64,
+                        measured: entry.measured_bytes as u64,
+                        block: entry
+                            .shared_block
+                            .map(|b| (b.charged_bytes as u64, b.measured_bytes as u64)),
+                    }
+                })
+                .collect()
+        };
+        WitnessFigures {
+            payload: section(witness.payload()),
+            cost_receipts: section(witness.cost_receipts()),
+            root_metadata: section(witness.root_metadata()),
+        }
+    }
 }
 
 /// The ownership figures at one step.
@@ -321,9 +457,16 @@ pub struct OwnerStep {
     /// The process account's charges at this step, read after the
     /// surviving handle (if any) was projected.
     pub charges: Charges,
-    /// The digest of the answer as projected through the handle still held
-    /// at this step, when one is.
+    /// The digest of the answer's exact value as materialized through the
+    /// handle still held at this step, when one is.
     pub projected: Option<String>,
+    /// What the handle still held at this step keeps charged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<WitnessFigures>,
+    /// What an unrelated reader, live through the whole release, keeps
+    /// charged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unrelated: Option<WitnessFigures>,
 }
 
 /// One retention sample.
@@ -345,6 +488,10 @@ pub struct SoakSummary {
     pub mode: Mode,
     pub tranches: u32,
     pub manifest_digest: String,
+    /// Whether the build that ran the workload could capture audit records:
+    /// the soak lane runs with capture compiled out, so its work counters are
+    /// the narrow soak readers' own.
+    pub capture_available: bool,
     /// The sentinel's answer under the original configuration, at setup.
     pub sentinel_digest: String,
     /// Digests of the texts the setup published before the first action.
@@ -450,17 +597,24 @@ struct Engine {
     mode: Mode,
     workspace: Arc<MemoryWorkspace>,
     host: Arc<VerterHost>,
-    /// Held roots per pin slot: the original, then its public copy.
-    pins: HashMap<u32, Vec<NodeRoot>>,
-    /// The alias each pin slot's answer was demanded by, so a release can
-    /// re-demand the same answer for its transfer probe.
-    pin_aliases: HashMap<u32, String>,
-    leaked: Vec<NodeRoot>,
+    /// Held answers per pin slot: the original, then its public copy.
+    pins: HashMap<u32, Vec<Held>>,
+    leaked: Vec<Held>,
     /// Actions the planted mutation was applied to, recorded where each plant
     /// takes effect (a root kept past its release is one of them).
     applied_at: Vec<u32>,
     /// Publications since the last action finished.
     publications: Mutex<Vec<String>>,
+    /// What the host holds now: the installed configuration text and every
+    /// open file's text, so a cold oracle host can be published the same.
+    current: Mutex<Published>,
+}
+
+/// The configuration text and open-file texts a host was last published.
+#[derive(Default)]
+struct Published {
+    config: String,
+    files: HashMap<String, String>,
 }
 
 /// The process account's charges by class.
@@ -490,13 +644,23 @@ impl Charges {
     }
 }
 
-/// One ownership step: the held handle (if any) is projected first, so a
-/// projection's own work lands before the charges and roots are read.
-fn owner_step(host: &VerterHost, held: Option<&NodeRoot>) -> OwnerStep {
-    let projected = held.map(|node| digest(host, Some(node)));
+/// A delivered flow return held by the runner.
+type Held = Arc<FlowReturnResult>;
+
+/// One ownership step: the held handle (if any) is materialized first, so a
+/// projection's own work lands before the charges, roots and witnesses are
+/// read.
+fn owner_step(
+    host: &VerterHost,
+    step: OwnerStepKind,
+    held: Option<&Held>,
+    unrelated: Option<&Held>,
+    allocations: &mut Allocations,
+) -> OwnerStep {
+    let projected = held.map(|held| return_digest(host, held));
     let s = host.retention_snapshot();
     OwnerStep {
-        step: OwnerStepKind::BeforeCopy,
+        step,
         roots: s.semantic_node_ownership.roots as u64,
         charges: Charges {
             active: s.active_bytes as u64,
@@ -505,7 +669,55 @@ fn owner_step(host: &VerterHost, held: Option<&NodeRoot>) -> OwnerStep {
             storage: (s.semantic_graph_storage_bytes + s.semantic_bookkeeping_storage_bytes) as u64,
         },
         projected,
+        held: held.map(|held| allocations.observe(&HeldChargeWitness::of_flow_return(held))),
+        unrelated: unrelated
+            .map(|held| allocations.observe(&HeldChargeWitness::of_flow_return(held))),
     }
+}
+
+/// The identity of `symbol`'s declared-body return in `file`.
+fn return_identity(file: &str, symbol: &str) -> FlowFunctionReturnIdentity {
+    FlowFunctionReturnIdentity {
+        anchor: AuthoredAnchor {
+            canonical_id: canonical(file).as_str().into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: symbol.into(),
+            space: LocatorSymbolSpace::Value,
+        },
+        function_part: FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    }
+}
+
+/// `symbol`'s return through the host's public flow-return request, and its
+/// outcome: a value when the result is exact.
+fn deliver_return(host: &VerterHost, file: &str, symbol: &str) -> (Outcome, Option<Held>) {
+    let (result, _audit) = host
+        .get_flow_return_type_with_audit(
+            &return_identity(file, symbol),
+            ReturnProjectionDemand::whole_return(),
+        )
+        .into_parts();
+    match result {
+        Ok(held) if held.degradation().is_none() => (Outcome::Value, Some(held)),
+        Ok(held) => (
+            Outcome::Fault {
+                detail: format!("degraded: {:?}", held.degradation()),
+            },
+            None,
+        ),
+        Err(err) => (
+            Outcome::Fault {
+                detail: format!("{err:?}"),
+            },
+            None,
+        ),
+    }
+}
+
+/// The digest of a held return's exact value, or why it has none.
+fn return_digest(host: &VerterHost, held: &FlowReturnResult) -> String {
+    exact_return_digest(host, held).unwrap_or_else(|_| "unmaterialised".into())
 }
 
 /// A demand's outcome and, for a value, its root. An answer whose wire
@@ -548,6 +760,51 @@ fn digest(host: &VerterHost, node: Option<&NodeRoot>) -> String {
     super::manifest::sha256_hex(&bytes)
 }
 
+/// Install `text` as the soak project's configuration on `host`.
+fn configure_host(workspace: &Arc<MemoryWorkspace>, host: &VerterHost, text: &str) {
+    let path = canonical("tsconfig.json");
+    workspace.inject_file(path.clone(), Arc::from(text));
+    let project = verter_workspace::configured_ide_project(
+        workspace.as_ref(),
+        PROJECT_ROOT.to_string(),
+        PROJECT_ROOT.to_string(),
+        &path,
+    );
+    host.configure_projects(vec![project]);
+}
+
+/// Open `text` at the canonical `id` on `host`.
+fn upsert_host(host: &VerterHost, id: &str, text: &str) -> Outcome {
+    match host.upsert(UpsertRequest {
+        canonical_id: Some(id.to_string()),
+        input_id: id.to_string(),
+        source: Arc::from(text),
+        file_language: language_of(id),
+        aliases: Vec::new(),
+    }) {
+        Ok(_) => Outcome::Done,
+        Err(err) => Outcome::Fault {
+            detail: format!("upsert {id}: {err:?}"),
+        },
+    }
+}
+
+/// A flow return's exact value: the digest of the bytes the host's bounded
+/// projection materializes from the delivered result's own return root.
+/// `Err` names why there is none: a degraded result, or a root that projects
+/// nothing.
+fn exact_return_digest(host: &VerterHost, result: &FlowReturnResult) -> Result<String, String> {
+    if let Some(degradation) = result.degradation() {
+        return Err(format!("degraded: {degradation:?}"));
+    }
+    let root = result
+        .return_root()
+        .map_err(|err| format!("no return root: {err:?}"))?;
+    host.project_node_to_type_expr_json_bytes(&root)
+        .map(|bytes| super::manifest::sha256_hex(&bytes))
+        .ok_or_else(|| "the return root projects nothing".to_string())
+}
+
 impl Engine {
     fn start(mode: Mode) -> Self {
         let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
@@ -558,13 +815,17 @@ impl Engine {
             workspace,
             host,
             pins: HashMap::new(),
-            pin_aliases: HashMap::new(),
             leaked: Vec::new(),
             applied_at: Vec::new(),
             publications: Mutex::new(Vec::new()),
+            current: Mutex::new(Published::default()),
         };
         engine.configure(ConfigVariant::Original);
         engine
+    }
+
+    fn current(&self) -> std::sync::MutexGuard<'_, Published> {
+        self.current.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn note_publication(&self, path: &str, text: &str) {
@@ -579,41 +840,27 @@ impl Engine {
     }
 
     fn configure(&self, variant: ConfigVariant) {
-        let path = canonical("tsconfig.json");
         let text = fixtures::tsconfig(variant);
-        self.note_publication(&path, &text);
-        self.workspace
-            .inject_file(path.clone(), Arc::from(text.as_str()));
-        let project = verter_workspace::configured_ide_project(
-            self.workspace.as_ref(),
-            PROJECT_ROOT.to_string(),
-            PROJECT_ROOT.to_string(),
-            &path,
-        );
-        self.host.configure_projects(vec![project]);
+        self.note_publication(&canonical("tsconfig.json"), &text);
+        configure_host(&self.workspace, &self.host, &text);
+        self.current().config = text;
     }
 
     fn upsert(&self, file: &str, text: &str) -> Outcome {
         let id = canonical(file);
         self.note_publication(&id, text);
-        match self.host.upsert(UpsertRequest {
-            canonical_id: Some(id.clone()),
-            input_id: id.clone(),
-            source: Arc::from(text),
-            file_language: language_of(&id),
-            aliases: Vec::new(),
-        }) {
-            Ok(_) => Outcome::Done,
-            Err(err) => Outcome::Fault {
-                detail: format!("upsert {file}: {err:?}"),
-            },
+        let outcome = upsert_host(&self.host, &id, text);
+        if outcome == Outcome::Done {
+            self.current().files.insert(id, text.to_string());
         }
+        outcome
     }
 
     /// Close a module as an editor does (release its document state), then
     /// delete it.
     fn remove(&self, file: &str) -> Outcome {
         let id = canonical(file);
+        self.current().files.remove(&id);
         self.host.evict(&id);
         match self.host.remove(&id) {
             Some(_) => Outcome::Done,
@@ -680,7 +927,7 @@ impl Engine {
         let graph = self.host.project_type_store().semantic_graph();
         let in_flight = AtomicU32::new(0);
         let max_in_flight = AtomicU32::new(0);
-        let joins_before = graph.stats_snapshot().joined_waits;
+        let joins_before = graph.work_snapshot().joined_waits;
         let issue = || {
             let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             max_in_flight.fetch_max(now, Ordering::SeqCst);
@@ -744,7 +991,7 @@ impl Engine {
             (answers, rendezvous.observe(), schedule)
         });
         let joined_waits = graph
-            .stats_snapshot()
+            .work_snapshot()
             .joined_waits
             .saturating_sub(joins_before);
         let outcome = match schedule {
@@ -792,22 +1039,13 @@ impl Engine {
         (outcome, answers.into_iter().map(|(_, d)| d).collect())
     }
 
-    fn cancellation(
-        &self,
-        file: &str,
-        symbol: &str,
-        cancel: bool,
-    ) -> (Outcome, Outcome, Option<String>) {
-        let identity = FlowFunctionReturnIdentity {
-            anchor: AuthoredAnchor {
-                canonical_id: canonical(file).as_str().into(),
-                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: symbol.into(),
-                space: LocatorSymbolSpace::Value,
-            },
-            function_part: FunctionPartIdentity::DeclarationBody,
-            overload_ordinal: 0,
-        };
+    /// A cancelled request for `symbol`'s return, then an uncancelled
+    /// retry, then the same request on a fresh cold host published the
+    /// configuration, imported module and module this host holds. Returns
+    /// the first outcome, the retry's, the retry's exact value digest, the
+    /// oracle's, and the oracle host's publications.
+    fn cancellation(&self, tranche: u32, file: &str, symbol: &str, cancel: bool) -> Cancelled {
+        let identity = return_identity(file, symbol);
         let classify = |result: Result<_, &FlowReturnError>| match result {
             Ok(_) => Outcome::Value,
             Err(FlowReturnError::Cancelled) => Outcome::Cancelled,
@@ -829,27 +1067,59 @@ impl Engine {
             whole(),
             CancellationToken::new(),
         );
-        // The retry must deliver the exact whole-return answer: a degraded
-        // success or an unmaterialisable return is not a value.
-        let delivered = retry
+        // The retry must deliver an exact return that materializes: a
+        // degraded success or an unmaterializable return is not a value.
+        let (retry_outcome, retry_digest) = match retry.as_result() {
+            Ok(result) => match exact_return_digest(&self.host, result) {
+                Ok(digest) => (Outcome::Value, Some(digest)),
+                Err(detail) => (
+                    Outcome::Fault {
+                        detail: format!("retry: {detail}"),
+                    },
+                    None,
+                ),
+            },
+            Err(err) => (classify(Err(err)), None),
+        };
+        drop(retry);
+
+        // The cold oracle: what this host holds for the request, published
+        // to a host with no history, in the order the manifest enumerates.
+        let (config, dep, module) = {
+            let current = self.current();
+            let dep_id = canonical(&dep_file(tranche));
+            let module_id = canonical(file);
+            (
+                current.config.clone(),
+                current.files.get(&dep_id).map(|t| (dep_id, t.clone())),
+                current
+                    .files
+                    .get(&module_id)
+                    .map(|t| (module_id, t.clone())),
+            )
+        };
+        let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+        let access: Arc<dyn WorkspaceAccess> = workspace.clone();
+        let oracle = VerterHost::new(HostConfig::default(), access);
+        let mut published = vec![publication_digest(&canonical("tsconfig.json"), &config)];
+        configure_host(&workspace, &oracle, &config);
+        for (id, text) in dep.iter().chain(module.iter()) {
+            published.push(publication_digest(id, text));
+            let _ = upsert_host(&oracle, id, text);
+        }
+        let oracle_digest = oracle
+            .get_flow_return_type_with_audit(&identity, whole())
             .as_result()
             .ok()
-            .map(|result| match result.fact().exact() {
-                Some(exact) => Ok(super::manifest::sha256_hex(
-                    format!("flow-return:{:?}", exact.return_type()).as_bytes(),
-                )),
-                None => Err(format!("{:?}", result.fact().status())),
-            });
-        match delivered {
-            Some(Ok(digest)) => (first, Outcome::Value, Some(digest)),
-            Some(Err(detail)) => (
-                first,
-                Outcome::Fault {
-                    detail: format!("degraded retry: {detail}"),
-                },
-                None,
-            ),
-            None => (first, classify(retry.as_result()), None),
+            .and_then(|result| exact_return_digest(&oracle, result).ok());
+        oracle.close();
+        drop(oracle);
+        Cancelled {
+            first,
+            retry: retry_outcome,
+            retry_digest,
+            oracle_digest,
+            published,
         }
     }
 
@@ -1017,22 +1287,68 @@ impl Engine {
                 record.outcome = outcome;
                 record.digests = digests;
             }
-            (HoldPin, Target::Hold { slot, file, alias }) => {
-                let node = observe(&mut record, demand(&self.host, file, alias, None));
-                self.pin_aliases.insert(*slot, alias.clone());
-                self.pins.insert(*slot, node.into_iter().collect());
+            (
+                HoldPin,
+                Target::Hold {
+                    slot,
+                    file,
+                    symbol,
+                    warm,
+                },
+            ) => {
+                // A warm acquisition finds the answer the cache already
+                // charged: the same request is answered once first and its
+                // reader released.
+                if *warm {
+                    let (outcome, precharge) = deliver_return(&host, file, symbol);
+                    record.digests.push(
+                        precharge
+                            .as_ref()
+                            .map_or_else(|| "unmaterialised".into(), |h| return_digest(&host, h)),
+                    );
+                    drop(precharge);
+                    self.settle_releases(&mut record);
+                    if outcome != Outcome::Value {
+                        record.outcome = outcome;
+                        return self.finish(record);
+                    }
+                }
+                let (outcome, held) = deliver_return(&host, file, symbol);
+                record.digests.push(
+                    held.as_ref()
+                        .map_or_else(|| "unmaterialised".into(), |h| return_digest(&host, h)),
+                );
+                record.outcome = outcome;
+                let mut allocations = Allocations::default();
+                record.ownership.push(owner_step(
+                    &host,
+                    OwnerStepKind::Acquired,
+                    held.as_ref(),
+                    None,
+                    &mut allocations,
+                ));
+                self.pins.insert(*slot, held.into_iter().collect());
             }
             (PublicCopy, Target::Slot { slot }) => match self.pins.get_mut(slot) {
                 Some(handles) if handles.len() == 1 => {
-                    record.ownership.push(OwnerStep {
-                        step: OwnerStepKind::BeforeCopy,
-                        ..owner_step(&host, handles.first())
-                    });
-                    let copy = handles[0].clone();
-                    record.ownership.push(OwnerStep {
-                        step: OwnerStepKind::AfterCopy,
-                        ..owner_step(&host, Some(&copy))
-                    });
+                    let mut allocations = Allocations::default();
+                    record.ownership.push(owner_step(
+                        &host,
+                        OwnerStepKind::BeforeCopy,
+                        handles.first(),
+                        None,
+                        &mut allocations,
+                    ));
+                    // A public copy of the delivered result, not a second
+                    // reference to the same one.
+                    let copy = Arc::new(FlowReturnResult::clone(&handles[0]));
+                    record.ownership.push(owner_step(
+                        &host,
+                        OwnerStepKind::AfterCopy,
+                        Some(&copy),
+                        None,
+                        &mut allocations,
+                    ));
                     handles.push(copy);
                 }
                 _ => {
@@ -1050,15 +1366,32 @@ impl Engine {
                 },
             ) => match self.pins.remove(slot) {
                 Some(mut handles) if handles.len() == 2 => {
-                    let probe_alias = self.pin_aliases.remove(slot);
                     if mutation == Some(Mutation::RetainedKeyLeak) && self.leaked.is_empty() {
-                        self.leaked.push(handles[0].clone());
+                        self.leaked.push(Arc::clone(&handles[0]));
                         self.applied_at.push(action.index);
                     }
-                    record.ownership.push(OwnerStep {
-                        step: OwnerStepKind::BeforeRelease,
-                        ..owner_step(&host, handles.first())
-                    });
+                    // An unrelated reader, in another module, live through
+                    // the whole release: what it keeps charged must not move.
+                    let (unrelated_outcome, unrelated) =
+                        deliver_return(&host, &dep_file(action.tranche), fixtures::UNRELATED_FN);
+                    if unrelated_outcome != Outcome::Value {
+                        record.outcome = unrelated_outcome;
+                        return self.finish(record);
+                    }
+                    let unrelated = unrelated.as_ref();
+                    // An external reader of the answer's return node, kept
+                    // past both handles: the handles' release then gives back
+                    // exactly what their witness names, and the node's own
+                    // backing goes only with this last root.
+                    let node = handles[0].return_root().ok();
+                    let mut allocations = Allocations::default();
+                    record.ownership.push(owner_step(
+                        &host,
+                        OwnerStepKind::BeforeRelease,
+                        handles.first(),
+                        unrelated,
+                        &mut allocations,
+                    ));
                     // Retire the cache entries the answer came from while
                     // both handles still read it: the document closes as an
                     // editor closes it, and the store reclaims what it
@@ -1066,49 +1399,43 @@ impl Engine {
                     self.host.evict(&canonical(file));
                     self.host.reclaim_retired_artifacts();
                     self.settle_releases(&mut record);
-                    record.ownership.push(OwnerStep {
-                        step: OwnerStepKind::AfterRetirement,
-                        ..owner_step(&host, handles.first())
-                    });
+                    record.ownership.push(owner_step(
+                        &host,
+                        OwnerStepKind::AfterRetirement,
+                        handles.first(),
+                        unrelated,
+                        &mut allocations,
+                    ));
                     // The copy goes first, or the original does: the other
                     // is the final reader.
                     let first = usize::from(action.class == ReleaseCopyThenOriginal);
                     drop(handles.remove(first));
                     self.settle_releases(&mut record);
-                    record.ownership.push(OwnerStep {
-                        step: OwnerStepKind::AfterFirstRelease,
-                        ..owner_step(&host, handles.first())
-                    });
+                    record.ownership.push(owner_step(
+                        &host,
+                        OwnerStepKind::AfterFirstRelease,
+                        handles.first(),
+                        unrelated,
+                        &mut allocations,
+                    ));
                     drop(handles);
                     self.settle_releases(&mut record);
-                    record.ownership.push(OwnerStep {
-                        step: OwnerStepKind::AfterFinalRelease,
-                        ..owner_step(&host, None)
-                    });
-                    // The transfer probe: the same answer demanded once more,
-                    // its fresh cache entries retired, and then released.
-                    // That final drop — the last reader of a retired cache,
-                    // exactly the release above — gives back precisely the
-                    // one allocation's charge, so the release above can be
-                    // judged against the allocation's own amount, not just
-                    // its sign.
-                    if let Some(alias) = probe_alias.as_deref() {
-                        if let (_, Some(probe)) = demand(&self.host, file, alias, None) {
-                            self.host.evict(&canonical(file));
-                            self.host.reclaim_retired_artifacts();
-                            self.settle_releases(&mut record);
-                            record.ownership.push(OwnerStep {
-                                step: OwnerStepKind::ProbeAcquired,
-                                ..owner_step(&host, Some(&probe))
-                            });
-                            drop(probe);
-                            self.settle_releases(&mut record);
-                            record.ownership.push(OwnerStep {
-                                step: OwnerStepKind::ProbeReleased,
-                                ..owner_step(&host, None)
-                            });
-                        }
-                    }
+                    record.ownership.push(owner_step(
+                        &host,
+                        OwnerStepKind::AfterFinalRelease,
+                        None,
+                        unrelated,
+                        &mut allocations,
+                    ));
+                    drop(node);
+                    self.settle_releases(&mut record);
+                    record.ownership.push(owner_step(
+                        &host,
+                        OwnerStepKind::AfterNodeRelease,
+                        None,
+                        unrelated,
+                        &mut allocations,
+                    ));
                     // The document reopens for the actions that follow.
                     let text = self.source_of(file, action.tranche, *revision);
                     record.outcome = self.upsert(file, &text);
@@ -1119,15 +1446,17 @@ impl Engine {
                     }
                 }
             },
-            (Cancellation, Target::Function { file, symbol }) => {
+            (Cancellation, Target::Function { file, symbol, .. }) => {
                 let cancel = mutation != Some(Mutation::OmitCancellation);
                 if !cancel {
                     self.applied_at.push(action.index);
                 }
-                let (first, retry, digest) = self.cancellation(file, symbol, cancel);
-                record.outcome = first;
-                record.retry = Some(retry);
-                record.retry_digest = digest;
+                let cancelled = self.cancellation(action.tranche, file, symbol, cancel);
+                record.outcome = cancelled.first;
+                record.retry = Some(cancelled.retry);
+                record.retry_digest = cancelled.retry_digest;
+                record.oracle_digest = cancelled.oracle_digest;
+                record.published = cancelled.published;
             }
             (ConfigChange | ConfigRestore, Target::Config { variant }) => {
                 let variant = if action.class == ConfigRestore
@@ -1241,6 +1570,12 @@ impl Engine {
                 }
             }
         }
+        self.finish(record)
+    }
+
+    /// Close `record`: what the action published to the soak's own host
+    /// first, then what it published elsewhere.
+    fn finish(&self, mut record: ActionRecord) -> ActionRecord {
         let mut published = self.take_publications();
         published.append(&mut record.published);
         record.published = published;
@@ -1251,7 +1586,7 @@ impl Engine {
     /// state down through its close route and wait on the host's release
     /// boundary, so the closed sample reads only what a live owner still
     /// holds. Returns the roots a planted leak keeps.
-    fn teardown(&mut self) -> Result<Vec<NodeRoot>, SoakError> {
+    fn teardown(&mut self) -> Result<Vec<Held>, SoakError> {
         self.pins.clear();
         self.close_sentinel();
         self.host.close();
@@ -1378,6 +1713,8 @@ pub fn run(options: &RunOptions) -> Result<SoakSummary, SoakError> {
         mode: options.mode,
         tranches: options.tranches,
         manifest_digest: manifest.digest(),
+        capture_available: verter_session::capture::availability()
+            == verter_audit::CaptureAvailability::Available,
         sentinel_digest,
         setup_published,
         records,

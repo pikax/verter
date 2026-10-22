@@ -22,7 +22,8 @@ use super::manifest::{
 };
 use super::refusal::{Demand, DemandRole, RefusalEvidence, RefusalVariant};
 use super::run::{
-    ActionRecord, Outcome, OwnerStep, OwnerStepKind, SoakSummary, SAMPLE_EVERY, SUMMARY_FILE,
+    ActionRecord, ChargeFigure, ChargeKind, Outcome, OwnerStep, OwnerStepKind, SoakSummary,
+    WitnessFigures, SAMPLE_EVERY, SUMMARY_FILE,
 };
 use crate::semantic_perf::disk;
 
@@ -129,6 +130,11 @@ pub fn verify_summary(mode: Mode, tranches: u32, summary: &SoakSummary) -> Vec<S
                 summary.manifest_digest,
                 expected.digest()
             ),
+        });
+    }
+    if summary.capture_available {
+        failures.push(SoakFailure::WorkloadMismatch {
+            detail: "the run's build compiles audit capture in".into(),
         });
     }
     check_inventory(&expected, summary, &mut failures);
@@ -290,7 +296,13 @@ pub fn check_refusal(index: u32, e: &RefusalEvidence) -> Vec<SoakFailure> {
     } else {
         AnswerClass::OperationProfile
     };
-    let computed = |d: &Demand| d.recomputes.is_some_and(|n| n > 0);
+    // Computed: the host entered the component-meta producer and its request
+    // produced a result rather than a single-attempt retained hit. Each is
+    // read at its own boundary; graph cache misses or queries are no proxy
+    // for either, since a recomputation over warm lower graph caches misses
+    // nothing there.
+    let computed =
+        |d: &Demand| d.recomputes.is_some_and(|n| n > 0) && d.producer_runs.is_some_and(|n| n > 0);
     let replayed = |d: &Demand, want: &Answer| {
         d.answer == *want && d.recomputes == Some(0) && d.producer_runs == Some(0)
     };
@@ -466,21 +478,57 @@ pub fn check_refusal(index: u32, e: &RefusalEvidence) -> Vec<SoakFailure> {
     out
 }
 
-/// The ownership rules of a held answer, read from its roots, the process
-/// account's charges and what the surviving handle projects.
+/// Whether `after` names exactly the allocations `before` named, each once,
+/// each charged precisely the bytes it measured at `before` (its block
+/// share too), with nothing else charged: an exact transfer, judged against
+/// the allocations' own measurements rather than another transfer or the
+/// account's shared totals.
+fn exact_transfer(before: &[ChargeFigure], after: &[ChargeFigure]) -> bool {
+    after.len() == before.len()
+        && before.iter().all(|expected| {
+            let mut matching = after.iter().filter(|f| f.allocation == expected.allocation);
+            matches!(
+                (matching.next(), matching.next()),
+                (Some(f), None) if f.class.is_some()
+                    && f.charged == expected.measured
+                    && f.measured == expected.measured
+                    && f.block.map(|(_, m)| m) == expected.block.map(|(_, m)| m)
+                    && f.block.is_none_or(|(c, m)| c == m)
+            )
+        })
+}
+
+fn sections_transfer(before: &WitnessFigures, after: &WitnessFigures) -> bool {
+    before
+        .sections()
+        .iter()
+        .zip(after.sections())
+        .all(|(b, a)| exact_transfer(b, a))
+}
+
+fn all_of(figures: &[ChargeFigure], kind: ChargeKind) -> bool {
+    !figures.is_empty() && figures.iter().all(|f| f.class == Some(kind))
+}
+
+/// A held answer's ownership through its acquisition, its public copy, or
+/// its cache's retirement and its two handles' releases, judged by the
+/// allocation-specific charge witness of each surviving reader.
 ///
-/// A public copy shares the answer and its one charge: it is neither a
-/// second independent root nor a second charge. Retiring the cache entries
-/// the answer came from releases the cache's share (retained bytes never
-/// grow) and leaves both handles reading it. Releasing the first handle
-/// changes neither the roots nor any charge while the other survives and
-/// still reads the same answer. Releasing the last gives its root back,
-/// grows neither the retained nor the active charge, and gives back exactly
-/// the one allocation charge the transfer probe measures by demanding and
-/// releasing the same answer again — a transfer that dropped, doubled or
-/// short-charged the allocation fails, as does a release with no probe
-/// evidence. Correct roots with the wrong charges fail, and so does a final
-/// drain alone.
+/// * Acquired (cold or warm): every allocation the answer keeps is charged
+///   exactly what it measures; the payload is the cache's (retained) and the
+///   delivery's bookkeeping is pinned for its reader.
+/// * Copy: the copy shares every allocation and charge, and neither the
+///   independent roots nor the account's charges move.
+/// * Retirement: the surviving readers keep exactly the allocations they
+///   held, each now charged its own measured bytes as the readers' (pinned),
+///   never dropped, doubled or partially charged.
+/// * First release: the survivor keeps exactly the same charges and roots.
+/// * Final release: the handles' root goes, and the account's content
+///   charge falls by exactly the bytes the last reader's witness named,
+///   while an external reader keeps the return node itself live.
+/// * Node release: the node's last root goes and its graph backing with it.
+/// * An unrelated reader, live through the release, keeps exactly its own
+///   allocations and charges at every step.
 pub fn check_ownership(
     index: u32,
     class: LifecycleClass,
@@ -497,39 +545,71 @@ pub fn check_ownership(
         }
     };
     let step = |kind: OwnerStepKind| steps.iter().find(|s| s.step == kind);
-    let projects_held =
-        |s: Option<&OwnerStep>| s.is_some_and(|s| s.projected.as_ref() == held && held.is_some());
-    if class == LifecycleClass::PublicCopy {
-        let (before, after) = (
-            step(OwnerStepKind::BeforeCopy),
-            step(OwnerStepKind::AfterCopy),
-        );
-        check(
-            projects_held(before) && projects_held(after),
-            "the copy does not project the held answer",
-        );
-        check(
-            matches!((before, after), (Some(b), Some(a)) if a.roots == b.roots),
-            "sharing a copy changed the independent roots",
-        );
-        check(
-            matches!((before, after), (Some(b), Some(a)) if a.charges == b.charges),
-            "sharing a copy changed the account's charges",
-        );
-        check(
-            [before, after].iter().all(|s| {
-                s.and_then(|s| s.charges.content_pinned())
-                    .is_some_and(|c| c > 0)
-            }),
-            "the held answer carries no content charge",
-        );
-        return out;
+    let projects_held = |s: Option<&OwnerStep>| {
+        s.is_some_and(|s| {
+            s.projected.as_ref() == held && held.is_some_and(|h| h != "unmaterialised")
+        })
+    };
+    fn witness(s: Option<&OwnerStep>) -> Option<&WitnessFigures> {
+        s.and_then(|s| s.held.as_ref())
     }
-    let (before, retired, first, last) = (
+    let exact = |w: Option<&WitnessFigures>| {
+        w.is_some_and(|w| w.figures().next().is_some() && w.figures().all(ChargeFigure::is_exact))
+    };
+    match class {
+        LifecycleClass::HoldPin => {
+            let acquired = step(OwnerStepKind::Acquired);
+            check(
+                projects_held(acquired),
+                "the acquired handle does not project its answer",
+            );
+            let w = witness(acquired);
+            check(
+                exact(w),
+                "the acquired answer's allocations are not each charged exactly what they measure",
+            );
+            check(
+                w.is_some_and(|w| {
+                    all_of(&w.payload, ChargeKind::Retained)
+                        && all_of(&w.root_metadata, ChargeKind::Pinned)
+                }),
+                "the acquired answer's payload is not the cache's or its bookkeeping is not pinned",
+            );
+            return out;
+        }
+        LifecycleClass::PublicCopy => {
+            let (before, after) = (
+                step(OwnerStepKind::BeforeCopy),
+                step(OwnerStepKind::AfterCopy),
+            );
+            check(
+                projects_held(before) && projects_held(after),
+                "the copy does not project the held answer",
+            );
+            check(
+                matches!((before, after), (Some(b), Some(a)) if a.roots == b.roots),
+                "sharing a copy changed the independent roots",
+            );
+            check(
+                matches!((before, after), (Some(b), Some(a)) if a.charges == b.charges),
+                "sharing a copy changed the account's charges",
+            );
+            check(
+                exact(witness(before))
+                    && witness(before).is_some_and(|w| !w.payload.is_empty())
+                    && witness(after) == witness(before),
+                "the copy does not share exactly the original's allocations and charges",
+            );
+            return out;
+        }
+        _ => {}
+    }
+    let (before, retired, first, last, node) = (
         step(OwnerStepKind::BeforeRelease),
         step(OwnerStepKind::AfterRetirement),
         step(OwnerStepKind::AfterFirstRelease),
         step(OwnerStepKind::AfterFinalRelease),
+        step(OwnerStepKind::AfterNodeRelease),
     );
     check(
         projects_held(before) && projects_held(retired) && projects_held(first),
@@ -548,61 +628,55 @@ pub fn check_ownership(
         "the final release did not give back the root",
     );
     check(
-        matches!((retired, first, last), (Some(r), Some(f), Some(l))
+        matches!((last, node), (Some(l), Some(n)) if n.roots + 1 == l.roots),
+        "releasing the return node's last reader did not give back its root",
+    );
+    check(
+        matches!((retired, first, last, node), (Some(r), Some(f), Some(l), Some(n))
             if r.charges.retained <= before.map_or(0, |b| b.charges.retained)
                 && l.charges.retained <= f.charges.retained
-                && l.charges.active <= f.charges.active),
-        "retirement or the final release grew the retained or active charges",
+                && l.charges.active <= f.charges.active
+                && n.charges.retained <= l.charges.retained
+                && n.charges.active <= l.charges.active),
+        "retirement or a release grew the retained or active charges",
     );
-    // The held allocation's own charge: pinned bytes less the stores' backing
-    // storage. The surviving readers hold it through retirement and the
-    // first release (one allocation charge, transferred from the cache to the
-    // readers, never dropped or doubled), and the last reader's release
-    // gives it back.
+    check(
+        exact(witness(before)) && witness(before).is_some_and(|w| !w.payload.is_empty()),
+        "the held answer's allocations are not each charged exactly what they measure",
+    );
+    check(
+        matches!((witness(before), witness(retired)), (Some(b), Some(r))
+            if sections_transfer(b, r)
+                && all_of(&r.payload, ChargeKind::Pinned)
+                && all_of(&r.root_metadata, ChargeKind::Pinned)),
+        "retirement did not transfer exactly the answer's measured charges to its readers",
+    );
+    check(
+        matches!((witness(retired), witness(first)), (Some(r), Some(f)) if f == r),
+        "the first release moved a charge the surviving reader keeps",
+    );
     let content = |s: Option<&OwnerStep>| s.and_then(|s| s.charges.content_pinned());
     check(
-        [before, retired, first]
-            .iter()
-            .all(|s| content(*s).is_some_and(|c| c > 0)),
-        "a live reader holds no content charge before the final release",
-    );
-    check(
-        matches!((content(before), content(retired)), (Some(b), Some(r)) if r <= b),
-        "retirement grew the content charge instead of transferring it to the readers",
-    );
-    check(
-        matches!((content(first), content(last)), (Some(f), Some(l)) if l < f),
-        "the final release did not give back the content charge",
-    );
-    // The give-back is exact: the transfer probe — the same answer demanded
-    // and released once more after the final release — returns precisely one
-    // allocation's charge, so the final release must return the same amount.
-    // A transfer that doubled or short-charged the allocation, amounts the
-    // unrelated pins around the release cannot expose, fails; so does a
-    // release with no probe evidence.
-    let (acquired, released) = (
-        step(OwnerStepKind::ProbeAcquired),
-        step(OwnerStepKind::ProbeReleased),
-    );
-    match (content(acquired), content(released)) {
-        (Some(pa), Some(pr)) => {
-            check(
-                pa.checked_sub(pr).is_some_and(|give_back| give_back > 0),
-                "the transfer probe's release gave back no charge",
-            );
-            check(
-                matches!(
-                    (content(first), content(last), pa.checked_sub(pr)),
-                    (Some(f), Some(l), Some(probe)) if f.checked_sub(l) == Some(probe)
-                ),
-                "the final release did not give back exactly the charge the transfer probe measured",
-            );
-        }
-        _ => check(
-            false,
-            "the release recorded no transfer probe to measure the allocation against",
+        matches!(
+            (content(first), content(last), witness(first)),
+            (Some(f), Some(l), Some(w)) if f.checked_sub(l) == Some(w.charged_total())
         ),
-    }
+        "the final release did not give back exactly the charges the last reader's witness named",
+    );
+    // The return node's backing is the graph's, not the answer's: it goes
+    // with the node's last root, and only then.
+    check(
+        matches!((content(last), content(node)), (Some(l), Some(n)) if n < l),
+        "releasing the return node's last reader gave back no backing",
+    );
+    let unrelated: Vec<_> = [before, retired, first, last, node]
+        .iter()
+        .map(|s| s.and_then(|s| s.unrelated.as_ref()))
+        .collect();
+    check(
+        exact(unrelated[0]) && unrelated.iter().all(|u| *u == unrelated[0]),
+        "an unrelated reader's charges moved during the release",
+    );
     out
 }
 
@@ -905,9 +979,12 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
             continue;
         }
         let query = match &action.target {
-            Target::Query { file, alias } | Target::Hold { file, alias, .. } => {
-                Some((action.tranche, file.clone(), alias.clone()))
-            }
+            Target::Query { file, alias }
+            | Target::Hold {
+                file,
+                symbol: alias,
+                ..
+            } => Some((action.tranche, file.clone(), alias.clone())),
             _ => None,
         };
         let first = record.digests.first().cloned().unwrap_or_default();
@@ -918,8 +995,10 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
             Target::Queries { queries } => Some(queries.len()),
             Target::Churn { edits, .. } => Some(*edits as usize + 1),
             Target::Surge { modules, .. } => Some(*modules as usize),
-            // A single demand promises one materialised answer.
-            Target::Query { .. } | Target::Hold { .. } => Some(1),
+            // A single demand promises one materialised answer; a warm hold
+            // also its precharging one.
+            Target::Query { .. } => Some(1),
+            Target::Hold { warm, .. } => Some(1 + usize::from(*warm)),
             _ => None,
         };
         if let Some(promised) = promised {
@@ -947,8 +1026,22 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
                 if !expect(Outcome::Value) {
                     failures.push(wrong(record.index, format!("{:?}", record.outcome)));
                 } else if let Some(key) = query {
-                    if let Target::Hold { slot, .. } = &action.target {
-                        held.insert(*slot, first.clone());
+                    if let Target::Hold { slot, warm, .. } = &action.target {
+                        let last = record.digests.last().cloned().unwrap_or_default();
+                        if *warm && last != first {
+                            failures.push(wrong(
+                                record.index,
+                                "the warm acquisition answered differently from its precharge"
+                                    .into(),
+                            ));
+                        }
+                        held.insert(*slot, last);
+                        failures.extend(check_ownership(
+                            record.index,
+                            record.class,
+                            held.get(slot),
+                            &record.ownership,
+                        ));
                     }
                     cold.entry(key).or_insert(first);
                 }
@@ -1113,22 +1206,30 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
                         index: record.index,
                     });
                 }
-                if record.retry == Some(Outcome::Value)
-                    && record
-                        .retry_digest
-                        .as_deref()
-                        .is_none_or(|d| d == ABSENT_DELIVERY || d == "unmaterialised")
-                {
-                    failures.push(wrong(
-                        record.index,
-                        "the uncancelled retry delivered no materialised answer".into(),
-                    ));
-                }
                 if record.retry != Some(Outcome::Value) {
                     failures.push(wrong(
                         record.index,
                         format!("the uncancelled retry answered {:?}", record.retry),
                     ));
+                }
+                // The retry's materialized value is judged against a fresh
+                // cold host's answer to the same request over the same
+                // sources and configuration: an exact but wrong return, a
+                // degraded one and one that materializes nothing all fail.
+                match (&record.retry_digest, &record.oracle_digest) {
+                    (Some(retry), Some(oracle)) if retry == oracle => {}
+                    (None, _) => failures.push(wrong(
+                        record.index,
+                        "the uncancelled retry delivered no materialized exact return".into(),
+                    )),
+                    (Some(_), None) => failures.push(wrong(
+                        record.index,
+                        "the cold oracle delivered no materialized exact return".into(),
+                    )),
+                    (Some(_), Some(_)) => failures.push(wrong(
+                        record.index,
+                        "the uncancelled retry's return differs from the cold oracle's".into(),
+                    )),
                 }
             }
             ConfigChange => {

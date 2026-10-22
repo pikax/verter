@@ -72,10 +72,11 @@ exactly; its required cells are the largest sizes' cold Verter `coldMs` and
 long-churn soak runner (`crates/verter_bench/src/soak/`, binary
 `verter-soak`) rather than a semantic-perf invocation. The runner exists only
 in the declared `soak.build` (`verter_bench` with its default-off
-`soak-support` feature, which forwards the engine's flight rendezvous, the
-retention account's ACTIVE-occupancy window and the session's test-support
-seams for the semantic graph store's joined-wait and query counters, never
-`semantic-observe` or audit capture); the driver
+`soak-support` feature, which forwards only the narrow soak seams: the
+engine's flight rendezvous, the retention account's ACTIVE-occupancy window,
+a held answer's allocation charge witness, a delivered flow return's
+materialization, and the capture-off work counters — never general
+`test-support`, `semantic-observe` or audit capture); the driver
 builds exactly that configuration and the validator rejects any other. Its
 two workloads, `normal` and `pressure`, are 100 tranches of one 100-action
 template (10,000 actions, at least 3,000 distinct query identities, every
@@ -104,7 +105,17 @@ counts, content pins and retained account bytes at the host's close route;
 pinned account bytes and store storage once the host is dropped). Overlapping
 cold demands are scheduled by the flight rendezvous and judged by one shared
 producer, a subscriber registered on its flight and a positive `joined_waits`
-delta. Every pressure manifest runs a bounded surge in its first tranche; the
+delta. A cancellation's uncancelled retry is materialized through its own
+return root and must equal a fresh cold host's answer over the same
+configuration and sources; that host's publications are part of the action's
+frozen inventory. Held answers are flow returns whose acquisitions (cold, and
+warm after a precharge), public copies and releases in both orders are
+judged by each surviving reader's allocation-specific charge witness: the
+cache's retirement transfers exactly each allocation's measured charge to the
+readers, the first release moves nothing, the last reader's release gives
+back exactly the bytes its witness names while an external reader keeps the
+return node live, and an unrelated reader's charges never move. Every
+pressure manifest runs a bounded surge in its first tranche; the
 full manifest also freezes surges that hold component-meta results past the
 account's aggregate ceiling and entry cap, and its verdict requires positive,
 surge-attributed aggregate-pressure and oversized refusal deltas, an answer
@@ -120,9 +131,10 @@ Candidate churn records the demanded slot's admission tokens and declared
 cap: an old token leaving while a new one enters at the cap proves displacement.
 An unchanged aggregate candidate count alone does not. Concurrent refusal
 demands report `null` for unmeasured work counters; only measured zero counters
-can prove a replay without recomputation. A demand's work is the semantic graph
-queries it ran (a retained component-meta replay runs none) and its producer
-runs are the graph's cold misses. Paid-context controls also record and
+can prove a replay without recomputation. A demand's work is the host's
+component-meta producer entries (early returns included) and its resolver
+request results, read through the host's narrow work reader; graph misses or
+queries never stand in for either. Paid-context controls also record and
 check their equal entry allowance.
 
 | Field                             | Meaning                                                                                                                                                                                                  |

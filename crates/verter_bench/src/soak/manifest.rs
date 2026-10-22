@@ -129,17 +129,17 @@ pub fn surge_limits_of(modules: u32) -> Option<&'static SurgeLimits> {
 /// query-depth bound.
 pub const DEPTH_LEVELS: u32 = 30;
 /// The projection-operation allowance of the isolation hosts.
-pub const ISOLATION_OP_BUDGET: usize = 100;
+pub const ISOLATION_OP_BUDGET: usize = 20;
 /// Mapped-type props of the isolation spender component.
-pub const ISOLATION_SPEND_PROPS: u32 = 16;
+pub const ISOLATION_SPEND_PROPS: u32 = 8;
 /// Mapped-type props of the isolation refuser: it fits the allowance alone
 /// and exceeds it once the spender's operations are spent.
-pub const ISOLATION_REFUSE_PROPS: u32 = 40;
+pub const ISOLATION_REFUSE_PROPS: u32 = 6;
 /// The projection-operation allowance of the refusal hosts.
-pub const REFUSAL_OP_BUDGET: usize = 100;
+pub const REFUSAL_OP_BUDGET: usize = 20;
 /// Mapped-type props of the refusal component: more than the refusal
 /// allowance covers on their own.
-pub const REFUSAL_PROPS: u32 = 52;
+pub const REFUSAL_PROPS: u32 = 16;
 /// Sources one publication-gate action holds gates on at once: enough that
 /// the gate registry grows past its retained floor and must shrink back.
 pub const GATE_SOURCES: usize = 128;
@@ -305,11 +305,14 @@ pub enum Target {
         alias: String,
         threads: u32,
     },
-    /// A pin slot: hold `alias`'s answer in it.
+    /// A pin slot: hold the return of `file`'s function `symbol` in it,
+    /// delivered cold, or (`warm`) after the same request was answered once
+    /// and its reader released, so the cache already charges the answer.
     Hold {
         slot: u32,
         file: String,
-        alias: String,
+        symbol: String,
+        warm: bool,
     },
     /// A pin slot.
     Slot { slot: u32 },
@@ -320,8 +323,12 @@ pub enum Target {
         file: String,
         revision: u32,
     },
-    /// A function whose return is requested.
-    Function { file: String, symbol: String },
+    /// A function of `file` at `revision` whose return is requested.
+    Function {
+        file: String,
+        symbol: String,
+        revision: u32,
+    },
     /// A configuration to install.
     Config { variant: ConfigVariant },
     /// Repeated edits of `file`, demanding `alias` after each.
@@ -446,11 +453,13 @@ impl Manifest {
             match &action.target {
                 Target::Query { file, alias }
                 | Target::Overlap { file, alias, .. }
-                | Target::Hold { file, alias, .. }
                 | Target::Churn { file, alias, .. } => {
                     seen.insert((file.clone(), alias.clone()));
                 }
                 Target::Queries { queries } => seen.extend(queries.iter().cloned()),
+                Target::Hold { file, symbol, .. } => {
+                    seen.insert((file.clone(), symbol.clone()));
+                }
                 _ => {}
             }
         }
@@ -538,13 +547,14 @@ fn tranche_template(mode: Mode, tranche: u32) -> Vec<(LifecycleClass, Target)> {
                 .collect(),
         },
     ));
-    let hold = |slot, alias| Target::Hold {
+    let hold = |slot: u32, warm| Target::Hold {
         slot,
         file: module.clone(),
-        alias,
+        symbol: format!("h{slot}"),
+        warm,
     };
     out.extend([
-        (HoldPin, hold(0, a(10))),
+        (HoldPin, hold(0, false)),
         (PublicCopy, Target::Slot { slot: 0 }),
         (
             ReleaseCopyThenOriginal,
@@ -554,7 +564,7 @@ fn tranche_template(mode: Mode, tranche: u32) -> Vec<(LifecycleClass, Target)> {
                 revision: 0,
             },
         ),
-        (HoldPin, hold(1, a(11))),
+        (HoldPin, hold(1, true)),
         (PublicCopy, Target::Slot { slot: 1 }),
         (Edit, file(1)),
     ]);
@@ -576,6 +586,7 @@ fn tranche_template(mode: Mode, tranche: u32) -> Vec<(LifecycleClass, Target)> {
             Target::Function {
                 file: module.clone(),
                 symbol: format!("f{f}"),
+                revision: 0,
             },
         )
     }));

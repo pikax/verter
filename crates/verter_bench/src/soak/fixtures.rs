@@ -67,8 +67,22 @@ pub fn module_source(mode: Mode, tranche: u32, revision: u32) -> String {
             "export function f{f}() {{\n  return {{ ok: \"{tag}f{f}\" }};\n}}"
         );
     }
+    for slot in 0..2 {
+        out.push_str(&held_function(&format!("h{slot}"), &tag));
+    }
     out
 }
+
+/// A function whose return the soak holds: it returns fresh literals, so the
+/// delivered return carries their self-charged slices, allocations every
+/// copy of the result shares, beside its delivery's own bookkeeping.
+fn held_function(name: &str, tag: &str) -> String {
+    format!("export function {name}() {{\n  return {{ held: \"{tag}{name}\" }};\n}}\n")
+}
+
+/// The function of the tranche's imported module whose return an unrelated
+/// reader holds through every pin release.
+pub const UNRELATED_FN: &str = "u0";
 
 /// A pressure tranche's large-union module.
 #[must_use]
@@ -85,7 +99,11 @@ pub fn big_source(tranche: u32) -> String {
 /// The module every tranche module imports.
 #[must_use]
 pub fn dep_source(tranche: u32) -> String {
-    format!("export type Dep = {{ readonly tranche: \"t{tranche:03}\" }};\n")
+    let tag = format!("t{tranche:03}");
+    format!(
+        "export type Dep = {{ readonly tranche: \"{tag}\" }};\n{}",
+        held_function(UNRELATED_FN, &tag)
+    )
 }
 
 /// A uniquely owned churn module.
@@ -187,6 +205,14 @@ pub fn expected_publications(mode: Mode, action: &Action) -> Vec<String> {
         }
         Target::Release { file, revision, .. } => vec![at(file, &source_of(file, *revision))],
         Target::Config { variant } => vec![at("tsconfig.json", &tsconfig(*variant))],
+        // The cold oracle host of a cancellation: the configuration, the
+        // imported module and the function's module, as the soak's own host
+        // holds them when the action runs.
+        Target::Function { file, revision, .. } => vec![
+            at("tsconfig.json", &tsconfig(ConfigVariant::Original)),
+            at(&dep_file(tranche), &dep_source(tranche)),
+            at(file, &source_of(file, *revision)),
+        ],
         Target::Query { file, .. } if action.class == LifecycleClass::UniqueOwnerChurn => {
             let ordinal = (0..)
                 .find(|k| churn_file(tranche, *k) == *file)

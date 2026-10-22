@@ -147,10 +147,12 @@ pub enum DemandRole {
 pub struct Demand {
     pub role: DemandRole,
     pub answer: Answer,
-    /// Component-meta resolutions, or `None` when shared concurrent counters
-    /// cannot attribute work to this demand.
+    /// Component-meta producer entries, early returns included, or `None`
+    /// when shared concurrent counters cannot attribute work to this demand.
     pub recomputes: Option<u64>,
-    /// Cold semantic producer runs, with the same attribution rule.
+    /// Component-meta request results the host produced other than a
+    /// single-attempt retained hit (`resolver_node_cache_misses`), with the
+    /// same attribution rule.
     pub producer_runs: Option<u64>,
 }
 

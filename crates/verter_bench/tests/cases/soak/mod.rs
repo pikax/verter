@@ -21,8 +21,8 @@ use verter_bench::soak::manifest::{
 };
 use verter_bench::soak::refusal::{Demand, DemandRole, RefusalEvidence, RefusalVariant};
 use verter_bench::soak::run::{
-    run, ActionRecord, ActiveEvidence, Charges, Outcome, OwnerStep, OwnerStepKind,
-    PressureEvidence, RunOptions, Sample, SoakSummary, SUMMARY_FILE,
+    run, ActionRecord, ActiveEvidence, ChargeFigure, ChargeKind, Charges, Outcome, OwnerStep,
+    OwnerStepKind, PressureEvidence, RunOptions, Sample, SoakSummary, WitnessFigures, SUMMARY_FILE,
 };
 use verter_bench::soak::verify::{
     check_isolation, check_ownership, check_pressure_outcomes, check_refusal, verify,
@@ -276,7 +276,7 @@ fn the_manifest_digest_binds_every_published_fixture() {
             .expect("the manifest has such an action")
             .index
     };
-    let picks: [(&str, u32); 6] = [
+    let picks: [(&str, u32); 7] = [
         ("the first action", 0),
         ("a middle tranche's edit", {
             manifest
@@ -312,6 +312,10 @@ fn the_manifest_digest_binds_every_published_fixture() {
             "the last configuration restore",
             last(&|a| a.class == LifecycleClass::ConfigRestore),
         ),
+        (
+            "the last cancellation's cold oracle host",
+            last(&|a| a.class == LifecycleClass::Cancellation),
+        ),
     ];
     for (what, index) in picks {
         assert_ne!(altered(index), frozen, "{what} is not bound by the digest");
@@ -341,6 +345,7 @@ fn the_manifest_digest_binds_every_published_fixture() {
                     | LifecycleClass::MetaIsolation
                     | LifecycleClass::RefusalRepeat
                     | LifecycleClass::ProfileHealing
+                    | LifecycleClass::Cancellation
             );
             assert_eq!(
                 !expected_publications(mode, action).is_empty(),
@@ -804,15 +809,43 @@ fn step(kind: OwnerStepKind, roots: u64, charges: Charges, projected: Option<&st
         roots,
         charges,
         projected: projected.map(str::to_string),
+        held: None,
+        unrelated: None,
     }
 }
 
-/// The allocation charge of one held answer at the magnitudes of a real
-/// run: the readers' 384 bytes ride on about 126 KB of unrelated pins.
-const HELD_ALLOCATION: u64 = 384;
+fn figure(allocation: u32, class: ChargeKind, bytes: u64) -> ChargeFigure {
+    ChargeFigure {
+        allocation,
+        class: Some(class),
+        charged: bytes,
+        measured: bytes,
+        block: None,
+    }
+}
+
+/// A held answer's witness at the magnitudes of a real run: a 320-byte
+/// diagnostic list the cache retains (`payload`) beside 176 + 64 bytes of
+/// its delivery's pinned bookkeeping.
+fn witness(payload: ChargeKind, first_allocation: u32) -> WitnessFigures {
+    WitnessFigures {
+        payload: vec![figure(first_allocation, payload, 320)],
+        cost_receipts: Vec::new(),
+        root_metadata: vec![
+            figure(first_allocation + 1, ChargeKind::Pinned, 176),
+            figure(first_allocation + 2, ChargeKind::Pinned, 64),
+        ],
+    }
+}
+
+/// The bytes the held answer's witness names.
+const HELD_ALLOCATION: u64 = 320 + 176 + 64;
 
 fn release_steps() -> Vec<OwnerStep> {
-    vec![
+    let unrelated = witness(ChargeKind::Retained, 0);
+    let cached = witness(ChargeKind::Retained, 3);
+    let readers = witness(ChargeKind::Pinned, 3);
+    let mut steps = vec![
         step(
             OwnerStepKind::BeforeRelease,
             50,
@@ -834,21 +867,33 @@ fn release_steps() -> Vec<OwnerStep> {
         step(
             OwnerStepKind::AfterFinalRelease,
             4,
-            charges(300, 126_116),
+            charges(300, 126_500 - HELD_ALLOCATION),
             None,
         ),
         step(
-            OwnerStepKind::ProbeAcquired,
-            5,
-            charges(300, 126_500),
-            Some("held"),
+            OwnerStepKind::AfterNodeRelease,
+            3,
+            charges(300, 126_500 - HELD_ALLOCATION - 608),
+            None,
         ),
-        step(OwnerStepKind::ProbeReleased, 4, charges(300, 126_116), None),
-    ]
+    ];
+    steps[0].held = Some(cached);
+    steps[1].held = Some(readers.clone());
+    steps[2].held = Some(readers);
+    for step in &mut steps {
+        step.unrelated = Some(unrelated.clone());
+    }
+    steps
+}
+
+fn acquired_step() -> Vec<OwnerStep> {
+    let mut acquired = step(OwnerStepKind::Acquired, 5, charges(300, 480), Some("held"));
+    acquired.held = Some(witness(ChargeKind::Retained, 0));
+    vec![acquired]
 }
 
 fn copy_steps() -> Vec<OwnerStep> {
-    vec![
+    let mut steps = vec![
         step(
             OwnerStepKind::BeforeCopy,
             5,
@@ -856,7 +901,22 @@ fn copy_steps() -> Vec<OwnerStep> {
             Some("held"),
         ),
         step(OwnerStepKind::AfterCopy, 5, charges(300, 480), Some("held")),
-    ]
+    ];
+    for step in &mut steps {
+        step.held = Some(witness(ChargeKind::Retained, 0));
+    }
+    steps
+}
+
+/// The held answer's figure for `allocation` at step `at`.
+fn held_figure(steps: &mut [OwnerStep], at: usize, allocation: usize) -> &mut ChargeFigure {
+    let held = steps[at].held.as_mut().expect("a held witness");
+    let mut figures: Vec<&mut ChargeFigure> = held
+        .payload
+        .iter_mut()
+        .chain(held.root_metadata.iter_mut())
+        .collect();
+    figures.swap_remove(allocation)
 }
 
 #[test]
@@ -867,7 +927,10 @@ fn ownership_rules_fail_early_destruction_wrong_charges_and_lost_release() {
         LifecycleClass::ReleaseCopyThenOriginal,
         LifecycleClass::ReleaseOriginalThenCopy,
     ] {
-        assert!(check_ownership(0, release, Some(&held), &release_steps()).is_empty());
+        assert_eq!(
+            check_ownership(0, release, Some(&held), &release_steps()),
+            Vec::new()
+        );
         let fails = |plant: &dyn Fn(&mut Vec<OwnerStep>), what: &str| {
             let mut steps = release_steps();
             plant(&mut steps);
@@ -886,7 +949,7 @@ fn ownership_rules_fail_early_destruction_wrong_charges_and_lost_release() {
         );
         fails(&|s| s[2].roots = 4, "the first release dropped a root");
         fails(&|s| s[3].roots = 5, "the final release gave no root back");
-        // Correct roots with the wrong charges.
+        // Correct roots with the wrong account charges.
         fails(
             &|s| s[2].charges.pinned -= 64,
             "the first release freed the shared charge",
@@ -899,23 +962,6 @@ fn ownership_rules_fail_early_destruction_wrong_charges_and_lost_release() {
             &|s| s[1].charges.retained = 1_000,
             "retirement grew the retained charge",
         );
-        // The held allocation's own (content) charge: pinned bytes less the
-        // stores' backing storage.
-        fails(
-            &|s| {
-                for step in s.iter_mut().take(3) {
-                    step.charges.pinned = step.charges.storage;
-                }
-            },
-            "a live reader holds no charge",
-        );
-        fails(
-            &|s| {
-                s[1].charges.pinned = s[1].charges.storage;
-                s[2].charges.pinned = s[2].charges.storage;
-            },
-            "retirement freed the charge the surviving readers hold",
-        );
         fails(
             &|s| s[3].charges.pinned = s[2].charges.pinned,
             "the final release freed nothing",
@@ -925,14 +971,6 @@ fn ownership_rules_fail_early_destruction_wrong_charges_and_lost_release() {
             "the final release grew the pinned charge",
         );
         fails(
-            &|s| s[1].charges.pinned = s[0].charges.pinned + 64,
-            "retirement grew the content charge",
-        );
-        fails(
-            &|s| s[1].charges.storage = s[1].charges.pinned + 1,
-            "storage past the pinned total is inconsistent accounting",
-        );
-        fails(
             &|s| s[3].charges.retained += 64,
             "the final release grew the retained charge",
         );
@@ -940,47 +978,127 @@ fn ownership_rules_fail_early_destruction_wrong_charges_and_lost_release() {
             &|s| s[3].charges.active += 64,
             "the final release grew the active charge",
         );
-        // Wrong amounts on the held allocation itself at real magnitudes:
-        // the unrelated pins dwarf it, so only the exact give-back against
-        // the transfer probe discriminates. Retirement re-charges the
-        // readers at twice the allocation and the final release returns the
-        // doubled charge.
+        fails(
+            &|s| s[3].charges.storage = s[3].charges.pinned + 1,
+            "storage past the pinned total is inconsistent accounting",
+        );
+        // Correct roots, wrong bytes on the held allocations themselves, at
+        // each intermediate snapshot: the witness, not the account's totals,
+        // names what each allocation must be charged.
+        for at in [1usize, 2] {
+            for allocation in 0..3 {
+                fails(
+                    &|s| held_figure(s, at, allocation).charged = 0,
+                    "a dropped transfer",
+                );
+                fails(
+                    &|s| held_figure(s, at, allocation).charged *= 2,
+                    "a doubled transfer",
+                );
+                fails(
+                    &|s| held_figure(s, at, allocation).charged /= 2,
+                    "a partial transfer",
+                );
+                fails(
+                    &|s| held_figure(s, at, allocation).class = None,
+                    "an allocation no owner charges",
+                );
+            }
+        }
+        // The same wrongs correlated across both intermediate snapshots, so
+        // the first release alone moves nothing.
+        for allocation in 0..3 {
+            for (what, wrong) in [("a dropped", 0u64), ("a doubled", 2), ("a partial", 3)] {
+                fails(
+                    &|s| {
+                        for at in [1, 2] {
+                            let figure = held_figure(s, at, allocation);
+                            figure.charged = match wrong {
+                                0 => 0,
+                                2 => figure.measured * 2,
+                                _ => figure.measured / 2,
+                            };
+                        }
+                    },
+                    &format!("{what} transfer through retirement and the first release"),
+                );
+            }
+        }
         fails(
             &|s| {
-                s[1].charges.pinned += HELD_ALLOCATION;
-                s[2].charges.pinned += HELD_ALLOCATION;
-                s[3].charges.pinned = s[2].charges.pinned - 2 * HELD_ALLOCATION;
+                s[1].held.as_mut().unwrap().payload[0].class = Some(ChargeKind::Retained);
+                s[2].held.as_mut().unwrap().payload[0].class = Some(ChargeKind::Retained);
             },
-            "a doubled charge transfer through retirement",
+            "the retired cache still retains the payload",
         );
-        // Retirement keeps only a fraction of the allocation and the final
-        // release returns that fraction.
         fails(
             &|s| {
-                s[1].charges.pinned -= HELD_ALLOCATION - 128;
-                s[2].charges.pinned -= HELD_ALLOCATION - 128;
-                s[3].charges.pinned = s[2].charges.pinned - 128;
+                for at in [1, 2] {
+                    s[at].held.as_mut().unwrap().payload[0].allocation = 99;
+                }
             },
-            "a partial charge transfer through retirement",
-        );
-        // The probe's own evidence is required and must measure the same
-        // allocation the release returns.
-        fails(&|s| s.truncate(4), "no transfer probe recorded");
-        fails(
-            &|s| s[5].charges.pinned = s[4].charges.pinned,
-            "the transfer probe's release gave back nothing",
+            "the readers keep a different allocation",
         );
         fails(
-            &|s| s[5].charges.pinned = s[4].charges.pinned - 256,
-            "the transfer probe measured a different allocation",
+            &|s| {
+                for at in [1, 2] {
+                    let held = s[at].held.as_mut().unwrap();
+                    held.payload.push(figure(98, ChargeKind::Pinned, 64));
+                }
+            },
+            "the readers keep an extra charge",
         );
+        fails(&|s| s[1].held = None, "no witness at retirement");
+        fails(&|s| s[4].roots = 4, "the node release gave no root back");
+        fails(
+            &|s| s[4].charges.pinned = s[3].charges.pinned,
+            "the node release gave back no backing",
+        );
+        fails(&|s| s.truncate(4), "no node release recorded");
+        // The final release gives back the bytes the witness names: a final
+        // drain alone, one allocation short, does not.
+        fails(
+            &|s| s[3].charges.pinned += 64,
+            "the final release gave back less than the witness names",
+        );
+        fails(
+            &|s| s[3].charges.pinned -= 64,
+            "the final release gave back more than the witness names",
+        );
+        // An unrelated reader's charges stay put.
+        fails(
+            &|s| s[2].unrelated.as_mut().unwrap().payload[0].class = Some(ChargeKind::Pinned),
+            "the release moved an unrelated reader's charge",
+        );
+        fails(
+            &|s| s[3].unrelated.as_mut().unwrap().root_metadata[0].charged = 0,
+            "the release dropped an unrelated reader's charge",
+        );
+        fails(&|s| s[1].unrelated = None, "no unrelated reader observed");
     }
-    assert!(check_ownership(0, copy, Some(&held), &copy_steps()).is_empty());
-    let mut uncharged_copy = copy_steps();
-    for step in &mut uncharged_copy {
-        step.charges.pinned = step.charges.storage;
+    // Acquisition, cold or warm: an exact witness of a cached payload beside
+    // pinned bookkeeping.
+    let acquired = LifecycleClass::HoldPin;
+    assert_eq!(
+        check_ownership(0, acquired, Some(&held), &acquired_step()),
+        Vec::new()
+    );
+    for plant in [
+        (|s: &mut Vec<OwnerStep>| s[0].held.as_mut().unwrap().payload[0].charged *= 2)
+            as fn(&mut Vec<OwnerStep>),
+        |s| s[0].held.as_mut().unwrap().root_metadata[0].class = Some(ChargeKind::Retained),
+        |s| s[0].held.as_mut().unwrap().payload[0].class = Some(ChargeKind::Pinned),
+        |s| s[0].held = None,
+        |s| s[0].projected = Some("unmaterialised".into()),
+    ] {
+        let mut steps = acquired_step();
+        plant(&mut steps);
+        assert!(!check_ownership(0, acquired, Some(&held), &steps).is_empty());
     }
-    assert!(!check_ownership(0, copy, Some(&held), &uncharged_copy).is_empty());
+    assert_eq!(
+        check_ownership(0, copy, Some(&held), &copy_steps()),
+        Vec::new()
+    );
     let mut doubled_root = copy_steps();
     doubled_root[1].roots = 6;
     assert!(!check_ownership(0, copy, Some(&held), &doubled_root).is_empty());
@@ -988,6 +1106,16 @@ fn ownership_rules_fail_early_destruction_wrong_charges_and_lost_release() {
     let mut doubled_charge = copy_steps();
     doubled_charge[1].charges.retained += 64;
     assert!(!check_ownership(0, copy, Some(&held), &doubled_charge).is_empty());
+    // A copy that does not share the original's allocations or charges.
+    for plant in [
+        (|w: &mut WitnessFigures| w.payload[0].allocation = 7) as fn(&mut WitnessFigures),
+        |w| w.payload[0].charged *= 2,
+        |w| w.root_metadata.clear(),
+    ] {
+        let mut steps = copy_steps();
+        plant(steps[1].held.as_mut().unwrap());
+        assert!(!check_ownership(0, copy, Some(&held), &steps).is_empty());
+    }
 }
 
 fn active(attributed_peak: Option<u64>, peak: u64) -> ActiveEvidence {
@@ -1510,6 +1638,10 @@ fn single_demand_without_a_materialised_answer_fails() {
     }
 }
 
+fn manifest_digest_of(text: &str) -> String {
+    verter_bench::soak::manifest::sha256_hex(text.as_bytes())
+}
+
 fn record_of(s: &mut SoakSummary, class: LifecycleClass) -> &mut ActionRecord {
     s.records
         .iter_mut()
@@ -1556,14 +1688,45 @@ fn summary_judgments_fail_closed_on_doctored_evidence() {
             "{trace:?}: {failures:#?}"
         );
     }
-    for digest in [None, Some("unmaterialised".to_string())] {
+    // The lane runs with capture compiled out; a summary from a build that
+    // compiles it in is not this workload's evidence.
+    assert!(!summary.capture_available);
+    assert!(judged(&|s| s.capture_available = true).iter().any(
+        |f| matches!(f, SoakFailure::WorkloadMismatch { detail } if detail.contains("capture"))
+    ));
+    // The real run's retries materialized exactly the cold oracle's value.
+    let cancellations: Vec<_> = summary
+        .records
+        .iter()
+        .filter(|r| r.class == LifecycleClass::Cancellation)
+        .collect();
+    assert!(!cancellations.is_empty());
+    for record in &cancellations {
+        assert!(record.retry_digest.is_some(), "{record:#?}");
+        assert_eq!(record.retry_digest, record.oracle_digest, "{record:#?}");
+    }
+    // A retry with no materialized value, an exact but different value, and
+    // a cold oracle that answered nothing each fail.
+    let oracle = cancellations[0].oracle_digest.clone();
+    for (retry, oracle, needle) in [
+        (
+            None,
+            oracle.clone(),
+            "retry delivered no materialized exact return",
+        ),
+        (
+            Some(manifest_digest_of("a different exact return")),
+            oracle.clone(),
+            "differs from the cold oracle",
+        ),
+        (oracle, None, "cold oracle delivered no materialized"),
+    ] {
         let failures = judged(&|s| {
-            record_of(s, LifecycleClass::Cancellation).retry_digest = digest.clone();
+            let record = record_of(s, LifecycleClass::Cancellation);
+            record.retry_digest = retry.clone();
+            record.oracle_digest = oracle.clone();
         });
-        assert!(
-            wrong_with(&failures, "no materialised answer"),
-            "{digest:?}: {failures:#?}"
-        );
+        assert!(wrong_with(&failures, needle), "{needle}: {failures:#?}");
     }
     let gap = |failures: Vec<SoakFailure>| {
         failures
@@ -1611,7 +1774,12 @@ fn summary_judgments_fail_closed_on_doctored_evidence() {
 #[test]
 fn concurrent_refusal_work_is_explicitly_unmeasured() {
     let _serial = serial();
-    let (observed, _) = verter_bench::soak::refusal::run(RefusalVariant::Concurrent, 36, 0, 64);
+    let (observed, _) = verter_bench::soak::refusal::run(
+        RefusalVariant::Concurrent,
+        verter_bench::soak::manifest::REFUSAL_OP_BUDGET,
+        0,
+        verter_bench::soak::manifest::REFUSAL_PROPS,
+    );
     let concurrent: Vec<_> = observed
         .demands
         .iter()
@@ -1689,4 +1857,97 @@ fn delivery_digest_binds_recovery_content_not_just_names() {
     assert_eq!(string.class, number.class);
     assert_ne!(string.digest, number.digest);
     assert_eq!(string, ask("string"));
+}
+
+/// The packages and features Cargo resolves for `verter_bench`'s normal and
+/// build closure under `features`, as the runner binary is built: dev
+/// dependencies and workspace dev-feature unification play no part.
+fn runner_closure(features: &[&str]) -> BTreeMap<String, BTreeSet<String>> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let mut args = vec![
+        "tree",
+        "--locked",
+        "--offline",
+        "-p",
+        "verter_bench",
+        "-e",
+        "normal,build",
+        "--prefix",
+        "none",
+        "-f",
+        "{p} [{f}]",
+    ];
+    let joined = features.join(",");
+    if !features.is_empty() {
+        args.extend(["--features", joined.as_str()]);
+    }
+    let output = std::process::Command::new(cargo)
+        .args(&args)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        output.status.success(),
+        "cargo tree: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut closure: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let (Some(name), Some(open), Some(close)) =
+            (line.split(' ').next(), line.rfind('['), line.rfind(']'))
+        else {
+            continue;
+        };
+        let enabled = closure.entry(name.to_string()).or_default();
+        enabled.extend(
+            line[open + 1..close]
+                .split(',')
+                .filter(|f| !f.is_empty())
+                .map(str::to_string),
+        );
+    }
+    assert!(closure.contains_key("verter_session"), "{closure:#?}");
+    closure
+}
+
+/// The runner's own build — `verter_bench` with `soak-support` alone, as
+/// the registration declares it — reaches the narrow soak seams of every
+/// owner it reads (the work counters, the charge witness, the flight
+/// rendezvous and the ACTIVE window) and enables neither general
+/// `test-support` nor `semantic-observe` anywhere in its closure; without the
+/// feature, no soak seam is compiled in at all.
+#[test]
+fn the_runner_build_forwards_only_the_narrow_soak_seams() {
+    let forbidden = ["test-support", "semantic-observe"];
+    let supported = runner_closure(&["soak-support"]);
+    for (package, features) in &supported {
+        for feature in forbidden {
+            assert!(
+                !features.contains(feature),
+                "the soak build enables {package}/{feature}"
+            );
+        }
+    }
+    for owner in [
+        "verter_session",
+        "verter_type_engine",
+        "verter_session_query",
+        "verter_retention",
+        "verter_audit",
+    ] {
+        assert!(
+            supported
+                .get(owner)
+                .is_some_and(|features| features.contains("soak-support")),
+            "{owner} soak seams are not compiled into the runner build"
+        );
+    }
+    for (package, features) in runner_closure(&[]) {
+        for feature in forbidden.iter().chain(&["soak-support"]) {
+            assert!(
+                !features.contains(*feature),
+                "the default build enables {package}/{feature}"
+            );
+        }
+    }
 }

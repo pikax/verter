@@ -342,32 +342,24 @@ impl Rig {
             .clone()
     }
 
-    /// Cold semantic producer runs the host has made (semantic-graph memo
-    /// misses): zero across a demand means nothing was recomputed. Read from
-    /// the store's measurement counters, which the soak-support build
-    /// compiles in with capture off.
+    /// Resolver request results the host has produced
+    /// (`resolver_node_cache_misses`): zero across a demand means the host
+    /// resolved nothing for it. Read through the host's narrow work reader,
+    /// which the soak-support build carries with capture off.
     #[must_use]
     pub fn producer_runs(&self) -> u64 {
-        self.host
-            .project_type_store()
-            .semantic_graph()
-            .stats_snapshot()
-            .misses
+        self.host.work_snapshot().resolver_node_cache_misses
     }
 
-    /// Semantic-graph queries the host has run, warm or cold: a demand
-    /// served from its retained component-meta result runs none, while one
-    /// that resolves again queries the graph even when every node it reads
-    /// is already warm. The host's per-resolution component-meta counter
-    /// exists only under `semantic-observe`, which this lane keeps off.
+    /// Component-meta producer entries the host has made, early returns
+    /// included (`component_meta_resolved_state_recomputes`): a demand
+    /// served from its retained result enters none, while one that resolves
+    /// again enters the producer even when every graph node it reads is warm.
     #[must_use]
     pub fn recomputes(&self) -> u64 {
-        let stats = self
-            .host
-            .project_type_store()
-            .semantic_graph()
-            .stats_snapshot();
-        stats.hits + stats.misses
+        self.host
+            .work_snapshot()
+            .component_meta_resolved_state_recomputes
     }
 }
 

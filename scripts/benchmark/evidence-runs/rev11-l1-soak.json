@@ -28,23 +28,23 @@
     "workloads": {
       "normal": {
         "actions": 10000,
-        "distinctQueries": 6200,
-        "digest": "d1d4597fdf273227778133dc5d63d0ebbd9c0eb7c961187992a381c13b23fa00"
+        "distinctQueries": 6400,
+        "digest": "78d56df9dffe290cdc38cbc2a8c6cb342bca9a5c754a2b95da58dfe6b21fb925"
       },
       "pressure": {
         "actions": 10000,
-        "distinctQueries": 5800,
-        "digest": "f255522a19961af18b0da8c380a062b5abad7c553986e6e8054cc11b38fc64ca"
+        "distinctQueries": 6000,
+        "digest": "3b36cbc6dbfe2a157571ce1623fed0623015f5cf870bdc5a93358f2ebb307eda"
       }
     },
     "smoke": {
       "normal": {
         "tranches": 1,
-        "digest": "0d04896fba71f4adf79c9c9040656fa506e3d5a40bba27cb8fa8f3b0a368e338"
+        "digest": "5c4c867a485061f324e08ad6cbd8abc885d53abbf2088d7dcd0675b9f20bdf7a"
       },
       "pressure": {
         "tranches": 1,
-        "digest": "1d45dc601fbf27eef93bf2070db9bdd48e0352c2e1dec14fc9108026479ea2a4"
+        "digest": "b6916e3f069bcb749376191c8b568e8fd18a59d33237b7709d682f752bd6786e"
       }
     },
     "binding": {
