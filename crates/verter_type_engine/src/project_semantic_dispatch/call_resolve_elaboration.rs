@@ -131,11 +131,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         site: &IndexedReportSite,
         expression: Option<(u32, u32)>,
     ) -> Option<Vec<CheckerDiagnosticOccurrence>> {
-        if let Some(elaborated) = self.elaborate_failure(site.form.as_ref(), source, target)? {
-            // The whole relation's overflow at the expression beside the
-            // parts the elaboration reports is not modelled.
+        if let Some(mut elaborated) = self.elaborate_failure(site.form.as_ref(), source, target)? {
             if self.relation_overflows(source, target) {
-                return None;
+                elaborated.insert(
+                    0,
+                    self.stack_overflow_occurrence(source, target, expression?, head.operation)?,
+                );
             }
             return Some(elaborated);
         }
@@ -150,28 +151,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let reported = self.widened_fresh_literal(site.form.as_ref(), source);
         match self.relation_report(reported, target, (site.point, site.end), head)? {
             RelationReport::Reported(occurrence) => Some(vec![occurrence]),
-            RelationReport::StackOverflow => {
-                let types = [
-                    self.print_diagnostic_type(source)?,
-                    self.print_diagnostic_type(target)?,
-                ];
-                let overflow = |span: (u32, u32)| {
-                    CheckerDiagnosticOccurrence::new(
-                        span.0,
-                        span.1,
-                        CheckerDiagnostic {
-                            code: CheckerDiagnosticCode::ExcessiveStackDepth,
-                            operation: head.operation,
-                        },
-                        types.iter().map(|text| text.as_str().into()).collect(),
-                        Box::new([]),
-                    )
-                };
-                Some(vec![
-                    overflow(expression?),
-                    overflow((site.point, site.end)),
-                ])
-            }
+            RelationReport::StackOverflow => Some(vec![
+                self.stack_overflow_occurrence(source, target, expression?, head.operation)?,
+                self.stack_overflow_occurrence(
+                    source,
+                    target,
+                    (site.point, site.end),
+                    head.operation,
+                )?,
+            ]),
         }
     }
 
@@ -541,8 +529,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// `checkTypeRelatedTo` reporting an elaborated part at `span`, as
     /// [`Self::relation_report`] does. A part whose relation overflows the
-    /// stack is reported at the part beside the whole relation's overflow at
-    /// the operation, which is not modelled.
+    /// stack reports TS2321 at that part.
     fn report_relation_failure(
         &self,
         source: SemanticNodeId,
@@ -552,8 +539,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<CheckerDiagnosticOccurrence> {
         match self.relation_report(source, target, span, head)? {
             RelationReport::Reported(occurrence) => Some(occurrence),
-            RelationReport::StackOverflow => None,
+            RelationReport::StackOverflow => {
+                self.stack_overflow_occurrence(source, target, span, head.operation)
+            }
         }
+    }
+
+    fn stack_overflow_occurrence(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        span: (u32, u32),
+        operation: CheckerDiagnosticOperation,
+    ) -> Option<CheckerDiagnosticOccurrence> {
+        Some(CheckerDiagnosticOccurrence::new(
+            span.0,
+            span.1,
+            CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessiveStackDepth,
+                operation,
+            },
+            Box::new([
+                self.print_diagnostic_type(source)?.into_boxed_str(),
+                self.print_diagnostic_type(target)?.into_boxed_str(),
+            ]),
+            Box::new([]),
+        ))
     }
 
     /// `checkTypeRelatedTo` reporting at `span`: `head` naming the two
@@ -589,6 +600,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return Some(RelationReport::StackOverflow);
         }
         let (source, target) = self.print_relation_operands(source, target)?;
+        let head = if head.code == CheckerDiagnosticCode::TypeNotAssignable && source == target {
+            CheckerDiagnostic {
+                code: CheckerDiagnosticCode::UnrelatedTypesWithSameName,
+                ..head
+            }
+        } else {
+            head
+        };
         Some(RelationReport::Reported(CheckerDiagnosticOccurrence::new(
             span.0,
             span.1,

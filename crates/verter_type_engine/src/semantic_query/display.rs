@@ -1621,7 +1621,25 @@ fn render_object_surface(
                 }
             }
             crate::semantic_query::AuthoredPropertyKey::Computed(node) => {
-                let (key, _) = follow_alias_chain(store, *node, &visited.substitution);
+                let (mut key, _) = follow_alias_chain(store, *node, &visited.substitution);
+                if checker {
+                    if let Some(settled) = visited.settled_types.get(&key) {
+                        key = follow_alias_chain(store, *settled, &visited.substitution).0;
+                    } else if matches!(
+                        store.node_data(key).as_deref(),
+                        Some(SemanticNodeData::TypeOf(_))
+                    ) && !visited.unsettled_types.contains(&key)
+                    {
+                        visited.unsettled_types.push(key);
+                    }
+                    // Only a key uses the enum member's literal base. The
+                    // same node in a value position keeps its nominal name.
+                    if let Some(SemanticNodeData::EnumLiteral(member)) =
+                        store.node_data(key).as_deref()
+                    {
+                        key = member.base;
+                    }
+                }
                 match store.node_data(key).as_deref() {
                     Some(SemanticNodeData::Literal(LiteralValue::String(name))) if checker => {
                         visited.add_length(name.len() + 1);

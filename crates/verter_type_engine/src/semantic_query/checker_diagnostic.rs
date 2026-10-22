@@ -53,6 +53,7 @@ impl CheckerDiagnostic {
             | CheckerDiagnosticCode::TupleTooLarge
             | CheckerDiagnosticCode::ExpressionTupleTooLarge => Some(PrimitiveKind::Any),
             CheckerDiagnosticCode::TypeNotAssignable
+            | CheckerDiagnosticCode::UnrelatedTypesWithSameName
             | CheckerDiagnosticCode::NoMatchingOverload
             | CheckerDiagnosticCode::ArgumentNotAssignable
             | CheckerDiagnosticCode::ArgumentCount
@@ -77,6 +78,8 @@ pub enum CheckerDiagnosticCode {
     /// TS2322: a contextually typed callback's return is not assignable to
     /// the return its contextual signature requires.
     TypeNotAssignable,
+    /// TS2719: a failed relation whose two reported type spellings agree.
+    UnrelatedTypesWithSameName,
     /// TS2589: an instantiation nested deeper than the checker's
     /// instantiation depth, or a conditional tail run longer than its tail
     /// limit ([`checker_policy`](super::checker_policy)) — including the lib
@@ -173,6 +176,7 @@ impl CheckerDiagnosticCode {
             | Self::CannotFindName
             | Self::NoMatchingOverload
             | Self::TypeNotAssignable
+            | Self::UnrelatedTypesWithSameName
             | Self::RecursiveFulfillmentCallback
             | Self::ArgumentNotAssignable
             | Self::ArgumentCount
@@ -193,6 +197,7 @@ impl CheckerDiagnosticCode {
         match self {
             Self::NoMatchingOverload => 2769,
             Self::TypeNotAssignable => 2322,
+            Self::UnrelatedTypesWithSameName => 2719,
             Self::ExcessivelyDeepInstantiation => 2589,
             Self::CircularTypeAlias => 2456,
             Self::CannotFindName => 2304,
@@ -228,6 +233,7 @@ impl CheckerDiagnosticCode {
         match self {
             Self::NoMatchingOverload => "No overload matches this call.",
             Self::TypeNotAssignable => "Type '{0}' is not assignable to type '{1}'.",
+            Self::UnrelatedTypesWithSameName => "Type '{0}' is not assignable to type '{1}'. Two different types with this name exist, but they are unrelated.",
             Self::ExcessivelyDeepInstantiation => {
                 "Type instantiation is excessively deep and possibly infinite."
             }
@@ -497,18 +503,18 @@ impl CheckerDiagnosticRecipe {
                 ..*self
             }
             .bind(site, printer)?;
-            // A relation that overflows the stack while overloads are chosen
-            // is reported for each candidate it overflows on, which is not
-            // modelled.
-            if failures.iter().any(|failure| {
-                failure.diagnostic.code == CheckerDiagnosticCode::ExcessiveStackDepth
-            }) {
-                return None;
-            }
             return Some(
                 failures
                     .into_iter()
                     .map(|failure| {
+                        // Candidate selection's overflow belongs to the call;
+                        // only the argument's own failure is an overload error.
+                        if failure.diagnostic.code == CheckerDiagnosticCode::ExcessiveStackDepth
+                            && Some(failure.start) == site.expression_start
+                            && Some(failure.end) == site.expression_end
+                        {
+                            return failure;
+                        }
                         let mut chain = Vec::with_capacity(failure.chain.len() + 2);
                         chain.push(CheckerDiagnosticChainLine::new(
                             1,

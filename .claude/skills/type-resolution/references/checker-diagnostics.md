@@ -64,7 +64,11 @@ primitives, nor an object type against a primitive. Past it the checker reports 
 (`Excessive stack depth comparing types`, both types printed) in place of the relation's message,
 twice: at the call expression (`CheckerDiagnosticSite::expression_start`), where it compares the types
 while choosing the candidate with no error node of its own, then at the argument. An elaborated argument
-whose whole relation overflows, and an overflow under TS2769, are not modelled and record nothing.
+whose whole relation overflows keeps TS2321 at the call beside its
+elaborated parts. An overflowing part keeps TS2321 at that part. Under TS2769,
+candidate selection's TS2321 remains at the call and the argument's own failure
+appears in the last-overload chain. When the two printed operands of an elaborated
+assignment coincide, its head is TS2719, retaining the complete failure chain.
 
 Types print as the checker's `typeToString` prints them (`print_diagnostic_type`,
 `DisplayContext::for_checker`): the display walk keeps the node builder's running `approximateLength`
@@ -88,7 +92,10 @@ in builder order, then ten bytes for the mapping. Closed mappings, spread
 alternatives and anonymous peer-merged declarations are prepared by the consumer
 before display; display itself never evaluates. Generic spreads separate closed
 property groups, each evaluated by the shared spread producer, and print their
-ordered intersection with the type parameters; open positive evidence is never
+ordered intersection with the type parameters. Repeated generic operands are
+deduplicated before splitting closed groups, preserving subsequent overwrite
+semantics. A spread of `any` retains the ordinary dynamic relation rather than
+being rejected as an object against a primitive. Open positive evidence is never
 interned as a closed object. An authored `infer` constraint
 prints with `extends` unless its position already infers that constraint (a
 template span, rest element/parameter, mapped key or a mapped value matched
@@ -98,6 +105,11 @@ authored constraint through the shared identity relation after ordered use-site
 substitution; display only reads the resulting decision. Its name is counted again
 as a parameter declaration, once rather than as a reference. Unique-symbol
 indexed-access types print `unique symbol`.
+
+Computed property names use the same consumer preparation worklist: non-nominal
+`typeof` keys evaluate through the shared owner and enum-member keys use their
+literal base. Display reads these settled forms without dispatching queries;
+unique-symbol keys retain their nominal spelling and deterministic symbol count.
 
 A symbol-keyed property's abbreviation contribution is the UTF-8 byte length
 of its leaf symbol spelling plus five fixed bytes. Both unique-symbol keys and

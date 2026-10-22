@@ -32,5 +32,5 @@ final-result refusal retention even beside an eligible operation-budget reason.
 These fixed caps do not define an operation profile, and wildcard accounting
 counts cold imported-registry computations only: successfully warmed dependency
 entries let an identical follow-up recompute and heal. Intermediate fuse-tripped
-misses likewise remain request-only, never warm negatives. Wire fact causes keep
-the distinct reason; the legacy schema vocabulary projects it as `propagated`.
+misses likewise remain request-only, never warm negatives. Wire fact causes and
+the completeness field both keep the distinct `fanoutLimit` reason.

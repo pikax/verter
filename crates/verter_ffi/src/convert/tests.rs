@@ -4009,8 +4009,8 @@ fn fanout_reason_survives_native_and_wire_publication() {
         assert_eq!(body.facts.unwrap().delivery.unwrap().causes, [21]);
         assert_eq!(
             body.result_completeness.unwrap().partial_reasons,
-            [7],
-            "the legacy field retains its compatible vocabulary"
+            [21],
+            "every protocol projection preserves the fanout cause"
         );
     }
 }
