@@ -18,6 +18,11 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  describeEnginePins,
+  loadEngineMatrixPins,
+  textRecordsEnginePins,
+} from "../../../scripts/sfc-projection/engine-pins.mjs";
 
 const STS0_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(STS0_DIR, "../../..");
@@ -1208,8 +1213,9 @@ export function assertProfileContract(policy) {
  * The Rust-side profile gate in `verter_session` (tests/cases/
  * sts0_profile_gate.rs): it projects every policy profile's evidence
  * fixture through the OWNED CCA1I `SvelteProjectionBackend` (project_ide),
- * checks the real generated carriers on BOTH claimed engines (ts-js 6.0.3
- * and ts-native 7.0.2), corrupts the evidence templates and the generated
+ * checks the real generated carriers on BOTH claimed engines (the ts-js and
+ * ts-native pins of the STP1 engine matrix), corrupts the evidence templates
+ * and the generated
  * carriers themselves (engine-checked rows must fail, js-unchecked rows
  * must not report), and consumes the declaration/module publication
  * surfaces with renaming twins. STS0's runtimeCorrectness claim rests on
@@ -1230,10 +1236,9 @@ export const STS0_PROFILE_GATE_TESTS = Object.freeze([
  * engine, so a green receipt that cannot show both lines did not run the
  * claimed engine matrix (STS0-AC1).
  */
-export const STS0_PROFILE_GATE_ENGINES = Object.freeze([
-  { label: "ts-js", version: "6.0.3" },
-  { label: "ts-native", version: "7.0.2" },
-]);
+export const STS0_PROFILE_GATE_ENGINES = Object.freeze(
+  ["ts-js", "ts-native"].map((label) => ({ label, version: loadEngineMatrixPins()[label] })),
+);
 
 const CARGO_SUMMARY_RE = /test result: (ok|FAILED)\. (\d+) passed; (\d+) failed/;
 
@@ -2177,12 +2182,12 @@ export function validateSts0Products({
       );
     }
   }
-  if (!/6\.0\.3/.test(evidenceText) || !/7\.0\.2/.test(evidenceText)) {
+  if (!textRecordsEnginePins(evidenceText)) {
     errors.push(
       err(
         "STS0-svelte-pin",
         "missing-engine-pins",
-        "STS0 evidence must record ts-js 6.0.3 and ts-native 7.0.2 engine pins",
+        `STS0 evidence must record ${describeEnginePins()} engine pins`,
       ),
     );
   }
