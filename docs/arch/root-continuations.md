@@ -116,6 +116,47 @@ blocking completion driver. Its only advancing operation is `poll(&mut self,
   with the existing scheduler driver or an explicitly driven `drive_one`.
   This handoff introduces no executor or pool.
 
+### Scoped cache-node admission and producer transfer
+
+`Scheduler::begin_scoped_cache_node<T>` returns `ScopedCacheNodeHandoff<T>`.
+Its `poll` yields while the bounded inbox is full, until DAG dispatch, or
+while another caller produces the shared value. It never executes a stage,
+waits, enters a pool or runs a producer. The synchronous
+`execute_scoped_cache_node` drives this same handoff and runs its transferred
+producer on the existing CPU pool.
+
+- **Producer ownership:** the first eligible poll after dispatch receives
+  `ScopedCacheNodeStep::Produce`. That intermediate result transfers one
+  `ScopedCacheNodeProducer<T>` to the external driver. Its `run` installs the
+  request context, aggregate cancellation and active-path identity, executes
+  the supplied closure, contains panic and publishes once. Dropping it
+  without running settles the flight as cancelled. A later poll of the
+  handoff receives the terminal `Value(Arc<T>)`; every surviving follower
+  receives that same value. Producers can borrow the external caller's data.
+- **Backpressure and lifetime:** admission retains the unsubmitted item and
+  separate capacity and flight registrations. A sibling's settlement
+  can bypass that item's capacity wait; a retired flight resolves
+  even if the successor inbox is full. The handoff and producer retain the
+  scheduler independently and can move between threads with exclusive
+  polling. Dropping a handoff withdraws its registrations and detaches only
+  its owner; a surviving sibling keeps shared work live.
+- **Errors:** cancellation, shutdown/reset, panic, mismatched result type and
+  same-path re-entry retain the existing typed outcomes. Cancellation is
+  checked at each poll; cancellation-only wake delivery and shared-registry
+  wait edges remain unfinished. Executors must re-poll or drop on request
+  cancellation. Polling after a terminal result is a contract violation.
+- **Wake ordering:** dispatch and settlement take registrations under the
+  flight lock. Delivery uses the scheduler's deferral rail, after flight,
+  scoped-incarnation and DAG locks release, including reset's outer hold.
+  Wakes request a later poll and do not execute the producer.
+- **Evidence:** `scheduler::scoped_handoff_tests` exercises yielding before
+  queue/result release, cross-thread producer transfer, follower isolation,
+  panic/drop, re-entry, reset with a full successor inbox, and unlocked wake
+  delivery. The session compile contract
+  `scoped_handoff_no_blocking_scheduler` denies recovering the blocking
+  scheduler from the handoff. These are boundary tests; complete production
+  component-meta/compile roots are still synchronous.
+
 ### Declaration-lowering owner-shard handoffs
 
 Retained parses live on dedicated worker shards and never leave them. A job
@@ -178,7 +219,7 @@ memo's flights do (`verter_type_engine::semantic_query_memo`).
 | Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
 | Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `CompletionSubscription::poll` on the handle; the adapter still parks |
 | Batch upsert completion (`Scheduler::wait_batch`) | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
-| Scoped cache-node flight (`wait_for_scoped_cache_node`; 2 ms timed condvar plus a rayon `install`) | `verter_scheduler/src/scheduler/{identity,cancellation}.rs` | Vue macro codegen in compile and the Vue API projector | none |
+| Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
 | Scheduler inbox submission (`send_submission`) | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
 | Workspace import-resolution flight (`FlightSubscription::wait`) | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` registers a waker; callers still synchronous |
 | Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) | `verter_session/src/host_batch_coordinator.rs` | `compile_many`, `get_component_meta_batch` | none; the batch topology itself is the executor's to replace |

@@ -33,7 +33,6 @@ pub(super) struct DagMutexGuard<'a> {
 
 /// Postpone callbacks across an outer scheduler lifecycle hold (reset).
 /// This also covers the driver the resetting thread must join.
-#[cfg(not(target_arch = "wasm32"))]
 pub(super) struct WakeDeferral<'a>(&'a DagMutex);
 
 impl DagMutex {
@@ -52,7 +51,6 @@ impl DagMutex {
         })
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn defer_wakes(&self) -> WakeDeferral<'_> {
         self.delivery.lock().scopes += 1;
         WakeDeferral(self)
@@ -70,7 +68,7 @@ impl DagMutex {
         }
     }
 
-    fn deliver(&self, mut wakes: Vec<TakenWakers>) {
+    pub(super) fn deliver(&self, mut wakes: Vec<TakenWakers>) {
         if wakes.is_empty() {
             return;
         }
@@ -109,7 +107,6 @@ impl Drop for DagMutexGuard<'_> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Drop for WakeDeferral<'_> {
     fn drop(&mut self) {
         let wakes = {

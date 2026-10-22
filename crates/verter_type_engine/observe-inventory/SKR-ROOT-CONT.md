@@ -22,6 +22,7 @@ The interface itself is described in
 | `SchedulerSubmission` (retained scheduler, prepared input, output subscriptions), `PendingSubmission` (pending inbox item and registration) | Request and atomic-batch admission polls; synchronous submissions drive the same pending state | REQUIRED | One admission handoff | `src/scheduler/submission.rs` | always |
 | `SchedulerDag.completion_wakes`, `DagMutex.delivery`, `WakeDeferral` | Terminal publication retains polling wakes until DAG unlock and any enclosing reset hold releases; blocking completion state remains immediately visible | REQUIRED | One lifecycle critical section; reset deferral spans its driver join | `src/dag.rs`, `src/scheduler/dag_lock.rs` | always |
 | `Scheduler.driver_thread_id` | Reset distinguishes its own driver callback from another scheduler's driver while its join handle is temporarily taken | REQUIRED | One native driver incarnation, through its reset join | `src/scheduler.rs` | native |
+| `ScopedCacheNodeHandoff` (admission, owner and registration), `ScopedCacheNodeProducer` (exclusive publication authority), `ScopedCacheFlightState.wakers` | Scoped cache-node polling and the synchronous `execute_scoped_cache_node` driver; dispatch and settlement defer wakes beyond lifecycle holds | REQUIRED | One flight, producer and independent subscriber; no durable retention | `verter_scheduler/src/scheduler/scoped_handoff.rs`, `cancellation.rs` | always |
 
 ## verter_semantic_source
 

@@ -45,7 +45,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use dashmap::DashMap;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 
 #[cfg(feature = "semantic-observe")]
 use crate::dag::DedupJoinerEvent;
@@ -80,14 +80,20 @@ mod dependencies;
 mod driver;
 mod identity;
 mod lifecycle;
+mod scoped_handoff;
 mod submission;
 
+pub use scoped_handoff::{ScopedCacheNodeHandoff, ScopedCacheNodeProducer, ScopedCacheNodeStep};
 use submission::PendingSubmission;
 pub use submission::SchedulerSubmission;
 
 #[cfg(test)]
 #[path = "scheduler/submission_tests.rs"]
 mod submission_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "scheduler/scoped_handoff_tests.rs"]
+mod scoped_handoff_tests;
 
 use admission::*;
 use cancellation::*;
@@ -241,7 +247,7 @@ pub enum ScopedCacheNodeError {
 #[doc(hidden)]
 pub struct ScopedCacheFlight {
     state: Mutex<ScopedCacheFlightState>,
-    changed: Condvar,
+    delivery: Arc<DagMutex>,
 }
 
 /// Typed result of a submission attempt.
@@ -815,6 +821,49 @@ impl Scheduler {
         T: Send + Sync + 'static,
         F: FnOnce(&CancellationToken) -> T + Send,
     {
+        let mut handoff = self.begin_scoped_cache_node(request)?;
+        let mut build = Some(build);
+        verter_execution::blocking::block_on(Some(std::time::Duration::from_millis(2)), |waker| {
+            loop {
+                match handoff.poll(waker) {
+                    std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) => {
+                        return std::task::Poll::Ready(Ok(value));
+                    }
+                    std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) => {
+                        let operation = build.take().expect("only one producer is transferred");
+                        #[cfg(not(target_arch = "wasm32"))]
+                        self.cpu_pool.install(move || producer.run(operation));
+                        #[cfg(target_arch = "wasm32")]
+                        producer.run(operation);
+                    }
+                    std::task::Poll::Ready(Err(error)) => {
+                        return std::task::Poll::Ready(Err(error))
+                    }
+                    std::task::Poll::Pending => {
+                        // Execution remains outside the polling capability.
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let progress = self
+                            .pump_ready(PumpReason::WaitOrDrive, caller_kind::CallerKind::current())
+                            .made_progress();
+                        #[cfg(target_arch = "wasm32")]
+                        let progress = self.drive_one();
+                        if !progress {
+                            return std::task::Poll::Pending;
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Begin a cache-node computation without waiting for inbox capacity or
+    /// executing its producer. Polling transfers a producer after DAG dispatch;
+    /// the caller runs it outside the root poll, then resumes the handoff.
+    /// See [`ScopedCacheNodeHandoff`] for ownership and cancellation semantics.
+    pub fn begin_scoped_cache_node<T: Send + Sync + 'static>(
+        self: &Arc<Self>,
+        request: ScopedCacheNodeRequest,
+    ) -> Result<ScopedCacheNodeHandoff<T>, ScopedCacheNodeError> {
         let request_token = request
             .request_context
             .as_ref()
@@ -832,12 +881,13 @@ impl Scheduler {
         }
         let owner_id = self.next_scoped_owner_id.fetch_add(1, Ordering::Relaxed);
         let flight = {
+            let _wakes = self.dag.defer_wakes();
             let _gate = self.scoped_cache_gate.lock();
             loop {
                 let candidate = match self.scoped_cache_flights.entry(identity.clone()) {
                     dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
                     dashmap::mapref::entry::Entry::Vacant(entry) => {
-                        let flight = Arc::new(ScopedCacheFlight::new());
+                        let flight = Arc::new(ScopedCacheFlight::new(Arc::clone(&self.dag)));
                         entry.insert(Arc::clone(&flight));
                         flight
                     }
@@ -859,33 +909,15 @@ impl Scheduler {
             flight: Arc::clone(&flight),
             request_context: request.request_context.clone(),
         };
-        if self.send_submission(submission).is_err() {
-            self.terminalize_scoped_cache_flight(
-                &identity,
-                &flight,
-                ScopedCacheTerminal::Shutdown,
-                false,
-            );
-        } else {
-            self.record_inbox_submission();
-        }
-
-        let result = self.wait_for_scoped_cache_node(
-            &identity,
-            &flight,
+        Ok(ScopedCacheNodeHandoff::new(
+            Arc::clone(self),
+            identity,
+            flight,
+            owner_id,
             request.request_context,
-            request_token.clone(),
-            build,
-        );
-        self.detach_scoped_cache_owner(&identity, &flight, owner_id);
-        if request_token
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
-        {
-            Err(ScopedCacheNodeError::Cancelled)
-        } else {
-            result
-        }
+            request_token,
+            submission,
+        ))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2297,7 +2329,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn scoped_test_context(
+    pub(super) fn scoped_test_context(
         id: u64,
     ) -> (
         verter_execution::request_context::OpaqueRequestContext,
@@ -2426,7 +2458,7 @@ mod tests {
     /// aggregate token latched cancelled and its `by_identity` entry vanished,
     /// so the successor was either force-cancelled (this test) or — when the
     /// stale cancel landed BEFORE the successor's dispatch — never dispatched
-    /// at all, leaving `wait_for_scoped_cache_node` parked forever. That
+    /// at all, leaving its scoped cache-node caller parked forever. That
     /// unbounded park is the >10s `VerterHost::ensure_ide_compiled` block
     /// observed under concurrent LSP load.
     #[cfg(not(target_arch = "wasm32"))]
