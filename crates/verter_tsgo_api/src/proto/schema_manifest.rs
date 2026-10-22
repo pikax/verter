@@ -247,7 +247,7 @@ pub const PINNED_REQUEST_FIELDS: &[(&str, &[&str])] = &[
 /// compiler-options diagnostic surface the codec now hand-writes); the
 /// fingerprint reflects that op set.
 pub const PINNED: SchemaManifest = SchemaManifest {
-    engine_version: "7.0.2",
+    engine_version: crate::toolchain::policy::TYPESCRIPT_PIN,
     framing: FramingConstants {
         fixarray3: crate::proto::msgpack::MSGPACK_FIXARRAY3,
         bin8: crate::proto::msgpack::MSGPACK_BIN8,

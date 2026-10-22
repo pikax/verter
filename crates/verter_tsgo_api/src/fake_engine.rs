@@ -9,25 +9,29 @@
 //! `verter-tsgo-fake-<scenario>[.exe]` — so parallel tests never share mutable
 //! environment:
 //!
+//! Every scenario reports the TypeScript pin (`PIN`,
+//! [`crate::toolchain::policy::TYPESCRIPT_PIN`]) unless the table says
+//! otherwise; `X.Y` is the pin's release line.
+//!
 //! | scenario         | `--version`              | `--lsp --stdio` behavior                         |
 //! |------------------|--------------------------|--------------------------------------------------|
-//! | `ok`             | `7.0.2`                  | handshake ok, `serverInfo` = `7.0.2`; DEAD api pipe |
-//! | `mismatch`       | `7.0.2`                  | handshake ok, `serverInfo` = `7.0.9`             |
-//! | `noserverinfo`   | `7.0.2`                  | initialize result carries no serverInfo          |
-//! | `exit`           | `7.0.2`                  | exits 1 immediately                              |
-//! | `v710`           | `7.1.0`                  | handshake ok, `serverInfo` = `7.0.9`-style match |
-//! | `rc`             | `7.0.2-rc.1`             | handshake ok, matching serverInfo                |
-//! | `nightly`        | `7.0.0-dev.20260703.1`   | handshake ok, matching serverInfo                |
-//! | `apiok`          | `7.0.2`                  | full surface: handshake + WORKING `--api` pipe (integer snapshot handle, staged project echoed) + standalone `--api` MessagePack surface |
-//! | `apimismatch`    | `7.0.2`                  | full surface BUT `serverInfo` = `7.0.9` (the attach succeeds, the version cross-check fails) |
-//! | `apihollow`      | `7.0.2`                  | full surface BUT `updateSnapshot` returns a hollow `projects: []` |
-//! | `declfail`       | `7.0.2`                  | full surface (incl. standalone `--api`); `--project <cfg>` exits 2 with NO output |
-//! | `declhang`       | `7.0.2`                  | `--project <cfg>` spawns a pipe-holding grandchild and hangs forever |
+//! | `ok`             | `PIN`                    | handshake ok, `serverInfo` = `PIN`; DEAD api pipe |
+//! | `mismatch`       | `PIN`                    | handshake ok, `serverInfo` = `X.Y.9`             |
+//! | `noserverinfo`   | `PIN`                    | initialize result carries no serverInfo          |
+//! | `exit`           | `PIN`                    | exits 1 immediately                              |
+//! | `outofrange`     | the next minor           | handshake ok, matching serverInfo                |
+//! | `rc`             | an rc of a later patch   | handshake ok, matching serverInfo                |
+//! | `nightly`        | a nightly of the pin     | handshake ok, matching serverInfo                |
+//! | `apiok`          | `PIN`                    | full surface: handshake + WORKING `--api` pipe (integer snapshot handle, staged project echoed) + standalone `--api` MessagePack surface |
+//! | `apimismatch`    | `PIN`                    | full surface BUT `serverInfo` = `X.Y.9` (the attach succeeds, the version cross-check fails) |
+//! | `apihollow`      | `PIN`                    | full surface BUT the snapshot returns a hollow `projects: []` |
+//! | `declfail`       | `PIN`                    | full surface (incl. standalone `--api`); `--project <cfg>` exits 2 with NO output |
+//! | `declhang`       | `PIN`                    | `--project <cfg>` spawns a pipe-holding grandchild and hangs forever |
 //! | `hang-version`   | hangs forever            | (unused)                                         |
-//! | `hold-pipe`      | prints `7.0.2`, then spawns a child that HOLDS the stdout/stderr pipes open and exits 0 |
-//! | `hang-lsp`       | `7.0.2`                  | hangs forever (never answers `initialize`)       |
-//! | `hold-lsp`       | `7.0.2`                  | spawns a pipe-holding child (`<exe>.child.pid`), then hangs |
-//! | `hang-api`       | `7.0.2`                  | full `--lsp`+pipe surface, but standalone `--api` never writes a frame |
+//! | `hold-pipe`      | prints `PIN`, then spawns a child that HOLDS the stdout/stderr pipes open and exits 0 |
+//! | `hang-lsp`       | `PIN`                    | hangs forever (never answers `initialize`)       |
+//! | `hold-lsp`       | `PIN`                    | spawns a pipe-holding child (`<exe>.child.pid`), then hangs |
+//! | `hang-api`       | `PIN`                    | full `--lsp`+pipe surface, but standalone `--api` never writes a frame |
 //!
 //! Two switches widen any scenario. `VERTER_TSGO_FAKE_STANDALONE_API` (or a
 //! `+api` file-name suffix, `verter-tsgo-fake-<scenario>+api`) makes it serve
@@ -55,7 +59,7 @@ enum Scenario {
     ApiMismatch,
     NoServerInfo,
     Exit,
-    V710,
+    OutOfRange,
     Rc,
     Nightly,
     ApiOk,
@@ -102,7 +106,7 @@ impl Scenario {
             "apimismatch" => Self::ApiMismatch,
             "noserverinfo" => Self::NoServerInfo,
             "exit" => Self::Exit,
-            "v710" => Self::V710,
+            "outofrange" => Self::OutOfRange,
             "rc" => Self::Rc,
             "nightly" => Self::Nightly,
             "apiok" => Self::ApiOk,
@@ -121,19 +125,22 @@ impl Scenario {
 
     /// The version this fake reports via `--version` (and, unless
     /// `Mismatch`/`NoServerInfo`, via in-band `serverInfo.version`).
-    fn probe_version(self) -> &'static str {
+    fn probe_version(self) -> String {
+        use crate::toolchain::policy::{pinned_version, supported_range_ceiling, TYPESCRIPT_PIN};
+        let pin = pinned_version();
         match self {
-            Self::V710 => "7.1.0",
-            Self::Rc => "7.0.2-rc.1",
-            Self::Nightly => "7.0.0-dev.20260703.1",
-            _ => "7.0.2",
+            Self::OutOfRange => supported_range_ceiling().to_string(),
+            Self::Rc => format!("{}.{}.{}-rc.1", pin.major, pin.minor, pin.patch + 1),
+            Self::Nightly => format!("{}.{}.{}-dev.20261022.1", pin.major, pin.minor, pin.patch),
+            _ => TYPESCRIPT_PIN.to_string(),
         }
     }
 
     /// The `serverInfo.version` the initialize result carries, if any.
-    fn server_info_version(self) -> Option<&'static str> {
+    fn server_info_version(self) -> Option<String> {
+        let pin = crate::toolchain::policy::pinned_version();
         match self {
-            Self::Mismatch | Self::ApiMismatch => Some("7.0.9"),
+            Self::Mismatch | Self::ApiMismatch => Some(format!("{}.{}.9", pin.major, pin.minor)),
             Self::NoServerInfo => None,
             other => Some(other.probe_version()),
         }

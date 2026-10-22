@@ -700,7 +700,7 @@ async fn resolve_pinned_engine() -> Result<String, GenError> {
         Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
     );
     let validator = ExactPinValidator {
-        product: ProcessValidator::from_env(),
+        product: ProcessValidator::production(),
     };
     match discovery::resolve_with(&request, &validator).await {
         Ok(resolution) => Ok(resolution.path.to_string_lossy().into_owned()),

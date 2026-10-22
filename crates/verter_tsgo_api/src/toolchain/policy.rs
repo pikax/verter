@@ -1,54 +1,88 @@
-//! Supported-tsgo-version policy (the ratified stable-only contract).
+//! Supported-tsgo-version policy: the ONE TypeScript pin and the release line
+//! it admits.
 //!
 //! tsgo is the TypeScript 7 native compiler and follows TypeScript SemVer
-//! (`major.minor.patch`). Verter supports ONE channel:
+//! (`major.minor.patch[-prerelease]`). Verter targets exactly one TypeScript
+//! build and supports the release line that build belongs to:
 //!
-//! - [`BUNDLED_TSGO_VERSION`] — the known-good floor Verter ships as the
-//!   offline bundled sidecar (shipped with the packaged product): `7.0.2`.
-//! - [`SUPPORTED_TSGO_RANGE`] — `>=7.0.2, <7.1.0`, STABLE ONLY. A candidate
-//!   qualifies iff its version has no prerelease AND lands in range. Stable
-//!   `7.0.x` patches auto-qualify; `7.1`, `8.0`, RCs, betas, and nightlies do
-//!   NOT.
+//! - [`TYPESCRIPT_PIN`] — the exact TypeScript build Verter targets. It is the
+//!   workspace `typescript` devDependency, the oracle harness pin, the
+//!   reference build of the `--api` wire pin, and the offline bundled sidecar.
+//!   It is the ONE Rust spelling of the version; every other spelling in the
+//!   repository (package manifests, fixtures, the oracle toolchain record) is
+//!   checked against the workspace `package.json` by
+//!   `scripts/typescript-pin.mjs --check`, and `--set <version>` rewrites them
+//!   all, so moving the pin is one command plus the oracle regeneration.
+//! - [`SUPPORTED_TSGO_RANGE_LABEL`] — the pin's release line, from the pin up
+//!   to the next minor. A candidate qualifies iff it carries no build metadata,
+//!   its core is on the line, and it is either a stable release at or after the
+//!   pin, or a `beta`/`rc` prerelease of the pin's own core at or after the pin.
+//!   Nightlies (`-dev.*`), alphas and other prerelease channels, earlier
+//!   releases and other minors/majors are refused. Once the pin is a stable
+//!   release, prereleases stop qualifying by construction (they order before
+//!   it).
 //!
-//! "Latest supported" always means the greatest STABLE version satisfying the
-//! range — never a registry `latest` tag.
-//!
-//! A DEV-ONLY escape hatch ([`VersionPolicy::with_dev_nightly_override`],
-//! env-gated via [`DEV_NIGHTLY_OVERRIDE_ENV`]) re-admits integer-handle
-//! nightlies for nightly gate testing. It is never on in production, and even
-//! under the override RC/beta builds and out-of-range versions stay refused.
+//! "Latest supported" always means the greatest qualifying version — never a
+//! registry `latest` tag.
 
 use std::fmt;
+use std::sync::LazyLock;
 
-/// The bundled offline floor: the known-good tsgo build Verter ships as a
-/// sidecar with the packaged product (the version contract lives here).
-pub const BUNDLED_TSGO_VERSION: TsgoVersion = TsgoVersion::new(7, 0, 2);
+/// The pin as a literal, so labels can be assembled at compile time (here and
+/// in dependent crates via `verter_tsgo_api::typescript_pin!()`). Change the pin
+/// HERE (or via `scripts/typescript-pin.mjs --set`).
+#[macro_export]
+macro_rules! typescript_pin {
+    () => {
+        "7.1.0-beta"
+    };
+}
 
-/// The inclusive lower bound of the supported window.
-pub const SUPPORTED_TSGO_RANGE_MIN: TsgoVersion = TsgoVersion::new(7, 0, 2);
+/// The release line the pin belongs to (`major.minor`).
+macro_rules! typescript_line {
+    () => {
+        "7.1"
+    };
+}
 
-/// The EXCLUSIVE upper bound of the supported window: any `7.1.x` or newer
-/// minor/major is refused until Verter explicitly adds support.
-pub const SUPPORTED_TSGO_RANGE_MAX_EXCLUSIVE: TsgoVersion = TsgoVersion::new(7, 1, 0);
+/// The exclusive upper bound of the line: the next minor.
+#[macro_export]
+macro_rules! typescript_line_ceiling {
+    () => {
+        "7.2.0"
+    };
+}
+
+/// The exact TypeScript build Verter targets (see the module docs).
+pub const TYPESCRIPT_PIN: &str = typescript_pin!();
 
 /// Human-readable supported window, embedded in every policy diagnostic.
-pub const SUPPORTED_TSGO_RANGE_LABEL: &str = ">=7.0.2, <7.1.0";
+pub const SUPPORTED_TSGO_RANGE_LABEL: &str =
+    concat!(">=", typescript_pin!(), ", <", typescript_line_ceiling!());
 
 /// The policy identity used in the on-disk temp-cache layout
-/// (`…/<target-triple>/<policy-id>/<version>/…`), so a policy bump can never
+/// (`…/<target-triple>/<policy-id>/<version>/…`), so a line change can never
 /// collide with cache entries written under a different support window.
-pub const SUPPORTED_POLICY_ID: &str = "ts7-stable";
+pub const SUPPORTED_POLICY_ID: &str = concat!("ts", typescript_line!());
 
-/// The earliest nightly build date (`YYYYMMDD` in `7.0.0-dev.YYYYMMDD.N`)
-/// whose `--api` wire issues opaque handles as bare JSON integers. Earlier
-/// nightlies issue STRING handles — a different wire class the codec does not
-/// speak — and are refused even under the dev override.
-pub const NIGHTLY_INTEGER_HANDLE_FLIP_DATE: u32 = 20260604;
+static PINNED_VERSION: LazyLock<TsgoVersion> =
+    LazyLock::new(|| TsgoVersion::parse(TYPESCRIPT_PIN).expect("TYPESCRIPT_PIN is strict SemVer"));
 
-/// DEV-ONLY escape hatch: when this env var is exactly `1`,
-/// [`VersionPolicy::from_env`] re-admits integer-handle nightlies (for nightly
-/// gate testing). Never set this in production or CI product lanes.
-pub const DEV_NIGHTLY_OVERRIDE_ENV: &str = "VERTER_TSGO_DEV_ALLOW_NIGHTLY";
+static LINE_CEILING: LazyLock<TsgoVersion> = LazyLock::new(|| {
+    TsgoVersion::parse(typescript_line_ceiling!()).expect("the line ceiling is strict SemVer")
+});
+
+/// The parsed [`TYPESCRIPT_PIN`]: the inclusive floor of the supported window
+/// and the version the offline bundled sidecar ships.
+pub fn pinned_version() -> &'static TsgoVersion {
+    &PINNED_VERSION
+}
+
+/// The EXCLUSIVE upper bound of the supported window (the next minor): any
+/// later minor or major is refused until Verter explicitly moves the pin.
+pub fn supported_range_ceiling() -> &'static TsgoVersion {
+    &LINE_CEILING
+}
 
 /// A strictly-parsed SemVer version. tsgo versions are TypeScript SemVer:
 /// `major.minor.patch` with an optional `-prerelease` and optional `+build`.
@@ -65,8 +99,8 @@ pub struct TsgoVersion {
     pub minor: u64,
     /// SemVer patch.
     pub patch: u64,
-    /// The prerelease suffix without the leading `-` (`rc.1`,
-    /// `dev.20260604.1`), or `None` for a stable release.
+    /// The prerelease suffix without the leading `-` (`beta`,
+    /// `rc.1`), or `None` for a stable release.
     pub prerelease: Option<String>,
     /// The build-metadata suffix without the leading `+`, or `None`.
     pub build: Option<String>,
@@ -301,7 +335,7 @@ impl fmt::Display for VersionParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "`{}` is not a strict SemVer version ({}); tsgo versions look like `7.0.2`",
+            "`{}` is not a strict SemVer version ({}); tsgo versions look like `{TYPESCRIPT_PIN}`",
             self.input, self.reason
         )
     }
@@ -309,7 +343,7 @@ impl fmt::Display for VersionParseError {
 
 impl std::error::Error for VersionParseError {}
 
-/// The prerelease channel a refused (or dev-admitted) build belongs to.
+/// The prerelease channel of a version's prerelease suffix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrereleaseChannel {
     /// `-rc` / `-rc.N` release candidates.
@@ -324,6 +358,19 @@ pub enum PrereleaseChannel {
     Other,
 }
 
+impl PrereleaseChannel {
+    /// The channel's name in diagnostics.
+    fn name(self) -> &'static str {
+        match self {
+            Self::ReleaseCandidate => "release-candidate",
+            Self::Beta => "beta",
+            Self::Alpha => "alpha",
+            Self::Nightly => "nightly",
+            Self::Other => "prerelease",
+        }
+    }
+}
+
 /// Why a candidate version does not satisfy the support policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyRejection {
@@ -334,18 +381,18 @@ pub enum PolicyRejection {
         /// Why it failed to parse.
         reason: String,
     },
-    /// A stable version below [`SUPPORTED_TSGO_RANGE_MIN`].
+    /// A release that orders before the pin ([`pinned_version`]).
     BelowSupportedFloor {
         /// The offending version.
         version: TsgoVersion,
     },
-    /// A stable version at or past [`SUPPORTED_TSGO_RANGE_MAX_EXCLUSIVE`].
+    /// A version at or past [`supported_range_ceiling`].
     OutOfSupportedRange {
         /// The offending version.
         version: TsgoVersion,
     },
-    /// A prerelease build (rc/beta/alpha/nightly/other), which production
-    /// never accepts.
+    /// A prerelease the line does not admit: a nightly, an alpha, another
+    /// channel, or a `beta`/`rc` of a core other than the pin's.
     Prerelease {
         /// The offending version.
         version: TsgoVersion,
@@ -365,43 +412,30 @@ impl fmt::Display for PolicyRejection {
             Self::Malformed { input, reason } => write!(
                 f,
                 "`{input}` is not a strict SemVer version ({reason}); Verter supports tsgo \
-                 (TypeScript 7 native) stable {SUPPORTED_TSGO_RANGE_LABEL}"
+                 (TypeScript 7 native) {SUPPORTED_TSGO_RANGE_LABEL}"
             ),
             Self::BelowSupportedFloor { version } => write!(
                 f,
-                "tsgo {version} is below the supported floor; Verter supports tsgo stable \
-                 {SUPPORTED_TSGO_RANGE_LABEL} — install typescript@{BUNDLED_TSGO_VERSION} or newer 7.0.x"
+                "tsgo {version} is below the supported floor; Verter supports tsgo \
+                 {SUPPORTED_TSGO_RANGE_LABEL} — install typescript@{TYPESCRIPT_PIN}"
             ),
             Self::OutOfSupportedRange { version } => write!(
                 f,
-                "tsgo {version} is outside the supported window; Verter supports tsgo stable \
+                "tsgo {version} is outside the supported window; Verter supports tsgo \
                  {SUPPORTED_TSGO_RANGE_LABEL} — a new TypeScript minor/major needs explicit \
-                 Verter support, install a 7.0.x stable instead"
+                 Verter support, install typescript@{TYPESCRIPT_PIN} instead"
             ),
-            Self::Prerelease { version, channel } => {
-                let dev_hint = if *channel == PrereleaseChannel::Nightly {
-                    format!(" (nightly gate testing may set {DEV_NIGHTLY_OVERRIDE_ENV}=1)")
-                } else {
-                    String::new()
-                };
-                write!(
-                    f,
-                    "tsgo {version} is a {channel_name} prerelease; Verter supports tsgo \
-                     STABLE {SUPPORTED_TSGO_RANGE_LABEL} only — install the matching stable \
-                     7.0.x release{dev_hint}",
-                    channel_name = match channel {
-                        PrereleaseChannel::ReleaseCandidate => "release-candidate",
-                        PrereleaseChannel::Beta => "beta",
-                        PrereleaseChannel::Alpha => "alpha",
-                        PrereleaseChannel::Nightly => "nightly",
-                        PrereleaseChannel::Other => "prerelease",
-                    }
-                )
-            }
+            Self::Prerelease { version, channel } => write!(
+                f,
+                "tsgo {version} is a {} prerelease Verter does not support; Verter supports \
+                 tsgo {SUPPORTED_TSGO_RANGE_LABEL} (stable releases, and beta/rc builds of the \
+                 pinned release only) — install typescript@{TYPESCRIPT_PIN}",
+                channel.name()
+            ),
             Self::BuildMetadata { version } => write!(
                 f,
                 "tsgo {version} carries build metadata (an unverified local build); Verter \
-                 supports tsgo stable {SUPPORTED_TSGO_RANGE_LABEL} from the official packages"
+                 supports tsgo {SUPPORTED_TSGO_RANGE_LABEL} from the official packages"
             ),
         }
     }
@@ -409,72 +443,55 @@ impl fmt::Display for PolicyRejection {
 
 impl std::error::Error for PolicyRejection {}
 
-/// The supported-version acceptance policy.
+/// The supported-version acceptance policy. There is one policy: the pin's
+/// release line (see the module docs). The type stays a value so the
+/// validator, the wire gate and the provisioning walk share one instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VersionPolicy {
-    allow_dev_nightly: bool,
+    _private: (),
 }
 
 impl VersionPolicy {
-    /// The production policy: stable `7.0.x` in range only.
+    /// The production policy: the pin's release line.
     pub const fn production() -> Self {
-        Self {
-            allow_dev_nightly: false,
-        }
-    }
-
-    /// The policy the running process uses: production, unless the DEV-ONLY
-    /// [`DEV_NIGHTLY_OVERRIDE_ENV`] var is exactly `1`.
-    pub fn from_env() -> Self {
-        match std::env::var(DEV_NIGHTLY_OVERRIDE_ENV).as_deref() {
-            Ok("1") => Self::with_dev_nightly_override(),
-            _ => Self::production(),
-        }
-    }
-
-    /// The DEV-ONLY override policy: production rules PLUS integer-handle
-    /// nightlies (for nightly gate testing). Never enable in production.
-    pub const fn with_dev_nightly_override() -> Self {
-        Self {
-            allow_dev_nightly: true,
-        }
-    }
-
-    /// Whether the dev nightly override is active.
-    pub fn allows_dev_nightly(&self) -> bool {
-        self.allow_dev_nightly
+        Self { _private: () }
     }
 
     /// Check a parsed version against the support window.
     ///
-    /// A candidate qualifies iff it is stable (no prerelease, no build
-    /// metadata) and `>=7.0.2, <7.1.0`. Under the DEV-ONLY override an
-    /// integer-handle nightly (`7.0.0-dev.<date>.<n>` at/after
-    /// [`NIGHTLY_INTEGER_HANDLE_FLIP_DATE`]) also qualifies; every other
-    /// prerelease stays refused.
+    /// A candidate qualifies iff it carries no build metadata, it orders before
+    /// [`supported_range_ceiling`], and it is either a stable release at or
+    /// after the pin, or a `beta`/`rc` prerelease of the pin's own core at or
+    /// after the pin.
     pub fn check(&self, version: &TsgoVersion) -> Result<(), PolicyRejection> {
         if version.build.is_some() {
             return Err(PolicyRejection::BuildMetadata {
                 version: version.clone(),
             });
         }
+        if version.core() >= supported_range_ceiling().core() {
+            return Err(PolicyRejection::OutOfSupportedRange {
+                version: version.clone(),
+            });
+        }
+        let pin = pinned_version();
         if let Some(prerelease) = &version.prerelease {
             let channel = classify_prerelease(prerelease);
-            if self.allow_dev_nightly && is_integer_handle_nightly(version) {
-                return Ok(());
-            }
-            return Err(PolicyRejection::Prerelease {
-                version: version.clone(),
+            let admitted = matches!(
                 channel,
-            });
+                PrereleaseChannel::Beta | PrereleaseChannel::ReleaseCandidate
+            ) && version.core() == pin.core()
+                && version >= pin;
+            if !admitted {
+                return Err(PolicyRejection::Prerelease {
+                    version: version.clone(),
+                    channel,
+                });
+            }
+            return Ok(());
         }
-        if version.core() < SUPPORTED_TSGO_RANGE_MIN.core() {
+        if version < pin {
             return Err(PolicyRejection::BelowSupportedFloor {
-                version: version.clone(),
-            });
-        }
-        if version.core() >= SUPPORTED_TSGO_RANGE_MAX_EXCLUSIVE.core() {
-            return Err(PolicyRejection::OutOfSupportedRange {
                 version: version.clone(),
             });
         }
@@ -493,7 +510,7 @@ impl VersionPolicy {
     }
 }
 
-/// Classify a prerelease suffix into its channel for diagnostics.
+/// Classify a prerelease suffix into its channel.
 fn classify_prerelease(prerelease: &str) -> PrereleaseChannel {
     let first = prerelease.split('.').next().unwrap_or("");
     match first {
@@ -505,59 +522,41 @@ fn classify_prerelease(prerelease: &str) -> PrereleaseChannel {
     }
 }
 
-/// Whether `version` is a `7.0.0-dev.<YYYYMMDD>.<n>` nightly at or after the
-/// integer-handle wire flip ([`NIGHTLY_INTEGER_HANDLE_FLIP_DATE`]).
-fn is_integer_handle_nightly(version: &TsgoVersion) -> bool {
-    if version.core() != (7, 0, 0) {
-        return false;
-    }
-    let Some(prerelease) = &version.prerelease else {
-        return false;
-    };
-    let Some(dev) = prerelease.strip_prefix("dev.") else {
-        return false;
-    };
-    let Some((date, seq)) = dev.split_once('.') else {
-        return false;
-    };
-    if date.len() != 8
-        || !date.bytes().all(|b| b.is_ascii_digit())
-        || seq.is_empty()
-        || !seq.bytes().all(|b| b.is_ascii_digit())
-    {
-        return false;
-    }
-    let Ok(date_num) = date.parse::<u32>() else {
-        return false;
-    };
-    date_num >= NIGHTLY_INTEGER_HANDLE_FLIP_DATE
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn v(input: &str) -> TsgoVersion {
+        TsgoVersion::parse(input).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// `major.minor.patch` of the pin with `patch` replaced.
+    fn on_line(patch: u64) -> String {
+        let pin = pinned_version();
+        format!("{}.{}.{patch}", pin.major, pin.minor)
+    }
 
     // ── strict SemVer parse ────────────────────────────────────────────────
 
     #[test]
     fn parse_accepts_stable_prerelease_and_build_shapes() {
-        let v = TsgoVersion::parse("7.0.2").expect("stable parses");
-        assert_eq!((v.major, v.minor, v.patch), (7, 0, 2));
-        assert_eq!(v.prerelease, None);
-        assert_eq!(v.build, None);
-        assert!(v.is_stable());
+        let parsed = v("7.1.2");
+        assert_eq!((parsed.major, parsed.minor, parsed.patch), (7, 1, 2));
+        assert_eq!(parsed.prerelease, None);
+        assert_eq!(parsed.build, None);
+        assert!(parsed.is_stable());
 
-        let v = TsgoVersion::parse("7.0.2-rc.1").expect("dotted rc parses");
-        assert_eq!(v.prerelease.as_deref(), Some("rc.1"));
-        assert!(!v.is_stable());
+        let parsed = v("7.1.0-rc.1");
+        assert_eq!(parsed.prerelease.as_deref(), Some("rc.1"));
+        assert!(!parsed.is_stable());
 
-        let v = TsgoVersion::parse("7.0.0-dev.20260604.1").expect("nightly parses");
-        assert_eq!(v.prerelease.as_deref(), Some("dev.20260604.1"));
-        assert!(!v.is_stable());
+        let parsed = v("7.1.0-dev.20261022.1");
+        assert_eq!(parsed.prerelease.as_deref(), Some("dev.20261022.1"));
+        assert!(!parsed.is_stable());
 
-        let v = TsgoVersion::parse("7.0.2+build.5").expect("build metadata parses");
-        assert_eq!(v.build.as_deref(), Some("build.5"));
-        assert!(v.is_stable(), "build metadata is not a prerelease");
+        let parsed = v("7.1.2+build.5");
+        assert_eq!(parsed.build.as_deref(), Some("build.5"));
+        assert!(parsed.is_stable(), "build metadata is not a prerelease");
     }
 
     // ── DISCRIMINATING: the parser is STRICT — every malformed shape below is
@@ -567,23 +566,23 @@ mod tests {
         for input in [
             "",
             "   ",
-            "7.0",
+            "7.1",
             "7",
-            "7.0.2.3",
-            "7.0.x",
-            "x.0.2",
-            "v7.0.2",
-            "7.0.2 ",
-            " 7.0.2",
+            "7.1.2.3",
+            "7.1.x",
+            "x.1.2",
+            "v7.1.2",
+            "7.1.2 ",
+            " 7.1.2",
             "7..2",
-            "7.00.2",      // leading zero in a core component is not strict SemVer
-            "07.0.2",      // leading zero in major
-            "7.0.2-",      // empty prerelease
-            "7.0.2+",      // empty build
-            "7.0.2-rc..1", // empty prerelease identifier
-            "7.0.2-rc_1",  // illegal identifier char
+            "7.01.2",      // leading zero in a core component is not strict SemVer
+            "07.1.2",      // leading zero in major
+            "7.1.2-",      // empty prerelease
+            "7.1.2+",      // empty build
+            "7.1.2-rc..1", // empty prerelease identifier
+            "7.1.2-rc_1",  // illegal identifier char
             "garbage",
-            "7.0.2+b+b", // a second `+` is not SemVer
+            "7.1.2+b+b", // a second `+` is not SemVer
         ] {
             assert!(
                 TsgoVersion::parse(input).is_err(),
@@ -596,86 +595,66 @@ mod tests {
     //    prerelease orders BEFORE its release (SemVer §11). ─────────────────
     #[test]
     fn version_ordering_is_semver_not_lexicographic() {
-        assert!(TsgoVersion::parse("7.0.2").unwrap() < TsgoVersion::parse("7.0.10").unwrap());
-        assert!(TsgoVersion::parse("7.0.9").unwrap() < TsgoVersion::parse("7.1.0").unwrap());
-        assert!(TsgoVersion::parse("7.0.99").unwrap() < TsgoVersion::parse("8.0.0").unwrap());
+        assert!(v("7.1.2") < v("7.1.10"));
+        assert!(v("7.1.9") < v("7.2.0"));
+        assert!(v("7.1.99") < v("8.0.0"));
         assert!(
-            TsgoVersion::parse("7.0.2-rc.1").unwrap() < TsgoVersion::parse("7.0.2").unwrap(),
+            v("7.1.0-rc.1") < v("7.1.0"),
             "a prerelease orders before its release"
         );
+        assert!(v("7.1.0-beta") < v("7.1.0-rc"), "beta orders before rc");
     }
 
-    // ── DISCRIMINATING (H12): prerelease precedence is IDENTIFIER-BY-IDENTIFIER
+    // ── DISCRIMINATING: prerelease precedence is IDENTIFIER-BY-IDENTIFIER
     //    (SemVer §11.4): numeric identifiers compare NUMERICALLY (rc.2 < rc.10 —
     //    a whole-string compare gets this wrong), numeric < alphanumeric, and a
     //    shorter identifier set precedes a longer one when prefix-equal. ────────
     #[test]
     fn prerelease_ordering_is_identifier_by_identifier() {
         use std::cmp::Ordering;
-        // Numeric identifiers compare numerically, never as whole strings.
         assert_eq!(
-            TsgoVersion::parse("7.0.2-rc.2")
-                .unwrap()
-                .cmp(&TsgoVersion::parse("7.0.2-rc.10").unwrap()),
+            v("7.1.0-rc.2").cmp(&v("7.1.0-rc.10")),
             Ordering::Less,
             "rc.2 < rc.10 (numeric, not string, comparison)"
         );
         assert!(
-            TsgoVersion::parse("7.0.0-dev.20260604.9").unwrap()
-                < TsgoVersion::parse("7.0.0-dev.20260604.10").unwrap(),
+            v("7.1.0-dev.20261022.9") < v("7.1.0-dev.20261022.10"),
             "nightly sequence numbers compare numerically"
         );
-        // Numeric identifiers precede alphanumeric ones.
+        assert!(v("7.1.0-rc.1") < v("7.1.0-rc.a"), "numeric < alphanumeric");
+        assert!(v("7.1.0-alpha") < v("7.1.0-beta"));
         assert!(
-            TsgoVersion::parse("7.0.2-rc.1").unwrap() < TsgoVersion::parse("7.0.2-rc.a").unwrap(),
-            "numeric < alphanumeric"
-        );
-        // Alphanumeric identifiers compare lexically.
-        assert!(
-            TsgoVersion::parse("7.0.2-alpha").unwrap() < TsgoVersion::parse("7.0.2-beta").unwrap()
-        );
-        // A shorter set < a longer set when all preceding identifiers are equal.
-        assert!(
-            TsgoVersion::parse("7.0.2-rc").unwrap() < TsgoVersion::parse("7.0.2-rc.1").unwrap(),
+            v("7.1.0-rc") < v("7.1.0-rc.1"),
             "a shorter identifier set precedes a longer prefix-equal one"
         );
-        // Mixed shapes stay strictly ordered (no equality collapse).
-        assert_ne!(
-            TsgoVersion::parse("7.0.2-rc.2")
-                .unwrap()
-                .cmp(&TsgoVersion::parse("7.0.2-rc.10").unwrap()),
-            Ordering::Equal
-        );
+        assert_ne!(v("7.1.0-rc.2").cmp(&v("7.1.0-rc.10")), Ordering::Equal);
     }
 
-    // ── DISCRIMINATING (H12): numeric PRERELEASE identifiers with leading
-    //    zeroes are not strict SemVer (§9) and are rejected; build metadata MAY
-    //    carry them (§10), and alphanumeric identifiers are unaffected. ────────
+    // ── DISCRIMINATING: numeric PRERELEASE identifiers with leading zeroes are
+    //    not strict SemVer (§9) and are rejected; build metadata MAY carry them
+    //    (§10), and alphanumeric identifiers are unaffected. ──────────────────
     #[test]
     fn parse_rejects_leading_zero_numeric_prerelease_identifiers() {
-        for input in ["7.0.2-rc.01", "7.0.2-01", "7.0.2-rc.1.02", "7.0.2-00"] {
+        for input in ["7.1.0-rc.01", "7.1.0-01", "7.1.0-rc.1.02", "7.1.0-00"] {
             assert!(
                 TsgoVersion::parse(input).is_err(),
                 "leading-zero numeric prerelease `{input}` must be rejected"
             );
         }
-        // A single `0` is numeric zero — allowed.
-        assert!(TsgoVersion::parse("7.0.2-rc.0").is_ok());
-        // Alphanumeric identifiers with leading zeros are not numeric — allowed.
-        assert!(TsgoVersion::parse("7.0.2-0a").is_ok());
-        // Build metadata MAY contain leading zeros (SemVer §10).
-        assert!(TsgoVersion::parse("7.0.2+build.01").is_ok());
+        assert!(TsgoVersion::parse("7.1.0-rc.0").is_ok());
+        assert!(TsgoVersion::parse("7.1.0-0a").is_ok());
+        assert!(TsgoVersion::parse("7.1.0+build.01").is_ok());
     }
 
-    // ── DISCRIMINATING (H12): Eq and Ord are CONSISTENT — SemVer precedence
-    //    ignores build metadata, so BOTH ignore it: equal iff Ordering::Equal,
-    //    and Hash agrees with Eq. ──────────────────────────────────────────────
+    // ── DISCRIMINATING: Eq and Ord are CONSISTENT — SemVer precedence ignores
+    //    build metadata, so BOTH ignore it: equal iff Ordering::Equal, and Hash
+    //    agrees with Eq. ─────────────────────────────────────────────────────
     #[test]
     fn equality_and_hash_are_consistent_with_ordering() {
         use std::cmp::Ordering;
-        let a = TsgoVersion::parse("7.0.2+build.1").unwrap();
-        let b = TsgoVersion::parse("7.0.2+build.2").unwrap();
-        let bare = TsgoVersion::parse("7.0.2").unwrap();
+        let a = v("7.1.2+build.1");
+        let b = v("7.1.2+build.2");
+        let bare = v("7.1.2");
         assert_eq!(
             a.cmp(&b),
             Ordering::Equal,
@@ -683,129 +662,179 @@ mod tests {
         );
         assert_eq!(a, b, "Eq must ignore build metadata exactly like Ord");
         assert_eq!(a, bare);
-        assert!(a != TsgoVersion::parse("7.0.3").unwrap());
+        assert!(a != v("7.1.3"));
         assert!(
-            a != TsgoVersion::parse("7.0.2-rc.1+build.1").unwrap(),
+            a != v("7.1.2-rc.1+build.1"),
             "prerelease still discriminates equality"
         );
-        // Hash agrees with Eq (build metadata is not hashed).
         let mut set = std::collections::HashSet::new();
         set.insert(a.clone());
         assert!(set.contains(&b), "equal values must hash equally");
         assert!(set.contains(&bare));
     }
 
-    // ── the supported-window constants ─────────────────────────────────────
+    // ── the pin and the line ───────────────────────────────────────────────
 
+    // ── DISCRIMINATING: the three literals the module spells stay coherent —
+    //    the line is the pin's `major.minor`, the ceiling is the next minor,
+    //    and the label and the cache-policy id are built from them. ──────────
     #[test]
-    fn policy_constants_pin_the_stable_7_0_window() {
+    fn pin_line_and_ceiling_are_coherent() {
+        let pin = pinned_version();
+        assert_eq!(pin.to_string(), TYPESCRIPT_PIN);
         assert_eq!(
-            BUNDLED_TSGO_VERSION,
-            TsgoVersion::new(7, 0, 2),
-            "the bundled offline floor is pinned to 7.0.2"
+            typescript_line!(),
+            format!("{}.{}", pin.major, pin.minor),
+            "the line is the pin's major.minor"
         );
-        assert_eq!(SUPPORTED_TSGO_RANGE_MIN, TsgoVersion::new(7, 0, 2));
         assert_eq!(
-            SUPPORTED_TSGO_RANGE_MAX_EXCLUSIVE,
-            TsgoVersion::new(7, 1, 0)
+            *supported_range_ceiling(),
+            TsgoVersion::new(pin.major, pin.minor + 1, 0),
+            "the ceiling is the pin's next minor"
         );
-        assert!(
-            SUPPORTED_TSGO_RANGE_LABEL.contains(">=7.0.2")
-                && SUPPORTED_TSGO_RANGE_LABEL.contains("<7.1.0"),
-            "the range label must state the window for diagnostics: {SUPPORTED_TSGO_RANGE_LABEL}"
+        assert_eq!(
+            SUPPORTED_TSGO_RANGE_LABEL,
+            format!(">={TYPESCRIPT_PIN}, <{}", supported_range_ceiling())
+        );
+        assert_eq!(
+            SUPPORTED_POLICY_ID,
+            format!("ts{}.{}", pin.major, pin.minor)
         );
     }
 
-    // ── DISCRIMINATING: the bundled floor ALWAYS satisfies the production
-    //    policy (the shipped offline fallback can never be self-refusing). ──
+    // ── DISCRIMINATING: the pin is the workspace `typescript` devDependency —
+    //    the version `pnpm install` actually provisions. ───────────────────────
     #[test]
-    fn bundled_version_always_satisfies_production_policy() {
+    fn pin_matches_the_workspace_typescript_dev_dependency() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../package.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let root: serde_json::Value = serde_json::from_str(&text).expect("parse package.json");
+        assert_eq!(
+            root["devDependencies"]["typescript"].as_str(),
+            Some(TYPESCRIPT_PIN),
+            "the workspace `typescript` devDependency must be TYPESCRIPT_PIN \
+             (move both with `node scripts/typescript-pin.mjs --set <version>`)"
+        );
+    }
+
+    // ── DISCRIMINATING: the pin (the shipped offline sidecar) ALWAYS satisfies
+    //    the production policy — the fallback can never be self-refusing. ───
+    #[test]
+    fn pin_always_satisfies_production_policy() {
         VersionPolicy::production()
-            .check(&BUNDLED_TSGO_VERSION)
-            .expect("the bundled floor must qualify under the production policy");
-        assert!(BUNDLED_TSGO_VERSION >= SUPPORTED_TSGO_RANGE_MIN);
-        assert!(BUNDLED_TSGO_VERSION < SUPPORTED_TSGO_RANGE_MAX_EXCLUSIVE);
-        assert!(BUNDLED_TSGO_VERSION.is_stable());
+            .check(pinned_version())
+            .expect("the pin must qualify under the production policy");
+        assert!(pinned_version() < supported_range_ceiling());
     }
 
-    // ── DISCRIMINATING: production accepts stable 7.0.x patches at/above the
-    //    floor — the auto-accept-patch contract. ─────────────────────────────
+    // ── DISCRIMINATING: stable releases on the line at or after the pin
+    //    qualify — the auto-accept-patch contract. ───────────────────────────
     #[test]
-    fn production_accepts_stable_patches_in_range() {
+    fn production_accepts_stable_releases_on_the_line() {
         let policy = VersionPolicy::production();
-        for v in ["7.0.2", "7.0.3", "7.0.9", "7.0.13", "7.0.99"] {
-            let parsed = TsgoVersion::parse(v).unwrap();
+        for patch in [0, 1, 2, 9, 13, 99] {
+            let candidate = v(&on_line(patch));
+            if candidate < *pinned_version() {
+                continue;
+            }
             assert!(
-                policy.check(&parsed).is_ok(),
-                "stable patch `{v}` must qualify"
+                policy.check(&candidate).is_ok(),
+                "stable `{candidate}` on the line must qualify"
             );
         }
     }
 
-    // ── DISCRIMINATING: production refuses versions below the floor and
-    //    outside the supported minor/major — with DISTINCT reasons. ─────────
+    // ── DISCRIMINATING: beta/rc builds of the pin's core at or after the pin
+    //    qualify; the same channels on any other core do not. ─────────────────
     #[test]
-    fn production_rejects_below_floor_and_out_of_range() {
+    fn production_admits_only_pinned_core_beta_and_rc() {
         let policy = VersionPolicy::production();
-        for v in ["7.0.0", "7.0.1", "6.9.9", "0.0.1"] {
-            let parsed = TsgoVersion::parse(v).unwrap();
-            assert!(
-                matches!(
-                    policy.check(&parsed),
-                    Err(PolicyRejection::BelowSupportedFloor { .. })
-                ),
-                "`{v}` is below the 7.0.2 floor"
+        let pin = pinned_version();
+        let core = format!("{}.{}.{}", pin.major, pin.minor, pin.patch);
+        for suffix in ["beta", "beta.2", "rc", "rc.1", "rc.10"] {
+            let candidate = v(&format!("{core}-{suffix}"));
+            let expected = candidate >= *pin;
+            assert_eq!(
+                policy.check(&candidate).is_ok(),
+                expected,
+                "`{candidate}`: admitted iff at or after the pin `{pin}`"
             );
         }
-        for v in ["7.1.0", "7.1.2", "7.2.0", "8.0.0", "9.3.1"] {
-            let parsed = TsgoVersion::parse(v).unwrap();
-            assert!(
-                matches!(
-                    policy.check(&parsed),
-                    Err(PolicyRejection::OutOfSupportedRange { .. })
-                ),
-                "`{v}` is outside the supported 7.0 window"
-            );
-        }
+        let next_patch = format!("{}.{}.{}-rc", pin.major, pin.minor, pin.patch + 1);
+        assert!(
+            matches!(
+                policy.check(&v(&next_patch)),
+                Err(PolicyRejection::Prerelease {
+                    channel: PrereleaseChannel::ReleaseCandidate,
+                    ..
+                })
+            ),
+            "an rc of a later patch is not the pinned build"
+        );
     }
 
-    // ── DISCRIMINATING: production refuses EVERY prerelease channel — rc,
-    //    beta, alpha, nightly — even when the core is in range. This is the
-    //    removed production RC/nightly acceptance: these used to qualify. ────
+    // ── DISCRIMINATING: production refuses nightlies, alphas and unknown
+    //    channels even on the pin's core, and earlier-minor prereleases. ────
     #[test]
-    fn production_rejects_all_prerelease_channels() {
+    fn production_rejects_other_prerelease_channels() {
         let policy = VersionPolicy::production();
+        let pin = pinned_version();
+        let core = format!("{}.{}.{}", pin.major, pin.minor, pin.patch);
         let cases = [
-            ("7.0.2-rc", PrereleaseChannel::ReleaseCandidate),
-            ("7.0.2-rc.1", PrereleaseChannel::ReleaseCandidate),
-            ("7.0.1-rc", PrereleaseChannel::ReleaseCandidate),
-            ("7.1.0-rc", PrereleaseChannel::ReleaseCandidate),
-            ("7.0.2-beta", PrereleaseChannel::Beta),
-            ("7.0.2-beta.3", PrereleaseChannel::Beta),
-            ("7.0.2-alpha", PrereleaseChannel::Alpha),
-            ("7.0.0-dev.20260703.1", PrereleaseChannel::Nightly),
-            ("7.0.0-dev.20260604.1", PrereleaseChannel::Nightly),
-            ("7.0.2-insiders", PrereleaseChannel::Other),
+            (format!("{core}-dev.20261022.1"), PrereleaseChannel::Nightly),
+            (format!("{core}-alpha"), PrereleaseChannel::Alpha),
+            (format!("{core}-insiders"), PrereleaseChannel::Other),
         ];
-        for (v, channel) in cases {
-            let parsed = TsgoVersion::parse(v).unwrap();
-            match policy.check(&parsed) {
+        for (candidate, channel) in cases {
+            match policy.check(&v(&candidate)) {
                 Err(PolicyRejection::Prerelease { channel: got, .. }) => {
-                    assert_eq!(got, channel, "wrong channel classification for `{v}`");
+                    assert_eq!(
+                        got, channel,
+                        "wrong channel classification for `{candidate}`"
+                    );
                 }
-                other => panic!("`{v}` must be a Prerelease rejection, got {other:?}"),
+                other => panic!("`{candidate}` must be a Prerelease rejection, got {other:?}"),
             }
         }
     }
 
+    // ── DISCRIMINATING: production refuses releases before the pin and
+    //    versions past the line — with DISTINCT reasons. ─────────────────────
+    #[test]
+    fn production_rejects_below_floor_and_out_of_range() {
+        let policy = VersionPolicy::production();
+        let pin = pinned_version();
+        let previous_minor = format!("{}.{}.9", pin.major, pin.minor - 1);
+        for candidate in [previous_minor.as_str(), "6.9.9", "0.0.1"] {
+            assert!(
+                matches!(
+                    policy.check(&v(candidate)),
+                    Err(PolicyRejection::BelowSupportedFloor { .. })
+                ),
+                "`{candidate}` is below the pin"
+            );
+        }
+        let ceiling = supported_range_ceiling().to_string();
+        let past = format!("{}.{}.3", pin.major, pin.minor + 1);
+        for candidate in [ceiling.as_str(), past.as_str(), "8.0.0", "9.3.1"] {
+            assert!(
+                matches!(
+                    policy.check(&v(candidate)),
+                    Err(PolicyRejection::OutOfSupportedRange { .. })
+                ),
+                "`{candidate}` is past the supported line"
+            );
+        }
+    }
+
     // ── DISCRIMINATING: build metadata is an unverified build and is refused
-    //    even when the core is an in-range stable patch. ─────────────────────
+    //    even on an otherwise admitted version. ─────────────────────────────
     #[test]
     fn production_rejects_build_metadata() {
-        let policy = VersionPolicy::production();
-        let parsed = TsgoVersion::parse("7.0.2+build.5").unwrap();
+        let candidate = v(&format!("{TYPESCRIPT_PIN}+build.5"));
         assert!(matches!(
-            policy.check(&parsed),
+            VersionPolicy::production().check(&candidate),
             Err(PolicyRejection::BuildMetadata { .. })
         ));
     }
@@ -814,123 +843,43 @@ mod tests {
     //    naming the input, never a panic or a silent default. ───────────────
     #[test]
     fn check_str_surfaces_malformed_input_as_typed_rejection() {
-        let policy = VersionPolicy::production();
-        match policy.check_str("7.0") {
-            Err(PolicyRejection::Malformed { input, .. }) => assert_eq!(input, "7.0"),
+        match VersionPolicy::production().check_str("7.1") {
+            Err(PolicyRejection::Malformed { input, .. }) => assert_eq!(input, "7.1"),
             other => panic!("expected Malformed, got {other:?}"),
         }
     }
 
-    // ── DISCRIMINATING: the DEV-ONLY override re-admits integer-handle
-    //    nightlies ONLY — never rc/beta, never pre-flip string-handle
-    //    nightlies, never out-of-range cores. ────────────────────────────────
-    #[test]
-    fn dev_override_admits_only_integer_handle_nightlies() {
-        let policy = VersionPolicy::with_dev_nightly_override();
-        assert!(policy.allows_dev_nightly());
-
-        // Integer-handle nightlies (at/after the wire flip) qualify.
-        for v in [
-            "7.0.0-dev.20260604.1",
-            "7.0.0-dev.20260703.1",
-            "7.0.0-dev.20270101.42",
-        ] {
-            let parsed = TsgoVersion::parse(v).unwrap();
-            assert!(
-                policy.check(&parsed).is_ok(),
-                "integer-handle nightly `{v}` must qualify under the dev override"
-            );
-        }
-
-        // A pre-flip nightly speaks the STRING-handle wire: still refused.
-        let pre_flip = TsgoVersion::parse("7.0.0-dev.20260603.1").unwrap();
-        assert!(matches!(
-            policy.check(&pre_flip),
-            Err(PolicyRejection::Prerelease {
-                channel: PrereleaseChannel::Nightly,
-                ..
-            })
-        ));
-
-        // The override is NOT a general prerelease/range bypass.
-        for v in [
-            "7.0.2-rc",
-            "7.0.2-rc.1",
-            "7.0.2-beta",
-            "7.0.1",
-            "7.1.0",
-            "8.0.0",
-            "7.0.2+build.1",
-        ] {
-            let parsed = TsgoVersion::parse(v).unwrap();
-            assert!(
-                policy.check(&parsed).is_err(),
-                "`{v}` must stay refused under the dev override"
-            );
-        }
-    }
-
-    #[test]
-    fn production_policy_disallows_dev_nightly() {
-        assert!(!VersionPolicy::production().allows_dev_nightly());
-    }
-
     // ── DISCRIMINATING: rejection diagnostics are ACTIONABLE — they name the
-    //    offending version, the supported window, the stable-only rule, and
-    //    (for nightlies) the dev override knob. ──────────────────────────────
+    //    offending version, the supported window and the pin to install. ──
     #[test]
     fn rejection_messages_are_actionable() {
         let policy = VersionPolicy::production();
+        let pin = pinned_version();
 
-        let err = policy
-            .check(&TsgoVersion::parse("7.1.0").unwrap())
-            .expect_err("out of range");
-        let msg = err.to_string();
-        assert!(msg.contains("7.1.0"), "names the version: {msg}");
-        assert!(msg.contains(">=7.0.2, <7.1.0"), "names the window: {msg}");
-        assert!(msg.contains("stable"), "states the stable-only rule: {msg}");
-
-        let err = policy
-            .check(&TsgoVersion::parse("7.0.1").unwrap())
-            .expect_err("below floor");
-        let msg = err.to_string();
-        assert!(msg.contains("7.0.1"), "names the version: {msg}");
-        assert!(msg.contains("7.0.2"), "names the floor: {msg}");
-
-        let err = policy
-            .check(&TsgoVersion::parse("7.0.2-rc.1").unwrap())
-            .expect_err("rc refused");
-        let msg = err.to_string();
-        assert!(msg.contains("7.0.2-rc.1"), "names the version: {msg}");
-        assert!(msg.contains("stable"), "states the stable-only rule: {msg}");
-
-        let err = policy
-            .check(&TsgoVersion::parse("7.0.0-dev.20260703.1").unwrap())
-            .expect_err("nightly refused in production");
-        let msg = err.to_string();
+        let past = format!("{}.{}.0", pin.major, pin.minor + 1);
+        let msg = policy
+            .check(&v(&past))
+            .expect_err("out of range")
+            .to_string();
+        assert!(msg.contains(&past), "names the version: {msg}");
         assert!(
-            msg.contains("7.0.0-dev.20260703.1"),
-            "names the version: {msg}"
+            msg.contains(SUPPORTED_TSGO_RANGE_LABEL),
+            "names the window: {msg}"
         );
-        assert!(
-            msg.contains(DEV_NIGHTLY_OVERRIDE_ENV),
-            "points at the dev-only override knob: {msg}"
-        );
-    }
+        assert!(msg.contains(TYPESCRIPT_PIN), "names the pin: {msg}");
 
-    // ── env-gated override construction (the env var itself is never mutated
-    //    in tests; from_env only READS). ─────────────────────────────────────
-    #[test]
-    fn from_env_mirrors_production_unless_the_override_var_is_set() {
-        // With the var unset (the normal test environment) from_env IS the
-        // production policy. If a dev shell exports the override, from_env
-        // must mirror the override instead — either way it must equal one of
-        // the two explicit constructors.
-        let from_env = VersionPolicy::from_env();
-        let expected = match std::env::var(DEV_NIGHTLY_OVERRIDE_ENV).as_deref() {
-            Ok("1") => VersionPolicy::with_dev_nightly_override(),
-            _ => VersionPolicy::production(),
-        };
-        assert_eq!(from_env, expected);
+        let below = format!("{}.{}.9", pin.major, pin.minor - 1);
+        let msg = policy
+            .check(&v(&below))
+            .expect_err("below floor")
+            .to_string();
+        assert!(msg.contains(&below), "names the version: {msg}");
+        assert!(msg.contains(TYPESCRIPT_PIN), "names the floor: {msg}");
+
+        let nightly = format!("{}.{}.{}-dev.20261022.1", pin.major, pin.minor, pin.patch);
+        let msg = policy.check(&v(&nightly)).expect_err("nightly").to_string();
+        assert!(msg.contains(&nightly), "names the version: {msg}");
+        assert!(msg.contains("nightly"), "names the channel: {msg}");
+        assert!(msg.contains(TYPESCRIPT_PIN), "names the pin: {msg}");
     }
 }

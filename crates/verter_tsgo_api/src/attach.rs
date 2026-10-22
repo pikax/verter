@@ -538,13 +538,13 @@ impl TsgoAttach<Owned> {
         conn: &JsonRpcConnection,
         root_uri: &str,
     ) -> TsgoApiResult<GateClearance> {
-        Self::lsp_handshake_with_policy(conn, root_uri, &VersionPolicy::from_env()).await
+        Self::lsp_handshake_with_policy(conn, root_uri, &VersionPolicy::production()).await
     }
 
     /// The policy-explicit handshake-half (crate-internal): the toolchain
     /// validator injects its own [`VersionPolicy`] so the in-band gate and the
     /// provisioning policy cannot disagree. [`TsgoAttach::lsp_handshake`]
-    /// delegates here with the env-derived policy.
+    /// delegates here with the production policy.
     pub(crate) async fn lsp_handshake_with_policy(
         conn: &JsonRpcConnection,
         root_uri: &str,
@@ -581,7 +581,7 @@ impl TsgoAttach<Owned> {
     /// initialized, and a second Verter-originated `initialize` would be a
     /// protocol violation — use [`TsgoAttach::attach_to_initialized`] instead.
     pub async fn attach_over(lsp: TsgoLspConnection, root_uri: &str) -> TsgoApiResult<Self> {
-        Self::attach_over_with_policy(lsp, root_uri, &VersionPolicy::from_env()).await
+        Self::attach_over_with_policy(lsp, root_uri, &VersionPolicy::production()).await
     }
 
     /// The policy-explicit owned composer (crate-internal): like

@@ -158,7 +158,7 @@ impl PreparedEngine {
         let cwd = cwd.to_path_buf();
         let held = Arc::clone(&held_stderr);
         let preparation = runtime.spawn(async move {
-            let validator = crate::toolchain::validation::ProcessValidator::from_env()
+            let validator = crate::toolchain::validation::ProcessValidator::production()
                 .holding_stderr(Arc::clone(&held));
             let provisional =
                 crate::toolchain::discovery::resolve_provisional(&request, &validator)
