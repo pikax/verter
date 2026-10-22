@@ -2,6 +2,8 @@
 //! runs work: the concrete scheduler, the workspace, the semantic engine and
 //! the session.
 //!
+//! - [`blocking`]: the external-boundary driver that runs a pollable
+//!   computation to completion on a synchronous caller's thread.
 //! - [`tasks`]: execution task identity, producer ownership and the
 //!   wait-for graph that refuses cycles. One [`tasks::TaskRegistry`] is one
 //!   cycle authority; layers whose producers may wait on one another share
@@ -21,6 +23,7 @@
 #[macro_use]
 extern crate verter_debug_assert;
 
+pub mod blocking;
 pub mod cancellation;
 pub mod pool_size;
 pub mod request_context;

@@ -84,7 +84,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::sync::Arc;
-use std::task::{Poll, Wake, Waker};
+use std::task::{Poll, Waker};
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -286,24 +286,6 @@ thread_local! {
 /// no producer woke it.
 const PARK_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
 
-/// Wakes the thread that created it: the waker a blocking drive polls with.
-struct UnparkThread(std::thread::Thread);
-
-impl Wake for UnparkThread {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
-    }
-}
-
-thread_local! {
-    /// This thread's blocking-drive waker, built once per thread.
-    static PARK_WAKER: Waker = Waker::from(Arc::new(UnparkThread(std::thread::current())));
-}
-
 /// Marks a drive as running for its extent, unwinding included.
 struct DriveScope;
 
@@ -321,16 +303,10 @@ impl Drop for DriveScope {
 }
 
 /// Poll `poll` to completion on this thread, parking it whenever the poll is
-/// pending until the producer it waits on wakes it.
-pub(crate) fn block_on<T>(mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
-    PARK_WAKER.with(|waker| loop {
-        match poll(waker) {
-            Poll::Ready(outcome) => return outcome,
-            // Timed parking keeps a stop observable while the producer has
-            // not woken this thread.
-            Poll::Pending => std::thread::park_timeout(PARK_SLICE),
-        }
-    })
+/// pending until the producer it waits on wakes it. Parking is timed so a
+/// stop stays observable while the producer has not woken this thread.
+pub(crate) fn block_on<T>(poll: impl FnMut(&Waker) -> Poll<T>) -> T {
+    verter_execution::blocking::block_on(Some(PARK_SLICE), poll)
 }
 
 /// Whether a drive is running on this thread: a synchronous entry reached
