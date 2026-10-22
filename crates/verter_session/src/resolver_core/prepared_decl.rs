@@ -1718,8 +1718,8 @@ pub fn build_prepared_type_decl_cache(
     // are resolvable by bare name through `prepare_local_type_decl`'s global
     // fallback, so they need a prepared-decl slot even though they never enter
     // the file surface. (A name that IS a file symbol already has a slot and
-    // takes precedence; the global member it shadows takes the owner's
-    // global-augmentation slot.)
+    // takes precedence, as does an import of the name; the global member
+    // either shadows takes the owner's global-augmentation slot.)
     // A `declare module "…"` block's type prepares through the same
     // fallback when it is the one block declaring the name.
     for (scope, key) in state.augmentation_type_decl_keys() {
@@ -1730,10 +1730,10 @@ pub fn build_prepared_type_decl_cache(
                     == Some(scope.clone())
             }
         };
-        if !addressable || state.is_import_local_in(key.owner, key.name.as_ref()) {
+        if !addressable {
             continue;
         }
-        let key = if state.has_type_symbol_in(key.owner, key.name.as_ref()) {
+        let key = if state.binds_module_scope_type_in(key.owner, key.name.as_ref()) {
             if !matches!(
                 scope,
                 verter_session_query::declarations::AugmentationScopeKind::Global

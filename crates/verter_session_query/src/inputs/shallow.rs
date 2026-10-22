@@ -1226,6 +1226,15 @@ impl ShallowInputAssembly {
             .contains_key(&DeclBindingKey::new(owner, name))
     }
 
+    /// Whether `owner`'s module scope binds the type name `name` itself — a
+    /// type declaration or an import — so the owner's `declare global`
+    /// contribution of the name is addressed by its global-augmentation
+    /// scope ([`TopLevelOwnerId::global_augmentation`]), never by the
+    /// module-scope identity.
+    pub fn binds_module_scope_type_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
+        self.has_type_symbol_in(owner, name) || self.is_import_local_in(owner, name)
+    }
+
     /// Get the import target for a local import name.
     pub fn import_target(&self, local_name: &str) -> Option<&ImportTarget> {
         self.import_target_in(TopLevelOwnerId::ordinary_file(), local_name)

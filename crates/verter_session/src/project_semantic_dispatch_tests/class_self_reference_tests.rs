@@ -402,6 +402,56 @@ export type First = LocalBox['local'];";
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A module whose `declare global` block contributes to a global its own
+/// import names (`import type { Box }` beside `declare global { interface
+/// Box … }`) still contributes: the import names the imported type in the
+/// module, the block the global. A reader in another module reads the
+/// global's member, cold and warm, exactly as when the import is renamed;
+/// the module's own `Box` stays the imported one. TypeScript answers
+/// `Box['first']` `2`, the reader's `read` return `2` and `Mine` `1` in
+/// every row.
+#[test]
+fn an_imported_namesake_does_not_hide_a_modules_global_contribution() {
+    use super::checker_probe_lane_tests::{mismatches_on_host, probe_host, ProbeProject};
+    let local = "export interface Box { local: 1 }";
+    let imported = "import type { Box } from './local';
+declare global { interface Box { first: 2 } }
+export type Mine = Box['local'];";
+    let renamed = "import type { Box as LocalBox } from './local';
+declare global { interface Box { first: 2 } }
+export type Mine = LocalBox['local'];";
+    let reader = "declare const v: Box['first'];
+export function read() { return v; }";
+    let importer = "import type { Mine } from './a';";
+    let global_rows = [
+        ("Box['first']", "2"),
+        ("ReturnType<typeof read>", "2"),
+        ("Box['first']", "2"),
+        ("ReturnType<typeof read>", "2"),
+    ];
+    let local_rows = [("Mine", "1"), ("Mine", "1")];
+    let mut failures = Vec::new();
+    for (label, augmenting) in [("imported namesake", imported), ("renamed import", renamed)] {
+        let files = [("local.ts", local), ("a.ts", augmenting)];
+        let project = ProbeProject {
+            files: &files,
+            ..Default::default()
+        };
+        for (role, source, rows) in [
+            ("global reader", reader, &global_rows[..]),
+            ("importer", importer, &local_rows[..]),
+        ] {
+            let host = probe_host(project);
+            failures.extend(
+                mismatches_on_host(&host, project, source, rows)
+                    .into_iter()
+                    .map(|failure| format!("{label}, {role}: {failure}")),
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A module's OWN `interface ThisType` — not in `declare global`, beside a
 /// global one in one library or in two, or beside its own `declare global`
 /// one — is a different symbol from the global marker: the literal's
