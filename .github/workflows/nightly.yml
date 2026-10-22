@@ -171,6 +171,10 @@ jobs:
         run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      # The LSP nextest-policy test asks nextest itself which tests the
+      # repository's nextest configuration serializes and times out.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Generate coverage
         env:
           VERTER_REQUIRE_TSGO: "1"

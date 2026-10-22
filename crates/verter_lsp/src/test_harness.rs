@@ -606,6 +606,7 @@ impl TestSessionBuilder {
             workspace_id,
             kind: self.kind,
             carrier_store_dir: session_carrier_store_dir,
+            scratch_ordinal: next_scratch_ordinal(),
             skip_reason: std::sync::Mutex::new(None),
             _drain_handle: drain_handle,
             _provider_process_permit: provider_process_permit,
@@ -650,6 +651,9 @@ pub(crate) struct RealProviderTestSession {
     /// [`Self::shutdown`]. Both the spawned plugin (via `VERTER_CARRIER_STORE_DIR`)
     /// and the LSP-side publish backend resolve exactly this dir.
     carrier_store_dir: std::path::PathBuf,
+    /// Process-unique ordinal naming the files this session creates in the
+    /// staged fixture tree. See [`Self::scratch_relative`].
+    scratch_ordinal: u64,
     /// The session's DEGRADATION LEDGER: the reason the body stopped short of
     /// its assertions (cold provider warmup, an empty controlled result), or
     /// `None` when nothing degraded.
@@ -683,6 +687,18 @@ impl RealProviderTestSession {
     #[allow(dead_code)]
     pub(crate) fn carrier_store_dir(&self) -> &std::path::Path {
         &self.carrier_store_dir
+    }
+
+    /// A fixture-relative path, private to this session, for a file the body
+    /// creates in the staged fixture tree: `("src/matrix", "ts")` becomes
+    /// `src/matrix-<ordinal>.ts`.
+    ///
+    /// The staged tree is shared by every session over the same fixture in one
+    /// process, and `cargo test` runs sessions as concurrent threads of that
+    /// process. A fixed scratch name lets two concurrent sessions overwrite,
+    /// replace and delete each other's file mid-check.
+    pub(crate) fn scratch_relative(&self, stem: &str, extension: &str) -> String {
+        format!("{stem}-{}.{extension}", self.scratch_ordinal)
     }
 
     /// Returns `true` when this session uses TSGO.
@@ -1429,6 +1445,14 @@ pub(crate) fn unique_store_segment() -> String {
         "{version}-test-{pid}-{seq}-{nanos}",
         version = env!("CARGO_PKG_VERSION"),
     )
+}
+
+/// A process-monotonic ordinal for [`RealProviderTestSession::scratch_relative`].
+/// Each process stages its own fixture copy, so process-unique is sufficient.
+fn next_scratch_ordinal() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Run `build` with `segment` installed as the active carrier-store host-version
