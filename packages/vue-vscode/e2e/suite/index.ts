@@ -149,6 +149,10 @@ export async function run(): Promise<void> {
     if (!suiteAllowedForFixture(FIXTURE_NAME, rel)) {
       return false;
     }
+    // The teardown recording is what the launcher's reaping check reads, and every
+    // launch spawns its own server, so every launch loads it — whatever profile it
+    // runs and however narrowly `onlyPattern` selects.
+    if (path.basename(file) === "_teardown.test.js") return true;
     if (serverProfileForSuite(rel, baseProfile) !== runProfile) {
       return false;
     }

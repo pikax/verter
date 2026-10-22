@@ -89,6 +89,7 @@ describe("E2E deadline hierarchy", () => {
       "editorOwnedProjectHover",
       "editorOwnedSettle",
       "externalFileChangeSettle",
+      "lifecycleServerReplaced",
       "outOfTreeSettle",
       "outOfTreeStrictDiagnostic",
       "restartEntryDiagnostics",

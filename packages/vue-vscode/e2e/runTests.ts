@@ -29,6 +29,7 @@ import {
 } from "./lib/parityTestInventory";
 import { e2eRouteLabel, selectE2eRunRoutes, type E2eRoute } from "./lib/routeInventory";
 import { installFixtureDeps } from "./lib/fixtureDeps";
+import { assertOwnedProcessesReaped, ownedProcessFile } from "./lib/teardownOwnership";
 import {
   E2E_BASE_SERVER_PROFILE_ENV,
   E2E_SERVER_PROFILE_ENV,
@@ -38,7 +39,7 @@ import {
   serverProfilesForSuites,
   type E2eServerProfile,
 } from "./lib/serverProfiles";
-import { FIXTURE_SUITE_GLOBS } from "./lib/fixtureSuiteMap";
+import { FIXTURE_SUITE_GLOBS, suiteAllowedForFixture } from "./lib/fixtureSuiteMap";
 import {
   isProjectlessContractFixture,
   PROJECTLESS_CONTRACT_LOADED_FILES,
@@ -502,6 +503,7 @@ async function main() {
       // Delete any stale run summary before the run so a prior-run summary can
       // never false-green a current zero-exit crash that writes no fresh summary.
       clearRunArtifacts(logFile);
+      fs.rmSync(ownedProcessFile(logFile), { force: true });
       // The runner's profile is USER-scope, and several suites write WORKSPACE-scope
       // settings into `<fixture>/.vscode/settings.json` at runtime (the decorations
       // suite, `revealDefinition`). That file is gitignored, so it survives between
@@ -627,6 +629,14 @@ async function main() {
           // exit code is unreliable on some hosts.
           extensionHostError = error;
         }
+        // The editor has exited: whatever its Verter language server owned must be
+        // gone with it. A failing summary below still reports first.
+        const reapedCount = await assertOwnedProcessesReaped(logFile);
+        console.log(
+          reapedCount === undefined
+            ? "  Teardown reaping NOT verified: the extension host wrote no owned-process recording."
+            : `  Teardown reaped ${reapedCount} owned process(es).`,
+        );
         // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
         // on some hosts (Windows: VS Code can exit 0 even when the extension test run
         // rejected). The authoritative oracle is the run summary the mocha runner writes
@@ -647,13 +657,24 @@ async function main() {
         const allowedProductGapCanaries = parity
           ? knownProductGapCanariesForRoute(fixture, typeProvider)
           : undefined;
-        const requiredLoadedFiles = contract
+        // Every launch loads the teardown recording (the suite loader admits it under
+        // any profile), and each launch spawns its own server. A launch that loads it
+        // and produced none verified nothing: the host died before its root teardown
+        // ran. One that recorded nothing owned was never observing a server.
+        const teardownLoadsHere = suiteAllowedForFixture(fixture, "_teardown.test.js");
+        const routeLoadedFiles = contract
           ? [`frameworks/${contract.framework}/contract.test.js`]
           : projectlessContract
             ? PROJECTLESS_CONTRACT_LOADED_FILES
             : barrelRegression
               ? BARREL_REGRESSION_LOADED_FILES
               : parity?.loadedFiles;
+        // The teardown recording is loaded beside the route's own suites, so the exact
+        // loaded inventory names it too.
+        const requiredLoadedFiles =
+          routeLoadedFiles && teardownLoadsHere
+            ? [...routeLoadedFiles, "_teardown.test.js"]
+            : routeLoadedFiles;
         try {
           await enforceRunSummary(logFile, label, {
             expectedFixture: fixture,
@@ -678,6 +699,16 @@ async function main() {
             );
           }
           throw summaryError;
+        }
+        if (teardownLoadsHere && reapedCount === undefined) {
+          throw new Error(
+            `Route ${label} wrote no owned-process recording, so teardown reaping was not verified.`,
+          );
+        }
+        if (teardownLoadsHere && reapedCount === 0) {
+          throw new Error(
+            `Route ${label} recorded no owned Verter language server, so teardown reaping verified nothing.`,
+          );
         }
         if (extensionHostError) {
           console.warn(

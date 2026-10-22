@@ -12,13 +12,15 @@ const require = createRequire(import.meta.url);
 const { buildParityTestInventory } = require(
   join(packageRoot, "out-test", "e2e", "lib", "parityTestInventory.js"),
 );
+// 79 = 78 + `server-lifecycle.test.ts`, the real-host restart/crash/teardown
+// characterisation of the language-server lifecycle.
 // 78 = 77 + `projectless-contract.test.ts`, the exact provider-off contract
 // for no-config/single-file routes. The previous 77th suite was
 // `native-hover-default.test.ts`, the DEFAULT-configuration pin added
 // when `hover.test.ts` and `generic-attrs.test.ts` moved onto the
 // `verter-native-semantics` server profile. Adding a suite is a deliberate act,
 // which is exactly why this number is pinned rather than derived.
-const ACCEPTED_SUITE_COUNT = 78;
+const ACCEPTED_SUITE_COUNT = 79;
 // Includes generic slot inference with parent props shadowed by slot/loop locals.
 const ACCEPTED_PARITY_LITERAL_COUNT = 260;
 const ACCEPTED_MATRIX_CASE_COUNT = 74;

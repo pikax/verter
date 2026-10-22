@@ -114,6 +114,8 @@ export interface RestartSupervisorOptions {
   restart: () => Promise<boolean>;
   /** Terminal notification: recovery stopped, and here is how to retry by hand. */
   onGiveUp: (message: string) => void;
+  /** Automatic restart `attempt` was scheduled and is waiting out its backoff. */
+  onAutomaticAttempt?: (attempt: number, reason: string) => void;
   log: RestartLog;
   policy?: Partial<RestartPolicy>;
   timers?: RestartTimers;
@@ -245,6 +247,7 @@ export function createRestartSupervisor(options: RestartSupervisorOptions): Rest
           `Automatic language server restart ${attempts}/${policy.maxAutomaticRestarts} in ${delay / 1000}s (${reason}).`,
         );
         clearHealthReset();
+        options.onAutomaticAttempt?.(attempts, reason);
         await Promise.race([timers.sleep(delay), disposedSignal]);
         // The delay is the window this fails in: the extension can be disposed
         // while recovery sits in it, and a restart afterwards spawns a server

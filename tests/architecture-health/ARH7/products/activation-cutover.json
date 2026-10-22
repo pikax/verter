@@ -94,10 +94,14 @@
         "evidence": [
           {
             "file": "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts",
-            "test": "releases every subscription, status bar item and armed timer when a start attempt fails"
+            "test": "recovers a server that cannot start within the budget, then shows it stopped and releases everything on disposal"
+          },
+          {
+            "file": "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts",
+            "test": "shuts down an initial server whose start completed after disposal"
           }
         ],
-        "note": "a failed or disposed start attempt still cannot hand the workspace an ownerless server"
+        "note": "a failed start attempt recovers within its bounded budget and releases everything on disposal; a disposed start attempt still cannot hand the workspace an ownerless server"
       },
       {
         "concern": "stale/partial rejection",
