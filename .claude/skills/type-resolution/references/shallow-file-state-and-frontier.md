@@ -25,8 +25,6 @@ Populated once through the shared host ensure-path and cached in `FileArtifactSt
 
 **Budget contract** -- three domains with high ceilings (safety rails, not normal control flow):
 - `local_closure_steps`: 500 (same-file symbols per closure)
-- `frontier_symbol_visits`: 2000 (cross-file `(canonical_id, exported_name)` pairs)
-- `builder_expansion_steps`: 5000 (symbolic expansion steps)
 
 When a budget trips, the system returns a structured `BudgetExceededFailure` with domain, limit, actual count, and context -- never silently normalizes.
 

@@ -30,18 +30,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .check_wildcard_route_fanout(&self.fuse_budgets)
     }
 
-    /// Check imported-root fanout budget. Returns `true` if within budget.
+    /// Check imported-root fanout budget. Returns `true` if within budget; a trip marks the request result budget-partial so the truncated registry is never admitted warm.
     pub fn allow_imported_root(&mut self) -> bool {
-        !self
+        let tripped = self
             .fuse_state
-            .check_imported_root_fanout(&self.fuse_budgets)
+            .check_imported_root_fanout(&self.fuse_budgets);
+        if tripped {
+            verter_type_engine::request_context::mark_request_result_inference_budget_exceeded();
+        }
+        !tripped
     }
 
-    /// Check registry deepening fanout budget. Returns `true` if within budget.
+    /// Check registry deepening fanout budget. Returns `true` if within budget; a trip marks the request result budget-partial so the truncated registry is never admitted warm.
     pub fn allow_registry_deepening(&mut self) -> bool {
-        !self
+        let tripped = self
             .fuse_state
-            .check_registry_deepening_fanout(&self.fuse_budgets)
+            .check_registry_deepening_fanout(&self.fuse_budgets);
+        if tripped {
+            verter_type_engine::request_context::mark_request_result_inference_budget_exceeded();
+        }
+        !tripped
     }
 
     /// Whether any fuse has tripped.

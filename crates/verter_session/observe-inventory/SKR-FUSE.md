@@ -1,7 +1,9 @@
 # Retired request-work fuses
 
-No field, store, hook, counter or trace was added, and nothing optional
-changed, so nothing is gated behind `semantic-observe`. The rows below
+No field, store, hook, counter or trace was added. The frontier visit
+counter (`ResolutionCounters::frontier_symbol_visits`), now read only by tests, is
+OPTIONAL and compiled under `cfg(test)` only; the unread
+`builder_expansion_steps` budget and counter were removed. The rows below
 classify the state this change kept or rerouted.
 
 Removed outright, with no successor state: `FuseBudgets::projection_op_count`
@@ -22,7 +24,7 @@ nothing).
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | `FuseBudgets` wildcard-route, imported-root and registry-deepening fan-out rails and their `FuseState` counters | Component-meta route and registry fan-out refusal | REQUIRED-budget | One engine (one request) | `resolver_core/fuses` | always |
-| `FuseState::trips` | The `fuse_tripped` component-meta trace and `has_fuse_tripped` | REQUIRED-budget | One engine (one request) | `resolver_core/fuses` | always |
+| `FuseState::trips` | The `fuse_tripped` component-meta trace and `has_fuse_tripped` (observation only; refusals come from the fan-out checks, which mark the request result budget-partial on a trip) | OPTIONAL | One engine (one request) | `resolver_core/fuses` | always |
 
 ## verter_session
 

@@ -158,8 +158,6 @@ pub struct ShallowTypeView<'a> {
 pub struct ResolutionBudgets {
     /// Max local symbols visited during same-file closure.
     pub local_closure_steps: usize,
-    /// Max symbolic expansion steps in the builder.
-    pub builder_expansion_steps: usize,
 }
 
 impl Default for ResolutionBudgets {
@@ -168,9 +166,6 @@ impl Default for ResolutionBudgets {
             // Intentionally high: most files have <50 local types.
             // 500 covers even very large single-file type libraries.
             local_closure_steps: 500,
-            // Intentionally high: expansion is the costliest phase but
-            // the frontier already limits how much work reaches here.
-            builder_expansion_steps: 5000,
         }
     }
 }
@@ -181,8 +176,9 @@ impl Default for ResolutionBudgets {
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionCounters {
     pub local_closure_steps: u64,
+    /// Test-only visit tally; no production path reads it.
+    #[cfg(test)]
     pub frontier_symbol_visits: u64,
-    pub builder_expansion_steps: u64,
 }
 
 // ---------------------------------------------------------------------------

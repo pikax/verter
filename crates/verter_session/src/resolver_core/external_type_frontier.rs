@@ -290,7 +290,10 @@ impl ExternalTypeFrontier {
         let level: Vec<_> = self.current_level.drain(..).collect();
 
         for pending in level {
-            self.counters.frontier_symbol_visits += 1;
+            #[cfg(test)]
+            {
+                self.counters.frontier_symbol_visits += 1;
+            }
 
             let resolved = self.resolve_one(host, &pending);
 
