@@ -97,6 +97,11 @@ impl WakerSet {
 }
 
 impl TakenWakers {
+    /// Whether there are no registrations to deliver.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Wake every taken registration once.
     pub fn wake(self) {
         for (_, waker) in self.0 {

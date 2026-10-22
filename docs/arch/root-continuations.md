@@ -69,8 +69,52 @@ with a 2 ms slice so a stop stays observable.
   completion outlives the request that issued it. `CompletionSender::send`
   stays first-writer-wins. It wakes every registered subscription once,
   after releasing the slot's lock.
-- **Backpressure:** none. Submission backpressure belongs to the scheduler's
-  request inbox (see the inventory below).
+- **Scheduler lifecycle locks:** admission, stage completion, failure and
+  retirement publish their terminal state while holding the DAG lock, and
+  retain the taken wakers on that guard. The guard releases the DAG lock
+  before delivering them. Reset additionally defers delivery until its
+  serialization hold and driver join finish. State publication order and
+  first-writer semantics therefore stay intact without invoking a completion
+  callback inside those critical sections. Exclusively owned standalone DAGs
+  deliver immediately. If this scheduler's own driver re-enters an already
+  active reset, that reset retains the quiesce obligation and the driver
+  returns without waiting on its joiner. The exemption uses the exact driver
+  thread identity; another scheduler's driver still waits for the reset
+  barrier.
+- **Backpressure:** none at completion; admission has its own handoff below.
+
+### Scheduler request admission
+
+`Scheduler::begin_submit_request` returns an owned
+`SchedulerSubmission<CompletionSubscription<RequestResult>>`.
+`begin_submit_batch_atomic` returns the same handoff over a vector of
+subscriptions in input order. Neither the handoff nor its output exposes a
+blocking completion driver. Its only advancing operation is `poll(&mut self,
+&Waker)`.
+
+- **Backpressure:** a full inbox retains the whole submission (one item for
+  an atomic batch) and returns `Pending`, without draining the inbox or
+  executing a stage. The offer and registration share the capacity lock;
+  consumers take the registrations after dequeue and wake after unlock.
+- **Result and errors:** `Ready` transfers the completion subscription(s).
+  Inbox admission is distinct from stage completion; poll the subscriptions
+  separately. If shutdown rejects admission, those subscriptions are already
+  terminal with `Shutdown`. An empty batch returns an empty vector without
+  queue or submission accounting. Re-polling a completed admission panics.
+- **Lifetime and cancellation:** construction captures each request's file
+  lifetime using the same preparation as synchronous submission. The handoff
+  retains the scheduler and all unsubmitted inputs. Dropping it withdraws
+  only its own capacity registration and discards unsubmitted work. Once
+  admitted, dropping a completion subscription leaves sibling consumers and
+  the producer intact; request-context cancellation keeps its existing
+  scheduler semantics. Reset invalidates the captured file lifetime, so a
+  retained request cannot republish a retired incarnation after reset.
+- **External drivers:** `submit_request`, `submit_batch_atomic` and the
+  scheduler's internal synchronous sends drive the same admission state.
+  Only these compatibility drivers may drain an older inbox item to avoid
+  parking the sole consumer behind its own full queue. Stage execution stays
+  with the existing scheduler driver or an explicitly driven `drive_one`.
+  This handoff introduces no executor or pool.
 
 ### Declaration-lowering owner-shard handoffs
 
@@ -127,16 +171,16 @@ memo's flights do (`verter_type_engine::semantic_query_memo`).
 | --- | --- | --- | --- |
 | Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
 | Semantic task drive (`SemanticTask::drive`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
-| Artifact cache singleflight joiner (`cooperative_admit_impl`, untimed `wait_while`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | none |
-| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | none |
-| Resolver request singleflight follower (`SingleflightGroup::run_retaining`; thread-identity owner) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | none |
-| Store-view build park (`StoreViewManager::park_for_build`) | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | none |
-| Carrier publication lanes (`publish_or_get`, `await_stable_parse`; 5 ms timed condvar) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | none |
+| Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | private `SlotJoin::poll`; synchronous callers still drive it to completion |
+| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | same `SlotJoin::poll`; callers still synchronous |
+| Resolver request singleflight follower (`SingleflightGroup::run_retaining`; thread-identity owner) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | private owned `FlightJoin::poll`; callers still synchronous |
+| Store-view build park (`StoreViewManager::park_for_build`) | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | private `BuildRelease::poll`; callers still synchronous |
+| Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
 | Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `CompletionSubscription::poll` on the handle; the adapter still parks |
 | Batch upsert completion (`Scheduler::wait_batch`) | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
 | Scoped cache-node flight (`wait_for_scoped_cache_node`; 2 ms timed condvar plus a rayon `install`) | `verter_scheduler/src/scheduler/{identity,cancellation}.rs` | Vue macro codegen in compile and the Vue API projector | none |
-| Scheduler inbox submission (`send_submission`, bounded send when the inbox is full) | `verter_scheduler/src/scheduler/driver.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | none (the driver drains the inbox) |
-| Workspace import-resolution flight (`FlightSubscription::wait`; 5 ms timed condvar) | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` exists without a waker |
+| Scheduler inbox submission (`send_submission`) | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
+| Workspace import-resolution flight (`FlightSubscription::wait`) | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` registers a waker; callers still synchronous |
 | Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) | `verter_session/src/host_batch_coordinator.rs` | `compile_many`, `get_component_meta_batch` | none; the batch topology itself is the executor's to replace |
 
 The declaration-lowering waits that used to be on this list are now the

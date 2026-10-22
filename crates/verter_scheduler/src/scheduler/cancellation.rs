@@ -234,14 +234,15 @@ impl Scheduler {
     /// drained-but-unprocessed submission so the corresponding handles
     /// resolve instead of hanging. `Wake` / `StageComplete` carry no
     /// waiter sender and are dropped silently.
-    pub(super) fn shutdown_drained_submission(submission: Submission) {
+    pub(super) fn shutdown_drained_submission(&self, submission: Submission) {
         match submission {
             Submission::NewRequest { sender, .. } => {
-                sender.send(CompletionState::Shutdown);
+                self.dag.send_completion(&sender, CompletionState::Shutdown);
             }
             Submission::NewRequestBatch { requests } => {
                 for req in requests {
-                    req.sender.send(CompletionState::Shutdown);
+                    self.dag
+                        .send_completion(&req.sender, CompletionState::Shutdown);
                 }
             }
             Submission::ScopedCacheNode { flight, .. } => {

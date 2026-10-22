@@ -316,17 +316,30 @@ impl<T: Clone> CompletionSender<T> {
     /// handle while it was pending is woken once, after the slot's lock is
     /// released.
     pub fn send(&self, state: CompletionState<T>) -> bool {
+        let Some(wakers) = self.send_deferred(state) else {
+            return false;
+        };
+        wakers.wake();
+        true
+    }
+
+    /// Publish under an enclosing scheduler lock, retaining callback delivery
+    /// for that lock's owner. State publication and first-writer semantics are
+    /// identical to `send`; only polling wakes are deferred.
+    pub(crate) fn send_deferred(
+        &self,
+        state: CompletionState<T>,
+    ) -> Option<verter_execution::wake::TakenWakers> {
         let wakers = {
             let mut slot = self.inner.slot.lock();
             if slot.state.is_some() {
-                return false; // already signaled — enforce exactly-once
+                return None;
             }
             slot.state = Some(state);
             slot.wakers.take()
         };
         self.inner.condvar.notify_all();
-        wakers.wake();
-        true
+        Some(wakers)
     }
 
     /// Attach a [`CompletionTarget`] so cooperative-pump callers

@@ -2001,9 +2001,9 @@ struct FlightJoin<V, E> {
 }
 
 impl<V, E: Clone> FlightJoin<V, E> {
-    fn new(state: &Arc<FlightState<V, E>>) -> Self {
+    fn new(state: Arc<FlightState<V, E>>) -> Self {
         Self {
-            state: Arc::clone(state),
+            state,
             registration: verter_execution::wake::WakeRegistration::default(),
         }
     }
@@ -2368,7 +2368,7 @@ where
             // block above; a follower that finds it `Pending` is racing a
             // sibling about to claim leadership and waits for the terminal
             // like any other follower.
-            let mut join = FlightJoin::new(&state);
+            let mut join = FlightJoin::new(state);
             let terminal = verter_execution::blocking::block_on(None, |waker| {
                 let polled = join.poll(waker);
                 #[cfg(test)]
@@ -2379,10 +2379,9 @@ where
                 }
                 polled
             });
-            drop(join);
             match terminal {
                 FlightTerminal::Done(result) => {
-                    self.unpin(&lane_key, &state);
+                    self.unpin(&lane_key, &join.state);
                     return result.map(|value| SingleflightRunResult {
                         value,
                         role: SingleflightRole::Follower,
@@ -2398,7 +2397,7 @@ where
                     // becomes the fresh leader and runs its own `compute`;
                     // the rest join it). This is what keeps a leader-panic
                     // from wedging every follower forever.
-                    self.unpin(&lane_key, &state);
+                    self.unpin(&lane_key, &join.state);
                     continue 'reelect;
                 }
             }
@@ -3983,7 +3982,7 @@ mod tests {
             let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
             let (release, leader, state) = leader_in_compute(&group, retained);
             let (probe, waker) = flight_wake_probe(&group);
-            let mut join = FlightJoin::new(&state);
+            let mut join = FlightJoin::new(Arc::clone(&state));
             assert!(join.poll(&waker).is_pending());
             assert!(join.poll(&waker).is_pending());
             assert_eq!(
@@ -4011,8 +4010,8 @@ mod tests {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let (release, leader, state) = leader_in_compute(&group, true);
         let (probe, waker) = flight_wake_probe(&group);
-        let mut dropped = FlightJoin::new(&state);
-        let mut kept = FlightJoin::new(&state);
+        let mut dropped = FlightJoin::new(Arc::clone(&state));
+        let mut kept = FlightJoin::new(Arc::clone(&state));
         assert!(dropped.poll(&waker).is_pending());
         assert!(kept.poll(&waker).is_pending());
         drop(dropped);
@@ -4035,7 +4034,7 @@ mod tests {
             let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
             let (release, leader, state) = leader_in_compute(&group, round % 2 == 0);
             let (probe, waker) = flight_wake_probe(&group);
-            let mut join = FlightJoin::new(&state);
+            let mut join = FlightJoin::new(Arc::clone(&state));
             release.send(()).expect("release the leader");
             let answered_at_poll = join.poll(&waker).is_ready();
             leader.join().expect("the leader returns");
