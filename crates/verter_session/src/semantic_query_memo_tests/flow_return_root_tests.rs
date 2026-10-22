@@ -30,11 +30,15 @@ fn host_with(source: &str) -> Arc<VerterHost> {
 }
 
 fn identity() -> FlowFunctionReturnIdentity {
+    identity_of("makeProps")
+}
+
+fn identity_of(symbol: &str) -> FlowFunctionReturnIdentity {
     FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
             canonical_id: verter_type_expr::OwnedStr::from(FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: verter_type_expr::OwnedStr::from("makeProps"),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,
@@ -46,10 +50,18 @@ fn deliver(
     host: &VerterHost,
     cancellation: Option<CancellationToken>,
 ) -> Result<Arc<FlowReturnResult>, FlowReturnError> {
+    deliver_of(host, &identity(), cancellation)
+}
+
+fn deliver_of(
+    host: &VerterHost,
+    function: &FlowFunctionReturnIdentity,
+    cancellation: Option<CancellationToken>,
+) -> Result<Arc<FlowReturnResult>, FlowReturnError> {
     let demand = ReturnProjectionDemand::whole_return();
     let carrier = match cancellation {
-        Some(token) => host.get_flow_return_type_with_audit_cancellable(&identity(), demand, token),
-        None => host.get_flow_return_type_with_audit(&identity(), demand),
+        Some(token) => host.get_flow_return_type_with_audit_cancellable(function, demand, token),
+        None => host.get_flow_return_type_with_audit(function, demand),
     };
     carrier.into_parts().0
 }
@@ -91,6 +103,13 @@ fn a_cancelled_then_retried_return_materializes_like_a_fresh_host() {
     assert_eq!(retried.degradation(), None);
     assert_eq!(materialize(&host, &retried), fresh);
 
+    // The repeated delivery is the warm one: it hands back the node the
+    // retry computed, and materializes the same value.
+    let repeated = deliver(&host, None).expect("the repeat resolves");
+    assert_eq!(repeated.degradation(), None);
+    assert_eq!(repeated.return_type(), retried.return_type());
+    assert_eq!(materialize(&host, &repeated), fresh);
+
     let other = exact_value(STRING_RETURN);
     assert!(other.contains("\"b\""), "{other}");
     assert_ne!(other, fresh, "a different exact return differs");
@@ -122,16 +141,58 @@ fn an_undelivered_or_foreign_return_root_projects_nothing() {
     assert!(other.project_node_to_type_expr_json_bytes(&root).is_none());
 }
 
-/// The held result keeps materializing the same value after the caches
-/// retire and the host closes, and the last holder's drop drains the node.
+/// Materializing a delivered return reads the node the lease already owns:
+/// with the memos retired it publishes no memo entry and interns no node (no
+/// second evaluation), and it leaves the graph's ownership exactly as it
+/// found it (no accounting of its own). A re-delivery, by contrast,
+/// evaluates and publishes.
 #[test]
-fn a_held_return_materializes_after_retirement_and_close_then_drains() {
+fn materializing_a_return_evaluates_nothing_and_keeps_no_ownership() {
     let host = host_with(NUMBER_RETURN);
     let result = deliver(&host, None).expect("the return resolves");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    graph.invalidate_all();
+    assert_eq!(graph.memo_entry_count(), 0, "premise: no memo survives");
+    let allocated = graph.node_slot_count();
+    let owned = graph.node_ownership_counts();
+
+    for _ in 0..2 {
+        let value = materialize(&host, &result);
+        assert!(value.contains("\"a\""), "{value}");
+        assert_eq!(graph.memo_entry_count(), 0, "nothing was evaluated");
+        assert_eq!(graph.node_slot_count(), allocated, "no node was interned");
+        assert_eq!(
+            graph.node_ownership_counts(),
+            owned,
+            "ownership is unchanged"
+        );
+    }
+
+    let again = deliver(&host, None).expect("the re-delivery resolves");
+    assert!(graph.memo_entry_count() > 0, "a re-delivery evaluates");
+    assert_eq!(materialize(&host, &again), materialize(&host, &result));
+}
+
+/// The held result keeps materializing the same value after the caches
+/// retire and the host closes, the last holder's drop drains its node, and
+/// an unrelated reader is left live and readable.
+#[test]
+fn a_held_return_materializes_after_retirement_and_close_then_drains() {
+    let host = host_with(&format!(
+        "{NUMBER_RETURN}\nfunction makeOther() {{ return {{ c: true as boolean }} }}"
+    ));
+    let result = deliver(&host, None).expect("the return resolves");
     let before = materialize(&host, &result);
+    let unrelated =
+        deliver_of(&host, &identity_of("makeOther"), None).expect("the unrelated return resolves");
+    let unrelated_value = materialize(&host, &unrelated);
+    assert!(unrelated_value.contains("\"c\""), "{unrelated_value}");
+    assert_ne!(unrelated_value, before);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let reader = result.return_root().expect("an external reader's root");
     let node = reader.id();
+    let unrelated_node = unrelated.return_type();
+    assert_ne!(unrelated_node, node);
 
     graph.invalidate_all();
     assert_eq!(
@@ -149,4 +210,9 @@ fn a_held_return_materializes_after_retirement_and_close_then_drains() {
     );
     drop(reader);
     assert!(!graph.node_is_live(node), "the final release drains");
+    assert!(
+        graph.node_is_live(unrelated_node),
+        "the unrelated reader survives"
+    );
+    assert_eq!(materialize(&host, &unrelated), unrelated_value);
 }
