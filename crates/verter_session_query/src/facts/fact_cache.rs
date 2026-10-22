@@ -784,7 +784,7 @@ mod compaction_domain_tests {
 
     fn parse_fact() -> FactVersionRef {
         FactVersionRef::Parse(ParseFactRef {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::Export {
                 name: "Foo".into(),
                 space: SymbolSpace::Type,
@@ -796,7 +796,7 @@ mod compaction_domain_tests {
 
     fn semantic_import_fact() -> FactVersionRef {
         FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::Export {
                 name: "Foo".into(),
                 space: SymbolSpace::Type,
@@ -843,14 +843,14 @@ mod compaction_domain_tests {
         let rows: Vec<(FactVersionRef, CompactionDomain)> = vec![
             (
                 FactVersionRef::FileWholeHash {
-                    canonical_id: "/p/a.ts".to_string(),
+                    canonical_id: "/p/a.ts".into(),
                     hash: [0; 16],
                 },
                 CompactionDomain::Content,
             ),
             (
                 FactVersionRef::DerivedFactHash {
-                    canonical_id: "/p/a.ts".to_string(),
+                    canonical_id: "/p/a.ts".into(),
                     kind: DerivedFactKind::Route,
                     hash: [0; 16],
                 },
@@ -861,7 +861,7 @@ mod compaction_domain_tests {
             (resolution_fact(), CompactionDomain::Resolution),
             (
                 FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-                    canonical_id: "/p/a.ts".to_string(),
+                    canonical_id: "/p/a.ts".into(),
                     key: FactKey::Export {
                         name: "Foo".into(),
                         space: SymbolSpace::Type,
@@ -873,7 +873,7 @@ mod compaction_domain_tests {
             ),
             (
                 FactVersionRef::FileSourceEnv {
-                    canonical_id: "/p/a.ts".to_string(),
+                    canonical_id: "/p/a.ts".into(),
                     parse_env_hash: ParseEnvHash::from_env_hash([4; 16]),
                     parse_key: test_parse_key(1),
                     file_language_id: ts_language(),
@@ -896,7 +896,7 @@ mod compaction_domain_tests {
 
         assert_ne!(
             compaction_domain(&FactVersionRef::FileSourceEnv {
-                canonical_id: "/p/a.ts".to_string(),
+                canonical_id: "/p/a.ts".into(),
                 parse_env_hash: ParseEnvHash::from_env_hash([4; 16]),
                 parse_key: test_parse_key(1),
                 file_language_id: ts_language(),

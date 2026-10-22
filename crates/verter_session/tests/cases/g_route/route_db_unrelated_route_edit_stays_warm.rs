@@ -57,7 +57,7 @@ fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey
 /// post-edit tracer scope.
 fn original_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "orig_dep.ts".to_string(),
+        canonical_id: "orig_dep.ts".into(),
         hash: [0x44u8; 16],
     }
 }
@@ -76,7 +76,7 @@ fn original_route() -> RouteResult {
 /// invalidate the original entry by fact-signature membership.
 fn foreign_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "foreign_dep.ts".to_string(),
+        canonical_id: "foreign_dep.ts".into(),
         hash: [0x55u8; 16],
     }
 }

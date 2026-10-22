@@ -1667,7 +1667,7 @@ impl VerterHost {
             .facts
             .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
         Some(verter_session_query::facts::fact_cache::ParseFactRef {
-            canonical_id: canonical,
+            canonical_id: canonical.into(),
             key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
             lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: fact.semantic_hash,

@@ -323,7 +323,7 @@ impl VerterHost {
             Some(verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: fact_canonical,
                 ..
-            }) if fact_canonical == canonical_id => {
+            }) if **fact_canonical == *canonical_id => {
                 if view.tracks_file(fact_canonical) {
                     verter_audit::AuditEvent::PreparedDeclBundleRejectSelfRootHashMismatch
                 } else {
@@ -1312,7 +1312,7 @@ impl VerterHost {
             self.owner_import_route_witness_in::<M>(observation, canonical_id);
         let mut facts = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.to_string(),
+                canonical_id: canonical_id.into(),
                 hash: state.whole_hash,
             },
         ];
@@ -1523,7 +1523,7 @@ impl VerterHost {
         let whole_hash = facts.whole_hash;
         let mut fact_versions = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.to_string(),
+                canonical_id: canonical_id.into(),
                 hash: whole_hash,
             },
         ];
@@ -3136,7 +3136,7 @@ impl VerterHost {
             .or_else(|| known_shallow.map(|state| state.whole_hash));
         if let Some(hash) = whole_hash {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.to_string(),
+                canonical_id: canonical_id.into(),
                 hash,
             };
             if seen.insert(fact.clone()) {
@@ -3178,7 +3178,7 @@ impl VerterHost {
             .or_else(|| known_shallow.map(|state| state.whole_hash));
         if let Some(hash) = whole_hash {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.to_string(),
+                canonical_id: canonical_id.into(),
                 hash,
             };
             if seen.insert(fact.clone()) {
@@ -3225,7 +3225,7 @@ impl VerterHost {
             .facts
             .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
         Some(verter_session_query::facts::fact_cache::ParseFactRef {
-            canonical_id: canonical_id.to_string(),
+            canonical_id: canonical_id.into(),
             key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
             lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: fact.semantic_hash,
@@ -3292,7 +3292,7 @@ impl VerterHost {
                         if let Some(owner) = exact_owner {
                             let mut facts =
                                 vec![verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                                    canonical_id: dep_canonical.to_string(),
+                                    canonical_id: dep_canonical.into(),
                                     hash: source_data.parse.whole_hash,
                                 }];
                             // Cross-file ROUTE fact — recorded ONLY from an
@@ -3442,7 +3442,7 @@ impl VerterHost {
             &mut seen,
         );
         let target_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: normalized_target.clone(),
+            canonical_id: Arc::from(normalized_target.as_str()),
             hash: target_hash,
         };
         if seen.insert(target_fact.clone()) {

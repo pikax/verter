@@ -263,7 +263,7 @@ mod canary_warm_hit_zero_alloc {
 
     fn dummy_fact(canonical: &str, name: &str, expected_hash: HashValue) -> FactVersionRef {
         FactVersionRef::Parse(ParseFactRef {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             key: FactKey::Export {
                 name: name.into(),
                 space: SymbolSpace::Type,
@@ -414,16 +414,16 @@ mod canary_signature_fingerprint_zero_alloc {
     fn all_variant_facts() -> Vec<FactVersionRef> {
         vec![
             FactVersionRef::FileWholeHash {
-                canonical_id: "/w/owner.vue".to_string(),
+                canonical_id: "/w/owner.vue".into(),
                 hash: [1u8; 16],
             },
             FactVersionRef::DerivedFactHash {
-                canonical_id: "/w/dep.ts".to_string(),
+                canonical_id: "/w/dep.ts".into(),
                 kind: DerivedFactKind::Route,
                 hash: [2u8; 16],
             },
             FactVersionRef::Parse(ParseFactRef {
-                canonical_id: "/w/parse.ts".to_string(),
+                canonical_id: "/w/parse.ts".into(),
                 key: FactKey::Export {
                     name: "Foo".into(),
                     space: SymbolSpace::Type,
@@ -432,7 +432,7 @@ mod canary_signature_fingerprint_zero_alloc {
                 expected_hash: [3u8; 16],
             }),
             FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-                canonical_id: "/w/imports.ts".to_string(),
+                canonical_id: "/w/imports.ts".into(),
                 key: FactKey::Export {
                     name: "Bar".into(),
                     space: SymbolSpace::Type,
@@ -441,7 +441,7 @@ mod canary_signature_fingerprint_zero_alloc {
                 expected_hash: [4u8; 16],
             }),
             FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-                canonical_id: "/w/route.ts".to_string(),
+                canonical_id: "/w/route.ts".into(),
                 key: FactKey::Export {
                     name: "Baz".into(),
                     space: SymbolSpace::Type,

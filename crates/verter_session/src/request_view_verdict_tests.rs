@@ -29,7 +29,7 @@ fn base_view() -> HostStoreView {
 
 fn whole(level: u8) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: format!("/r/{level}.ts"),
+        canonical_id: format!("/r/{level}.ts").into(),
         hash: [level; 16],
     }
 }
@@ -37,7 +37,7 @@ fn whole(level: u8) -> FactVersionRef {
 /// `/r/0.ts` as an older version recorded it; the overlay holds `[0; 16]`.
 fn stale_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "/r/0.ts".to_string(),
+        canonical_id: "/r/0.ts".into(),
         hash: [0xEE; 16],
     }
 }
@@ -165,7 +165,7 @@ fn a_retained_signature_answers_its_settled_verdict() {
     overlay.insert_whole_hash_for_tests("/stale.ts", [1; 16]);
     let mut facts: Vec<FactVersionRef> = (1..32).map(whole).collect();
     facts.push(FactVersionRef::FileWholeHash {
-        canonical_id: "/stale.ts".to_string(),
+        canonical_id: "/stale.ts".into(),
         hash: [2; 16],
     });
     let stale: Arc<[FactVersionRef]> = Arc::from(facts);
@@ -206,7 +206,7 @@ fn uncertain_torn_and_refused_failures_settle_nothing() {
 
     let live = ResultReceipt::new(vec![
         FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-            canonical_id: "/r/1.ts".to_string(),
+            canonical_id: "/r/1.ts".into(),
             key: FactKey::ProgramFileOrder {
                 program: Arc::from("/unpublished/tsconfig.json"),
             },
@@ -415,7 +415,7 @@ export type B = { y: string };
     let base = host.resolver_store_view_read().into_owned_view();
     for expected_hash in [[7; 16], [0; 16]] {
         let fact = ParseFactRef {
-            canonical_id: ID.to_string(),
+            canonical_id: ID.into(),
             key: FactKey::Export {
                 name: InternedName(Arc::from("B")),
                 space: SymbolSpace::Type,

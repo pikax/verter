@@ -43,7 +43,7 @@ impl StoreView for TestView {
 
 fn fact(canonical: &str, hash: u8) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: [hash; 16],
     }
 }

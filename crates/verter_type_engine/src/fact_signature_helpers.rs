@@ -834,7 +834,7 @@ pub fn observe_file_source_env_from_artifact_key<C: crate::resolver_core::Resolv
     let key = artifact_key?;
     let identity = ctx.source_environment(key);
     let fact = FactVersionRef::FileSourceEnv {
-        canonical_id: key.canonical.as_ref().to_owned(),
+        canonical_id: Arc::clone(&key.canonical),
         parse_env_hash: identity.parse_env_hash,
         parse_key: identity.parse_key,
         file_language_id: identity.file_language_id,
@@ -863,7 +863,7 @@ pub fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVersionRef
     sig.iter()
         .filter_map(|crate::semantic_query::DepEntry(canon, ver)| match ver {
             DepVersion::WholeHash(h) => Some(FactVersionRef::FileWholeHash {
-                canonical_id: canon.as_ref().to_string(),
+                canonical_id: Arc::from(canon.as_str()),
                 hash: *h,
             }),
             DepVersion::ProjectGeneration(generation) => Some(FactVersionRef::ProjectGeneration {
@@ -1045,7 +1045,7 @@ pub fn parse_fact_ref_for_observed_current_content<
 #[inline]
 fn observed_self_root_fact(canonical_id: &str, observed_hash: Hash16) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: canonical_id.to_string(),
+        canonical_id: canonical_id.into(),
         hash: observed_hash,
     }
 }
@@ -1326,7 +1326,7 @@ pub fn fact_signature_from_fence(
         match version {
             DepVersion::WholeHash(hash) => {
                 out.push(FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.as_ref().to_string(),
+                    canonical_id: Arc::from(canonical.as_str()),
                     hash: *hash,
                 });
             }
@@ -1424,7 +1424,7 @@ pub(crate) fn shared_completed_structural_carrier(
         let mut named = false;
         for fact in traced.iter() {
             if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-                if canonical_id.as_str() == canonical.as_ref() {
+                if &**canonical_id == canonical.as_ref() {
                     if hash != observed {
                         return None;
                     }
@@ -1467,11 +1467,11 @@ pub(crate) fn shared_completed_carrier_rooting_traced_files(
         if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
             if files
                 .last()
-                .is_some_and(|(last, _)| *last == canonical_id.as_str())
+                .is_some_and(|(last, _)| *last == &**canonical_id)
             {
                 return None;
             }
-            files.push((canonical_id.as_str(), hash));
+            files.push((&**canonical_id, hash));
         }
         index += 1;
     }
@@ -1518,7 +1518,7 @@ pub(crate) fn bound_completed_structural_carrier(
         for fact in signature_entries(&facts) {
             note_root_fact_visit();
             if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-                if let Some(observed) = root_hashes.get_mut(canonical_id.as_str()) {
+                if let Some(observed) = root_hashes.get_mut(&**canonical_id) {
                     observed.get_or_insert(*hash);
                 }
             }
@@ -1546,7 +1546,7 @@ pub(crate) fn bound_completed_structural_carrier(
             note_root_fact_visit();
             match fact {
                 FactVersionRef::FileWholeHash { canonical_id, .. } => {
-                    root_hashes.contains_key(canonical_id.as_str())
+                    root_hashes.contains_key(&**canonical_id)
                 }
                 _ => false,
             }
@@ -1697,7 +1697,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
         self.entries().any(|fact| match fact {
             FactVersionRef::FileWholeHash { canonical_id, .. } => self_root_canonicals
                 .iter()
-                .any(|root| root.as_ref() == canonical_id.as_str()),
+                .any(|root| root.as_ref() == &**canonical_id),
             _ => false,
         })
     }
@@ -1881,7 +1881,7 @@ pub fn engine_fact_signature_for_materialize_memo(
         "MaterializeScopeObservation must describe one internally-consistent source",
     );
 
-    if observed_scope_syntactic_export_set.canonical_id.as_str() != scope_canonical_id {
+    if &*observed_scope_syntactic_export_set.canonical_id != scope_canonical_id {
         // The supplied parse fact resolves to a DIFFERENT canonical
         // than the keyed scope — provenance is resolved (we have a
         // parse fact), just attributed to the wrong file. This is a
@@ -1895,7 +1895,7 @@ pub fn engine_fact_signature_for_materialize_memo(
     let mut entries = Vec::with_capacity(2 + materialized_dep_signature.len());
 
     entries.push(FactVersionRef::FileWholeHash {
-        canonical_id: scope_canonical_id.to_string(),
+        canonical_id: scope_canonical_id.into(),
         hash: observed_scope_whole_hash,
     });
     entries.push(FactVersionRef::Parse(observed_scope_syntactic_export_set));
@@ -1919,7 +1919,7 @@ pub fn engine_fact_signature_for_materialize_memo(
                     continue;
                 }
                 entries.push(FactVersionRef::FileWholeHash {
-                    canonical_id: observed_canonical.as_ref().to_string(),
+                    canonical_id: Arc::from(observed_canonical.as_str()),
                     hash: *observed_hash,
                 });
             }

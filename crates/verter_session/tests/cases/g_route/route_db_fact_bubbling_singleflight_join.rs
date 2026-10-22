@@ -114,7 +114,7 @@ where
 /// outer tracer when the coalesced-join bubble fires.
 fn leader_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "join_dep.ts".to_string(),
+        canonical_id: "join_dep.ts".into(),
         hash: [0x33u8; 16],
     }
 }

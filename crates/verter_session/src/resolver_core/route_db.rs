@@ -1000,7 +1000,7 @@ mod tests {
         // fact signature through `get_or_resolve_route_with_facts`,
         // as demonstrated below.
         let dummy_fact = FactVersionRef::FileWholeHash {
-            canonical_id: "bar.ts".to_owned(),
+            canonical_id: "bar.ts".into(),
             hash: [0u8; 16],
         };
         let result =
@@ -1109,7 +1109,7 @@ mod tests {
             defining_symbol: "Foo".to_owned(),
         };
         let live_fact = FactVersionRef::FileWholeHash {
-            canonical_id: "live.ts".to_owned(),
+            canonical_id: "live.ts".into(),
             hash: [7u8; 16],
         };
 
@@ -1176,15 +1176,15 @@ mod tests {
             fact_dep_signature: Arc::from(
                 vec![
                     FactVersionRef::FileWholeHash {
-                        canonical_id: "barrel.ts".to_owned(),
+                        canonical_id: "barrel.ts".into(),
                         hash: [1; 16],
                     },
                     FactVersionRef::FileWholeHash {
-                        canonical_id: "foo.ts".to_owned(),
+                        canonical_id: "foo.ts".into(),
                         hash: [2; 16],
                     },
                     FactVersionRef::FileWholeHash {
-                        canonical_id: "bar.ts".to_owned(),
+                        canonical_id: "bar.ts".into(),
                         hash: [3; 16],
                     },
                 ]
@@ -1214,7 +1214,7 @@ mod tests {
                 wildcard_edges: FxHashMap::default(),
                 fact_dep_signature: Arc::from(
                     vec![FactVersionRef::FileWholeHash {
-                        canonical_id: "barrel.ts".to_owned(),
+                        canonical_id: "barrel.ts".into(),
                         hash: [1; 16],
                     }]
                     .into_boxed_slice(),
@@ -1251,7 +1251,7 @@ mod tests {
                 wildcard_edges: FxHashMap::default(),
                 fact_dep_signature: Arc::from(
                     vec![FactVersionRef::FileWholeHash {
-                        canonical_id: "b.ts".to_owned(),
+                        canonical_id: "b.ts".into(),
                         hash: [1; 16],
                     }]
                     .into_boxed_slice(),

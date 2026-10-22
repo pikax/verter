@@ -25,7 +25,7 @@ fn distinct_facts(count: usize) -> Vec<FactVersionRef> {
             hash[1] = ((i >> 8) & 0xFF) as u8;
             hash[2] = ((i >> 16) & 0xFF) as u8;
             FactVersionRef::FileWholeHash {
-                canonical_id: format!("wide_fact_{i}.ts"),
+                canonical_id: format!("wide_fact_{i}.ts").into(),
                 hash,
             }
         })

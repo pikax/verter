@@ -25,7 +25,7 @@ fn make_route() -> RouteResult {
 
 fn make_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "provider.ts".to_string(),
+        canonical_id: "provider.ts".into(),
         hash: [11u8; 16],
     }
 }

@@ -90,7 +90,7 @@ fn cross_file_route_facts_flow_owner_route_filtered() {
         sig.facts.iter().any(|f| matches!(
             f,
             FactVersionRef::Parse(parse) if
-                parse.canonical_id == "/src/types.ts"
+                &*parse.canonical_id == "/src/types.ts"
                     && parse.key == FactKey::SyntacticRouteInterface
         )),
         "the route source dep's `SyntacticRouteInterface` fact MUST be in the published facts rail. facts = {:#?}",
@@ -103,7 +103,7 @@ fn cross_file_route_facts_flow_owner_route_filtered() {
                 canonical_id,
                 kind: DerivedFactKind::Route,
                 ..
-            } if canonical_id == "/src/types.ts"
+            } if &**canonical_id == "/src/types.ts"
         )),
         "route-only component-meta proof must not retain the dep's legacy content-sensitive Route fact. facts = {:#?}",
         sig.facts,
@@ -126,7 +126,7 @@ fn cross_file_route_facts_flow_owner_route_filtered() {
                     canonical_id,
                     kind: DerivedFactKind::Route,
                     ..
-                } if canonical_id == "/src/Comp.vue"
+                } if &**canonical_id == "/src/Comp.vue"
             )
         })
         .collect();

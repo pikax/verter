@@ -110,7 +110,7 @@ fn non_empty_signature_admits_normally_per_production_cache_kind() {
         let mut hash: Hash16 = [0u8; 16];
         hash[0] = idx as u8;
         let fact = FactVersionRef::FileWholeHash {
-            canonical_id: format!("/w/file_{idx}.ts"),
+            canonical_id: format!("/w/file_{idx}.ts").into(),
             hash,
         };
 

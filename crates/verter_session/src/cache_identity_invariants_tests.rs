@@ -1414,7 +1414,7 @@ fn a_withdrawn_artifact_only_canonical_rejects_instead_of_accepting_a_stale_hash
         !StoreView::validates(
             &view,
             &FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_string(),
+                canonical_id: canonical.into(),
                 hash: stale_hash,
             }
         ),
@@ -1426,7 +1426,7 @@ fn a_withdrawn_artifact_only_canonical_rejects_instead_of_accepting_a_stale_hash
         !StoreView::validates(
             &view,
             &FactVersionRef::DerivedFactHash {
-                canonical_id: canonical.to_string(),
+                canonical_id: canonical.into(),
                 kind: DerivedFactKind::DirectSource,
                 hash: stale_hash,
             }
@@ -1443,7 +1443,7 @@ fn a_withdrawn_artifact_only_canonical_rejects_instead_of_accepting_a_stale_hash
         StoreView::validates(
             &view,
             &FactVersionRef::FileWholeHash {
-                canonical_id: never_seen.to_string(),
+                canonical_id: never_seen.into(),
                 hash: stale_hash,
             }
         ),

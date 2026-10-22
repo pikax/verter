@@ -2686,24 +2686,24 @@ pub fn carrier_facts_reference_canonical(
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: c,
             ..
-        } => c.as_str() == canonical_id,
+        } => **c == *canonical_id,
         verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
             canonical_id: c,
             ..
-        } => c.as_str() == canonical_id,
+        } => **c == *canonical_id,
         verter_session_query::facts::fact_cache::FactVersionRef::Parse(p) => {
-            p.canonical_id.as_str() == canonical_id
+            *p.canonical_id == *canonical_id
         }
         verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(r) => {
             r.canonical_id() == Some(canonical_id)
         }
         verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(r) => {
-            r.canonical_id.as_str() == canonical_id
+            *r.canonical_id == *canonical_id
         }
         verter_session_query::facts::fact_cache::FactVersionRef::FileSourceEnv {
             canonical_id: c,
             ..
-        } => c.as_str() == canonical_id,
+        } => **c == *canonical_id,
         verter_session_query::facts::fact_cache::FactVersionRef::ProgramAnalysis(fact) => {
             match fact {
                 verter_session_query::facts::fact_cache::ProgramAnalysisFactRef::FlowBody {

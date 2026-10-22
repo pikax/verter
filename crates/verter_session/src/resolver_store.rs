@@ -2782,7 +2782,7 @@ impl HostStoreView {
             None => return false,
         };
 
-        let key = self.resolved_import_facts_key_for(canonical_id.as_str(), content_hash);
+        let key = self.resolved_import_facts_key_for(canonical_id, content_hash);
 
         // The candidate must root its own path-precise resolution witness in
         // THIS view. That is
@@ -3266,7 +3266,7 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
         // a sentinel hash (`ZERO_HASH`) means "this file produced no
         // value at observation time"; accept that observation against
         // an untracked file (still produces no value).
-        let content_hash = match self.whole_hash(canonical_id.as_str()) {
+        let content_hash = match self.whole_hash(canonical_id) {
             Some(h) => h,
             None => return *expected_hash == ZERO_HASH,
         };
@@ -3409,7 +3409,7 @@ impl HostStoreView {
         fact: &verter_session_query::facts::fact_cache::ParseFactRef,
     ) -> LeafCheck {
         const ZERO_HASH: Hash16 = [0u8; 16];
-        let resolved = self.canonical_view(fact.canonical_id.as_str());
+        let resolved = self.canonical_view(&fact.canonical_id);
         let facts = match resolved.file_facts.as_ref() {
             Some(f) => f,
             // Untracked file — accept if the observed hash was the

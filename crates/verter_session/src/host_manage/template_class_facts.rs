@@ -1228,7 +1228,7 @@ mod attribution_tests {
 
     fn owner_whole_hash_fact() -> FactVersionRef {
         FactVersionRef::FileWholeHash {
-            canonical_id: OWNER.to_string(),
+            canonical_id: OWNER.into(),
             hash: [3u8; 16],
         }
     }
@@ -1259,7 +1259,7 @@ mod attribution_tests {
                 [
                     owner_whole_hash_fact(),
                     FactVersionRef::FileWholeHash {
-                        canonical_id: "/p/Dep.ts".to_string(),
+                        canonical_id: "/p/Dep.ts".into(),
                         hash: [4u8; 16],
                     },
                 ]

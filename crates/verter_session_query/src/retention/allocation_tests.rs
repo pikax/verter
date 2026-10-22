@@ -6,7 +6,7 @@ use crate::facts::version::{FactHash16, ParseFactRef};
 
 fn whole_hash(canonical: String) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: canonical,
+        canonical_id: canonical.into(),
         hash: FactHash16::default(),
     }
 }

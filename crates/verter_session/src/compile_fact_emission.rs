@@ -324,7 +324,7 @@ fn observe_file_whole_hash(host: &VerterHost, canonical_id: &str) {
     };
     verter_type_engine::resolver_core::resolver_context::observe_fan_out(
         FactVersionRef::FileWholeHash {
-            canonical_id: canonical_id.to_string(),
+            canonical_id: canonical_id.into(),
             hash: whole_hash,
         },
     );
@@ -358,7 +358,7 @@ fn observe_parse_fact_present(host: &VerterHost, canonical_id: &str, key: FactKe
     };
     verter_type_engine::resolver_core::resolver_context::observe_fan_out(FactVersionRef::Parse(
         ParseFactRef {
-            canonical_id: canonical_id.to_string(),
+            canonical_id: canonical_id.into(),
             key,
             lane,
             expected_hash,
@@ -553,7 +553,7 @@ fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[Analyz
             };
             verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                 FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-                    canonical_id: import.source.clone(),
+                    canonical_id: import.source.clone().into(),
                     key: fact_key,
                     lane: FactLane::Semantic,
                     expected_hash: *fingerprint,

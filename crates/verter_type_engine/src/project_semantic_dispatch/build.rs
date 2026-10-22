@@ -7722,16 +7722,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // `ModuleAugmentationIndexShape` validation keys entirely on the typed
         // `FactKey` (target kind + specifier/canonical) and `expected_hash`,
         // never on this field.
-        let shape_attribution = match &target {
-            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => canon.as_ref().to_owned(),
-            AugmentationTargetKind::ExternalSpecifier(spec) => spec.as_ref().to_owned(),
-            AugmentationTargetKind::WildcardAmbient(pat) => pat.as_ref().to_owned(),
-            AugmentationTargetKind::GlobalAugmentation => String::new(),
+        let shape_attribution: Arc<str> = match &target {
+            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => Arc::clone(canon),
+            AugmentationTargetKind::ExternalSpecifier(spec) => Arc::clone(&spec.0),
+            AugmentationTargetKind::WildcardAmbient(pat) => Arc::clone(&pat.0),
+            AugmentationTargetKind::GlobalAugmentation => Arc::default(),
         };
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
-                    canonical_id: shape_attribution.clone(),
+                    canonical_id: Arc::clone(&shape_attribution),
                     key: verter_session_query::source::augmentation_keys::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),
@@ -7760,7 +7760,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
-                    canonical_id: shape_attribution.clone(),
+                    canonical_id: shape_attribution,
                     key:
                         verter_session_query::inputs::contributors::population_contributor_fact_key(
                             &target, decl_name,
@@ -8548,7 +8548,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for root in &contributor_roots {
             crate::resolver_core::resolver_context::observe_fan_out(
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: root.canonical.as_ref().to_owned(),
+                    canonical_id: Arc::from(root.canonical.as_str()),
                     hash: root.whole_hash,
                 },
             );
@@ -8722,7 +8722,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
-                    canonical_id: attribution.to_owned(),
+                    canonical_id: attribution.into(),
                     key: verter_session_query::source::augmentation_keys::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),
@@ -9194,7 +9194,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
-                    canonical_id: String::new(),
+                    canonical_id: Arc::default(),
                     key:
                         verter_session_query::inputs::contributors::population_contributor_fact_key(
                             &target, name,
@@ -11088,9 +11088,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for rdep in self.ctx.reverse_dependency_canonicals(canonical) {
             let _ = self.transaction_indexed_record(&rdep);
         }
+        let canonical_text: Arc<str> = Arc::from(canonical);
         let target =
             verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(
-                Arc::from(canonical),
+                Arc::clone(&canonical_text),
             );
         // The common case — no module augments this one — is decided from the
         // augmenter set alone, observed so a later augmenter misses a warm
@@ -11099,7 +11100,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
-                    canonical_id: canonical.to_owned(),
+                    canonical_id: canonical_text,
                     key: verter_session_query::source::augmentation_keys::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),

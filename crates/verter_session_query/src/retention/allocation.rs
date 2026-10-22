@@ -53,20 +53,22 @@ pub fn fact_heap_bytes(fact: &FactVersionRef, aliases: &mut AliasSet) -> usize {
     match fact {
         FactVersionRef::FileWholeHash { canonical_id, .. }
         | FactVersionRef::DerivedFactHash { canonical_id, .. }
-        | FactVersionRef::FileSourceEnv { canonical_id, .. } => string_bytes(canonical_id),
+        | FactVersionRef::FileSourceEnv { canonical_id, .. } => {
+            arc_str_bytes(canonical_id, aliases)
+        }
         FactVersionRef::Parse(parse) => {
-            string_bytes(&parse.canonical_id) + fact_key_heap_bytes(&parse.key, aliases)
+            arc_str_bytes(&parse.canonical_id, aliases) + fact_key_heap_bytes(&parse.key, aliases)
         }
         FactVersionRef::RouteSurface(route) => {
-            string_bytes(&route.canonical_id) + fact_key_heap_bytes(&route.key, aliases)
+            arc_str_bytes(&route.canonical_id, aliases) + fact_key_heap_bytes(&route.key, aliases)
         }
         FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
             canonical_id,
             key,
             ..
-        }) => string_bytes(canonical_id) + fact_key_heap_bytes(key, aliases),
+        }) => arc_str_bytes(canonical_id, aliases) + fact_key_heap_bytes(key, aliases),
         FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) => {
-            resolution_key_heap_bytes(&resolution.key)
+            resolution_key_heap_bytes(&resolution.key, aliases)
         }
         FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody { function, .. }) => {
             function.canonical_id.offer(aliases)
@@ -187,10 +189,10 @@ fn fact_key_heap_bytes(key: &FactKey, aliases: &mut AliasSet) -> usize {
     bytes
 }
 
-/// Heap one resolution fact key owns: its canonical and specifier strings,
-/// and a decision's boxed query identity.
-fn resolution_key_heap_bytes(key: &ResolutionFactKey) -> usize {
-    key.owned_heap_bytes()
+/// Heap one resolution fact key owns: its shared canonical and specifier
+/// texts, and a decision's shared query identity.
+fn resolution_key_heap_bytes(key: &ResolutionFactKey, aliases: &mut AliasSet) -> usize {
+    key.owned_heap_bytes(aliases)
 }
 
 impl verter_retention::heap_size::HeapSize for FactVersionRef {

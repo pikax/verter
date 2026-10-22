@@ -3295,7 +3295,7 @@ impl VerterHost {
         if let Some(hash) = self.current_or_read_whole_hash(canonical) {
             let file_fact =
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.to_string(),
+                    canonical_id: canonical.into(),
                     hash,
                 };
             if seen.insert(file_fact.clone()) {

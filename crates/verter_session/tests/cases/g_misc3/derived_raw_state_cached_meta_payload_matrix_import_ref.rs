@@ -46,7 +46,7 @@ fn cached_meta_payload_signature_carries_import_ref() {
     );
 
     let import_fact = FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/src/Comp.vue".to_owned(),
+        canonical_id: "/src/Comp.vue".into(),
         key: FactKey::ImportRef {
             specifier: InternedSpecifier::from("./types"),
             binding: InternedName::from("Foo"),

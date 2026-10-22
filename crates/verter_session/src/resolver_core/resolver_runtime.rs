@@ -579,7 +579,7 @@ mod tests {
 
     fn admit_view(runtime: &UnifiedResolverRuntime<u32, ()>, key: ResolutionNodeKey) {
         let facts = vec![FactVersionRef::FileWholeHash {
-            canonical_id: key.symbol_id.clone(),
+            canonical_id: key.symbol_id.clone().into(),
             hash: [1u8; 16],
         }];
         let (admission, ()) =
@@ -616,7 +616,7 @@ mod tests {
             foreign.clone(),
             CachedValue::new(2),
             vec![FactVersionRef::FileWholeHash {
-                canonical_id: "/src/A.vue".to_string(),
+                canonical_id: "/src/A.vue".into(),
                 hash: [1u8; 16],
             }],
             "component_meta.results",

@@ -52,7 +52,7 @@ impl VerterHost {
     ) {
         if let Some(hash) = ctx.authoritative_current_content_hash(canonical) {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_string(),
+                canonical_id: canonical.into(),
                 hash,
             };
             if seen.insert(fact.clone()) {
@@ -66,7 +66,7 @@ impl VerterHost {
             .and_then(|indexed| indexed.route_surface_hash())
         {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
-                canonical_id: canonical.to_string(),
+                canonical_id: canonical.into(),
                 kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                 hash,
             };

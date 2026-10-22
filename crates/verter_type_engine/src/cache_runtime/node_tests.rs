@@ -88,7 +88,7 @@ fn cache_admission_has_three_arms_with_typed_reasons() {
 #[test]
 fn signature_admission_from_ok_finalise_is_cacheable() {
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/a.ts".to_string(),
+        canonical_id: "/a.ts".into(),
         hash: [1u8; 16],
     }]);
     let admission = SignatureAdmission::from_finalise(FactReadSetFinalise::Ok(Arc::clone(&facts)));
@@ -120,7 +120,7 @@ fn signature_admission_from_ok_finalise_is_cacheable() {
 #[test]
 fn signature_admission_from_non_cacheable_finalise_refuses_admission() {
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/a.ts".to_string(),
+        canonical_id: "/a.ts".into(),
         hash: [1u8; 16],
     }]);
     let admission = SignatureAdmission::from_finalise(FactReadSetFinalise::NonCacheable(facts));

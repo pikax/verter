@@ -751,7 +751,7 @@ mod tests {
         // dependency's whole hash. The fact rail must be consulted on warm read.
         let cross_file_fact =
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: "/Carrier.ts".to_string(),
+                canonical_id: "/Carrier.ts".into(),
                 hash: [9u8; 16],
             };
         store.insert(
