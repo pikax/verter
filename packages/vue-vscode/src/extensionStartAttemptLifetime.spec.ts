@@ -28,6 +28,8 @@ const mocks = vi.hoisted(() => {
     createdClientOptions: [] as unknown[],
     /** Park `start()` so a test can dispose the extension mid-start. */
     holdStart: false,
+    /** When set, the editor TypeScript extension exists and its activation parks on this. */
+    editorTypeScriptActivate: undefined as (() => Promise<unknown>) | undefined,
     releaseStart: undefined as (() => void) | undefined,
     configurePluginHold: false,
     releaseConfigurePlugin: undefined as (() => void) | undefined,
@@ -187,7 +189,13 @@ vi.mock("vscode", () => {
       registerCodeLensProvider: () => disposable(),
       registerHoverProvider: () => disposable(),
     },
-    extensions: { getExtension: () => undefined, all: [] as unknown[] },
+    extensions: {
+      getExtension: (id: string) =>
+        id === "vscode.typescript-language-features" && mocks.state.editorTypeScriptActivate
+          ? { isActive: false, exports: {}, activate: mocks.state.editorTypeScriptActivate }
+          : undefined,
+      all: [] as unknown[],
+    },
     lm: { registerMcpServerDefinitionProvider: () => disposable() },
     Uri: {
       parse: (value: string) => ({ toString: () => value, fsPath: value, scheme: "file" }),
@@ -374,6 +382,7 @@ function resetHostRuntimeMocks() {
   mocks.state.startCalls = 0;
   mocks.state.stopCalls = 0;
   mocks.state.holdStart = false;
+  mocks.state.editorTypeScriptActivate = undefined;
   mocks.state.releaseStart = undefined;
   mocks.state.configurePluginHold = false;
   mocks.state.releaseConfigurePlugin = undefined;
@@ -644,6 +653,42 @@ describe("disposal during an in-flight recovery", () => {
     expect(mocks.state.stopCalls).toBe(1);
     expect(mocks.state.startCalls).toBe(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("disposal during provider setup", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetHostRuntimeMocks();
+    mocks.state.startShouldFail = false;
+  });
+
+  afterEach(() => {
+    (workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("constructs no client when the attempt is disposed while the editor provider is being established", async () => {
+    (workspace as { workspaceFolders: unknown }).workspaceFolders = [{ uri: { fsPath: "/proj" } }];
+    mocks.configurationValues["verter.typeProvider"] = "editor-tsserver";
+    // The editor TypeScript extension never finishes activating.
+    mocks.state.editorTypeScriptActivate = () => new Promise<never>(() => {});
+    const lifetime = new StartAttemptScope();
+
+    const activating = startAttempt(makeContext(), lifetime);
+    const outcome = activating.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    lifetime.dispose();
+    // The bounded provider operation gives up; the start must not carry on past it.
+    await vi.advanceTimersByTimeAsync(600_000);
+
+    expect(await outcome).toMatchObject({ name: "StartAbandonedError" });
+    expect(mocks.state.createdClients).toHaveLength(0);
+    expect(mocks.state.startCalls).toBe(0);
   });
 });
 

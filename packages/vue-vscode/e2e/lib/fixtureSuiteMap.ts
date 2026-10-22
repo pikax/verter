@@ -46,6 +46,11 @@ const LEGACY_SUITE_GLOBS = [
   "_teardown.test",
 ] as const;
 
+// Every launch of a fixture below opens carrier documents and so spawns its own
+// Verter server; the teardown recording is what the launcher reads to verify that
+// server was reaped, so these fixtures load it alongside their own suites.
+const TEARDOWN_SUITE_GLOB = "_teardown.test";
+
 export const FIXTURE_SUITE_GLOBS: Readonly<Record<string, readonly string[]>> = {
   "single-project": LEGACY_SUITE_GLOBS,
   monorepo: LEGACY_SUITE_GLOBS,
@@ -63,14 +68,19 @@ export const FIXTURE_SUITE_GLOBS: Readonly<Record<string, readonly string[]>> = 
   // tree assumes an in-repo fixture layout this out-of-tree workspace does not have.
   "out-of-tree-monorepo": ["out-of-tree-monorepo.test"],
 
-  "vue-contract": ["frameworks/vue/"],
-  "svelte-contract": ["frameworks/svelte/"],
+  "vue-contract": ["frameworks/vue/", TEARDOWN_SUITE_GLOB],
+  "svelte-contract": ["frameworks/svelte/", TEARDOWN_SUITE_GLOB],
 
-  "vue-parity": ["parity/vue/", "parity/shared/", "parity/lsp-extras.test"],
-  "svelte-parity": ["parity/svelte/", "parity/shared/", "parity/lsp-extras.test"],
-  "mixed-parity": ["parity/mixed/"],
-  "multi-root-parity": ["parity/multi-root/"],
-  "ecosystem-parity": ["parity/ecosystem/"],
+  "vue-parity": ["parity/vue/", "parity/shared/", "parity/lsp-extras.test", TEARDOWN_SUITE_GLOB],
+  "svelte-parity": [
+    "parity/svelte/",
+    "parity/shared/",
+    "parity/lsp-extras.test",
+    TEARDOWN_SUITE_GLOB,
+  ],
+  "mixed-parity": ["parity/mixed/", TEARDOWN_SUITE_GLOB],
+  "multi-root-parity": ["parity/multi-root/", TEARDOWN_SUITE_GLOB],
+  "ecosystem-parity": ["parity/ecosystem/", TEARDOWN_SUITE_GLOB],
 };
 
 /**

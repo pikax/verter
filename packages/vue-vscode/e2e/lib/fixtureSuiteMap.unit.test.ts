@@ -12,4 +12,20 @@ describe("fixture suite selection", () => {
     );
     expect(suiteAllowedForFixture("tsconfig-extends", "parity/lsp-extras.test.js")).toBe(false);
   });
+
+  it("loads the teardown recording on every server-owning specialty fixture", () => {
+    // The launcher requires a recording only where this predicate holds, so a fixture
+    // that omits the suite would pass with an orphaned server undetectable.
+    for (const fixture of [
+      "vue-parity",
+      "svelte-parity",
+      "mixed-parity",
+      "multi-root-parity",
+      "ecosystem-parity",
+      "vue-contract",
+      "svelte-contract",
+    ]) {
+      expect(suiteAllowedForFixture(fixture, "_teardown.test.js"), fixture).toBe(true);
+    }
+  });
 });

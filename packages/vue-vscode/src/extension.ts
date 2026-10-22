@@ -452,11 +452,19 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
     return serverPromise;
   };
 
+  // Fire-and-forget start. A start that was abandoned because the session ended
+  // is the expected outcome of deactivating mid-start, not a failure to surface.
+  const startLanguageServerInBackground = () => {
+    ensureLanguageServerStarted().catch((error) => {
+      if (!(error instanceof StartAbandonedError)) throw error;
+    });
+  };
+
   const ensureStartedForFrameworkDocument = (document?: TextDocument) => {
     if (!isFrameworkCarrierLanguageId(document?.languageId)) {
       return;
     }
-    void ensureLanguageServerStarted();
+    startLanguageServerInBackground();
   };
 
   const ensureTypeScriptPluginConfiguredForDocument = (document?: TextDocument) => {
@@ -620,7 +628,7 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
     workspace.textDocuments.some((doc) => isFrameworkCarrierLanguageId(doc.languageId)) ||
     isFrameworkCarrierLanguageId(window.activeTextEditor?.document.languageId)
   ) {
-    void ensureLanguageServerStarted();
+    startLanguageServerInBackground();
   }
   ensureTypeScriptPluginConfiguredForDocument(window.activeTextEditor?.document);
   // A carrier already open at activation never fires `onDidOpenTextDocument`, so
@@ -756,6 +764,18 @@ interface LanguageServerActivationOptions {
   mcpHandles?: ActivationSession;
 }
 
+/** The start attempt lost its lifetime before it had a client; nothing was left running. */
+class StartAbandonedError extends Error {
+  constructor() {
+    super("Verter language server start abandoned: the extension session ended");
+    this.name = "StartAbandonedError";
+  }
+}
+
+function abandonedStart(): never {
+  throw new StartAbandonedError();
+}
+
 export async function activateVueLanguageServer(
   context: ExtensionContext,
   log: LogOutputChannel,
@@ -798,12 +818,17 @@ async function startVueLanguageServer(
     effectiveTypeProvider,
     log,
   );
+  // Deactivation can dispose the attempt while a provider is being established; an
+  // attempt that lost its lifetime must not go on to construct and spawn a client.
+  // add() disposes the late handle immediately.
   attempt.add({ dispose: () => sharedTsgo.dispose() });
+  if (attempt.isDisposed) return abandonedStart();
   const editorTsserver =
     sharedTsgo.lspArgs.length === 0
       ? await establishEditorTsserverPlugin(effectiveTypeProvider, rootPath, log)
       : NO_EDITOR_TSSERVER;
   attempt.add({ dispose: () => editorTsserver.dispose() });
+  if (attempt.isDisposed) return abandonedStart();
   options.onEditorCarrierSourceFeatureOwnership?.(
     editorTsserverOwnsCarrierSourceFeatures(editorTsserver.lspArgs),
   );
