@@ -1067,6 +1067,12 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                 let mut new_key_bytes = 0_u64;
                 for key in &delta {
                     if !ledger.unique_keys.contains(key) {
+                        // Sized once, on the first new key: at most the
+                        // whole delta is new, and a retry with none
+                        // allocates nothing.
+                        if new_keys.capacity() == 0 {
+                            new_keys.reserve(delta.len());
+                        }
                         new_keys.push(key.clone());
                         new_key_bytes = new_key_bytes.saturating_add(input_key_spelling_bytes(key));
                     }
