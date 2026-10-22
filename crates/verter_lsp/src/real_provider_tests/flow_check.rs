@@ -41,7 +41,7 @@ fn generation_canary(generation: u32) -> String {
 }
 
 fn publish_check(session: &RealProviderTestSession, name: &str, code: &str) -> PublishedCheck {
-    let relative = format!("src/{name}.ts");
+    let relative = session.scratch_relative(&format!("src/{name}"), "ts");
     let content = format!("{code}{CANARY}");
     let file = session.publish_workspace_file(&relative, &content);
     let canary_start = code.len() as u32;
@@ -158,7 +158,7 @@ real_provider_test!(
         for fixture in fixtures::semantic_suite() {
             let check = assert_fixture(session, &fixture, GuardStrategy::Snapshot).await;
             for hover in &fixture.hovers {
-                let relative = format!("src/{}-hover.ts", fixture.name);
+                let relative = session.scratch_relative(&format!("src/{}-hover", fixture.name), "ts");
                 let _published = session.publish_workspace_file(&relative, &check.code);
                 let (path, _) = session.open_fixture_in_provider(&relative).await;
                 let mut text = String::new();
