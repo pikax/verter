@@ -745,6 +745,158 @@ struct Fixture {
     config: Vec<String>,
 }
 
+/// A narrow consumer must not pull capture or the broad test seams through
+/// either normal or build dependency feature forwarding.
+#[test]
+fn narrow_work_feature_closure_keeps_capture_and_general_support_off() {
+    let root = repository_root();
+    let metadata = metadata(root, &[]);
+    for target in [host_target(root).as_str(), "wasm32-unknown-unknown"] {
+        let enabled = closure(
+            root,
+            "verter_compile_contracts_session_soak",
+            target,
+            None,
+            false,
+            &[],
+            &metadata,
+        );
+        for (id, feature) in &enabled {
+            if !metadata.workspace_members.contains(id) {
+                continue;
+            }
+            assert_ne!(
+                feature, "semantic-observe",
+                "narrow support must not enable capture"
+            );
+            assert_ne!(
+                feature, "test-support",
+                "narrow support must not enable general test seams"
+            );
+        }
+        for owner in ["verter_session", "verter_type_engine", "verter_audit"] {
+            let package = metadata
+                .packages
+                .iter()
+                .find(|package| package.name == owner)
+                .unwrap();
+            assert!(
+                enabled.contains(&(package.id.clone(), "soak-support".into())),
+                "{owner} narrow storage is enabled"
+            );
+        }
+    }
+}
+
+// The planted negative control for the check above: the same closure reader
+// must see a narrow consumer that forwards `semantic-observe` through its
+// normal dependency edge, so the green pass above observes the soak crate's
+// real manifest rather than failing to see forwarding at all.
+#[test]
+fn narrow_work_feature_closure_detects_a_planted_capture_edge() {
+    let root = verter_test_support::unique_temp_dir("observe-feature-closure");
+    // `unique_temp_dir` only mints the path: this scope owns removal, on
+    // success and on every assertion failure below, like the `Fixture`
+    // guard's own drop.
+    let _workspace = RemoveOnDrop(&root);
+    write_member(
+        &root,
+        "verter_audit",
+        r#"[package]
+name = "verter_audit"
+version = "0.0.0"
+edition = "2021"
+[features]
+semantic-observe = []
+test-support = []
+soak-support = []
+"#,
+    );
+    write_member(
+        &root,
+        "verter_session",
+        r#"[package]
+name = "verter_session"
+version = "0.0.0"
+edition = "2021"
+[features]
+soak-support = ["verter_audit/soak-support"]
+semantic-observe = ["verter_audit/semantic-observe"]
+[dependencies]
+verter_audit = { path = "../verter_audit" }
+"#,
+    );
+    for (name, features) in [
+        ("planted_consumer", "\"soak-support\", \"semantic-observe\""),
+        ("control_consumer", "\"soak-support\""),
+    ] {
+        write_member(
+            &root,
+            name,
+            &format!(
+                r#"[package]
+name = "{name}"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+verter_session = {{ path = "../verter_session", features = [{features}] }}
+"#
+            ),
+        );
+    }
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"verter_audit\", \"verter_session\", \"planted_consumer\", \"control_consumer\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    let metadata = resolve_metadata(&root, &[], false);
+    let target = host_target(Path::new(env!("CARGO_MANIFEST_DIR")));
+    let session = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == "verter_session")
+        .unwrap();
+    let planted = closure(
+        &root,
+        "planted_consumer",
+        &target,
+        None,
+        false,
+        &[],
+        &metadata,
+    );
+    assert!(
+        planted.contains(&(session.id.clone(), "semantic-observe".into())),
+        "the planted capture edge is seen and would fail the check above"
+    );
+    assert!(
+        planted.contains(&(session.id.clone(), "soak-support".into())),
+        "the planted consumer keeps its narrow support visible too"
+    );
+    let control = closure(
+        &root,
+        "control_consumer",
+        &target,
+        None,
+        false,
+        &[],
+        &metadata,
+    );
+    assert!(!control.contains(&(session.id.clone(), "semantic-observe".into())));
+    assert!(control.contains(&(session.id.clone(), "soak-support".into())));
+}
+
+/// Scope-owned removal for a minted `unique_temp_dir` path a test writes
+/// directly (the `Fixture` guard owns its own root the same way): dropping
+/// the guard removes the tree even after an assertion failure.
+struct RemoveOnDrop<'a>(&'a Path);
+
+impl Drop for RemoveOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(self.0);
+    }
+}
+
 fn write_member(root: &Path, name: &str, manifest: &str) {
     let package = root.join(name);
     fs::create_dir_all(package.join("src")).unwrap();

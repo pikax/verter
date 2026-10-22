@@ -14,6 +14,7 @@ const PASS_FIXTURES: &[&str] = &[
     "script_fact_partial_exact_syntax.rs",
     "public_owned_carriers_borrow_and_own.rs",
     "host_release_completion_in_production_build.rs",
+    "work_observation_behavior.rs",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -163,6 +164,15 @@ fn main() {
                     | Some("host_release_completion_through_soak_support.rs")
                     | Some("flow_return_root_positive_through_soak_support.rs")
                     | Some("held_charge_witness_through_soak_support.rs")
+                    | Some("narrow_work_observations.rs")
+                    | Some("full_work_readers_absent_with_narrow_support.rs")
+                    // The capture-available agreement twin: it needs
+                    // `semantic-observe`, which no member of the workspace
+                    // may enable on a normal dependency edge (that would
+                    // unify capture into every `--workspace` build). Its
+                    // runner lives outside the workspace and runs in the
+                    // dedicated session-observe compile-contract lane.
+                    | Some("narrow_work_agreement_under_semantic_observe.rs")
             )
         });
     }

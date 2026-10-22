@@ -1,5 +1,48 @@
 # Optional semantic observations
 
+## Narrow work readers with capture off
+
+`verter_session/soak-support` is an explicit, default-off tooling capability.
+It forwards narrow support to the engine and audit counter substrate without
+enabling `semantic-observe` or general `test-support`. Capture availability
+remains `Unavailable`. It adds two bounded relaxed counters per host and two
+per graph, at their existing increment sites, with no runtime enable checks.
+
+- `VerterHost::work_snapshot() -> HostWorkSnapshot` exposes only
+  `resolver_node_cache_misses` (request results other than a first-attempt
+  cache hit) and `component_meta_resolved_state_recomputes` (producer entry,
+  including early returns).
+- `SemanticGraphStore::work_snapshot() -> GraphWorkSnapshot` exposes only
+  `misses` (memo claim misses, possibly including recursion and subscribers)
+  and `joined_waits` (actual joins). Neither is an exact producer count.
+
+These readers are also available in broader observation configurations and
+read the same counters once. Without support or observation the host reader
+is absent; the graph reader additionally exists in engine test configurations.
+Unrelated metrics are absent from the narrow snapshots, rather than reported
+as measured zero. Full graph statistics, provenance, histories, origin edges,
+reservoirs and timers keep their existing gates. Current production occupancy
+and ownership readers remain independent of these OPTIONAL work counters.
+
+The existing `node scripts/compile-contracts.mjs` lane binds both foreign
+consumer proofs. A focused narrow invocation is
+`cargo run --locked -p verter_compile_contracts_session_soak -- narrow-work`.
+The capture-available invocation is
+`cargo run --locked --manifest-path
+crates/verter_compile_contracts_session_observe/Cargo.toml`, whose normal
+dependency carries `soak-support` and `semantic-observe` together:
+trybuild copies a crate's `[dependencies]` into the fixture project verbatim
+but cannot forward a `--features` argument to a `cargo run` bin (its feature
+discovery needs a hash-suffixed test-binary `argv[0]`) and strips non-`dep:`
+entries from the copied feature table, so the observation configuration must
+ride the dependency edge itself. Because member features unify across every
+`--workspace` build, that edge also forbids workspace membership: the crate
+sits on the workspace `exclude` list with its own committed lockfile and is
+run by manifest path, so the canonical gate and the core CI shards keep
+building and testing the capture-off configuration. That run checks the same
+public boundaries with capture available, the narrow readers' agreement with
+the full snapshots, and that support and capture never double count.
+
 This is the binding classification policy for semantic state and instrumentation.
 Classify each field, store, hook, counter or trace by its actual consumer, not its
 historical name. Split mixed mechanisms field by field. Every owner records its
@@ -78,7 +121,10 @@ both required occupancy and optional historical counters; classify those
 fields separately. The seeded inventory lives at
 [`crates/verter_audit/observe-inventory/SKR-OBS-D.md`](../../crates/verter_audit/observe-inventory/SKR-OBS-D.md).
 
-OPTIONAL items use `cfg(feature = "semantic-observe")`. Optional state whose
+OPTIONAL capture items use `cfg(feature = "semantic-observe")`. The four
+selected tooling work counters described above additionally permit explicit
+`soak-support`; that exception never enables other optional storage or capture.
+Optional state whose
 only readers are tests may instead be gated to tests alone: `cfg(test)` when
 only the owner's unit tests read it, `cfg(any(test, feature = "test-support"))`
 when dependents' tests read it, and the combined

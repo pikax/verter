@@ -510,12 +510,17 @@ export const PATH_FILTERS = Object.freeze({
   // self-test, the generated-artifact freshness check it runs and that
   // check's generators, and the sfc-projection files the isolated
   // verter_compiler lib tests read. Its crate half is the runner crates plus
-  // every owner whose fixtures the runner compiles.
+  // every owner whose fixtures the runner compiles — except the
+  // session-observe runner, which the workspace `exclude` list keeps out of
+  // `cargo metadata` (its `semantic-observe` edge must not unify into
+  // `--workspace` builds), so a path filter is the only lane selector that
+  // sees a change confined to it.
   compiler_contracts: [
     "scripts/compile-contracts.mjs",
     "scripts/compiler-ci-lane-selftest.mjs",
     "scripts/check-compiler-generated-artifacts.mjs",
     "scripts/generate-svelte-*.mjs",
+    "crates/verter_compile_contracts_session_observe/**",
     ...RUST_READ_SFC_FIXTURES,
   ],
   // Non-crate inputs of the BF2 authoritative lane (its workspace-domain

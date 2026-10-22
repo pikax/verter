@@ -2,11 +2,22 @@
 //!
 //! Every counter here is optional measurement state: no production decision
 //! (budget, cache admission, eviction, scheduling, validity or retention
-//! accounting) reads one. Without `semantic-observe` each counter is
-//! zero-size, its writes compile to nothing and no snapshot or reader exists,
+//! accounting) reads one. `soak-support` retains only the two selected host
+//! work counters. Without either feature every counter is zero-size, its
+//! writes compile to nothing and no snapshot or reader exists,
 //! so a default build reports unavailable provenance rather than zeros.
 
-use verter_audit::observe::ObservedU64;
+use verter_audit::observe::{ObservedU64, WorkObservedU64};
+
+/// OPTIONAL host work observations available without audit capture.
+#[cfg(any(feature = "soak-support", feature = "semantic-observe"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostWorkSnapshot {
+    /// Resolver request results other than a first-attempt cache hit.
+    pub resolver_node_cache_misses: u64,
+    /// Component-meta producer entries, including non-admitted early returns.
+    pub component_meta_resolved_state_recomputes: u64,
+}
 
 /// Per-host provenance counters for component-meta observability.
 ///
@@ -23,7 +34,7 @@ use verter_audit::observe::ObservedU64;
 #[derive(Debug, Default)]
 pub struct MetaProvenance {
     pub get_component_meta_calls: ObservedU64,
-    pub component_meta_resolved_state_recomputes: ObservedU64,
+    pub component_meta_resolved_state_recomputes: WorkObservedU64,
     pub get_analysis_calls: ObservedU64,
     pub evaluate_types_calls: ObservedU64,
     /// Bumped on every `VerterHost::upsert(...)` call. Used by session-view
@@ -39,7 +50,7 @@ pub struct MetaProvenance {
     pub resolved_external_type_cache_hits: ObservedU64,
     pub resolved_external_type_cache_misses: ObservedU64,
     pub resolver_node_cache_hits: ObservedU64,
-    pub resolver_node_cache_misses: ObservedU64,
+    pub resolver_node_cache_misses: WorkObservedU64,
     pub resolver_singleflight_coalesced: ObservedU64,
     pub resolver_cross_view_lane_forks: ObservedU64,
     pub resolver_cycle_detections: ObservedU64,
