@@ -11161,8 +11161,9 @@ pub enum SemanticNodeData {
     /// conditional whose extends holds only `InferRef`s does NOT
     /// re-declare the name (no shadow), and an `InferRef` is never an
     /// inference-pattern site (never a deposit target). Raises to the
-    /// same `TypeExpr::Infer { name }` as a declaration, so
-    /// TypeExpr-level consumers are unaffected.
+    /// `TypeExpr::Ref { name }` it lowers from: a `TypeExpr::Infer` inside
+    /// an `extends` clause always declares, so raising a reference to it
+    /// would redeclare (shadow) the binder.
     InferRef {
         name: OwnedStr,
         binder: InferBinderId,

@@ -8,7 +8,10 @@ import type { NativeTypeExpr, NativeEvaluatedField } from "./type-expr-bridge.js
 import {
   DecodedTypeGraph,
   createGraphTypeExprRef,
+  LITERAL_NUMBER,
   LITERAL_STRING,
+  MEMBER_METHOD,
+  MEMBER_PROPERTY,
   NODE_ARRAY,
   NODE_CONDITIONAL,
   NODE_FUNCTION,
@@ -16,6 +19,7 @@ import {
   NODE_KEY_OF,
   NODE_LITERAL,
   NODE_MAPPED,
+  NODE_OBJECT,
   NODE_PRIMITIVE,
   NODE_REF,
   NODE_UNION,
@@ -25,60 +29,115 @@ import {
 // typeExprToDescriptor: primitives
 // =============================================================================
 
+/**
+ * `infer` declares its binder only inside a conditional's `extends` clause;
+ * the true branch references it by name.
+ */
+function inExtendsClause(infer: NativeTypeExpr): NativeTypeExpr {
+  return {
+    kind: "conditional",
+    check: { kind: "ref", name: "T", typeArguments: [] },
+    extends: infer,
+    trueType: { kind: "infer", name: "U" },
+    falseType: { kind: "primitive", name: "never" },
+  };
+}
+
 describe("typeExprToDescriptor", () => {
-  it("renders an array constraint on an unreduced infer", () => {
+  it("keeps a nested infer declaration that shadows an enclosing binder", () => {
+    const never: NativeTypeExpr = { kind: "primitive", name: "never" };
     const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: {
-        kind: "array",
-        readonly: false,
-        element: { kind: "primitive", name: "string" },
+      kind: "conditional",
+      check: { kind: "ref", name: "T", typeArguments: [] },
+      extends: { kind: "infer", name: "U" },
+      trueType: {
+        kind: "conditional",
+        check: { kind: "primitive", name: "number" },
+        extends: { kind: "infer", name: "U" },
+        trueType: { kind: "ref", name: "U", typeArguments: [] },
+        falseType: never,
       },
+      falseType: never,
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends string[]" });
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends infer U ? number extends infer U ? U : never : never",
+    });
+  });
+
+  it("renders an array constraint on an unreduced infer", () => {
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: {
+          kind: "array",
+          readonly: false,
+          element: { kind: "primitive", name: "string" },
+        },
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends string[]) ? U : never",
+    });
   });
 
   it("renders a graph constraint on an unreduced infer", () => {
     const graph = new DecodedTypeGraph([], [{ kind: NODE_PRIMITIVE, primitive: 1 }]);
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: createGraphTypeExprRef(graph, 1),
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: createGraphTypeExprRef(graph, 1),
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends string) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends string" });
   });
 
   it("renders a function constraint on an unreduced infer", () => {
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: {
-        kind: "function",
-        parameters: [],
-        returnType: { kind: "primitive", name: "string" },
-      },
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: {
+          kind: "function",
+          parameters: [],
+          returnType: { kind: "primitive", name: "string" },
+        },
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends (() => string)) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends () => string" });
   });
 
   it("parenthesizes a union array constraint on an unreduced infer", () => {
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: {
-        kind: "array",
-        readonly: false,
-        element: {
-          kind: "union",
-          types: [
-            { kind: "primitive", name: "string" },
-            { kind: "primitive", name: "number" },
-          ],
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: {
+          kind: "array",
+          readonly: false,
+          element: {
+            kind: "union",
+            types: [
+              { kind: "primitive", name: "string" },
+              { kind: "primitive", name: "number" },
+            ],
+          },
         },
-      },
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends (string | number)[]) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends (string | number)[]" });
   });
 
   it("renders a graph function constraint on an unreduced infer", () => {
@@ -94,12 +153,17 @@ describe("typeExprToDescriptor", () => {
         },
       ],
     );
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: createGraphTypeExprRef(graph, 2),
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: createGraphTypeExprRef(graph, 2),
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends (() => string)) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends () => string" });
   });
 
   it("parenthesizes a graph union array constraint on an unreduced infer", () => {
@@ -112,12 +176,17 @@ describe("typeExprToDescriptor", () => {
         { kind: NODE_ARRAY, elementNodeId: 3, readonly: false },
       ],
     );
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: createGraphTypeExprRef(graph, 4),
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: createGraphTypeExprRef(graph, 4),
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends (string | number)[]) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends (string | number)[]" });
   });
 
   it("converts primitive types", () => {
@@ -317,6 +386,207 @@ describe("typeExprToDescriptor", () => {
     expect(obj.properties[0].optional).toBe(false);
     expect(obj.properties[1].name).toBe("name");
     expect(obj.properties[1].optional).toBe(true);
+  });
+
+  it("names, indexes and enumerates members by their typed key", () => {
+    const keyed: NativeTypeExpr = {
+      kind: "object",
+      properties: [
+        {
+          memberKind: "property",
+          key: { kind: "string", value: "color" },
+          ty: { kind: "literal", literalKind: "string", value: "red" },
+          optional: false,
+        },
+        {
+          memberKind: "property",
+          key: { kind: "number", value: 7 },
+          ty: { kind: "primitive", name: "number" },
+          optional: true,
+        },
+        {
+          memberKind: "method",
+          key: { kind: "string", value: "go" },
+          function: { parameters: [], returnType: { kind: "primitive", name: "void" } },
+        },
+      ],
+    };
+
+    const obj = typeExprToDescriptor(keyed) as {
+      kind: "object";
+      properties: { name: string; optional: boolean }[];
+    };
+    expect(obj.properties.map((p) => [p.name, p.optional])).toEqual([
+      ["color", false],
+      ["7", true],
+      ["go", false],
+    ]);
+
+    expect(
+      typeExprToDescriptor(
+        {
+          kind: "indexedAccess",
+          object: { kind: "ref", name: "Keyed", typeArguments: [] },
+          index: { kind: "literal", literalKind: "string", value: "color" },
+        },
+        new Map([["Keyed", keyed]]),
+      ),
+    ).toEqual({ kind: "literal", value: "red" });
+
+    // A numeric index reads the member keyed by that number.
+    expect(
+      typeExprToDescriptor(
+        {
+          kind: "indexedAccess",
+          object: { kind: "ref", name: "Keyed", typeArguments: [] },
+          index: { kind: "literal", literalKind: "number", value: 7 },
+        },
+        new Map([["Keyed", keyed]]),
+      ),
+    ).toEqual({
+      kind: "union",
+      types: [
+        { kind: "primitive", name: "number" },
+        { kind: "primitive", name: "undefined" },
+      ],
+    });
+
+    // A method key indexes to the method's signature.
+    expect(
+      typeExprToDescriptor(
+        {
+          kind: "indexedAccess",
+          object: { kind: "ref", name: "Keyed", typeArguments: [] },
+          index: { kind: "literal", literalKind: "string", value: "go" },
+        },
+        new Map([["Keyed", keyed]]),
+      ),
+    ).toMatchObject({ kind: "function", returnType: { kind: "primitive", name: "void" } });
+
+    // `keyof` names method keys too, and keeps a number key a number
+    // literal, as TypeScript does.
+    expect(typeExprToDescriptor({ kind: "keyOf", operand: keyed })).toEqual({
+      kind: "union",
+      types: [
+        { kind: "literal", value: "color" },
+        { kind: "literal", value: 7 },
+        { kind: "literal", value: "go" },
+      ],
+    });
+
+    expect(
+      typeExprToDescriptor({
+        kind: "mapped",
+        parameter: "K",
+        source: { kind: "keyOf", operand: keyed },
+        value: { kind: "typeParameter", name: "K" },
+      }),
+    ).toEqual({
+      kind: "object",
+      properties: [
+        { name: "color", type: { kind: "literal", value: "color" }, optional: false },
+        { name: "7", type: { kind: "literal", value: 7 }, optional: true },
+        { name: "go", type: { kind: "literal", value: "go" }, optional: false },
+      ],
+    });
+
+    // A mapped value indexing the source by its parameter reads the number key.
+    expect(
+      typeExprToDescriptor(
+        {
+          kind: "mapped",
+          parameter: "K",
+          source: { kind: "union", types: [{ kind: "literal", literalKind: "number", value: 7 }] },
+          value: {
+            kind: "indexedAccess",
+            object: { kind: "ref", name: "Keyed", typeArguments: [] },
+            index: { kind: "typeParameter", name: "K" },
+          },
+        },
+        new Map([["Keyed", keyed]]),
+      ),
+    ).toEqual({
+      kind: "object",
+      properties: [
+        {
+          name: "7",
+          type: {
+            kind: "union",
+            types: [
+              { kind: "primitive", name: "number" },
+              { kind: "primitive", name: "undefined" },
+            ],
+          },
+          optional: false,
+        },
+      ],
+    });
+  });
+
+  it("indexes and enumerates a graph member by its number key", () => {
+    const graph = new DecodedTypeGraph(
+      ["K", "go"],
+      [
+        { kind: NODE_PRIMITIVE, primitive: 1 }, // 1: string
+        {
+          kind: NODE_OBJECT,
+          members: [
+            {
+              kind: MEMBER_PROPERTY,
+              key: { kind: "number", value: 7 },
+              typeNodeId: 1,
+              optional: false,
+              readonly: false,
+              keyNameId: 0,
+              keyTypeNodeId: 0,
+              valueTypeNodeId: 0,
+              functionNodeId: 0,
+              methodKind: 0,
+              hasImplementationBody: false,
+            },
+            {
+              kind: MEMBER_METHOD,
+              key: { kind: "string", nameId: 2 },
+              typeNodeId: 0,
+              optional: false,
+              readonly: false,
+              keyNameId: 0,
+              keyTypeNodeId: 0,
+              valueTypeNodeId: 0,
+              functionNodeId: 6,
+              methodKind: 0,
+              hasImplementationBody: false,
+            },
+          ],
+        }, // 2: { 7: string; go(): string }
+        { kind: NODE_LITERAL, literalKind: LITERAL_NUMBER, numberValue: 7 }, // 3: 7
+        { kind: NODE_INDEXED_ACCESS, objectNodeId: 2, indexNodeId: 3 }, // 4: { 7: string; go(): string }[7]
+        { kind: NODE_KEY_OF, operandNodeId: 2 }, // 5: keyof { 7: string; go(): string }
+        {
+          kind: NODE_FUNCTION,
+          parameters: [],
+          returnTypeNodeId: 1,
+          typeParameterNodeIds: [],
+        }, // 6: () => string
+        { kind: NODE_LITERAL, literalKind: LITERAL_STRING, stringId: 2 }, // 7: "go"
+        { kind: NODE_INDEXED_ACCESS, objectNodeId: 2, indexNodeId: 7 }, // 8: { 7: string; go(): string }["go"]
+      ],
+    );
+    expect(typeExprToDescriptor(createGraphTypeExprRef(graph, 4), new Map())).toEqual({
+      kind: "primitive",
+      name: "string",
+    });
+    expect(typeExprToDescriptor(createGraphTypeExprRef(graph, 5))).toEqual({
+      kind: "union",
+      types: [
+        { kind: "literal", value: 7 },
+        { kind: "literal", value: "go" },
+      ],
+    });
+    expect(typeExprToDescriptor(createGraphTypeExprRef(graph, 8), new Map())).toMatchObject({
+      kind: "function",
+      returnType: { kind: "primitive", name: "string" },
+    });
   });
 
   it("preserves index signatures on object types", () => {
@@ -1295,7 +1565,7 @@ describe("typeExprToDescriptor", () => {
   // modifier as absent. A genuinely-plain native mapped still recovers `Record`.
   // ===========================================================================
 
-  it("keeps a `+optional` native open-domain mapped type as unknown('mapped') (native raw-JSON carries the optional modifier)", () => {
+  it("keeps a `+optional` native open-domain mapped type as unknown (native raw-JSON carries the optional modifier)", () => {
     // `+? [P in string]: any` — the native producer surfaces the ADDED optional
     // modifier in the raw-JSON `optional` field. `Record` cannot express an
     // added optional, so the recovery must bail rather than silently drop it
@@ -1308,7 +1578,7 @@ describe("typeExprToDescriptor", () => {
       optional: "add",
     });
     expect(result.kind).toBe("unknown");
-    expect(result).toEqual({ kind: "unknown", rawType: "mapped" });
+    expect(result).toEqual({ kind: "unknown", rawType: "{ [P in string]?: any }" });
     // Negative: the unsound `Record` recovery is gone for the modified form.
     expect(result.kind).not.toBe("ref");
   });
@@ -1667,7 +1937,7 @@ describe("buildEvaluatedTypeMap", () => {
 
 describe("operator-shaped graph nodes render structurally in display text", () => {
   /**
-   * `Theme[color] extends Dark ? A : B` as a graph: node 3 is the indexed
+   * `Theme["color"] extends Dark ? A : B` as a graph: node 3 is the indexed
    * access, node 7 the conditional that consumes it.
    */
   function operatorGraph(): DecodedTypeGraph {
@@ -1676,7 +1946,7 @@ describe("operator-shaped graph nodes render structurally in display text", () =
       [
         { kind: NODE_REF, nameId: 1, typeArgumentNodeIds: [] }, // 1: Theme
         { kind: NODE_LITERAL, literalKind: LITERAL_STRING, stringId: 2 }, // 2: "color"
-        { kind: NODE_INDEXED_ACCESS, objectNodeId: 1, indexNodeId: 2 }, // 3: Theme[color]
+        { kind: NODE_INDEXED_ACCESS, objectNodeId: 1, indexNodeId: 2 }, // 3: Theme["color"]
         { kind: NODE_REF, nameId: 3, typeArgumentNodeIds: [] }, // 4: Dark
         { kind: NODE_REF, nameId: 4, typeArgumentNodeIds: [] }, // 5: A
         { kind: NODE_REF, nameId: 5, typeArgumentNodeIds: [] }, // 6: B
@@ -1687,7 +1957,7 @@ describe("operator-shaped graph nodes render structurally in display text", () =
           trueTypeNodeId: 5,
           falseTypeNodeId: 6,
         }, // 7
-        { kind: NODE_KEY_OF, operandNodeId: 3 }, // 8: keyof Theme[color]
+        { kind: NODE_KEY_OF, operandNodeId: 3 }, // 8: keyof Theme["color"]
       ],
     );
   }
@@ -1700,13 +1970,13 @@ describe("operator-shaped graph nodes render structurally in display text", () =
     const result = typeExprToDescriptor(createGraphTypeExprRef(operatorGraph(), 7));
     expect(result).toEqual({
       kind: "unknown",
-      rawType: "Theme[color] extends Dark ? A : B",
+      rawType: 'Theme["color"] extends Dark ? A : B',
     });
   });
 
   it("renders an unresolvable keyof over an indexed access as type syntax", () => {
     const result = typeExprToDescriptor(createGraphTypeExprRef(operatorGraph(), 8));
-    expect(result).toEqual({ kind: "unknown", rawType: "keyof Theme[color]" });
+    expect(result).toEqual({ kind: "unknown", rawType: 'keyof Theme["color"]' });
   });
 });
 

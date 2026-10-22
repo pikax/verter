@@ -335,14 +335,18 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             alg.type_parameter(Arc::<str>::from(display_name), constraint_out, default_out)
         }
         // A declaration raises with its constraint (a present but
-        // unraisable one fails the node); a reference names the declaration.
+        // unraisable one fails the node); a reference raises as the bare name
+        // it was authored as, so a nested `extends` clause that only refers
+        // to an enclosing binder never reads as redeclaring it.
         SemanticNodeData::Infer {
             name, constraint, ..
         } => {
             let constraint_out = fold_optional_slot(alg, dispatch, *constraint, active)?;
             alg.infer(Arc::<str>::from(name), constraint_out)
         }
-        SemanticNodeData::InferRef { name, .. } => alg.infer(Arc::<str>::from(name), None),
+        SemanticNodeData::InferRef { name, .. } => {
+            alg.reference(Arc::<str>::from(name), Vec::new())
+        }
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { name, args } => {
                 let raised_args: Vec<A::Out> = args

@@ -4242,6 +4242,7 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "serde",
+ "serde_json",
  "verter_ecma",
  "verter_span",
  "verter_type_expr",

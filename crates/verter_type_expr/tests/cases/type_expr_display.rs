@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use verter_type_expr::{
-    render_type_expr_display, FunctionExpr, FunctionParam, IndexSignature, LiteralValue,
-    MappedModifier, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
-    RecursiveConditionalBranch, RecursiveConditionalFrame, SyntheticCarrierKey,
-    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeExprDisplayError, TypeParam,
-    UnknownValue, ValueRef,
+    render_type_expr_display, AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam,
+    IndexSignature, LiteralValue, MappedModifier, MethodSignature, ObjectExpr, ObjectMember,
+    ObjectProperty, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame,
+    SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeExprDisplayError,
+    TypeParam, UnknownValue, ValueRef,
 };
 
 fn reference(name: &str) -> TypeExpr {
@@ -422,7 +422,7 @@ fn deep_finite_structure_renders_completely_without_a_depth_cap() {
 }
 
 #[test]
-fn an_infer_bound_by_an_enclosing_clause_renders_as_a_reference() {
+fn every_infer_in_an_extends_clause_declares_and_a_reference_is_its_name() {
     let infer = |name: &str| TypeExpr::Infer {
         name: name.into(),
         constraint: None,
@@ -444,28 +444,80 @@ fn an_infer_bound_by_an_enclosing_clause_renders_as_a_reference() {
                 false_type: Arc::new(false_type),
             }
         };
-    // The nested clause in the true branch references `U`; the false branch
-    // is outside its scope, so a clause there declares `U` afresh.
-    let expression = conditional(
+    let render = |expression: &TypeExpr| {
+        render_type_expr_display(expression)
+            .expect("the conditional renders")
+            .text
+    };
+    // A nested clause in the true branch that refers to the enclosing `U`
+    // holds the reference; the false branch is outside its scope, so a clause
+    // there declares `U` afresh.
+    let referring = conditional(
         reference("T"),
         object("a", infer("U")),
         conditional(
             reference("T"),
-            object("b", infer("U")),
-            infer("U"),
+            object("b", reference("U")),
+            reference("U"),
             TypeExpr::Literal(LiteralValue::Number(2.0)),
         ),
         conditional(
             reference("T"),
             object("c", infer("U")),
-            infer("U"),
+            reference("U"),
             TypeExpr::Primitive(PrimitiveName::Never),
         ),
     );
     assert_eq!(
-        render_type_expr_display(&expression)
-            .expect("the conditional renders")
-            .text,
+        render(&referring),
         "T extends { a: infer U } ? T extends { b: U } ? U : 2 : T extends { c: infer U } ? U : never"
+    );
+    // A nested clause redeclaring the enclosing name shadows it: printed as a
+    // reference, `T = string` would select `never` instead of `number`.
+    let shadowing = conditional(
+        reference("T"),
+        infer("U"),
+        conditional(
+            TypeExpr::Primitive(PrimitiveName::Number),
+            infer("U"),
+            reference("U"),
+            TypeExpr::Primitive(PrimitiveName::Never),
+        ),
+        TypeExpr::Primitive(PrimitiveName::Never),
+    );
+    assert_eq!(
+        render(&shadowing),
+        "T extends infer U ? number extends infer U ? U : never : never"
+    );
+}
+
+#[test]
+fn a_digit_spelled_string_key_stays_quoted_apart_from_its_number_key() {
+    // `{ '7': A }` and `{ 7: B }` address one property, but `keyof` is `'7'`
+    // for the first and `7` for the second: only the number key prints bare.
+    let expression = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
+        properties: vec![
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "7".into(),
+                reference("A"),
+                false,
+                false,
+            )),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                AuthoredPropertyKey::Number(
+                    CanonicalIndexInt::from_canonical_i64(7).expect("7 is a canonical index"),
+                ),
+                reference("B"),
+                false,
+                false,
+            )),
+        ],
+    }));
+    assert_eq!(
+        render_type_expr_display(&expression)
+            .expect("the object renders")
+            .text,
+        "{ '7': A; 7: B }"
     );
 }
