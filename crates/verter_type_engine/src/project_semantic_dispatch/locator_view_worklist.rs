@@ -168,7 +168,6 @@ enum ProjectionFrame {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         data: crate::semantic_query_memo::NodeData,
-        check: SemanticNodeId,
     },
     ConditionalAfterExtends {
         node: SemanticNodeId,
@@ -518,17 +517,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn conditional_check_context(
-        context: ProjectionReductionContext,
-    ) -> ProjectionReductionContext {
-        // Branch selection reads the check's type, not its member values.
-        context.with_mode(if context.mode == ProjectionMode::Skeleton {
-            ProjectionMode::Skeleton
-        } else {
-            ProjectionMode::Navigate
-        })
-    }
-
     pub(super) fn reference_argument_context(
         &self,
         continuation: &CarrierArgsContinuation,
@@ -709,9 +697,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                 ))
             }
-            SemanticNodeData::BareRef(_) => {
-                self.plan_bare_reference_projection(data, context, inputs, substitutions)
-            }
+            SemanticNodeData::BareRef(_) => self.plan_bare_reference_projection(
+                data,
+                context,
+                inputs,
+                substitutions,
+                self.in_deferred_interior(ancestors),
+            ),
             SemanticNodeData::ImportType(_) => {
                 self.plan_import_reference_projection(data, context, inputs, suspend)
             }
@@ -1087,26 +1079,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     node,
                     context,
                     data,
-                    check,
                 } => {
-                    let check_id = projected(memo, check, Self::conditional_check_context(context));
-                    let check_is_object_relation_subject = matches!(
-                        self.graph().node_data(check_id).as_deref(),
-                        Some(
-                            SemanticNodeData::Object(_)
-                                | SemanticNodeData::Intersection(_)
-                                | SemanticNodeData::Alias(_)
-                                | SemanticNodeData::DeclRef { .. }
-                                | SemanticNodeData::InstantiationRef { .. }
-                                | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
-                        )
-                    );
-                    let extends_context = if check_is_object_relation_subject {
-                        context
-                    } else {
-                        ProjectionReductionContext::structural_transit_with_mode(context.mode)
-                            .with_orthogonal_axes_from(context)
-                    };
+                    let extends_context = Self::conditional_target_context(context);
                     let SemanticNodeData::Conditional { extends, .. } = data.as_ref() else {
                         unreachable!("conditional staging frame must carry a conditional")
                     };
@@ -1140,7 +1114,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         unreachable!("conditional staging frame must carry a conditional")
                     };
                     let decision_shell = SemanticNodeData::Conditional {
-                        check: projected(memo, *check, Self::conditional_check_context(context)),
+                        check: projected(memo, *check, Self::conditional_operand_context(context)),
                         extends: projected(memo, *extends, extends_context),
                         true_branch_ref: *true_branch_ref,
                         false_branch_ref: *false_branch_ref,
@@ -1153,7 +1127,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             check: projected(
                                 memo,
                                 *check,
-                                Self::conditional_check_context(context),
+                                Self::conditional_operand_context(context),
                             ),
                             extends: projected(memo, *extends, extends_context),
                             true_branch: *true_branch_ref,
@@ -1278,7 +1252,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             check: projected(
                                 memo,
                                 *check,
-                                Self::conditional_check_context(context),
+                                Self::conditional_operand_context(context),
                             ),
                             extends: projected(memo, *extends, extends_context),
                             true_branch: self.answer_member(
@@ -1986,11 +1960,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     node,
                     context,
                     data,
-                    check,
                 });
                 frames.push(ProjectionFrame::Enter {
                     node: check,
-                    context: Self::conditional_check_context(context),
+                    context: Self::conditional_operand_context(context),
                 });
                 Ok(true)
             }

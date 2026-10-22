@@ -353,6 +353,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
+        let scope = if let AuthoredBodyLocator::AugmentationBody(augmentation) = key.locator() {
+            let augmentation_scope = match &augmentation.scope {
+                verter_type_expr::locators::AuthoredAugmentationScope::Global => {
+                    verter_session_query::declarations::AugmentationScopeKind::Global
+                }
+                verter_type_expr::locators::AuthoredAugmentationScope::Module { specifier } => {
+                    verter_session_query::declarations::AugmentationScopeKind::Module(
+                        specifier.to_string(),
+                    )
+                }
+            };
+            Self::augmentation_body_scope(
+                scope,
+                &indexed.shallow_state.headers,
+                &augmentation_scope,
+                anchor.symbol.as_ref(),
+            )
+        } else {
+            scope
+        };
         let anchor_symbol = match key.locator() {
             AuthoredBodyLocator::DeclBody(slot) => slot.anchor.symbol.clone(),
             AuthoredBodyLocator::AugmentationBody(aug) => aug.anchor.symbol.clone(),

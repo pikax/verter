@@ -900,6 +900,14 @@ fn blocker_set_canonicals(set: &PendingBlockerSet) -> impl Iterator<Item = &Arc<
         .filter_map(dep_canonical)
 }
 
+#[derive(Debug, Default)]
+struct BlockerReferenceBucket {
+    counts: FxHashMap<BlockerKey, usize>,
+    /// Deletions can reduce HashMap::capacity through tombstones without
+    /// releasing its allocation. No bucket operation shrinks the backing.
+    backing_capacity: usize,
+}
+
 /// Per-canonical reverse indices for the state surfaces a source bump or
 /// a file removal must sweep, so
 /// [`SchedulerDag::supersede_old_file_generations`] and removal do work
@@ -940,7 +948,7 @@ struct CanonicalReverseIndex {
     /// [`SchedulerDag::artifact_blocker_deps`] whose live deps or failed
     /// records name it, each with its reference count. Lets a removal
     /// scrub only the entries that reference the removed file.
-    blocker_dep_refs: FxHashMap<Arc<str>, FxHashMap<BlockerKey, usize>>,
+    blocker_dep_refs: FxHashMap<Arc<str>, BlockerReferenceBucket>,
 }
 
 impl CanonicalReverseIndex {
@@ -1013,12 +1021,12 @@ impl CanonicalReverseIndex {
     /// generation)` entry.
     fn add_blocker_refs(&mut self, key: &BlockerKey, set: &PendingBlockerSet) {
         for canonical in blocker_set_canonicals(set) {
-            *self
+            let bucket = self
                 .blocker_dep_refs
                 .entry(Arc::clone(canonical))
-                .or_default()
-                .entry(key.clone())
-                .or_insert(0) += 1;
+                .or_default();
+            *bucket.counts.entry(key.clone()).or_insert(0) += 1;
+            bucket.backing_capacity = bucket.backing_capacity.max(bucket.counts.capacity());
         }
     }
 
@@ -1029,13 +1037,13 @@ impl CanonicalReverseIndex {
                 verter_debug_assert!(false, "blocker reference index lost a live reference");
                 continue;
             };
-            if let Some(count) = owners.get_mut(key) {
+            if let Some(count) = owners.counts.get_mut(key) {
                 *count -= 1;
                 if *count == 0 {
-                    owners.remove(key);
+                    owners.counts.remove(key);
                 }
             }
-            if owners.is_empty() {
+            if owners.counts.is_empty() {
                 self.blocker_dep_refs.remove(canonical.as_ref());
             }
         }
@@ -1046,7 +1054,7 @@ impl CanonicalReverseIndex {
     fn blocker_entries_referencing(&self, canonical: &str) -> Vec<BlockerKey> {
         self.blocker_dep_refs
             .get(canonical)
-            .map(|owners| owners.keys().cloned().collect())
+            .map(|owners| owners.counts.keys().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -1196,9 +1204,9 @@ impl SchedulerDag {
         DependencyOccupancy {
             dep_edges: self.dep_edges.occupancy(),
             blocker_ref_canonicals: refs.len(),
-            blocker_ref_entries: refs.values().map(FxHashMap::len).sum(),
+            blocker_ref_entries: refs.values().map(|bucket| bucket.counts.len()).sum(),
             blocker_ref_capacity: refs.capacity(),
-            blocker_ref_entries_capacity: refs.values().map(FxHashMap::capacity).sum(),
+            blocker_ref_entries_capacity: refs.values().map(|bucket| bucket.backing_capacity).sum(),
         }
     }
 

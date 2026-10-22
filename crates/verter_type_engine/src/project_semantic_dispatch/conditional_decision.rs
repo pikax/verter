@@ -18,8 +18,9 @@ use super::{ConditionalBranchSelection, ProjectSemanticDispatch};
 use crate::semantic_query::surface_resolution::NonEmptyReasons;
 use crate::semantic_query::{
     BranchSelection, ConditionalPendingSubstitution, ExecutionAbort, FactResult, LiteralValue,
-    OriginEdgeKind, OriginMeta, PartialReason, PrimitiveKind, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    OriginEdgeKind, OriginMeta, PartialReason, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey,
 };
 
 /// Whether `data` stores a child id: a payload with none is a leaf of every
@@ -479,6 +480,30 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for L
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Both operands keep their generic declaration and arguments until the
+    /// relation authority applies variance or demands their structure.
+    pub(super) fn conditional_operand_context(
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        let mode = if context.mode == ProjectionMode::Skeleton {
+            ProjectionMode::Skeleton
+        } else {
+            ProjectionMode::Navigate
+        };
+        // The check consumes its selected value: an unread indexed carrier
+        // cannot prove a reflexive relation merely by node identity.
+        context.with_mode(mode)
+    }
+
+    /// An extends pattern keeps its operators structural until the relation
+    /// demands them, without publishing nested mapped members.
+    pub(super) fn conditional_target_context(
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        let context = Self::conditional_operand_context(context);
+        context.into_structural_transit_with_mode(context.mode)
+    }
+
     /// Nodes this thread's conditional decisions read to classify their
     /// operands (generic, `infer` sites); test-only. A distributed member
     /// that re-reads its wide `extends` operand shows here.
@@ -734,9 +759,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // demand observed is the relation's to observe, so it is dropped.
         if self.deciding_on_the_runtime() {
             let demanded = self.observe_read(|| self.demand_relation_operands([check, extends]));
-            let _ = demanded.discard();
             if self.decision_waits() {
+                let _ = demanded.discard();
                 return self.waiting_decision_output();
+            }
+            // An operand whose walk ended at the checker's error type is
+            // that type, and the checker returns it when either operand is
+            // it: the relation, which would walk the operand again, never
+            // runs. The demand's reads are the answer's evidence.
+            let [check_error, extends_error] = *demanded.value();
+            if check_error.is_some() || extends_error.is_some() {
+                if let Err(abort) = demanded.adopt(self) {
+                    return super::walk::QueryBuildOutput::from((
+                        QueryResult::Error(QueryError::ExecutionAborted(abort)),
+                        self.project_generation_signature(),
+                    ));
+                }
+                if let Some(absorbed) = self.absorb_conditional(
+                    check_error.unwrap_or(check),
+                    extends_error.unwrap_or(extends),
+                    distributive,
+                    |take_true| branches.branch(self, take_true),
+                ) {
+                    return absorbed;
+                }
+            } else {
+                let _ = demanded.discard();
             }
         }
         let observation = self.observe_read(|| self.conditional_branch_selection(check, extends));
@@ -1384,7 +1432,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    fn is_conditional_checker_recovery(&self, node: SemanticNodeId) -> bool {
+    pub(super) fn is_conditional_checker_recovery(&self, node: SemanticNodeId) -> bool {
         matches!(
             self.graph().node_data(node).as_deref(),
             Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
@@ -2228,7 +2276,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Whether `node` holds a type variable free in it: a type parameter no
     /// signature within declares, or a reference to an enclosing `infer`.
-    fn mentions_generic_operand_variable(&self, node: SemanticNodeId, infer_operand: bool) -> bool {
+    pub(super) fn mentions_generic_operand_variable(
+        &self,
+        node: SemanticNodeId,
+        infer_operand: bool,
+    ) -> bool {
         let summary = self.free_type_variables(node);
         summary.params.is_some()
             || summary.infer_ref

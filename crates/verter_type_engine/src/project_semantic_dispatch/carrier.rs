@@ -310,6 +310,13 @@ pub(super) enum CarrierFinish {
 /// Keeping this continuation independent of [`CarrierResolverContext`] is what
 /// lets the projection worklist resume it after all argument nodes complete.
 pub(super) enum CarrierArgsContinuation {
+    ExternalModule {
+        specifier: String,
+        decl_name: String,
+        name: Arc<str>,
+        scope: NodeScopeId,
+        context: ProjectionReductionContext,
+    },
     Intern {
         head: RefHeadResolution,
         name: Arc<str>,
@@ -459,6 +466,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         in_deferred_position: &dyn Fn() -> bool,
     ) -> CarrierFinish {
         match continuation {
+            CarrierArgsContinuation::ExternalModule {
+                specifier,
+                decl_name,
+                name,
+                scope,
+                context,
+            } => CarrierFinish::Node(
+                self.resolve_external_module_augmentation(
+                    &specifier, &decl_name, &type_args, &scope, context,
+                )
+                .unwrap_or_else(|| {
+                    if matches!(
+                        context.mode,
+                        ProjectionMode::Navigate
+                            | ProjectionMode::Skeleton
+                            | ProjectionMode::Shallow
+                    ) {
+                        self.intern_ref_head_carrier(
+                            RefHeadResolution::Unresolved,
+                            &name,
+                            &scope,
+                            type_args,
+                        )
+                    } else {
+                        self.opaque(QueryError::Miss)
+                    }
+                }),
+            ),
             CarrierArgsContinuation::Intern { head, name, scope } => {
                 CarrierFinish::Node(self.intern_ref_head_carrier(head, &name, &scope, type_args))
             }
@@ -879,6 +914,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let reduction_context = ctx.reduction_context();
         let mode = ctx.mode();
 
+        if let Some((specifier, decl_name)) = self.ambient_namespace_type_target(scope, name) {
+            return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ExternalModule {
+                specifier,
+                decl_name,
+                name: Arc::clone(name),
+                scope: scope.clone(),
+                context: reduction_context,
+            });
+        }
+
+        // An enum member has no type header. Bind its owning value in the
+        // lexical namespace before a file/global declaration can replace it.
+        if name.rsplit_once('.').is_some_and(|(prefix, _)| {
+            self.ambient_namespace_target(scope, prefix, super::build::GlobalSpace::Value)
+                .is_some()
+        }) {
+            if let Some(member_type) =
+                self.resolve_enum_member_type(scope, name_resolution, scope_payload, name.as_ref())
+            {
+                return CarrierResolutionPlan::complete(member_type);
+            }
+        }
+
         // Global lib-type fast path: an unshadowed runtime nominal interns a
         // `DeclRef` / `InstantiationRef` carrier in EVERY mode, preserving its
         // declaration identity for semantic classifiers and reducers.
@@ -1050,14 +1108,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => false,
         };
         if !resolves_to_file {
-            if let NodeScopeId::File { canonical_id, .. } = scope {
-                if let Some(merged) = self.resolve_external_module_augmentation(
-                    canonical_id.as_ref(),
-                    name.as_ref(),
-                    scope,
-                    reduction_context,
-                ) {
-                    return CarrierResolutionPlan::complete(merged);
+            if let NodeScopeId::File {
+                canonical_id,
+                owner,
+                ..
+            } = scope
+            {
+                if let Some((specifier, decl_name)) =
+                    self.external_module_type_target(canonical_id.as_ref(), *owner, name.as_ref())
+                {
+                    return CarrierResolutionPlan::NeedsArgs(
+                        CarrierArgsContinuation::ExternalModule {
+                            specifier,
+                            decl_name,
+                            name: Arc::clone(name),
+                            scope: scope.clone(),
+                            context: reduction_context,
+                        },
+                    );
                 }
             }
         }
@@ -1085,21 +1153,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // `Enum.Member` whose prefix is a proven enum value declaration
             // projects the member's projected type. Gated on the typed
             // `ValueDeclKind::Enum` fact, not a dotted-name heuristic.
-            if let NodeScopeId::File {
-                canonical_id,
-                owner,
-                ..
-            } = scope
+            if let Some(member_type) =
+                self.resolve_enum_member_type(scope, name_resolution, scope_payload, name.as_ref())
             {
-                if let Some(member_type) = self.resolve_enum_member_type(
-                    canonical_id.as_ref(),
-                    *owner,
-                    name_resolution,
-                    scope_payload,
-                    name.as_ref(),
-                ) {
-                    return CarrierResolutionPlan::complete(member_type);
-                }
+                return CarrierResolutionPlan::complete(member_type);
             }
             // A conditional's `infer` declaration read outside its scope,
             // with nothing else binding the name, is the checker's TS2304 —

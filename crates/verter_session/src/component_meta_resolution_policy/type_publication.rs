@@ -65,6 +65,10 @@ enum ProofPathStep {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProofReferenceIdentity {
+    Enum {
+        declaration: DeclIdentity,
+        module_specifier: Option<verter_type_expr::OwnedStr>,
+    },
     Decl(DeclIdentity),
     Bare {
         name: std::sync::Arc<str>,
@@ -444,7 +448,10 @@ fn proof_reference_map<M: verter_audit::observe::ObserveExec>(
             // An enum member's literal names its enum declaration; the
             // member is compared by the shape proof below.
             SemanticNodeData::EnumLiteral(literal) => {
-                references.insert(path, ProofReferenceIdentity::Decl(literal.enum_decl.clone()));
+                references.insert(path, ProofReferenceIdentity::Enum {
+                    declaration: literal.enum_decl.clone(),
+                    module_specifier: literal.module_specifier.clone(),
+                });
             }
             SemanticNodeData::ObjectSpreadProgram(program) => {
                 for (index, child) in program.child_nodes().enumerate() {

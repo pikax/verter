@@ -59,3 +59,60 @@ Each continuation frame traces its own reads; completing a child folds its
 signature into its parent. The metadata and evidence pages use the existing
 aggregate retention account. A newly added consumer must observe augmenter
 edits and additions even when its declaration subject was already evaluated.
+
+**Ambient namespace body context.** A module-scoped namespace body keeps its
+source-ordered `augmentation_namespace_blocks` ordinal as
+`NodeLocalScopeId::AugmentationNamespace` in `NodeScopeId::File.local_scope`,
+pinned by the canonical file, exact owner and whole-file hash. Lexical table
+indices use the distinct `NodeLocalScopeId::Lexical(LocalScopeId)` variant;
+an equal ordinal never selects the ambient namespace inventory. Scope hashing
+and stable-key encoding preserve this discriminator.
+Module-root declaration bodies retain their `augmentation_blocks` ordinal as
+`NodeLocalScopeId::AugmentationModule`, with the same generation and owner
+fences. A namespace alias that reaches a module-root alias therefore keeps the
+exact module inventory when that alias demands its own sibling dependencies.
+Both locator-shape lowering and contribution projection use that scope. Lexical
+references consult the exact module inventory, walking enclosing namespace
+prefixes before the module root, before file/import/global lookup. They stay
+scoped carriers until the shared ambient contribution folder reads the demanded
+type, including supplied generic arguments. No sibling map or second resolver
+is stored on a carrier. Contribution parameters use the shared positional/default
+binder; their defaults are read through `AugmentationBody` locators in the
+contributor scope, so earlier parameters can feed later defaults.
+Body projection preserves scoped member references as back-edges, lowering their
+arguments without unfolding sibling bodies. Alias roots and conditional operands
+resolve siblings through the contribution folder rather than retaining a bare
+reference as their answer. The consumer's reference demand
+uses the same ambient folder, so recursive interfaces remain projectable without
+adding a separate recursive resolver or a second cycle table.
+The bound locators used to reconstruct declaration binder identities must carry
+that same augmentation scope: embedded constraints/defaults are part of the
+binder node, so a file-scope retry can break even explicit-argument substitution.
+A single contribution retains its actual type (including an alias reference or
+scalar); only multiple contributors require peer surface merging.
+
+Namespace `typeof` roots bind values in that same inventory before file/global
+lookup, including nested namespace roots whose members have qualified value
+headers. The shared value builder consumes those headers before projecting any
+remaining property path. Their qualified name and augmentation binder identity
+reach the shared value builder, which prepares the exact module-scoped declaration
+and reads its authored value position through an `AugmentationBody` locator even when another
+module declares the same namespace and value names. Enum member types
+follow the shared ambient import value route before enum projection. An enum
+member referenced by a sibling alias first binds its owning enum in the lexical
+namespace inventory, before file/global lookup, then uses the same enum projector.
+Ambient value import roots carry the module's structural binder identity and
+test declaration presence in that exact inventory; another module or file-level
+namesake never makes that presence ambiguous. Enum preparation shares the exact
+augmentation-value reader with `typeof`. Enum literals retain the declaring
+module specifier alongside their declaration identity through interning, stable
+keys, union printing, publication proof and widening, so subsequent enum demands
+cannot fall back to a file-global enum of the same qualified name.
+Function value signature jobs carry that same known augmentation into their
+authored body locators, including ambient default exports. Their return and
+parameter demands never reconstruct a file-scope locator for a scoped root.
+A scoped namespace root is composed from its namespace inventory, not prepared
+as an ordinary value declaration; each member retains the module binder.
+Namespace classes retain both their instance type and constructor value through
+the ordinary class header and body lowerers, including explicit exports and
+generic defaults.
