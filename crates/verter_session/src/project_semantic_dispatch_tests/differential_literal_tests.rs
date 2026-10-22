@@ -537,12 +537,19 @@ namespace D.E {
     export const v = [h()];
     export function run() { return { b: h() }; }
 }
+namespace F.A { export function h(): 2 { return 2; } }
+namespace F.A.B { export const v = { a: h() }; export const r = [h()]; }
+namespace K { export namespace A {
+    export function h(): 2 { return 2; }
+    export namespace B { export const v = { a: h() }; }
+} }
 "##;
 
 /// A call that is an array-literal element or an object-literal property
 /// value types as its return, in a module value and in a namespace's,
 /// nested and dotted namespaces included (a dotted namespace's own members
-/// called through its last segment's scope): a call's result is no fresh
+/// called through its last segment's scope, an enclosing namespace's
+/// function called bare from an inner one): a call's result is no fresh
 /// literal, so a literal return type stays as it is where an authored
 /// literal beside it widens. The answers are complete and read the same
 /// warm.
@@ -577,6 +584,9 @@ fn a_call_inside_a_literal_types_as_its_return() {
             ("typeof A.B.C.plain", "{ a: number; }"),
             ("typeof D.E.v", "2[]"),
             ("ReturnType<typeof D.E.run>", "{ b: 2; }"),
+            ("typeof F.A.B.v", "{ a: 2; }"),
+            ("typeof F.A.B.r", "2[]"),
+            ("typeof K.A.B.v", "{ a: 2; }"),
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -605,6 +615,9 @@ export const getThenPlain = { a: f(), get b() { return 1; }, b: "s" };
 export const plainThenGet = { a: f(), b: "s", get b() { return 1; } };
 export const plainThenPair = { a: f(), b: "s", get b() { return 1; }, set b(v: number) {} };
 export const setThenPlain = { a: f(), set b(v: number) {}, b: "s" };
+export const setThenPlainThenGet = { a: f(), set b(v: number) {}, b: "s", get b() { return 1; } };
+export const plainThenSetThenGet = { a: f(), b: "s", set b(v: number) {}, get b() { return 1; } };
+export const getThenPlainThenGet = { a: f(), get b() { return 1; }, b: "s", get b() { return true; } };
 export const pairThenPlain = { a: f(), get b() { return 1; }, set b(v: number) {}, b: "s" };
 export const plainThenPlain = { a: f(), b: 1, b: "s" };
 export const getThenPlainNoCall = { a: n, get b() { return 1; }, b: "s" };
@@ -641,6 +654,12 @@ fn an_accessor_in_a_literal_is_the_property_it_reads_as() {
             ("typeof plainThenGet", "{ a: number; readonly b: number; }"),
             ("typeof plainThenPair", "{ a: number; b: number; }"),
             ("typeof setThenPlain", "{ a: number; b: string; }"),
+            ("typeof setThenPlainThenGet", "{ a: number; b: number; }"),
+            ("typeof plainThenSetThenGet", "{ a: number; b: number; }"),
+            (
+                "typeof getThenPlainThenGet",
+                "{ a: number; readonly b: boolean; }",
+            ),
             ("typeof pairThenPlain", "{ a: number; b: string; }"),
             ("typeof plainThenPlain", "{ a: number; b: string; }"),
             (

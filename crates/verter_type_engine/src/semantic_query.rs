@@ -4898,26 +4898,32 @@ pub(crate) fn object_literal_members_last_wins(members: Vec<SurfaceMember>) -> V
     for ordinals in by_spelling.values().filter(|ordinals| ordinals.len() > 1) {
         // The binder symbol each member declares: `0` the spelling's table
         // symbol, `n` the `n`th detached one a conflicting accessor or
-        // method mints.
-        let (mut table_get, mut table_set, mut table_other) = (false, false, false);
+        // method mints. A plain property conflicts with nothing and joins
+        // the table symbol; an accessor conflicts with its own kind and a
+        // method, never with a plain property; a method conflicts with
+        // every other member.
+        let (mut table_get, mut table_set, mut table_method, mut table_plain) =
+            (false, false, false, false);
         let mut detached = 0usize;
         let symbols: Vec<usize> = ordinals
             .iter()
             .map(|ordinal| match members[*ordinal].method_kind {
                 None => {
-                    table_other = true;
+                    table_plain = true;
                     0
                 }
-                Some(ObjectMethodKind::Get) if !table_get && !table_other => {
+                Some(ObjectMethodKind::Get) if !table_get && !table_method => {
                     table_get = true;
                     0
                 }
-                Some(ObjectMethodKind::Set) if !table_set && !table_other => {
+                Some(ObjectMethodKind::Set) if !table_set && !table_method => {
                     table_set = true;
                     0
                 }
-                Some(ObjectMethodKind::Method) if !table_get && !table_set && !table_other => {
-                    table_other = true;
+                Some(ObjectMethodKind::Method)
+                    if !table_get && !table_set && !table_method && !table_plain =>
+                {
+                    table_method = true;
                     0
                 }
                 Some(_) => {
