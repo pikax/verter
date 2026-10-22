@@ -36,6 +36,7 @@ import {
   E2E_SERVER_PROFILE_SLUGS,
   serverProfileKeys,
   serverProfileSettings,
+  serverProfileForSuite,
   serverProfilesForSuites,
   type E2eServerProfile,
 } from "./lib/serverProfiles";
@@ -689,11 +690,21 @@ async function main() {
           }
           throw summaryError;
         }
-        // A route whose suites include the teardown recording that produced none
-        // verified nothing: the host died before its root teardown ran.
-        if (reapedCount === undefined && suiteAllowedForFixture(fixture, "_teardown.test.js")) {
+        // The teardown recording runs only in the launch whose profile owns it (the
+        // suite loader drops it from every other profile's launch). A launch that
+        // loads it and produced none verified nothing: the host died before its root
+        // teardown ran. One that recorded nothing owned was never observing a server.
+        const teardownLoadsHere =
+          suiteAllowedForFixture(fixture, "_teardown.test.js") &&
+          serverProfileForSuite("_teardown.test", baseServerProfile) === serverProfile;
+        if (teardownLoadsHere && reapedCount === undefined) {
           throw new Error(
             `Route ${label} wrote no owned-process recording, so teardown reaping was not verified.`,
+          );
+        }
+        if (teardownLoadsHere && reapedCount === 0) {
+          throw new Error(
+            `Route ${label} recorded no owned Verter language server, so teardown reaping verified nothing.`,
           );
         }
         if (extensionHostError) {
