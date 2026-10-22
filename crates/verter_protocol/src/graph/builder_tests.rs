@@ -893,3 +893,95 @@ fn snapshot_heap_counts_its_strings_and_node_lists_once_per_shared_table() {
         "a clone shares both tables"
     );
 }
+
+/// Signatures encoded one after another each get their own function node,
+/// however the allocator recycles memory between them: 256 distinct
+/// signatures yield 256 distinct nodes.
+#[test]
+fn temporary_signature_arcs_never_alias_in_the_pointer_memo() {
+    use verter_type_expr::FunctionExpr;
+    let mut builder = GraphBuilder::new();
+    let mut ids = Vec::new();
+    for value in 0..256u32 {
+        let function = FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(TypeExpr::Literal(LiteralValue::Number(
+                f64::from(value),
+            )))),
+            Vec::new(),
+        );
+        ids.push(builder.signature_member(0, &function).function);
+    }
+    let mut distinct = ids.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        ids.len(),
+        "{} of {} distinct signatures were answered with another signature's node",
+        ids.len() - distinct.len(),
+        ids.len()
+    );
+}
+
+/// One object type with two methods whose signatures differ
+/// (`a(): string`, `b(): number`) keeps a function node per method.
+#[test]
+fn two_methods_of_one_object_keep_their_own_signatures() {
+    use verter_type_expr::{
+        FunctionExpr, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember,
+    };
+    let method = |name: &str, ret: PrimitiveName| {
+        ObjectMember::Method(MethodSignature::with_key_visibility(
+            name.into(),
+            FunctionExpr::synthetic(
+                Vec::new(),
+                Some(Arc::new(TypeExpr::Primitive(ret))),
+                Vec::new(),
+            ),
+            false,
+            MemberVisibility::Public,
+            Default::default(),
+        ))
+    };
+    let object = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
+        properties: vec![
+            method("a", PrimitiveName::String),
+            method("b", PrimitiveName::Number),
+        ],
+    }));
+    let mut builder = GraphBuilder::new();
+    let id = builder.node_id(&object);
+    let GraphNode::Object { members, .. } = &builder.nodes()[id as usize - 1] else {
+        panic!("an object node");
+    };
+    let functions: Vec<u32> = members.iter().map(|member| member.function).collect();
+    assert_eq!(functions.len(), 2);
+    assert_ne!(
+        functions[0], functions[1],
+        "b() was answered with a()'s signature node"
+    );
+}
+
+/// The tables are a function of the expressions' content and encounter order
+/// alone, never of where or how long they were allocated: expressions handed
+/// in as temporaries, each dropped straight after its `node_id` call, number
+/// and encode exactly as the same expressions held alive throughout.
+#[test]
+fn tables_do_not_depend_on_how_long_the_expressions_live() {
+    let make = |value: u32| TypeExpr::Array {
+        element: Arc::new(TypeExpr::Literal(LiteralValue::Number(f64::from(value)))),
+        readonly: false,
+    };
+    let held: Vec<TypeExpr> = (0..256).map(make).collect();
+    let mut kept = GraphBuilder::new();
+    let kept_ids: Vec<u32> = held.iter().map(|expr| kept.node_id(expr)).collect();
+    let mut transient = GraphBuilder::new();
+    let transient_ids: Vec<u32> = (0..256)
+        .map(|value| transient.node_id(&make(value)))
+        .collect();
+    assert_eq!(transient_ids, kept_ids);
+    assert_eq!(transient.nodes(), kept.nodes());
+    assert_eq!(transient.strings(), kept.strings());
+}

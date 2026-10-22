@@ -462,6 +462,102 @@ impl ExprMemoKey {
     }
 }
 
+/// A memo key's view of its own identity.
+trait MemoIdentity {
+    /// Whether the key identifies its expression by any allocation address
+    /// (an `Arc` or `Arc<[T]>` pointer). A key built only from values it owns
+    /// is sound on its own; an address key is sound only while the
+    /// allocation it names is alive, which [`MemoKey`] guarantees.
+    fn records_addresses(&self) -> bool;
+}
+
+impl MemoIdentity for ExprMemoKey {
+    fn records_addresses(&self) -> bool {
+        match self {
+            Self::Primitive(_)
+            | Self::Literal(_)
+            | Self::TypeParameter(_)
+            | Self::TypeOf(_)
+            | Self::SyntheticSlotBinding { .. }
+            | Self::Unknown { .. } => false,
+            Self::Union { .. }
+            | Self::Intersection { .. }
+            | Self::Array { .. }
+            | Self::Tuple { .. }
+            | Self::Object { .. }
+            | Self::Function { .. }
+            | Self::ConstructorType { .. }
+            | Self::Ref { .. }
+            | Self::KeyOf { .. }
+            | Self::IndexedAccess { .. }
+            | Self::Conditional { .. }
+            | Self::Mapped { .. }
+            | Self::TemplateLiteral { .. }
+            | Self::Infer { .. }
+            | Self::Rest { .. }
+            | Self::Parenthesized { .. }
+            | Self::RecursiveRef { .. }
+            | Self::ImportType { .. }
+            | Self::IntrinsicApplication { .. } => true,
+        }
+    }
+}
+
+impl MemoIdentity for ExprPtrKey {
+    /// Every variant but the primitive (tag 0), whose identity is its name.
+    fn records_addresses(&self) -> bool {
+        self.tag != 0
+    }
+}
+
+/// A memo entry's key, owning what it identifies.
+///
+/// It hashes and compares as `key` alone, so a lookup borrows a bare key.
+/// When `key` records allocation addresses, the entry also holds a clone of
+/// the expression the key was taken from. The clone shares every `Arc` the
+/// key points into (a reference-count increment, no deep copy), so none of
+/// those allocations is freed while the builder holds the entry: each
+/// recorded address names that one expression for the builder's whole
+/// lifetime and is never handed to another expression, which would then be
+/// answered with this entry's node. A key made only of owned values holds no
+/// clone.
+#[derive(Debug)]
+struct MemoKey<K> {
+    key: K,
+    /// Keeps the allocations `key` names alive; never read.
+    _referent: Option<TypeExpr>,
+}
+
+impl<K: MemoIdentity> MemoKey<K> {
+    fn new(key: K, expr: &TypeExpr) -> Self {
+        let referent = key.records_addresses().then(|| expr.clone());
+        Self {
+            key,
+            _referent: referent,
+        }
+    }
+}
+
+impl<K: PartialEq> PartialEq for MemoKey<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl<K: Eq> Eq for MemoKey<K> {}
+
+impl<K: std::hash::Hash> std::hash::Hash for MemoKey<K> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+    }
+}
+
+impl<K> std::borrow::Borrow<K> for MemoKey<K> {
+    fn borrow(&self) -> &K {
+        &self.key
+    }
+}
+
 fn arc_ptr_id<T>(value: &Arc<T>) -> usize {
     Arc::as_ptr(value) as usize
 }
@@ -703,11 +799,15 @@ pub struct GraphBuilder {
     /// [`Self::nodes`]. Stores ONLY ids and dedups by comparing against
     /// `nodes[id - 1]`, so it never owns a second (deep) copy of the node.
     node_ids: HashTable<u32>,
-    expr_ids: HashMap<ExprMemoKey, u32>,
+    /// Expression memo. Each key owns the allocations it names by address
+    /// ([`MemoKey`]), so a hit always means the very expression that was
+    /// encoded, whatever the caller does with its own copy afterwards.
+    expr_ids: HashMap<MemoKey<ExprMemoKey>, u32>,
     /// Fast-path cache for pointer-based `TypeExpr` variants. Checked before
     /// building the full `ExprMemoKey`, avoiding clones on cache hits for the
-    /// majority of expression types.
-    expr_ptr_ids: HashMap<ExprPtrKey, u32>,
+    /// majority of expression types. Its keys own their allocations the same
+    /// way.
+    expr_ptr_ids: HashMap<MemoKey<ExprPtrKey>, u32>,
     #[cfg(test)]
     graph_node_build_count: usize,
     #[cfg(test)]
@@ -767,13 +867,13 @@ impl GraphBuilder {
 
         // Slow path: build the full memo key (may clone value fields).
         let memo_key = ExprMemoKey::from_expr(expr);
-        if let Some(id) = self.expr_ids.get(&memo_key) {
+        if let Some(&id) = self.expr_ids.get(&memo_key) {
             // Populate the ptr cache so future hits for the same Arc take
             // the fast path.
             if let Some(pk) = ptr_key {
-                self.expr_ptr_ids.insert(pk, *id);
+                self.expr_ptr_ids.insert(MemoKey::new(pk, expr), id);
             }
-            return *id;
+            return id;
         }
 
         // Terminal value-level dedup + own-once push (no `GraphNode` clone).
@@ -781,11 +881,21 @@ impl GraphBuilder {
         // interned or freshly pushed, so both cases share one tail.
         let node = self.graph_node(expr);
         let id = self.intern_node(node);
-        self.expr_ids.insert(memo_key, id);
+        self.expr_ids.insert(MemoKey::new(memo_key, expr), id);
         if let Some(pk) = ptr_key {
-            self.expr_ptr_ids.insert(pk, id);
+            self.expr_ptr_ids.insert(MemoKey::new(pk, expr), id);
         }
         id
+    }
+
+    /// The function node of a member signature (a method, call or construct
+    /// signature). The signature lives inline in its member, in no `Arc` of
+    /// its own, so it has no allocation to memoise on: its node is built and
+    /// interned by value, which yields the same id a `TypeExpr::Function`
+    /// holding an equal signature gets.
+    fn signature_function_id(&mut self, function: &FunctionExpr) -> u32 {
+        let node = self.function_node(function);
+        self.intern_node(node)
     }
 
     pub fn strings(&self) -> &[String] {
@@ -1203,7 +1313,7 @@ impl GraphBuilder {
             key_name: 0,
             key_type: 0,
             value_type: 0,
-            function: self.node_id(&TypeExpr::Function(std::sync::Arc::new(function.clone()))),
+            function: self.signature_function_id(function),
             method_kind: 0,
             has_implementation_body: false,
         }
@@ -1219,9 +1329,7 @@ impl GraphBuilder {
             key_name: 0,
             key_type: 0,
             value_type: 0,
-            function: self.node_id(&TypeExpr::Function(std::sync::Arc::new(
-                method.function.clone(),
-            ))),
+            function: self.signature_function_id(&method.function),
             method_kind: match method.method_kind {
                 verter_type_expr::ObjectMethodKind::Method => 0,
                 verter_type_expr::ObjectMethodKind::Get => 1,
