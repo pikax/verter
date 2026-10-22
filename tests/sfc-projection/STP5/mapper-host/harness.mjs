@@ -8,7 +8,7 @@
  * this directory's `fixture-mapper/`, spawned with the current Node.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -132,10 +132,39 @@ export function materializeMapperProject({
   return {
     dir,
     logFile,
+    /** Remove the project. Never throws; returns the failure text, if any. */
     cleanup() {
-      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      try {
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        return null;
+      } catch (error) {
+        return `could not remove ${dir}: ${error?.message || error}`;
+      }
     },
   };
+}
+
+/**
+ * The command that runs `engine`'s tsc with `args`: the native executable
+ * itself, or the JS compiler under the current Node.
+ */
+export function tscCommand(engine, args) {
+  return engine.kind === "native"
+    ? { command: engine.executable, args }
+    : { command: process.execPath, args: [engine.executable, ...args] };
+}
+
+/**
+ * Every run pins its message language: `--locale en` on the command line
+ * (unless the run is about locale) and a C locale in the environment, so a
+ * machine with another UI language cannot change the English messages and
+ * `initialize.locale` the proof reads.
+ */
+export const DEFAULT_LOCALE = "en";
+export const RUN_ENV = Object.freeze({ ...process.env, LANG: "C", LC_ALL: "C" });
+
+export function withLocale(args, locale = DEFAULT_LOCALE) {
+  return args.includes("--locale") ? args : [...args, "--locale", locale];
 }
 
 /**
@@ -169,7 +198,8 @@ export function parseTscDiagnostics(output) {
   return rows;
 }
 
-export function readRequestLog(logFile) {
+/** Every line the fixture logged: requests (`method`) and its replies (`response`). */
+export function readMapperLog(logFile) {
   if (!fs.existsSync(logFile)) return [];
   return fs
     .readFileSync(logFile, "utf8")
@@ -178,45 +208,92 @@ export function readRequestLog(logFile) {
     .map((line) => JSON.parse(line));
 }
 
+/** The requests TypeScript sent, in order. */
+export function readRequestLog(logFile) {
+  return readMapperLog(logFile).filter((entry) => entry.method !== undefined);
+}
+
+/** The replies the fixture sent, in order. */
+export function readResponseLog(logFile) {
+  return readMapperLog(logFile).filter((entry) => entry.response !== undefined);
+}
+
+/**
+ * Run a command to completion without blocking the event loop, so
+ * independent runs proceed concurrently. A run past `timeoutMs` is killed;
+ * a spawn failure resolves with `error` instead of throwing.
+ */
+export function runCommand(command, args, { cwd, timeoutMs = 60000 } = {}) {
+  return new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    const child = spawn(command, args, { cwd, env: RUN_ENV, windowsHide: true });
+    const finish = (status, error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status, error, output });
+    };
+    const timer = setTimeout(() => {
+      killTree(child);
+      finish(null, `timed out after ${timeoutMs} ms`);
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => (output += chunk));
+    child.stderr.on("data", (chunk) => (output += chunk));
+    child.on("error", (error) => finish(null, String(error?.message || error)));
+    child.on("close", (status) => finish(status, null));
+  });
+}
+
+/**
+ * Kill a process and its descendants. On Windows a plain kill leaves the
+ * mapper (tsc's child) running and holding the project directory open.
+ */
+export function killTree(child) {
+  if (!child.pid || child.exitCode !== null) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+  } else {
+    child.kill("SIGKILL");
+  }
+}
+
 /** Run the engine's own tsc over one materialized project. */
-export function runTscWithMapper(engine, project, extraArgs = []) {
-  const args = [
-    "--runExternalCode",
-    "-p",
-    path.join(project.dir, "tsconfig.json"),
-    "--pretty",
-    "false",
-    ...extraArgs,
-  ];
-  const spawned =
-    engine.kind === "native"
-      ? spawnSync(engine.executable, args, {
-          encoding: "utf8",
-          windowsHide: true,
-          timeout: 60000,
-          cwd: project.dir,
-        })
-      : spawnSync(process.execPath, [engine.executable, ...args], {
-          encoding: "utf8",
-          windowsHide: true,
-          timeout: 60000,
-          cwd: project.dir,
-        });
-  const output = `${spawned.stdout || ""}${spawned.stderr || ""}`;
+export async function runTscWithMapper(engine, project, extraArgs = []) {
+  const { command, args } = tscCommand(
+    engine,
+    withLocale([
+      "--runExternalCode",
+      "-p",
+      path.join(project.dir, "tsconfig.json"),
+      "--pretty",
+      "false",
+      ...extraArgs,
+    ]),
+  );
+  const run = await runCommand(command, args, { cwd: project.dir });
   return {
-    status: spawned.status,
-    error: spawned.error ? String(spawned.error.message || spawned.error) : null,
-    output,
-    diagnostics: parseTscDiagnostics(output),
+    status: run.status,
+    error: run.error,
+    output: run.output,
+    diagnostics: parseTscDiagnostics(run.output),
     requests: readRequestLog(project.logFile),
+    responses: readResponseLog(project.logFile),
   };
 }
 
-export function withProject(engine, settings, extraArgs, fn) {
+/**
+ * Materialize, run, observe, clean up. A cleanup failure never replaces the
+ * observation; it is returned beside it.
+ */
+export async function withProject(engine, settings, extraArgs, fn = (run) => run) {
   const project = materializeMapperProject(settings);
+  let observed;
   try {
-    return fn(runTscWithMapper(engine, project, extraArgs), project);
+    observed = await fn(await runTscWithMapper(engine, project, extraArgs), project);
   } finally {
-    project.cleanup();
+    const cleanupError = project.cleanup();
+    if (observed && typeof observed === "object") observed.cleanupError = cleanupError;
   }
+  return observed;
 }

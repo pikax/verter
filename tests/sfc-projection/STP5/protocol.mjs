@@ -16,14 +16,37 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { MAPPER_HOST_OPERATIONS } from "./mapper-host/e2e.mjs";
-
 const STP5_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 /** Version of this harness module. Not a wire field: the protocol has none. */
 export const PROTOCOL_VERSION = 1;
 
-export { MAPPER_HOST_OPERATIONS };
+/**
+ * The operations the executed proof (`mapper-host/e2e.mjs`) records per
+ * build, in report order. Each maps to a field, method or rule of the final
+ * protocol.
+ */
+export const MAPPER_HOST_OPERATIONS = Object.freeze([
+  "initialize",
+  "encoding-negotiation",
+  "locale",
+  "diagnostic-source",
+  "openProject",
+  "option-diagnostics",
+  "dynamic-config-identity",
+  "watched-files",
+  "transform",
+  "virtual-extension",
+  "span-mappings",
+  "alias-display",
+  "synthesized-diagnostics",
+  "mapper-diagnostics",
+  "diagnostic-directive-ignore",
+  "diagnostic-directive-expect",
+  "unused-expect-diagnostic",
+  "unused-expect-index",
+  "closeProject",
+]);
 
 export const REQUIRED_HOST_OPERATIONS = Object.freeze([
   "initialize",
@@ -507,21 +530,46 @@ export function validateUnusedExpectReportedInOriginal({
   diagnosticSource,
 } = {}) {
   const errors = [];
-  const unusedTable = directives?.unusedExpectDirectiveDiagnostics || [];
-  for (const directive of directives?.directives || []) {
+  if (
+    !directives ||
+    typeof directives !== "object" ||
+    Array.isArray(directives) ||
+    !Array.isArray(directives.directives) ||
+    !Array.isArray(directives.unusedExpectDirectiveDiagnostics)
+  ) {
+    return [
+      err(
+        "STP5-guard-duplicate",
+        "directive-shape",
+        "unused-Expect reporting needs diagnosticDirectives { unusedExpectDirectiveDiagnostics, directives }, not a bare tuple array",
+      ),
+    ];
+  }
+  const unusedTable = directives.unusedExpectDirectiveDiagnostics;
+  for (const directive of directives.directives) {
     const [originalStart, originalLength, virtualStart, virtualEnd, policy, unusedIndex] =
       directive;
     if (policy !== DiagnosticDirectivePolicy.Expect) continue;
+    const expected = unusedTable[unusedIndex ?? 0];
+    if (!expected) {
+      errors.push(
+        err(
+          "STP5-guard-duplicate",
+          "unused-expect-index",
+          `Expect directive names unused diagnostic ${unusedIndex ?? 0}, which the table does not hold`,
+        ),
+      );
+      continue;
+    }
     const used = (virtualDiagnostics || []).some((diag) => {
       const diagStart = diag.start;
       const diagEnd = diag.end ?? diagStart + (diag.length || 0);
       return diagStart < virtualEnd && virtualStart < diagEnd;
     });
     if (used) continue;
-    const expected = unusedTable[unusedIndex ?? 0];
     const reported = (originalReports || []).some((report) => {
       if (report.file && report.file !== "original") return false;
-      if (expected && report.code !== expected.code) return false;
+      if (report.code !== expected.code) return false;
       if (diagnosticSource && report.source !== diagnosticSource) return false;
       const reportEnd = report.start + (report.length || 0);
       const originalEnd = originalStart + originalLength;
@@ -790,13 +838,14 @@ export function validateOpenProjectResult(result, { dynamicConfig = false } = {}
   return errors;
 }
 
-function validateMappedOutput(output, { originalLength, label }) {
+function validateMappedOutput(output, { originalLength, encoding, label }) {
   const errors = [];
   const fail = (code, message) => errors.push(err("STP5-capability", code, `${label}: ${message}`));
   if (typeof output?.text !== "string") {
     fail("mapped-output-shape", "text must be a string");
     return errors;
   }
+  const virtualLength = encoding === "utf-8" ? utf8Length(output.text) : output.text.length;
   if (!VIRTUAL_EXTENSIONS.includes(output.extension)) {
     fail(
       "virtual-extension",
@@ -824,9 +873,17 @@ function validateMappedOutput(output, { originalLength, label }) {
     if (oStart + oLen > originalLength) {
       fail("mapping-range", `mapping ${index} original span exceeds the source`);
     }
+    if (vStart + vLen > virtualLength) {
+      fail("mapping-range", `mapping ${index} virtual span exceeds the virtual text`);
+    }
   }
   errors.push(...assertNonOverlappingVirtualSpans(mappings.filter(Array.isArray)));
-  errors.push(...validateWireDiagnosticDirectives(output.diagnosticDirectives, { originalLength }));
+  errors.push(
+    ...validateWireDiagnosticDirectives(output.diagnosticDirectives, {
+      originalLength,
+      virtualLength,
+    }),
+  );
   return errors;
 }
 
@@ -834,14 +891,19 @@ function validateMappedOutput(output, { originalLength, label }) {
  * A `transform` result (`TransformResult extends MappedOutput`): canonical
  * output, optional `supplemental` outputs, and `diagnostics` whose `code` is
  * required (TypeScript#63936). Absent `mappings` mean fully synthesized
- * output. Original lengths are measured in the negotiated `encoding`.
+ * output. Original and virtual lengths are measured in the negotiated
+ * `encoding`, and every mapping and directive range must lie inside them.
  */
 export function validateTransformResult(result, originalText, encoding = "utf-16") {
   const originalLength = encoding === "utf-8" ? utf8Length(originalText) : originalText.length;
-  const errors = validateMappedOutput(result, { originalLength, label: "transform" });
+  const errors = validateMappedOutput(result, { originalLength, encoding, label: "transform" });
   for (const [index, supplemental] of (result?.supplemental || []).entries()) {
     errors.push(
-      ...validateMappedOutput(supplemental, { originalLength, label: `supplemental[${index}]` }),
+      ...validateMappedOutput(supplemental, {
+        originalLength,
+        encoding,
+        label: `supplemental[${index}]`,
+      }),
     );
   }
   for (const [index, diagnostic] of (result?.diagnostics || []).entries()) {
@@ -1287,6 +1349,59 @@ export const WIRE_REJECT_TWINS = Object.freeze([
       } = CLEAN_TRANSFORM;
       return validateTransformResult(output, original);
     },
+  },
+  {
+    name: "mapping whose virtual span runs past the virtual text",
+    caseId: "STP5-capability",
+    code: "mapping-range",
+    validate: () => {
+      const { original, targetFile: _targetFile, ...output } = CLEAN_TRANSFORM;
+      return validateTransformResult(
+        { ...output, mappings: [[output.text.length - 2, 5, 0, 1, SpanMapKind.Atom]] },
+        original,
+      );
+    },
+  },
+  {
+    name: "directive whose virtual range runs past the virtual text",
+    caseId: "STP5-guard-duplicate",
+    code: "hidden-blame",
+    validate: () => {
+      const { original, targetFile: _targetFile, ...output } = CLEAN_TRANSFORM;
+      return validateTransformResult(
+        {
+          ...output,
+          diagnosticDirectives: {
+            unusedExpectDirectiveDiagnostics: [],
+            directives: [[0, 1, 0, output.text.length + 1, DiagnosticDirectivePolicy.Ignore]],
+          },
+        },
+        original,
+      );
+    },
+  },
+  {
+    name: "unused-Expect check handed the bare tuple array",
+    caseId: "STP5-guard-duplicate",
+    code: "directive-shape",
+    validate: () =>
+      validateUnusedExpectReportedInOriginal({
+        ...CLEAN_UNUSED_EXPECT,
+        directives: DIRTY_GUARD_BARE_ARRAY.directives,
+      }),
+  },
+  {
+    name: "unused-Expect check with an out-of-range unusedExpectDirectiveIndex",
+    caseId: "STP5-guard-duplicate",
+    code: "unused-expect-index",
+    validate: () =>
+      validateUnusedExpectReportedInOriginal({
+        ...CLEAN_UNUSED_EXPECT,
+        directives: {
+          ...CLEAN_GUARD.directives,
+          directives: [[0, 24, 0, 40, DiagnosticDirectivePolicy.Expect, 3]],
+        },
+      }),
   },
   {
     name: "mapper diagnostic without code",

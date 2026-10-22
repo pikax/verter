@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 
 import { probeMapperHost, resolveEngine } from "../../../scripts/sfc-projection/verify-node.mjs";
 import { runMapperHostEndToEnd } from "./mapper-host/e2e.mjs";
-import { createMapperHandler } from "./mapper-host/fixture-mapper/server.mjs";
+import {
+  createFrameReader,
+  createMapperHandler,
+  writeFrame,
+} from "./mapper-host/fixture-mapper/server.mjs";
 import {
   FIXTURE_MAPPER_DIR,
   INVALID_MAPPER_OPTIONS,
@@ -480,36 +484,27 @@ test("STP5 fixture mapper: JSON-RPC over stdio with Content-Length framing; exit
     { stdio: ["pipe", "pipe", "inherit"] },
   );
   const replies = [];
-  let buffer = Buffer.alloc(0);
-  child.stdout.on("data", (chunk) => {
-    buffer = Buffer.concat([buffer, chunk]);
-    for (;;) {
-      const end = buffer.indexOf("\r\n\r\n");
-      if (end < 0) return;
-      const length = Number(/Content-Length: (\d+)/.exec(buffer.subarray(0, end).toString())[1]);
-      if (buffer.length < end + 4 + length) return;
-      replies.push(JSON.parse(buffer.subarray(end + 4, end + 4 + length).toString("utf8")));
-      buffer = buffer.subarray(end + 4 + length);
-    }
-  });
-  const send = (id, method, params) => {
-    const body = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, method, params }), "utf8");
-    child.stdin.write(`Content-Length: ${body.length}\r\n\r\n`);
-    child.stdin.write(body);
-  };
+  child.stdout.on(
+    "data",
+    createFrameReader((message) => replies.push(message)),
+  );
+  const send = (id, method, params) =>
+    writeFrame(child.stdin, { jsonrpc: "2.0", id, method, params });
   const exited = new Promise((resolve) => child.on("exit", resolve));
   send("a1", "initialize", { positionEncodings: ["utf-8", "utf-16"] });
   send("a2", "transform", { fileName: "x.stp5", content: "", projectHandle: "missing" });
   send("a3", "bogus", {});
+  // Asked for utf-8 but offered only utf-16: refused, never a silent fallback.
+  send("a4", "initialize", { positionEncodings: ["utf-16"] });
   const deadline = Date.now() + 10000;
-  while (replies.length < 3 && Date.now() < deadline) {
+  while (replies.length < 4 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   child.stdin.end();
   assert.equal(await exited, 0);
   assert.deepEqual(
     replies.map((reply) => reply.id),
-    ["a1", "a2", "a3"],
+    ["a1", "a2", "a3", "a4"],
   );
   assert.deepEqual(replies[0].result, {
     positionEncoding: "utf-8",
@@ -517,6 +512,8 @@ test("STP5 fixture mapper: JSON-RPC over stdio with Content-Length framing; exit
   });
   assert.equal(replies[1].error.code, -32602);
   assert.equal(replies[2].error.code, -32601);
+  assert.equal(replies[3].error.code, -32602);
+  assert.match(replies[3].error.message, /requested encoding utf-8 was not offered/);
 });
 
 /** The repo's ts-native engine (the root `typescript` pin), resolved as the verifier does. */
@@ -552,6 +549,8 @@ test("STP5 executed mapper host: the root ts-native engine runs the fixture mapp
     run.operations.map((row) => row.operation),
     [...MAPPER_HOST_OPERATIONS],
   );
+  t.diagnostic(`ts-native@${engine.version} end-to-end wall time ${run.wallMs} ms`);
+  for (const message of run.cleanupErrors) t.diagnostic(`cleanup warning: ${message}`);
   const failed = run.operations.filter((row) => !row.ok);
   assert.equal(failed.length, 0, failed.map((row) => `${row.operation}: ${row.detail}`).join("\n"));
 });

@@ -54,6 +54,7 @@ import {
   STP32_MANDATORY_CASES,
   STS0_MANDATORY_CASES,
 } from "./node-mandatory-cases.mjs";
+import { tscCommand } from "../../tests/sfc-projection/STP5/mapper-host/harness.mjs";
 
 export {
   MANDATORY_CASES,
@@ -2171,19 +2172,12 @@ export function probeMapperHost(engine, { helpTextHasMapperHost }) {
   }
   // `--all`: TypeScript 7.1 lists --runExternalCode only in the full help,
   // so plain `--help` misses a real host.
-  const helpArgs = ["--help", "--all"];
-  const spawned =
-    engine.kind === "native"
-      ? spawnSync(engine.executable, helpArgs, {
-          encoding: "utf8",
-          windowsHide: true,
-          timeout: 20000,
-        })
-      : spawnSync(process.execPath, [engine.executable, ...helpArgs], {
-          encoding: "utf8",
-          windowsHide: true,
-          timeout: 20000,
-        });
+  const { command, args } = tscCommand(engine, ["--help", "--all"]);
+  const spawned = spawnSync(command, args, {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 20000,
+  });
   if (spawned.error && !spawned.stdout && !spawned.stderr) {
     return {
       present: false,
@@ -2424,6 +2418,11 @@ async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipPr
     if (probe.present) {
       try {
         hostRun = await e2e.runMapperHostEndToEnd(engine);
+        // A temp directory the OS would not release does not change what the
+        // build did; it is reported, never counted against the proof.
+        for (const message of hostRun.cleanupErrors || []) {
+          process.stderr.write(`STP5 mapper-host cleanup warning: ${message}\n`);
+        }
       } catch (error) {
         hostRun = { performed: false, error: String(error?.message || error) };
         errors.push(

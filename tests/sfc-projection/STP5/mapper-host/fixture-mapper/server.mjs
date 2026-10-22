@@ -64,6 +64,10 @@ export const TWINS = Object.freeze([
   "atom-call",
   // the synthesized header carries a type error with no original location.
   "synthesized-error",
+  // Control: the process exits on initialize. Its refusal reason must differ
+  // from the reserved-source and unoffered-encoding twins', so a crash can
+  // never stand in for a protocol refusal.
+  "exit-on-initialize",
 ]);
 
 /** Length of `text` in the negotiated encoding. */
@@ -204,13 +208,22 @@ export function createMapperHandler({ encoding = "utf-16", twin = null } = {}) {
     handle(method, params) {
       switch (method) {
         case "initialize": {
+          if (twin === "exit-on-initialize") process.exit(3);
           const offered = params?.positionEncodings || [];
-          negotiated =
-            twin === "unoffered-encoding"
-              ? "utf-32"
-              : offered.includes(encoding)
-                ? encoding
-                : offered[0];
+          if (twin === "unoffered-encoding") {
+            negotiated = "utf-32";
+          } else if (offered.includes(encoding)) {
+            negotiated = encoding;
+          } else {
+            // Never fall back silently: a run that asked for an encoding must
+            // either negotiate it or fail where the harness can see it.
+            throw Object.assign(
+              new Error(
+                `requested encoding ${encoding} was not offered: ${JSON.stringify(offered)}`,
+              ),
+              { code: -32602 },
+            );
+          }
           return {
             positionEncoding: negotiated,
             diagnosticSource: twin === "reserved-diagnostic-source" ? "tsc" : DIAGNOSTIC_SOURCE,
@@ -260,36 +273,13 @@ export function createMapperHandler({ encoding = "utf-16", twin = null } = {}) {
   };
 }
 
-/** Frame and serve JSON-RPC over the given streams until input ends. */
-export function startServer({
-  input = process.stdin,
-  output = process.stdout,
-  handler = createMapperHandler(),
-  onRequest = () => {},
-  onEnd = () => process.exit(0),
-} = {}) {
-  const send = (message) => {
-    const body = Buffer.from(JSON.stringify(message), "utf8");
-    output.write(`Content-Length: ${body.length}\r\n\r\n`);
-    output.write(body);
-  };
-  const dispatch = (message) => {
-    if (message.method === undefined) return;
-    onRequest({ method: message.method, params: message.params ?? null, id: message.id ?? null });
-    if (message.id === undefined || message.id === null) return;
-    try {
-      const result = handler.handle(message.method, message.params);
-      send({ jsonrpc: "2.0", id: message.id, result: result ?? null });
-    } catch (error) {
-      send({
-        jsonrpc: "2.0",
-        id: message.id,
-        error: { code: error.code ?? -32603, message: String(error.message || error) },
-      });
-    }
-  };
+/**
+ * An incremental reader of LSP base-protocol frames (`Content-Length`
+ * headers): feed it chunks, it calls `onMessage` with each parsed body.
+ */
+export function createFrameReader(onMessage) {
   let buffer = Buffer.alloc(0);
-  input.on("data", (chunk) => {
+  return (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
     for (;;) {
       const headerEnd = buffer.indexOf("\r\n\r\n");
@@ -304,9 +294,46 @@ export function startServer({
       if (buffer.length < headerEnd + 4 + length) return;
       const body = buffer.subarray(headerEnd + 4, headerEnd + 4 + length).toString("utf8");
       buffer = buffer.subarray(headerEnd + 4 + length);
-      dispatch(JSON.parse(body));
+      onMessage(JSON.parse(body));
     }
-  });
+  };
+}
+
+/** Write one LSP base-protocol frame. */
+export function writeFrame(output, message) {
+  const body = Buffer.from(JSON.stringify(message), "utf8");
+  output.write(`Content-Length: ${body.length}\r\n\r\n`);
+  output.write(body);
+}
+
+/** Frame and serve JSON-RPC over the given streams until input ends. */
+export function startServer({
+  input = process.stdin,
+  output = process.stdout,
+  handler = createMapperHandler(),
+  onRequest = () => {},
+  onResponse = () => {},
+  onEnd = () => process.exit(0),
+} = {}) {
+  const reply = (method, message) => {
+    onResponse({ response: method, ...message });
+    writeFrame(output, { jsonrpc: "2.0", ...message });
+  };
+  const dispatch = (message) => {
+    if (message.method === undefined) return;
+    onRequest({ method: message.method, params: message.params ?? null, id: message.id ?? null });
+    if (message.id === undefined || message.id === null) return;
+    try {
+      const result = handler.handle(message.method, message.params);
+      reply(message.method, { id: message.id, result: result ?? null });
+    } catch (error) {
+      reply(message.method, {
+        id: message.id,
+        error: { code: error.code ?? -32603, message: String(error.message || error) },
+      });
+    }
+  };
+  input.on("data", createFrameReader(dispatch));
   // TypeScript closing the pipe ends the mapper; a lingering process would
   // hold its working directory open.
   input.on("end", onEnd);
@@ -332,10 +359,12 @@ function isMainModule() {
 
 if (isMainModule()) {
   const logFile = arg("log");
+  const log = (entry) => {
+    if (logFile) fs.appendFileSync(logFile, `${JSON.stringify(entry)}\n`);
+  };
   startServer({
     handler: createMapperHandler({ encoding: arg("encoding") || "utf-16", twin: arg("twin") }),
-    onRequest: (entry) => {
-      if (logFile) fs.appendFileSync(logFile, `${JSON.stringify(entry)}\n`);
-    },
+    onRequest: log,
+    onResponse: log,
   });
 }
