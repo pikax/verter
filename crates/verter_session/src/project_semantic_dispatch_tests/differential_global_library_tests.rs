@@ -658,3 +658,24 @@ fn unrelated_generic_references_remain_naked_union_candidates() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A library `Promise` beside a plain member, against an authored cyclic
+/// thenable and its naked variable: the `Promise` infers its payload through
+/// the thenable, and only the plain member reaches the variable, so the
+/// variable is the payload union, never the `Promise` itself.
+#[test]
+fn a_promise_member_infers_its_payload_beside_the_naked_union_remainder() {
+    let source = format!(
+        "{MIRRORED_THENABLE}declare const v: Promise<1> | 2;\n\
+         declare function resolve<T>(x: T | PL<T>): T;\n\
+         export function resolved() {{ return resolve(v); }}\n"
+    );
+    let matrix = Matrix::new(&source).lib(GLOBALS_LIB).settings(&[STRICT]);
+    let failures = matrix.types(&[(
+        "(Promise<1> | 2) extends PL<infer U> | infer U ? U : 0",
+        "1 | 2",
+    )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let failures = matrix.returns(&[("resolved", "1 | 2")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
