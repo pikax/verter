@@ -2632,24 +2632,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 abort,
             );
         }
-        // The demand owns its operand for its whole evaluation; one this
-        // graph no longer holds is refused, never evaluated.
-        let Ok(operand) = self.graph().root_nodes([node]) else {
+        // An operand this graph no longer holds is refused, never
+        // evaluated.
+        if !self.graph().node_is_live(node) {
             return EvaluateDeferredOutcome::refused_operand(
                 self.opaque(QueryError::StaleSemanticOperand),
             );
-        };
+        }
         // Continuations live on the heap. Authored structural depth has no
         // cap here; only connected operational limits can stop evaluation.
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
             return EvaluateDeferredOutcome::partial(node, reasons);
         }
+        // An operand that evaluates to itself completes before any step
+        // reads through it, so it is admitted without being rooted.
         if self.evaluates_to_itself(node, reduction_context, demand)
             && self.admit_self_evaluation(node, reduction_context, demand)
         {
             return EvaluateDeferredOutcome::complete(node);
         }
+        // Any other demand owns its operand for its whole evaluation.
+        let Ok(operand) = self.graph().root_nodes([node]) else {
+            return EvaluateDeferredOutcome::refused_operand(
+                self.opaque(QueryError::StaleSemanticOperand),
+            );
+        };
         // A completed cacheable evaluation needs no connected work beyond
         // what its receipt charges. Limited outcomes can never reach this
         // memo; one this demand cannot pay for is evaluated here.

@@ -66,10 +66,11 @@ pub fn current_request_cancellation_token() -> Option<CancellationToken> {
 /// Whether the installed request's cancellation token is cancelled, read in
 /// place; `None` when no request is installed.
 pub(crate) fn current_request_cancelled() -> Option<bool> {
-    CURRENT_REQUEST_CONTEXT.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|ctx| ctx.cancellation.is_cancelled())
+    // Every semantic checkpoint reads it: written as a plain match, which a
+    // debug build runs without an adaptor call per read.
+    CURRENT_REQUEST_CONTEXT.with(|c| match &*c.borrow() {
+        Some(ctx) => Some(ctx.cancellation.is_cancelled()),
+        None => None,
     })
 }
 

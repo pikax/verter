@@ -37,13 +37,10 @@ fn active(account: &Arc<SemanticRetentionAccount>, bytes: usize) -> RetentionCha
 /// Identified balances plus the UNKNOWN balance are the account's ACTIVE
 /// bytes, at every point the test samples.
 fn assert_balances_cover_account(account: &Arc<SemanticRetentionAccount>) {
-    let _admission_lock = account.lock_aggregate_state();
+    let state = account.lock_aggregate_state();
     let registry = account.active_windows.inner.lock();
     let identified: usize = registry.owner_active.values().sum();
-    assert_eq!(
-        identified + registry.unknown_active,
-        account.active_bytes.load(Ordering::Relaxed)
-    );
+    assert_eq!(identified + registry.unknown_active, state.active_bytes);
 }
 
 /// Bytes are conserved across a report and every transition inside the

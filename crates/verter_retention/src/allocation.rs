@@ -146,8 +146,8 @@ pub struct AliasSet {
 /// Allocations an [`AliasSet`] tracks before it spills to a hash set.
 const ALIAS_INLINE: usize = 8;
 
-/// The owned children a measurement reached. Most measurements reach none
-/// or one, so those are held without an allocation, and an empty list —
+/// The owned children a measurement reached. Most measurements reach none,
+/// one or two, so those are held without an allocation, and an empty list —
 /// built and dropped by every measurement — costs a debug build no call to
 /// create, read or drop.
 #[derive(Default)]
@@ -155,6 +155,7 @@ pub(crate) enum Children {
     #[default]
     Empty,
     One(Arc<dyn super::owned::Node>),
+    Two([Arc<dyn super::owned::Node>; 2]),
     Many(Vec<Arc<dyn super::owned::Node>>),
 }
 
@@ -170,7 +171,13 @@ impl Children {
                 let Self::One(first) = std::mem::take(self) else {
                     unreachable!("matched a single child");
                 };
-                *self = Self::Many(vec![first, child]);
+                *self = Self::Two([first, child]);
+            }
+            Self::Two(_) => {
+                let Self::Two([first, second]) = std::mem::take(self) else {
+                    unreachable!("matched two children");
+                };
+                *self = Self::Many(vec![first, second, child]);
             }
             Self::Many(children) => children.push(child),
         }
@@ -186,6 +193,7 @@ impl Children {
         match self {
             Self::Empty => &[],
             Self::One(child) => std::slice::from_ref(child),
+            Self::Two(children) => children,
             Self::Many(children) => children,
         }
     }
@@ -198,6 +206,7 @@ impl Children {
         match self {
             Self::Empty => 0,
             Self::One(_) => 1,
+            Self::Two(_) => 2,
             Self::Many(children) => children.len(),
         }
     }
@@ -210,6 +219,7 @@ impl Children {
         match self {
             Self::Empty => Box::new([]),
             Self::One(child) => Box::new([child]),
+            Self::Two(children) => Box::new(children),
             Self::Many(children) => children.into_boxed_slice(),
         }
     }
@@ -229,8 +239,9 @@ impl IntoIterator for Children {
 
     fn into_iter(self) -> ChildrenIntoIter {
         match self {
-            Self::Empty => ChildrenIntoIter::One(None),
-            Self::One(child) => ChildrenIntoIter::One(Some(child)),
+            Self::Empty => ChildrenIntoIter::Inline(None, None),
+            Self::One(child) => ChildrenIntoIter::Inline(Some(child), None),
+            Self::Two([first, second]) => ChildrenIntoIter::Inline(Some(first), Some(second)),
             Self::Many(children) => ChildrenIntoIter::Many(children.into_iter()),
         }
     }
@@ -238,7 +249,10 @@ impl IntoIterator for Children {
 
 /// The owned children of a [`Children`] list, by value.
 pub(crate) enum ChildrenIntoIter {
-    One(Option<Arc<dyn super::owned::Node>>),
+    Inline(
+        Option<Arc<dyn super::owned::Node>>,
+        Option<Arc<dyn super::owned::Node>>,
+    ),
     Many(std::vec::IntoIter<Arc<dyn super::owned::Node>>),
 }
 
@@ -247,7 +261,7 @@ impl Iterator for ChildrenIntoIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::One(child) => child.take(),
+            Self::Inline(first, second) => first.take().or_else(|| second.take()),
             Self::Many(children) => children.next(),
         }
     }

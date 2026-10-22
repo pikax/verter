@@ -1031,9 +1031,14 @@ impl ArenaInner {
             return Slot::Released;
         };
         let index = (id.0 & CHUNK_MASK) as usize;
-        match (&chunk.nodes[index], &chunk.scopes[index]) {
-            (Some(payload), Some(scope)) => Slot::Live(payload, scope),
-            _ => Slot::Released,
+        // Nested matches, not a matched pair: a debug build would build the
+        // pair on every node read.
+        match &chunk.nodes[index] {
+            Some(payload) => match &chunk.scopes[index] {
+                Some(scope) => Slot::Live(payload, scope),
+                None => Slot::Released,
+            },
+            None => Slot::Released,
         }
     }
 
