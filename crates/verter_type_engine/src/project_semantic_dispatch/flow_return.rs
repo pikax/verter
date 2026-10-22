@@ -13977,6 +13977,8 @@ struct ArrayEvalFrame<'e> {
     contextual: Option<SemanticNodeId>,
     /// The literal's shape a contextual tuple reads its elements by.
     shape: super::call_resolve::ArrayLiteralShape,
+    /// The shapes of the contextual tuples the elements read.
+    tuple_shapes: super::call_resolve::TupleContextShapes,
     tupled: bool,
     /// `(reduction operand, widening_nullish)` per element position of
     /// the join.
@@ -15786,6 +15788,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     contextual,
                     index,
                     super::call_resolve::ArrayLiteralShape::default(),
+                    &mut super::call_resolve::TupleContextShapes::default(),
                 )
             }
             SemanticNodeData::TypeParam {
@@ -15879,12 +15882,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// ([`super::call_resolve::tuple_element_contexts`]), an array's
     /// element type, or, while no spread came before it, the object's
     /// numeric property or index; a constrained type parameter's through
-    /// its constraint.
+    /// its constraint. `tuple_shapes` holds the shapes of the tuples the
+    /// literal's elements read, computed once for the literal.
     fn contextual_element_type(
         &self,
         contextual: SemanticNodeId,
         position: usize,
         shape: super::call_resolve::ArrayLiteralShape,
+        tuple_shapes: &mut super::call_resolve::TupleContextShapes,
     ) -> Option<SemanticNodeId> {
         let graph = self.dispatch.graph();
         let contextual = self.dispatch.resolved_reduction_view(contextual);
@@ -15895,20 +15900,25 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 drop(data);
                 let types: Vec<SemanticNodeId> = members
                     .iter()
-                    .filter_map(|member| self.contextual_element_type(*member, position, shape))
+                    .filter_map(|member| {
+                        self.contextual_element_type(*member, position, shape, tuple_shapes)
+                    })
                     .collect();
                 (!types.is_empty()).then(|| self.union(&types))
             }
             SemanticNodeData::Array { element, .. } => Some(*element),
             SemanticNodeData::Tuple { elements, .. } => {
-                let types = super::call_resolve::tuple_element_contexts(
+                let mut types = Vec::new();
+                super::call_resolve::tuple_element_contexts(
                     elements,
+                    tuple_shapes.of(contextual, elements),
                     position,
                     shape,
                     |rest| match graph.node_data(rest).as_deref() {
                         Some(SemanticNodeData::Array { element, .. }) => Some(*element),
                         _ => None,
                     },
+                    &mut types,
                 );
                 drop(data);
                 (!types.is_empty()).then(|| self.union(&types))
@@ -15919,7 +15929,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             } => {
                 let constraint = *constraint;
                 drop(data);
-                self.contextual_element_type(constraint, position, shape)
+                self.contextual_element_type(constraint, position, shape, tuple_shapes)
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
@@ -16120,6 +16130,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 first_spread: elements.iter().position(spread),
                 last_spread: elements.iter().rposition(spread),
             },
+            tuple_shapes: super::call_resolve::TupleContextShapes::default(),
             tupled: const_asserted || tuple_context,
             parts: Vec::with_capacity(elements.len()),
             tuple: Vec::new(),
@@ -16154,7 +16165,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     pre_widening,
                 } => {
                     let element_context = frame.contextual.and_then(|contextual| {
-                        self.contextual_element_type(contextual, position, frame.shape)
+                        self.contextual_element_type(
+                            contextual,
+                            position,
+                            frame.shape,
+                            &mut frame.tuple_shapes,
+                        )
                     });
                     let outcome = match (delivered.take(), element_context) {
                         (Some(outcome), _) => outcome,
