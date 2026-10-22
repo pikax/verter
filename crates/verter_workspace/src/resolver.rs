@@ -1063,18 +1063,23 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                     ));
                 }
 
+                // Sized once, from the first new key on: a retry with none
+                // allocates nothing.
                 let mut new_keys = Vec::new();
                 let mut new_key_bytes = 0_u64;
-                for key in &delta {
-                    if !ledger.unique_keys.contains(key) {
-                        // Sized once, on the first new key: at most the
-                        // whole delta is new, and a retry with none
-                        // allocates nothing.
-                        if new_keys.capacity() == 0 {
-                            new_keys.reserve(delta.len());
+                if let Some(first) = delta
+                    .iter()
+                    .position(|key| !ledger.unique_keys.contains(key))
+                {
+                    new_keys.reserve(delta.len() - first);
+                    new_keys.push(delta[first].clone());
+                    new_key_bytes = input_key_spelling_bytes(&delta[first]);
+                    for key in &delta[first + 1..] {
+                        if !ledger.unique_keys.contains(key) {
+                            new_keys.push(key.clone());
+                            new_key_bytes =
+                                new_key_bytes.saturating_add(input_key_spelling_bytes(key));
                         }
-                        new_keys.push(key.clone());
-                        new_key_bytes = new_key_bytes.saturating_add(input_key_spelling_bytes(key));
                     }
                 }
                 let prospective_unique = ledger

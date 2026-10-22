@@ -21,11 +21,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::input_resolution_budgets::CompletedWitnessRetentionKey;
-use crate::priority_frontier::{CandidateOutput, PriorityFrontierState, RecordedCandidate};
+use crate::priority_frontier::{CandidateRead, CandidateRecorder, PriorityFrontierState};
 use crate::resolver_attempt_view::SnapshotRead;
 use crate::{AttemptOutput, InputResolutionRetention, KernelAttempt, ResolverAttemptView};
 use verter_session_query::resolution::{
-    ancestor_scope_prefixes, ConsumedResolutionObservationKey, InputKey, ResolutionBasis,
+    ancestor_scope_prefixes, AttemptFailure, CanonicalId, ConsumedResolutionObservationKey,
+    InputKey, ResolutionBasis,
 };
 
 /// Mirrors `resolve_ts_source_sibling`'s own match arms exactly
@@ -176,16 +177,15 @@ pub(crate) fn build_probe_candidate_list(
         .collect()
 }
 
-/// Ancestor-directory chain of `path` — the shared
-/// [`verter_session_query::resolution::ancestor_scope_prefixes`] walk, the
-/// same one the legacy witness fixture's `ancestor_scopes`
-/// (`verter_workspace::resolution_witness_contract_tests`) spells.
+/// Ancestor-directory chain of `path`, spelled: the shared
+/// [`ancestor_scope_prefixes`] walk, as the reference tests compare against.
+#[cfg(test)]
 pub(crate) fn ancestor_scopes(path: &str) -> Vec<String> {
     ancestor_scope_prefixes(path).map(str::to_owned).collect()
 }
 
 /// The recovery-scope witnesses of `path`, nearest ancestor first: exactly
-/// [`ancestor_scopes`], as the keys an output records.
+/// the [`ancestor_scope_prefixes`] walk, as the keys an output records.
 ///
 /// Every path in one directory has the same chain, and the candidates of an
 /// import — and the imports of a barrel — share their directory, so the
@@ -274,10 +274,10 @@ fn record_scope_chain(
     Ok(())
 }
 
-/// The recovery-scope chains one frontier has already recorded whole into
-/// its output. Recording one again changes nothing, so it is skipped. Only
-/// the first [`RECORDED_CHAIN_SLOTS`] are remembered; a chain past them is
-/// recorded again, which is still exact, only slower.
+/// The recovery-scope chains one frontier recorded whole into its output
+/// most recently, most recent first. Recording one again changes nothing,
+/// so it is skipped; a chain that fell out is recorded again, which is
+/// still exact, only slower.
 #[derive(Default)]
 struct RecordedChains {
     slots: [Option<Arc<[ConsumedResolutionObservationKey]>>; RECORDED_CHAIN_SLOTS],
@@ -286,154 +286,152 @@ struct RecordedChains {
 const RECORDED_CHAIN_SLOTS: usize = 8;
 
 impl RecordedChains {
-    fn contains(&self, chain: &Arc<[ConsumedResolutionObservationKey]>) -> bool {
-        self.slots
-            .iter()
-            .flatten()
-            .any(|recorded| Arc::ptr_eq(recorded, chain))
+    /// Whether `chain` is held, moving it to the front when it is.
+    fn contains(&mut self, chain: &Arc<[ConsumedResolutionObservationKey]>) -> bool {
+        let Some(index) = self.slots.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|recorded| Arc::ptr_eq(recorded, chain))
+        }) else {
+            return false;
+        };
+        self.slots[..=index].rotate_right(1);
+        true
     }
 
+    /// Remembers `chain` as the most recent, forgetting the least recent.
     fn remember(&mut self, chain: Arc<[ConsumedResolutionObservationKey]>) {
-        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
-            *slot = Some(chain);
-        }
+        self.slots.rotate_right(1);
+        self.slots[0] = Some(chain);
     }
 }
 
 /// Mirrors `resolve_existing_path`'s own probe-then-realpath-on-hit
 /// structure exactly: probe the candidate; a stable `Absent`/
-/// `Inaccessible`/`Unknown` classification is a genuine miss (`Complete(None)`,
-/// with the probe recorded as consumed); a `File`/`Directory` hit follows
-/// up with `real_path` and records both the probe and the realpath as
-/// consumed, plus recovery-scope ancestors for both the requested and
-/// resolved paths.
-///
-/// The output goes where the frontier says ([`CandidateOutput`]): straight
-/// into the frontier's own output while no block is held, and nowhere once
-/// one is — then a miss only checks that its witnesses could have been
-/// retained, and a hit, which cannot win, is not even spelled. Every
-/// observation is read before anything is recorded, so a candidate that
-/// needs an input has written nothing.
-fn evaluate_probe_candidate(
+/// `Inaccessible`/`Unknown` classification is a genuine miss, a
+/// `File`/`Directory` hit follows up with `real_path`. This reads only; what
+/// a hit or a miss records is [`ProbeRecorder`]'s.
+fn read_probe_candidate(
     view: &ResolverAttemptView,
     candidate: &Arc<str>,
-    output: CandidateOutput<'_>,
-    recorded: &mut RecordedChains,
-) -> RecordedCandidate<String> {
+) -> CandidateRead<Option<CanonicalId>, ()> {
     let probe = match view.read_path_probe(candidate) {
         SnapshotRead::Known(probe) => probe,
         SnapshotRead::Missing(basis) => {
-            return missing(|path| InputKey::PathProbe { path }, candidate, *basis)
+            return CandidateRead::NeedInput(
+                InputKey::PathProbe {
+                    path: Arc::clone(candidate),
+                },
+                *basis,
+            )
         }
         SnapshotRead::Unavailable(observation) => return unavailable(observation),
     };
     match probe {
         verter_session_query::resolution::PathProbe::File
         | verter_session_query::resolution::PathProbe::Directory => {
-            let resolved = match view.read_real_path(candidate) {
-                SnapshotRead::Known(resolved) => resolved,
-                SnapshotRead::Missing(basis) => {
-                    return missing(|path| InputKey::RealPath { path }, candidate, *basis)
-                }
-                SnapshotRead::Unavailable(observation) => return unavailable(observation),
-            };
-            let CandidateOutput::Accumulate(mut accumulator) = output else {
-                // Rule 5: a hit after a block cannot win, so its answer is
-                // never spelled.
-                return RecordedCandidate::DiscardedHit;
-            };
-            let resolved_id = resolved
-                .as_ref()
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| candidate.to_string());
-            let output = accumulator.output();
-            let recorded = output
-                .record_consumed_resolution_observation(
-                    ConsumedResolutionObservationKey::PathProbe {
+            match view.read_real_path(candidate) {
+                SnapshotRead::Known(resolved) => CandidateRead::Hit(resolved),
+                SnapshotRead::Missing(basis) => CandidateRead::NeedInput(
+                    InputKey::RealPath {
                         path: Arc::clone(candidate),
                     },
-                )
-                .and_then(|()| {
-                    output.record_consumed_resolution_observation(
-                        ConsumedResolutionObservationKey::RealPath {
-                            path: Arc::clone(candidate),
-                        },
-                    )
-                })
-                .and_then(|()| record_candidate_chain(output, candidate, recorded))
-                .and_then(|()| record_candidate_chain(output, &resolved_id, recorded));
-            match recorded {
-                Ok(()) => RecordedCandidate::Hit(resolved_id),
-                Err(failure) => RecordedCandidate::Terminal(failure),
+                    *basis,
+                ),
+                SnapshotRead::Unavailable(observation) => unavailable(observation),
             }
         }
-        _ => {
-            let recorded = match output {
-                CandidateOutput::Accumulate(mut accumulator) => {
-                    let output = accumulator.output();
-                    output
-                        .record_consumed_resolution_observation(
-                            ConsumedResolutionObservationKey::PathProbe {
-                                path: Arc::clone(candidate),
-                            },
-                        )
-                        .and_then(|()| record_candidate_chain(output, candidate, recorded))
-                }
-                // The probe witness and the candidate's ancestors, which are
-                // distinct keys.
-                CandidateOutput::Discard => {
-                    InputResolutionRetention::current_admits_fresh_completed_witnesses(
-                        1 + ancestor_scope_prefixes(candidate).count(),
-                        || {
-                            let chain = recovery_scope_chain(candidate);
-                            std::iter::once(ConsumedResolutionObservationKey::PathProbe {
-                                path: Arc::clone(candidate),
-                            })
-                            .chain(chain.iter().cloned())
-                            .map(CompletedWitnessRetentionKey::ConsumedResolutionObservation)
-                            .collect()
-                        },
-                    )
-                }
-            };
-            match recorded {
-                Ok(()) => RecordedCandidate::Miss,
-                Err(failure) => RecordedCandidate::Terminal(failure),
-            }
-        }
+        _ => CandidateRead::Miss(()),
     }
 }
 
-fn missing<T>(
-    key: fn(Arc<str>) -> InputKey,
-    candidate: &Arc<str>,
-    basis: ResolutionBasis,
-) -> RecordedCandidate<T> {
-    RecordedCandidate::NeedInput(key(Arc::clone(candidate)), basis)
-}
-
-fn unavailable<T>(
+fn unavailable<H, M>(
     observation: verter_session_query::resolution::ResolverObservationKind,
-) -> RecordedCandidate<T> {
-    RecordedCandidate::Terminal(
-        verter_session_query::resolution::AttemptFailure::ObservationUnavailable { observation },
-    )
+) -> CandidateRead<H, M> {
+    CandidateRead::Terminal(AttemptFailure::ObservationUnavailable { observation })
 }
 
-/// Records `path`'s recovery scopes into the frontier's output, unless this
-/// frontier already recorded that chain whole.
-fn record_candidate_chain(
-    output: &mut AttemptOutput,
-    path: &str,
-    recorded: &mut RecordedChains,
-) -> Result<(), verter_session_query::resolution::AttemptFailure> {
-    let chain = recovery_scope_chain(path);
-    if recorded.contains(&chain) {
-        return Ok(());
+/// What a probe candidate records: the probe as consumed, and on a hit the
+/// real path too, plus the recovery-scope ancestors of the requested and
+/// resolved paths.
+struct ProbeRecorder<'a> {
+    candidate: &'a Arc<str>,
+    recorded: &'a mut RecordedChains,
+}
+
+impl ProbeRecorder<'_> {
+    fn record_probe(&self, output: &mut AttemptOutput) -> Result<(), AttemptFailure> {
+        output.record_consumed_resolution_observation(ConsumedResolutionObservationKey::PathProbe {
+            path: Arc::clone(self.candidate),
+        })
     }
-    record_scope_chain(output, &chain)?;
-    recorded.remember(chain);
-    Ok(())
+
+    /// Records `path`'s recovery scopes, unless this frontier recorded that
+    /// chain whole recently.
+    fn record_chain(
+        &mut self,
+        output: &mut AttemptOutput,
+        path: &str,
+    ) -> Result<(), AttemptFailure> {
+        let chain = recovery_scope_chain(path);
+        if self.recorded.contains(&chain) {
+            return Ok(());
+        }
+        record_scope_chain(output, &chain)?;
+        self.recorded.remember(chain);
+        Ok(())
+    }
+}
+
+impl CandidateRecorder<Option<CanonicalId>, ()> for ProbeRecorder<'_> {
+    type Answer = String;
+
+    fn record_hit(
+        mut self,
+        resolved: Option<CanonicalId>,
+        output: &mut AttemptOutput,
+    ) -> Result<String, AttemptFailure> {
+        let resolved_id = resolved
+            .as_ref()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| self.candidate.to_string());
+        self.record_probe(output)?;
+        output.record_consumed_resolution_observation(
+            ConsumedResolutionObservationKey::RealPath {
+                path: Arc::clone(self.candidate),
+            },
+        )?;
+        let candidate = Arc::clone(self.candidate);
+        self.record_chain(output, &candidate)?;
+        self.record_chain(output, &resolved_id)?;
+        Ok(resolved_id)
+    }
+
+    fn record_miss(mut self, (): (), output: &mut AttemptOutput) -> Result<(), AttemptFailure> {
+        self.record_probe(output)?;
+        let candidate = Arc::clone(self.candidate);
+        self.record_chain(output, &candidate)
+    }
+
+    fn admit_discarded_miss(self, (): ()) -> Result<(), AttemptFailure> {
+        // The probe witness and the candidate's ancestors, which are
+        // distinct keys. Spelled from the walk itself at the budget edge,
+        // leaving the thread's chain cache as it is.
+        InputResolutionRetention::current_admits_fresh_completed_witnesses(
+            1 + ancestor_scope_prefixes(self.candidate).count(),
+            || {
+                std::iter::once(ConsumedResolutionObservationKey::PathProbe {
+                    path: Arc::clone(self.candidate),
+                })
+                .chain(ancestor_scope_prefixes(self.candidate).map(|prefix| {
+                    ConsumedResolutionObservationKey::RecoveryScope {
+                        canonical_prefix: Arc::from(prefix),
+                    }
+                }))
+                .map(CompletedWitnessRetentionKey::ConsumedResolutionObservation)
+                .collect()
+            },
+        )
+    }
 }
 
 /// Evaluates the full path-probe candidate sequence in one attempt (no
@@ -454,8 +452,8 @@ pub(crate) fn probe_path_for_context(
 }
 
 /// Runs `candidates` through one priority frontier (see
-/// [`crate::priority_frontier`] for the rules), each candidate recording
-/// its witnesses where the frontier says.
+/// [`crate::priority_frontier`] for the rules), each candidate read first
+/// and then recorded where the frontier says.
 pub(crate) fn evaluate_probe_candidates(
     view: &ResolverAttemptView,
     expected_basis: ResolutionBasis,
@@ -465,9 +463,12 @@ pub(crate) fn evaluate_probe_candidates(
         PriorityFrontierState::new_with_budgets(expected_basis, view.input_resolution_budgets());
     let mut recorded = RecordedChains::default();
     for candidate in candidates {
-        let step =
-            evaluate_probe_candidate(view, candidate, frontier.candidate_output(), &mut recorded);
-        if let Some(outcome) = frontier.push_recorded(step) {
+        let read = read_probe_candidate(view, candidate);
+        let recorder = ProbeRecorder {
+            candidate,
+            recorded: &mut recorded,
+        };
+        if let Some(outcome) = frontier.push_read(read, recorder) {
             return outcome;
         }
     }

@@ -156,9 +156,10 @@ impl InputResolutionRetention {
     ///
     /// The answer, including the failure, is exactly what recording the
     /// witnesses into a new [`crate::AttemptOutput`] and dropping it would
-    /// produce. When even an all-new set fits, `keys` is never called; only
-    /// at the edge of the budget are the witnesses already retained looked
-    /// up, and `keys` is built before the ledger is locked. Outside any
+    /// produce. When even an all-new set fits, which a first look at the
+    /// ledger shows, `keys` is never called. At the edge of the budget
+    /// `keys` is built with the ledger unlocked, and the answer is decided
+    /// under a second lock, against the ledger as it then is. Outside any
     /// scope a new output gets a fresh default ledger.
     pub(crate) fn current_admits_fresh_completed_witnesses(
         distinct: usize,

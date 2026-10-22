@@ -239,55 +239,40 @@ fn need_inputs_result_carries_no_completed_attempt() {
     assert_eq!(outcome.complete(), None);
 }
 
-/// A candidate recording into the frontier's live output must know its
-/// outcome first: nothing rolls a write back, and a witness left there by a
-/// candidate that then needs an input would stay retained in the
-/// operation's ledger. The frontier refuses such a candidate in debug
-/// builds.
-#[cfg(debug_assertions)]
+/// A candidate that records into the frontier's live output is recorded
+/// only once its reads settle as a hit or a miss: one that needs an input,
+/// or fails, never reaches its recorder, and its input is unioned as usual.
 #[test]
-#[should_panic(expected = "a candidate that needs an input recorded into the frontier's output")]
-fn a_candidate_that_needs_an_input_must_not_have_recorded() {
-    use super::{CandidateOutput, PriorityFrontierState, RecordedCandidate};
+fn only_a_settled_hit_or_miss_reaches_its_recorder() {
+    use super::{CandidateRead, CandidateRecorder, PriorityFrontierState};
 
-    let mut frontier = PriorityFrontierState::new_with_budgets(
-        basis(1),
-        verter_session_query::resolution::InputResolutionBudgets::default(),
-    );
-    if let CandidateOutput::Accumulate(mut accumulator) = frontier.candidate_output() {
-        accumulator
-            .output()
-            .record_ambient_dependency(canonical("consumer"), canonical("virtual"))
-            .expect("within default budget");
+    struct Unreachable;
+    impl CandidateRecorder<(), ()> for Unreachable {
+        type Answer = String;
+        fn record_hit(self, (): (), _: &mut AttemptOutput) -> Result<String, AttemptFailure> {
+            panic!("a candidate that needs an input was recorded")
+        }
+        fn record_miss(self, (): (), _: &mut AttemptOutput) -> Result<(), AttemptFailure> {
+            panic!("a candidate that needs an input was recorded")
+        }
+        fn admit_discarded_miss(self, (): ()) -> Result<(), AttemptFailure> {
+            panic!("a candidate that needs an input was admitted")
+        }
     }
-    let _ = frontier.push_recorded::<String>(RecordedCandidate::NeedInput(
-        path_probe_key("/p/a.ts"),
-        basis(1),
-    ));
-}
-
-/// The same input need from a candidate that recorded nothing is unioned as
-/// usual, so the check above rejects only the write.
-#[test]
-fn a_candidate_that_needs_an_input_without_recording_is_unioned() {
-    use super::{CandidateOutput, PriorityFrontierState, RecordedCandidate};
 
     let mut frontier = PriorityFrontierState::new_with_budgets(
         basis(1),
         verter_session_query::resolution::InputResolutionBudgets::default(),
     );
-    assert!(matches!(
-        frontier.candidate_output(),
-        CandidateOutput::Accumulate(_)
-    ));
     assert!(frontier
-        .push_recorded::<String>(RecordedCandidate::NeedInput(
-            path_probe_key("/p/a.ts"),
-            basis(1),
-        ))
+        .push_read(
+            CandidateRead::NeedInput(path_probe_key("/p/a.ts"), basis(1)),
+            Unreachable,
+        )
         .is_none());
-    match frontier.finish::<String>() {
-        AttemptOutcome::NeedInputs(load_set) => {
+    // A hit after the block cannot win, and is not recorded either.
+    match frontier.push_read(CandidateRead::Hit(()), Unreachable) {
+        Some(AttemptOutcome::NeedInputs(load_set)) => {
             assert_eq!(load_set.keys(), [path_probe_key("/p/a.ts")]);
         }
         other => panic!("expected the input to be needed, got {other:?}"),
