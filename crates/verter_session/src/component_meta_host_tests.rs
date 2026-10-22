@@ -385,6 +385,8 @@ fn scalar_payload_output_failure_stays_typed_at_component_meta_session_boundary(
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// AUDITED output-failure record fidelity: with `audit_enabled +
 /// footprint_capture`, a forced output-materialization failure on the
 /// audited session entry must return the REAL `ActiveStored` audit

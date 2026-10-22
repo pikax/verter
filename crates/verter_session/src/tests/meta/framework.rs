@@ -7,6 +7,8 @@ use super::*;
 /// to the same shape the synchronous `get_component_meta` path returns,
 /// so callers can rely on observable equivalence between the two
 /// execution modes while only the fan-out characteristic differs.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn get_component_meta_batch_dispatches_through_scheduler() {
     use std::sync::atomic::Ordering;
@@ -381,6 +383,8 @@ defineProps<PropsBase>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn get_component_meta_uses_single_native_query_path() {
     let project = make_project();
@@ -455,6 +459,8 @@ fn get_component_meta_returns_consistent_results_on_repeated_calls() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn get_component_meta_does_not_call_public_evaluate_types_workflow() {
     let project = make_project();
@@ -474,6 +480,8 @@ fn get_component_meta_does_not_call_public_evaluate_types_workflow() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn get_component_meta_cold_path_does_not_call_public_get_analysis_workflow() {
     let project = make_project();

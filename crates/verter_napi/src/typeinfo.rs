@@ -85,7 +85,9 @@ pub(crate) fn encode_symbol_list(entries: &[FfiSymbolEntry]) -> Result<Buffer> {
 pub(crate) fn encode_stored_audit_record(rec: &RequestAuditRecord) -> Result<Option<Buffer>> {
     match rec.capture_state {
         AuditCaptureState::ActiveStored => encode_audit_record(rec).map(Some),
-        AuditCaptureState::FilteredNoop | AuditCaptureState::AuditDisabled => Ok(None),
+        AuditCaptureState::FilteredNoop
+        | AuditCaptureState::AuditDisabled
+        | AuditCaptureState::Unavailable => Ok(None),
     }
 }
 

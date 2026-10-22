@@ -26,11 +26,11 @@ error[E0277]: the trait bound `BoundNativeHostRequest: serde::Serialize` is not 
   --> tests/cases/compile-fail/native_host_binding_sealed.rs:19:26
    |
 19 |     requires_serialize::<BoundNativeHostRequest>();
-   |                          ^^^^^^^^^^^^^^^^^^^^^^ the trait `serde::Serialize` is not implemented for `BoundNativeHostRequest`
+   |                          ^^^^^^^^^^^^^^^^^^^^^^ the trait `Serialize` is not implemented for `BoundNativeHostRequest`
    |
    = note: for local types consider adding `#[derive(serde::Serialize)]` to your `BoundNativeHostRequest` type
    = note: for types from other crates check whether the crate offers a `serde` feature flag
-   = help: the following other types implement trait `serde::Serialize`:
+   = help: the following other types implement trait `Serialize`:
              &'a T
              &'a mut T
              ()

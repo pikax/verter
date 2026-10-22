@@ -13,10 +13,12 @@
 
 use std::sync::Arc;
 
-use verter_audit::{RequestKind, RequestKindPayload};
-use verter_session::typeinfo::types::{
-    EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolKind,
-};
+#[cfg(feature = "semantic-observe")]
+use verter_audit::RequestKind;
+use verter_audit::RequestKindPayload;
+use verter_session::typeinfo::types::{EvaluateTypeExpressionRequest, SymbolKind};
+#[cfg(feature = "semantic-observe")]
+use verter_session::typeinfo::types::{ImportSpec, NamedImport};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_type_engine::semantic_query::ProjectionMode;
 
@@ -52,6 +54,8 @@ fn list_file_symbols_returns_inventory() {
     assert!(alias.is_exported);
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_named_symbol_with_audit_returns_record() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
@@ -115,6 +119,8 @@ fn evaluate_type_expression_with_audit_resolves_primitive() {
     ));
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn evaluate_with_extra_imports_round_trip() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {

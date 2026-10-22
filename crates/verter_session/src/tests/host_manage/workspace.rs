@@ -1,5 +1,7 @@
 use super::*;
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn provenance_snapshot_includes_vfs_dir_index_counters_from_workspace() {
     let dir = verter_test_support::unique_temp_dir("verter-host-provenance");
@@ -88,6 +90,8 @@ export interface ButtonProps extends UseComponentIconsProps, LinkProps {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn prepared_type_decl_reuses_warmed_package_target_and_leaves_undemanded_helper_cold() {
@@ -1358,6 +1362,8 @@ defineProps<ButtonHTMLAttributes>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn direct_imported_type_root_fast_path_reuses_exact_owner_local_type_declaration() {
@@ -1888,6 +1894,8 @@ const emit = defineEmits<PackageEmits>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_native_props_materializes_active_package_target_once() {
@@ -2003,6 +2011,8 @@ const emit = defineEmits<PackageEmits>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_surface_materializes_active_package_target_once() {

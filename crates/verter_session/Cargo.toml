@@ -11,30 +11,25 @@ publish = false
 
 [features]
 default = []
-# Measurement-only: forwards `verter_workspace/currency_probe` and enables the
-# `probe_scope!` timers on this crate's currency chokepoints. Absent from
-# `default`; requested ONLY by the `verter_bench` measurement harness, never by
-# a production edge (`verter_napi`, `verter_lsp`, `verter_wasm`, `verter_tsc`).
-currency_probe = ["verter_workspace/currency_probe"]
-# Measurement-only: forwards `verter_audit/attribution` so A27 chargeability
-# tests can read the CSS-domain counters. NOT in `default`; requested by this
-# crate's test self-edge only. No production binary enables it.
-attribution = ["verter_audit/attribution"]
 # The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
-# forwards it to every lower layer this crate builds on and implies the legacy
-# measurement features above plus `hotpath`. Requested only by the `verter_bench`
-# measurement harness; no production edge enables it.
+# forwards it to every lower layer this crate builds on — the work-attribution
+# counters, the currency-probe timers on this crate's currency chokepoints and
+# the `hotpath` measurement attributes all compile under it. Requested only by
+# measurement harnesses (`verter_bench`, `verter_lsp`'s own opt-in); no
+# production edge (`verter_napi`, `verter_lsp`, `verter_wasm`, `verter_tsc`)
+# enables it.
 semantic-observe = [
   "verter_audit/semantic-observe",
+  "verter_execution/semantic-observe",
   "verter_scheduler/semantic-observe",
   "verter_workspace/semantic-observe",
   "verter_semantic/semantic-observe",
   "verter_compiler/semantic-observe",
   "verter_semantic_source/semantic-observe",
   "verter_type_engine/semantic-observe",
-  "attribution",
-  "currency_probe",
-  "hotpath",
+  "verter_parser/semantic-observe",
+  "verter_session_query/semantic-observe",
+  "dep:hotpath",
 ]
 # Opt-in test-support seam for items the SEPARATE integration-test binary
 # (`tests/cases/**`) must see but a normal `cargo build` / `pnpm run build:lsp`
@@ -141,15 +136,6 @@ transport-authoritative = []
 # feature — corpus drift is detected by the harness before
 # the work begins.
 diagnosis-bench = ["external-corpus"]
-hotpath = [
-  "dep:hotpath",
-  "hotpath/hotpath",
-  "verter_compiler/hotpath",
-  "verter_semantic/hotpath",
-  "verter_type_engine/hotpath",
-  "verter_scheduler/hotpath",
-  "verter_workspace/hotpath",
-]
 
 [dependencies]
 verter_resolution = { workspace = true }
@@ -271,6 +257,9 @@ windows-sys = { version = "0.61.2", features = [
 # Phase 9b — Rayon-backed batch compile (`host_compile.rs`) is native-only.
 # WASM continues to use the single-file `upsert` + `get_virtual_file` path.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
 rayon = { workspace = true }
 # uuid 1.22 split RNG into explicit features. Native targets use
 # `rng-getrandom` for v4 generation.
@@ -324,9 +313,7 @@ verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
 # by any non-dev edge). This is the same idiom as the `verter_scheduler`
 # `test-support` edge above; it is what lets the reverse-materialization fence
 # be compiler-enforced in EVERY build profile rather than release-only.
-# `attribution` is measurement-only and is what lets A27 read CSS-domain
-# counters from this crate's integration tests.
-verter_session = { path = ".", features = ["test-support", "attribution"] }
+verter_session = { path = ".", features = ["test-support"] }
 # Activates the `test-support` feature on `verter_compiler` for
 # `cargo test --package verter_session` (and example/bench) builds only —
 # `compile_with_parsed`/`compile`/`svelte::runtime::compile_client` are
@@ -344,8 +331,11 @@ verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_type_expr = { workspace = true }
 # The integration-test binary is its own crate, so the observer substrate
-# must be a dev-dependency for tests that install an `AuditObserver`
-# (the deterministic mid-loop cancellation discriminators).
+# must be a dev-dependency for tests that install an `AuditObserver`. The
+# edge enables no capture: tests that read audit records, observer events or
+# work-attribution counters build with this crate's `semantic-observe` in the
+# instrumentation lane, so the default test build stays the shipped
+# configuration.
 verter_audit = { path = "../verter_audit" }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }

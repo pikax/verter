@@ -879,8 +879,8 @@ fn a_blocking_drive_parks_until_the_producer_wakes_it() {
 #[test]
 fn a_bound_request_context_is_installed_for_each_step_on_any_thread() {
     use verter_execution::request_context::{
-        current_request_id, CacheEventKind, OpaqueContextGuard, OpaqueRequestContext,
-        RequestContextLike, TlsUninstall,
+        current_request_id, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike,
+        TlsUninstall,
     };
     struct Request;
     struct Installed(#[allow(dead_code)] OpaqueContextGuard);
@@ -891,11 +891,6 @@ fn a_bound_request_context_is_installed_for_each_step_on_any_thread() {
         fn request_id(&self) -> u64 {
             77
         }
-        fn capture_enabled(&self) -> bool {
-            false
-        }
-        fn on_dedup_joiner(&self, _: std::sync::Arc<str>, _: u64, _: bool) {}
-        fn record_cache_event(&self, _: CacheEventKind) {}
         fn install_tls(self: std::sync::Arc<Self>) -> Box<dyn TlsUninstall + Send> {
             Box::new(Installed(OpaqueContextGuard::install(
                 OpaqueRequestContext(self),

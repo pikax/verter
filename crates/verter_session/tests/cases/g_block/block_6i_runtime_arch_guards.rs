@@ -630,6 +630,8 @@ fn per_key_route_builds_bounded() {
 // same file. The prepared-decl bundle for an imported dep MUST be
 // computed AT MOST ONCE — the second call hits the warm bundle cache.
 // =====================================================================
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn per_canonical_prepared_bundle_builds_bounded() {
     let project = make_project();
@@ -693,6 +695,8 @@ defineProps<DepUser>()
 // The compat boundary makes exactly one native call per
 // `getComponentMeta` invocation; the provenance counter tracks that
 // invariant — the JS=1 NAPI call contract.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn compat_one_napi_call_audit() {
     let project = make_project();

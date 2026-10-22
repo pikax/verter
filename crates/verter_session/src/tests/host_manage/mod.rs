@@ -2,8 +2,11 @@ use super::*;
 use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 use std::sync::Arc;
+#[cfg(feature = "semantic-observe")]
 use verter_type_expr::TypeExpr;
-use verter_workspace::{WorkspaceAccess, WorkspaceRead};
+use verter_workspace::WorkspaceAccess;
+#[cfg(feature = "semantic-observe")]
+use verter_workspace::WorkspaceRead;
 
 const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
 <script setup>
@@ -635,7 +638,7 @@ fn return_wrapper_role_for(
     let fixed = host.capture_batch_fixed_view(&view);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
-        crate::resolver_core::HostResolverContext::from_cold_seed(host, fixed.cold_seed(), overlay);
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(host, fixed.cold_seed(), overlay);
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
     verter_type_engine::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return(

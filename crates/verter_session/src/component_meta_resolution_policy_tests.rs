@@ -305,7 +305,8 @@ fn node_data(
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         out = verter_type_engine::project_semantic_dispatch::node_data_for(
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
-                .graph(),
+                .graph()
+                .store(),
             node,
         );
     });
@@ -341,7 +342,8 @@ fn bare_ref_scope_and_resolved_decl(
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let data = verter_type_engine::project_semantic_dispatch::node_data_for(
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
-                .graph(),
+                .graph()
+                .store(),
             node,
         )
         .expect("reference node data");
@@ -368,7 +370,8 @@ fn bare_ref_scope_and_resolved_decl(
                     verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
                         ctx,
                     )
-                    .graph(),
+                    .graph()
+                    .store(),
                     resolved,
                 )
                 .as_deref()

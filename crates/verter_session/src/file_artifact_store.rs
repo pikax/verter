@@ -981,9 +981,9 @@ pub struct FileArtifactStore {
     /// [`Self::evict_lru_promoted`] under explicit memory pressure.
     access_tick: AtomicU64,
     /// Live entry counter.
-    live_counter: Arc<AtomicU64>,
+    live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Stale-sweep counter.
-    stale_sweeps: Arc<AtomicU64>,
+    stale_sweeps: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Monotonic artifact-publication generation.
     ///
     /// Bumped on every mutation that changes the per-canonical
@@ -1082,7 +1082,10 @@ impl FileArtifactStore {
         Self::with_counters(Default::default(), Default::default())
     }
 
-    pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counters(
+        live: verter_type_engine::cache_runtime::OccupancyCounter,
+        stale: verter_type_engine::cache_runtime::OccupancyCounter,
+    ) -> Self {
         Self::with_counters_and_schema_version(
             live,
             stale,
@@ -1102,8 +1105,8 @@ impl FileArtifactStore {
     }
 
     fn with_counters_and_schema_version(
-        live: Arc<AtomicU64>,
-        stale: Arc<AtomicU64>,
+        live: verter_type_engine::cache_runtime::OccupancyCounter,
+        stale: verter_type_engine::cache_runtime::OccupancyCounter,
         schema_version: u32,
     ) -> Self {
         Self {
@@ -1660,6 +1663,8 @@ impl FileArtifactStore {
     /// Look up the indexed artifact for `canonical_id` if the cached
     /// entry matches `expected_whole_hash`. Stale entries are ignored.
     #[must_use]
+    /// [`Self::get_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get(
         &self,
         canonical_id: &str,
@@ -1667,7 +1672,25 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
-        self.get_base_artifacts(
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, expected_whole_hash, expected_parse_key, expected_file_language)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub fn get_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        expected_whole_hash: Hash16,
+        expected_parse_key: &verter_language::ParseKey,
+        expected_file_language: &FileLanguage,
+    ) -> Option<Arc<IndexedReady>> {
+        let _ = observation;
+        self.get_base_artifacts::<M>(
+            observation,
             canonical_id,
             expected_whole_hash,
             expected_parse_key,
@@ -1679,13 +1702,15 @@ impl FileArtifactStore {
     /// [`Self::get`] returning the whole base `FileArtifacts` entry, for a
     /// reader that also consumes the artifact's parse facts.
     #[must_use]
-    pub(crate) fn get_base_artifacts(
+    pub(crate) fn get_base_artifacts<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         expected_whole_hash: Hash16,
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<FileArtifacts>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1707,7 +1732,7 @@ impl FileArtifactStore {
                     Arc::clone(&stored.payload)
                 })
         });
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1719,7 +1744,7 @@ impl FileArtifactStore {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -1755,6 +1780,8 @@ impl FileArtifactStore {
     /// overlay-scoped read never reaches the base entry. Stale
     /// candidates for an older content hash yield `None`.
     #[must_use]
+    /// [`Self::get_overlay_scoped_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get_overlay_scoped(
         &self,
         canonical_id: &str,
@@ -1763,6 +1790,24 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_overlay_scoped_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, expected_whole_hash, discriminator, expected_parse_key, expected_file_language)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub fn get_overlay_scoped_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        expected_whole_hash: Hash16,
+        discriminator: Hash16,
+        expected_parse_key: &verter_language::ParseKey,
+        expected_file_language: &FileLanguage,
+    ) -> Option<Arc<IndexedReady>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1789,7 +1834,7 @@ impl FileArtifactStore {
                         Arc::clone(&stored.payload.indexed)
                     })
             });
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1801,7 +1846,7 @@ impl FileArtifactStore {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -1839,7 +1884,23 @@ impl FileArtifactStore {
     /// base reader. A session-view reader that wants its overlay
     /// artifact uses [`Self::get_overlay_scoped`] (exact key) instead.
     #[must_use]
+    /// [`Self::get_any_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_any_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub fn get_any_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) -> Option<Arc<IndexedReady>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1862,7 +1923,7 @@ impl FileArtifactStore {
                 }
             }
         }
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1874,7 +1935,7 @@ impl FileArtifactStore {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -1899,7 +1960,29 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
-        self.get(
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_for_current_content_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(),
+                canonical_id,
+                expected_content_hash,
+                expected_parse_key,
+                expected_file_language,
+            )
+
+        })
+    }
+
+    /// Content-pinned lookup using the calling execution's capture receivers.
+    #[must_use]
+    pub fn get_for_current_content_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        expected_content_hash: Hash16,
+        expected_parse_key: &verter_language::ParseKey,
+        expected_file_language: &FileLanguage,
+    ) -> Option<Arc<IndexedReady>> {
+        self.get_in::<M>(
+            observation,
             canonical_id,
             expected_content_hash,
             expected_parse_key,
@@ -2997,7 +3080,7 @@ impl FileArtifactStore {
         // R23 typed event: a `FileArtifactStore` entry was admitted.
         // Best-effort emission — silent no-op when no observer
         // accumulator is installed on the current thread.
-        verter_type_engine::request_observers::push_structured_event(
+        verter_type_engine::component_meta_trace_structured!(
             crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                 canonical_id: Arc::clone(&canonical),
                 action: verter_audit::FileArtifactCacheAction::Admit,
@@ -3046,7 +3129,7 @@ impl FileArtifactStore {
             self.bump_artifact_generation();
             // R23 typed event: a `FileArtifactStore` entry was
             // evicted. Best-effort emission.
-            verter_type_engine::request_observers::push_structured_event(
+            verter_type_engine::component_meta_trace_structured!(
                 crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                     canonical_id: canonical,
                     action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3086,7 +3169,7 @@ impl FileArtifactStore {
             // downstream telemetry can attribute drain footprint
             // per `FileArtifactKey` dimension.
             for (key, _payload) in &removed_pairs {
-                verter_type_engine::request_observers::push_structured_event(
+                verter_type_engine::component_meta_trace_structured!(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3123,7 +3206,7 @@ impl FileArtifactStore {
                 .fetch_add(removed as u64, Ordering::Relaxed);
             self.bump_artifact_generation();
             for (key, _payload) in &removed_pairs {
-                verter_type_engine::request_observers::push_structured_event(
+                verter_type_engine::component_meta_trace_structured!(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3898,7 +3981,7 @@ pub(crate) fn emit_module_augmentation_index_shape_event(
             None,
         ),
     };
-    verter_type_engine::request_observers::push_structured_event(
+    verter_type_engine::component_meta_trace_structured!(
         crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationIndexShape {
             target_kind_tag: tag,
             external_specifier,
@@ -3964,7 +4047,7 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
 /// dimension); the parallel `semantic_hash` and `display_hash`
 /// fields carry both lane hashes simultaneously.
 fn emit_fact_registry_writes(canonical_id: &Arc<str>, fact: &fact_registry::Fact) {
-    verter_type_engine::request_observers::push_structured_event(
+    verter_type_engine::component_meta_trace_structured!(
         crate::component_meta_audit::StructuredAuditEvent::FactRegistryWrite {
             canonical_id: Arc::clone(canonical_id),
             fact_key_kind: fact_key_kind_tag_for(&fact.key),

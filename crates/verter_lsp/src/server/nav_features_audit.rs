@@ -57,7 +57,7 @@ pub(super) async fn handle_hover_with_audit(
         .uri
         .clone();
     let position = params.text_document_position_params.position;
-    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let target_identity = || crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     let span = server.interaction_trace.begin("textDocument/hover", || {
         server.documents.get(&uri).map(|doc| doc.version as u64)
     });
@@ -87,7 +87,7 @@ pub(super) async fn handle_completion_with_audit(
     let host = server.documents.host_arc();
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
-    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let target_identity = || crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     let span = server
         .interaction_trace
         .begin("textDocument/completion", || {
@@ -138,7 +138,7 @@ pub(super) async fn handle_goto_definition_with_audit(
         .uri
         .clone();
     let position = params.text_document_position_params.position;
-    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let target_identity = || crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     let span = server
         .interaction_trace
         .begin("textDocument/definition", || {
@@ -185,7 +185,8 @@ pub(super) async fn handle_references_with_audit(
     let host = server.documents.host_arc();
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
-    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let target_identity = || crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let body_uri = &uri;
     let span = server
         .interaction_trace
         .begin("textDocument/references", || {
@@ -202,7 +203,7 @@ pub(super) async fn handle_references_with_audit(
                 server
                     .answer_repaired_foreground(
                         crate::documents::ForegroundRoute::References,
-                        &uri,
+                        body_uri,
                         handle_references(server, params),
                     )
                     .await
@@ -231,7 +232,8 @@ pub(super) async fn handle_rename_with_audit(
     let host = server.documents.host_arc();
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
-    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let target_identity = || crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let body_uri = &uri;
     let span = server.interaction_trace.begin("textDocument/rename", || {
         server.documents.get(&uri).map(|doc| doc.version as u64)
     });
@@ -246,7 +248,7 @@ pub(super) async fn handle_rename_with_audit(
                 server
                     .answer_repaired_edit_foreground(
                         crate::documents::ForegroundRoute::Rename,
-                        &uri,
+                        body_uri,
                         handle_rename(server, params),
                     )
                     .await

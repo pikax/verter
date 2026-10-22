@@ -74,12 +74,13 @@ pub fn overlay_prepared_decl_bundle_probe(
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     let bundle = IndexedInputs::prepared_decl_bundle(&session_ctx, raw_canonical)?;
     let prepared =

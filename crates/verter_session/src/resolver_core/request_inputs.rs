@@ -99,7 +99,7 @@ mod tests {
             }
         }
         let _reset = ResetFence(&host);
-        host.with_base_resolver_context(|ctx| {
+        host.with_base_resolver_context::<_, verter_audit::observe::Uncaptured>(|ctx| {
             let first = IndexedInputs::ensure_indexed_ready_serve(ctx, "/pin.ts").unwrap();
             assert!(!first.store_published);
             let _ = upsert("export type Fresh = { fresh: number }");

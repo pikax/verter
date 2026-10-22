@@ -374,7 +374,8 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
     let snap = {
         let _guard = CaptureToken::start_for_query("phase_11d_unit_record_dedup");
         // First emission: cold ledger insert.
-        graph.record_origin_edge(
+        graph.record_origin_edge_in::<verter_audit::observe::Captured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
@@ -384,7 +385,8 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
         // Second emission: identical identity. Pre-fix this records a
         // duplicate ledger entry; post-fix the dedup skips the ledger
         // write.
-        graph.record_origin_edge(
+        graph.record_origin_edge_in::<verter_audit::observe::Captured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
@@ -486,6 +488,8 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Test 3 (audit-mining contract). With an installed
 /// `RequestFootprintAccumulator`, run a query that triggers the
 /// warm-prefix dedup path. Assert the audit accumulator still
@@ -534,12 +538,16 @@ fn audit_mining_traces_dropped_prefix_edges() {
             Some(Arc::clone(&acc)),
         );
         let _guard = RequestContextGuard::install(ctx);
+        let observation = verter_type_engine::request_observers::CaptureTargets::installed::<
+            verter_audit::observe::Captured,
+        >();
 
         // Two emissions of the SAME edge identity. Pre-fix both
         // populate the ledger AND both push to the accumulator.
         // Post-fix the ledger dedups (one entry) but the accumulator
         // sees BOTH (audit-mining contract preservation).
-        graph.record_origin_edge(
+        graph.record_origin_edge_in::<verter_audit::observe::Captured>(
+            &observation,
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
@@ -549,7 +557,8 @@ fn audit_mining_traces_dropped_prefix_edges() {
             },
             fence.clone(),
         );
-        graph.record_origin_edge(
+        graph.record_origin_edge_in::<verter_audit::observe::Captured>(
+            &observation,
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),

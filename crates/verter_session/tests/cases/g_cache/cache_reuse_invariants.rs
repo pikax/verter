@@ -176,6 +176,8 @@ fn byte_identical_re_upsert_preserves_db_entry_counts() {
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// R1 / R2 — direct audit-observer probe: byte-identical re-upsert
 /// MUST NOT emit any `CacheDrainedAtUpsert` structured event.
 ///

@@ -28,6 +28,7 @@ import {
   State as LanguageClientState,
   TransportKind,
   RevealOutputChannelOn,
+  ResponseError,
 } from "vscode-languageclient/node";
 
 import { basename, join, normalize, resolve, sep } from "path";
@@ -891,6 +892,13 @@ async function startVueLanguageServer(
         html: workspace.getConfiguration("html"),
       },
       statistics: getStatisticsInitialization(rootPath),
+      // The server sends recurring notifications only to a client that asks:
+      // the heartbeat feeds this extension's restart watchdog, and the
+      // carrier-store ping refreshes VS Code's own TypeScript service.
+      subscriptions: {
+        heartbeat: true,
+        carrierStoreChanged: true,
+      },
       analysis: {
         enabled: workspace.getConfiguration("verter.analysis").get<boolean>("enabled", false),
       },
@@ -2283,6 +2291,18 @@ function addVerterAnalysis(getClient: GetClient, lifetime: Lifetime) {
         await client.sendRequest(RequestType.GetAnalysis, { uri });
         const snapshot = await client.sendRequest(RequestType.GetStatistics, {});
         return snapshot.diagnostics?.[uri];
+      }),
+      // The workspace-wide enumeration is the demand for the complete
+      // inventory; the server answers LSP `RequestFailed` (-32803) until the
+      // scan it starts has settled.
+      commands.registerCommand("verter._workspaceInventoryReady", async () => {
+        try {
+          await getClient().sendRequest(RequestType.GetProjectOverview, {});
+          return true;
+        } catch (error) {
+          if (error instanceof ResponseError && error.code === -32803) return false;
+          throw error;
+        }
       }),
       commands.registerCommand("verter._getDecorationState", () => ({
         bindingColors: bindingColorProvider.getState(),

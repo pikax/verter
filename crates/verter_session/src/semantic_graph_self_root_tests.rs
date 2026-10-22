@@ -2341,7 +2341,7 @@ fn session_overlay_warm_validation_matrix() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,
@@ -2375,7 +2375,7 @@ fn session_overlay_warm_validation_matrix() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,
@@ -2407,7 +2407,7 @@ fn session_overlay_warm_validation_matrix() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,
@@ -2549,7 +2549,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = SessionResolverContext::new(
+    let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &session_store_view,
@@ -2951,7 +2951,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,
@@ -3000,7 +3000,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,
@@ -3044,7 +3044,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,
@@ -3224,7 +3224,7 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,
@@ -3271,7 +3271,7 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,

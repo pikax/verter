@@ -1047,7 +1047,7 @@ impl crate::VerterHost {
         );
         if previous_fingerprint != Some(order.fingerprint()) {
             self.bump_load_generation();
-            verter_type_engine::request_observers::push_structured_event(
+            verter_type_engine::component_meta_trace_structured!(
                 crate::component_meta_audit::StructuredAuditEvent::ProgramFileOrder {
                     program: Arc::from(tsconfig_path.as_str()),
                     prev_fingerprint: previous_fingerprint,

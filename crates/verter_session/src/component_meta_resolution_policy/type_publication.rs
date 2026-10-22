@@ -107,7 +107,10 @@ fn push_proof_child(
 /// resolving them. This sidecar is the no-information-loss rail around the
 /// normalized projection comparison below: the shared shape key intentionally
 /// renders `DeclRef`/`BareRef` as display refs, so it cannot carry this proof.
-fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<ProofReferenceMap> {
+fn proof_reference_map<M: verter_audit::observe::ObserveExec>(
+    root: SemanticNodeId,
+    ctx: &PolicyCtx<'_, '_, M>,
+) -> Option<ProofReferenceMap> {
     let mut references = ProofReferenceMap::default();
     let mut active = rustc_hash::FxHashSet::default();
     let mut stack = vec![ProofWalkFrame::Enter(root, Vec::new())];
@@ -477,10 +480,10 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
 }
 
 #[cfg(test)]
-pub(super) fn proof_reference_maps_match_for_test(
+pub(super) fn proof_reference_maps_match_for_test<M: verter_audit::observe::ObserveExec>(
     left: SemanticNodeId,
     right: SemanticNodeId,
-    ctx: &PolicyCtx<'_, '_>,
+    ctx: &PolicyCtx<'_, '_, M>,
 ) -> Option<bool> {
     Some(proof_reference_map(left, ctx)? == proof_reference_map(right, ctx)?)
 }
@@ -506,10 +509,10 @@ fn push_optional_proof_pair(
 /// they explain where an equivalent projection came from, not what type it is.
 /// Reference identities remain exact here and are additionally guarded by the
 /// positional map in [`symbolic_projection_equivalent`].
-fn normalized_projection_shape_equivalent(
+fn normalized_projection_shape_equivalent<M: verter_audit::observe::ObserveExec>(
     left: SemanticNodeId,
     right: SemanticNodeId,
-    ctx: &PolicyCtx<'_, '_>,
+    ctx: &PolicyCtx<'_, '_, M>,
 ) -> Option<bool> {
     let dispatch = ctx.engine.dispatch;
     let reduction = ProjectionReductionContext::published(ProjectionMode::Navigate);
@@ -1024,10 +1027,10 @@ fn normalized_projection_shape_equivalent(
 /// normalized lockstep by the ONE shared resolver under
 /// `Published(Navigate)`. Any identity-bearing carrier that survives that
 /// demand must match exactly.
-pub(super) fn symbolic_projection_equivalent(
+pub(super) fn symbolic_projection_equivalent<M: verter_audit::observe::ObserveExec>(
     resolved: SemanticNodeId,
     authored: SemanticNodeId,
-    ctx: &PolicyCtx<'_, '_>,
+    ctx: &PolicyCtx<'_, '_, M>,
 ) -> Option<bool> {
     let resolved_raw_refs = proof_reference_map(resolved, ctx)?;
     let authored_raw_refs = proof_reference_map(authored, ctx)?;
@@ -1045,11 +1048,11 @@ pub(super) fn symbolic_projection_equivalent(
 /// Mint a symbolic-representation proof only when both bound sources retain
 /// reference identity and normalize losslessly to the same projection through
 /// the shared resolver.
-fn validate_symbolic_equivalence(
+fn validate_symbolic_equivalence<M: verter_audit::observe::ObserveExec>(
     kind: SymbolicEquivalenceKind,
     resolved_source: &SemanticTypeSource,
     evidence: &AuthoredTypeEvidence,
-    ctx: &PolicyCtx<'_, '_>,
+    ctx: &PolicyCtx<'_, '_, M>,
 ) -> Option<SymbolicEquivalenceProof> {
     let resolved = ctx.raise_source(resolved_source)?;
     let authored_source = evidence.source().to_semantic_source();
@@ -1089,9 +1092,9 @@ fn validate_symbolic_equivalence(
 /// substituted Object body is the intended public shape.
 ///
 /// Returns `true` if the published source was replaced.
-pub(super) fn macro_compound_publication_policy(
+pub(super) fn macro_compound_publication_policy<M: verter_audit::observe::ObserveExec>(
     publication: &TypePublication,
-    ctx: &mut PolicyCtx<'_, '_>,
+    ctx: &mut PolicyCtx<'_, '_, M>,
 ) -> Option<PublicationPolicy> {
     let evidence = publication.evidence()?;
     let resolved_source = publication.authority().source()?;
@@ -1139,7 +1142,10 @@ pub(super) fn macro_compound_publication_policy(
 
 /// A reference head directly at the raw root (unwrapping one alias hop)
 /// whose name resolves to a macro-participating root identity.
-fn is_bare_macro_participating_ref(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> bool {
+fn is_bare_macro_participating_ref<M: verter_audit::observe::ObserveExec>(
+    node: SemanticNodeId,
+    ctx: &PolicyCtx<'_, '_, M>,
+) -> bool {
     if let Some((name, _)) = ctx.node_ref_head(node) {
         return ctx.is_macro_participating(name.as_str());
     }
@@ -1155,9 +1161,9 @@ fn is_bare_macro_participating_ref(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>
 /// generic vs. non-generic forms. Walks the raw node's composition spine
 /// (unions / intersections / arrays / tuples / indexed-access arms /
 /// reference args) — visited-guarded, since raised nodes may be shared.
-fn collect_macro_participating_refs(
+fn collect_macro_participating_refs<M: verter_audit::observe::ObserveExec>(
     root: SemanticNodeId,
-    ctx: &PolicyCtx<'_, '_>,
+    ctx: &PolicyCtx<'_, '_, M>,
     out: &mut Vec<(String, usize)>,
 ) {
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
@@ -1201,9 +1207,9 @@ fn collect_macro_participating_refs(
 /// indexed access that transits through an imported declaration. When
 /// true, the caller restores the symbolic form from the authored source
 /// and skips the expansion walk.
-pub(super) fn imported_indexed_publication_policy(
+pub(super) fn imported_indexed_publication_policy<M: verter_audit::observe::ObserveExec>(
     publication: &TypePublication,
-    ctx: &mut PolicyCtx<'_, '_>,
+    ctx: &mut PolicyCtx<'_, '_, M>,
 ) -> Option<PublicationPolicy> {
     let evidence = publication.evidence()?;
     let resolved_source = publication.authority().source()?;
@@ -1238,7 +1244,10 @@ pub(super) fn imported_indexed_publication_policy(
 /// "indexed root" is the chain starting from the indexed access's `object`
 /// and the property body that the access selects from the root's
 /// declaration body.
-fn raw_indexed_access_root_is_imported(node: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> bool {
+fn raw_indexed_access_root_is_imported<M: verter_audit::observe::ObserveExec>(
+    node: SemanticNodeId,
+    ctx: &mut PolicyCtx<'_, '_, M>,
+) -> bool {
     let Some(data) = ctx.node_data(node) else {
         return false;
     };
@@ -1290,7 +1299,10 @@ fn raw_indexed_access_root_is_imported(node: SemanticNodeId, ctx: &mut PolicyCtx
 /// References whose declarations cannot be located are ignored — they
 /// cannot be proven imported. A cross-file `import("…")` carrier is, by
 /// construction, a reference to an imported declaration.
-fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> bool {
+fn node_contains_imported_ref<M: verter_audit::observe::ObserveExec>(
+    root: SemanticNodeId,
+    ctx: &mut PolicyCtx<'_, '_, M>,
+) -> bool {
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
     let mut worklist: Vec<SemanticNodeId> = vec![root];
     while let Some(node) = worklist.pop() {

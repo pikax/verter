@@ -167,6 +167,18 @@ Key features:
 
 ## CodeTransform Is the Single Source of Truth (CRITICAL)
 
+`CodeTransform<'a, M>` carries the compiler's selected capture mode through
+script, template and source-map operations. `CodeTransform::new` defaults to
+uncaptured execution; the compiler uses `CodeTransform::<M>::new_in` after
+root selection. Captured operations update a plain local audit tally and
+publish it once on drop. Uncaptured operations compile out that update and
+their drop reads no observer slot. Helpers accepting transforms stay generic
+over `M` so they preserve the caller's selection.
+Standalone transform owners select from the installed observer once at their
+entry (`code_transform::installed_capture_mode`) and specialise before creating
+the transform. This preserves captured operation counts in nested script/TSC,
+style, assembly and Svelte transforms without polling during their operations.
+
 **All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.). Never apply string replacements, regex transforms, or manual splicing to the output of `build_string()` or to content produced by a `CodeTransform`.
 
 Post-hoc string manipulation breaks sourcemap accuracy: `CodeTransform` generates source maps by tracking chunks (Original, Inserted, Moved, Overwritten). Modifying the string after the transform makes byte offsets in the source map no longer match the content, causing position mismatches in the LSP (e.g. hover landing on the wrong token, go-to-definition jumping to wrong locations).

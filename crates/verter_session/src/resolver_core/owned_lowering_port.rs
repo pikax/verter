@@ -269,8 +269,9 @@ impl SourceInputProvider for crate::VerterHost {
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
-        crate::VerterHost::prepared_type_decl_in_with_store_view(
+        crate::VerterHost::prepared_type_decl_in_with_store_view::<verter_audit::observe::Uncaptured>(
             self,
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             seed.view(),
             None,
             canonical_id,
@@ -289,8 +290,9 @@ impl SourceInputProvider for crate::VerterHost {
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
-        crate::VerterHost::prepared_value_decl_in_with_store_view(
+        crate::VerterHost::prepared_value_decl_in_with_store_view::<verter_audit::observe::Uncaptured>(
             self,
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             seed.view(),
             None,
             canonical_id,
@@ -551,14 +553,19 @@ impl<T: SourceInputProvider> HostSourcePort for T {
 
 /// A session request context: the engine's request contract plus the
 /// session-only extensions a framework-surface resolver demands.
-pub(crate) trait HostRequestContext:
-    verter_type_engine::resolver_core::ResolverContext<super::HostCapabilities> + HostSourcePort
+///
+/// `M` is the context family's capture execution.
+pub(crate) trait HostRequestContext<
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+>:
+    verter_type_engine::resolver_core::ResolverContext<super::HostCapabilities<M>> + HostSourcePort
 {
 }
 impl<
-        T: verter_type_engine::resolver_core::ResolverContext<super::HostCapabilities>
+        M: verter_audit::observe::ObserveExec,
+        T: verter_type_engine::resolver_core::ResolverContext<super::HostCapabilities<M>>
             + HostSourcePort,
-    > HostRequestContext for T
+    > HostRequestContext<M> for T
 {
 }
 

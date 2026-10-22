@@ -10,32 +10,22 @@ publish = false
 description = "Benchmarks and examples for verter_compiler"
 
 [features]
+# The one measurement opt-in (see docs/arch/semantic-observe.md): the
+# work-attribution counter table and its reader, the currency-chokepoint
+# wall-clock/call-count timers and the `hotpath` profiler instrumentation, in
+# every layer this harness links. Production binaries never request it.
 semantic-observe = [
   "verter_audit/semantic-observe",
   "verter_compiler/semantic-observe",
   "verter_workspace/semantic-observe",
   "verter_semantic/semantic-observe",
   "verter_session/semantic-observe",
-  "attribution",
-  "currency_probe",
-  "hotpath",
-]
-hotpath = [
-  "verter_compiler/hotpath",
-  "verter_session/hotpath",
-  "verter_diagnostics/hotpath",
+  "verter_diagnostics/semantic-observe",
   "dep:hotpath",
-  "hotpath/hotpath",
 ]
-hotpath-alloc = ["verter_compiler/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
-# Measurement-only rail for `examples/currency_phase_probe.rs`. Enables the
-# per-site wall-clock/call-count timers on the currency chokepoints.
-currency_probe = ["verter_session/currency_probe", "verter_workspace/currency_probe"]
-# Measurement-only rail for `examples/attribution_baseline.rs`. Turns on the
-# work-attribution counter table and its reader. Production binaries never
-# request `verter_audit/attribution`. The `verter_session` test self-edge also
-# forwards it so CSS-domain chargeability tests can read counters.
-attribution = ["verter_audit/attribution"]
+# Allocation profiling through hotpath's own allocator, on top of the
+# coordinated opt-in.
+hotpath-alloc = ["semantic-observe", "verter_compiler/hotpath-alloc", "hotpath/hotpath-alloc"]
 
 [dependencies]
 # `bench` unlocks `template`/`script` module visibility (see
@@ -224,8 +214,18 @@ name = "profile_public_api_batch"
 path = "examples/profile_public_api_batch.rs"
 
 [[example]]
+# Reads the dispatch-loop investigation counters and drives the stall
+# watchdog, both of which exist only under `semantic-observe`.
+name = "audit_real_component_meta"
+path = "examples/audit_real_component_meta.rs"
+required-features = ["semantic-observe"]
+
+[[example]]
+# Prints the host's provenance counters, which exist only under
+# `semantic-observe`.
 name = "currency_phase_probe"
 path = "examples/currency_phase_probe.rs"
+required-features = ["semantic-observe"]
 
 [[example]]
 # Per-request resolver-context port call counts; the counters exist only
@@ -239,7 +239,7 @@ name = "route_overhead_baseline"
 path = "examples/route_overhead_baseline.rs"
 
 [[example]]
-# Requires `attribution`: the whole point of this cell is to prove
+# Requires `semantic-observe`: the whole point of this cell is to prove
 # `compile_prepared`/`compile_batch` skip re-parsing by reading the real
 # `compiler.carrier_parse.calls` counter (`verter_audit::attribution`).
 # Without the feature that counter does not exist in the build at all —
@@ -249,4 +249,16 @@ path = "examples/route_overhead_baseline.rs"
 # error instead of a silently-passing no-op.
 name = "compiler_route_overhead"
 path = "examples/compiler_route_overhead.rs"
-required-features = ["attribution"]
+required-features = ["semantic-observe"]
+
+[[example]]
+# Reads the decl-lowering handoff rendezvous profile, which exists only
+# under `semantic-observe`.
+name = "profile_real_component_meta"
+path = "examples/profile_real_component_meta.rs"
+required-features = ["semantic-observe"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }

@@ -130,7 +130,10 @@ impl NormalizedTypeArgs {
     /// argument may consult the same declaration cache the cycle guard
     /// itself uses.
     #[must_use]
-    pub(super) fn normalize_nodes(args: &[SemanticNodeId], ctx: &mut PolicyCtx<'_, '_>) -> Self {
+    pub(super) fn normalize_nodes<M: verter_audit::observe::ObserveExec>(
+        args: &[SemanticNodeId],
+        ctx: &mut PolicyCtx<'_, '_, M>,
+    ) -> Self {
         let mut out: SmallVec<[NormalizedTypeArg; 4]> = SmallVec::new();
         for arg in args {
             out.push(normalize_one_node(*arg, ctx));
@@ -166,7 +169,10 @@ impl Default for NormalizedTypeArgs {
 }
 
 /// Resolve one raised argument NODE into its `NormalizedTypeArg` shape.
-fn normalize_one_node(node: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> NormalizedTypeArg {
+fn normalize_one_node<M: verter_audit::observe::ObserveExec>(
+    node: SemanticNodeId,
+    ctx: &mut PolicyCtx<'_, '_, M>,
+) -> NormalizedTypeArg {
     if let Some((name, args)) = ctx.node_ref_head(node) {
         // Try to resolve the reference head to a declaration identity. When
         // the lookup succeeds the canonical source uniquely keys the head;
@@ -214,7 +220,10 @@ fn normalize_one_node(node: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> Norm
 /// over-cuts one request's recursion (it never under-cuts a real cycle and
 /// never poisons a cross-request cache), matching the ephemeral-guard
 /// contract documented on this module.
-fn hash_arg_nodes(args: &[SemanticNodeId], ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
+fn hash_arg_nodes<M: verter_audit::observe::ObserveExec>(
+    args: &[SemanticNodeId],
+    ctx: &PolicyCtx<'_, '_, M>,
+) -> ShapeHash {
     let mut hasher = xxhash_rust::xxh3::Xxh3::new();
     let mut bridge = LiteralHashBridge(&mut hasher);
     let mut seen: rustc_hash::FxHashMap<SemanticNodeId, u64> = rustc_hash::FxHashMap::default();
@@ -228,7 +237,10 @@ fn hash_arg_nodes(args: &[SemanticNodeId], ctx: &PolicyCtx<'_, '_>) -> ShapeHash
 /// Compute a deterministic 64-bit structural fingerprint of a semantic-graph
 /// node through [`hash_semantic_node_structurally`], digested via `xxh3` to
 /// match the shape used elsewhere in the cycle guard's identity space.
-fn hash_node(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
+fn hash_node<M: verter_audit::observe::ObserveExec>(
+    node: SemanticNodeId,
+    ctx: &PolicyCtx<'_, '_, M>,
+) -> ShapeHash {
     let mut hasher = xxhash_rust::xxh3::Xxh3::new();
     let mut bridge = LiteralHashBridge(&mut hasher);
     hash_semantic_node_structurally(ctx.engine.dispatch, node, &mut bridge);
@@ -249,10 +261,13 @@ fn hash_node(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
 /// NON-LOSSY in the discriminating dimensions (resolved reference heads,
 /// literal values, and composite structural shape stay distinct). It is an
 /// ephemeral recursion-guard identity only — never a cache key.
-pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
+pub(crate) fn hash_semantic_node_structurally<
+    H: std::hash::Hasher,
+    M: verter_audit::observe::ObserveExec,
+>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     root: SemanticNodeId,
     hasher: &mut H,
@@ -265,10 +280,10 @@ pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
     hash_node_rec(dispatch, root, hasher, &mut seen, 0);
 }
 
-fn hash_node_rec<H: std::hash::Hasher>(
+fn hash_node_rec<H: std::hash::Hasher, M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
     hasher: &mut H,

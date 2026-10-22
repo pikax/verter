@@ -3522,6 +3522,7 @@ dependencies = [
  "prost",
  "serde_json",
  "verter_actions",
+ "verter_audit",
  "verter_compiler",
  "verter_diagnostics",
  "verter_identity",
@@ -4074,6 +4075,7 @@ name = "verter_source_policy_gate"
 version = "0.0.1-beta.7"
 dependencies = [
  "proc-macro2",
+ "serde",
  "serde_json",
  "static_assertions",
  "syn 2.0.117",
@@ -4082,6 +4084,7 @@ dependencies = [
  "verter_no_typeexpr",
  "verter_session",
  "verter_span",
+ "verter_test_support",
  "verter_type_engine",
  "verter_type_expr",
  "verter_workspace",
@@ -4178,6 +4181,7 @@ dependencies = [
 name = "verter_type_engine"
 version = "0.0.1-beta.7"
 dependencies = [
+ "aho-corasick",
  "arc-swap",
  "boxcar",
  "dashmap",

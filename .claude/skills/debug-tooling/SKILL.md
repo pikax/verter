@@ -18,14 +18,14 @@ Three independent pieces (combine as needed), from commit `6f603f05` (`chore(deb
 **Build:**
 
 ```bash
-cargo build --profile=release-dbg --example audit_real_component_meta -p verter_bench
+cargo build --profile=release-dbg --example audit_real_component_meta -p verter_bench --features semantic-observe
 ```
 
 Output: `target/release-dbg/examples/`. Use whenever attaching a debugger or capturing a backtrace.
 
 ## 2. In-process watchdog backtrace dumper
 
-`crates/verter_type_engine/src/loop5_instrumentation.rs` — sampling watchdog that captures `std::backtrace::Backtrace::force_capture()` from the running thread. Wired into `shallow_lower_type_expr` (recursive workhorse of TypeExpr → SemanticNodeId lowering). **Inert when not spawned** (single relaxed atomic load per call site).
+`crates/verter_type_engine/src/loop5_instrumentation.rs` — sampling watchdog that captures `std::backtrace::Backtrace::force_capture()` from the running thread. Wired into `shallow_lower_type_expr` (recursive workhorse of TypeExpr → SemanticNodeId lowering). The module and every call site compile only under the coordinated `semantic-observe` feature (or test builds), so a default build carries none of it; with the feature on it is inert when not spawned (single relaxed atomic load per call site).
 
 ### Two modes
 
@@ -91,11 +91,13 @@ Line numbers map to `match` arms in `shallow_lower_type_expr`, identifying which
 
 ```rust
 // In your hot-path entry:
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 crate::loop5_instrumentation::watchdog_beat();
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 crate::loop5_instrumentation::watchdog_check_and_dump("my_hot_function");
 ```
 
-Both calls are inert when the watchdog is not spawned (single relaxed atomic load each in production).
+The module exists only under that gate, so production builds carry neither call; with it on, both calls are inert when the watchdog is not spawned (single relaxed atomic load each).
 
 ## 3. LLDB attach wrapper
 

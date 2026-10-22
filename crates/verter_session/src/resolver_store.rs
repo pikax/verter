@@ -337,6 +337,7 @@ pub fn dump_from_host_call_sites() -> Vec<(String, u64)> {
     rows
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Per-request component-meta store counters captured by
 /// [`VerterHost::component_meta_audit_store_snapshot`]. The fields
 /// live on [`crate::component_meta_audit::ComponentMetaPayload`]
@@ -346,8 +347,6 @@ pub fn dump_from_host_call_sites() -> Vec<(String, u64)> {
 /// the audit-builder finalisation.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ComponentMetaStoreCounters {
-    pub materialize_structure_calls: u64,
-    pub materialize_structure_cache_hits: u64,
     pub node_arena_lock_acquisitions: u64,
     pub family_map_lock_acquisitions: u64,
     pub dep_signature_merges: u64,
@@ -1571,12 +1570,12 @@ impl HostStoreView {
             .fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(c.get().saturating_add(1)));
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             ctx.cache_counters
                 .bypass_diagnostics
                 .host_store_view_from_host_builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        });
         host.store_view_manager().base_view(host)
     }
 
@@ -2054,7 +2053,7 @@ impl HostStoreView {
     /// requires both. The memo is bypassed deliberately — a memoized
     /// answer is not a root read, and a control that could be satisfied by
     /// a cache hit would prove nothing about the instrumentation.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "semantic-observe"))]
     pub(crate) fn owner_read_through_roots_for_tests(
         &self,
         canonical_id: &str,
@@ -4708,6 +4707,7 @@ impl VerterHost {
             .external_supersession_fingerprint()
     }
 
+    #[cfg(feature = "semantic-observe")]
     pub(crate) fn component_meta_audit_store_snapshot(
         &self,
         store_view: Option<&HostStoreView>,
@@ -4749,12 +4749,6 @@ impl VerterHost {
         let component_meta_counters =
             match verter_type_engine::request_context::current_request_context() {
                 Some(ctx) => ComponentMetaStoreCounters {
-                    materialize_structure_calls: ctx
-                        .materialize_structure_calls
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    materialize_structure_cache_hits: ctx
-                        .materialize_structure_cache_hits
-                        .load(std::sync::atomic::Ordering::Relaxed),
                     node_arena_lock_acquisitions: ctx
                         .node_arena_lock_acquisitions
                         .load(std::sync::atomic::Ordering::Relaxed),
@@ -4785,6 +4779,7 @@ impl VerterHost {
         (store_audit, component_meta_counters)
     }
 
+    #[cfg(feature = "semantic-observe")]
     pub(crate) fn component_meta_audit_memory_bytes(&self) -> (u64, u64) {
         let host_cache_bytes: u64 = self
             .project_type_store
@@ -5258,6 +5253,8 @@ mod store_view_o1_build_tests;
 /// declared here for the same reason.
 #[cfg(test)]
 #[path = "store_view_marginal_admit_tests.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod store_view_marginal_admit_tests;
 
 /// Terminal-aggregate validation contract — declared here for the same
@@ -5306,7 +5303,13 @@ impl crate::VerterHost {
     pub(crate) fn capture_request_snapshot(
         &self,
     ) -> verter_type_engine::resolver_core::RequestSnapshot<WorkspaceSlotClocks> {
-        verter_type_engine::resolver_core::RequestSnapshot::new(
+        self.capture_request_snapshot_in::<verter_audit::observe::Uncaptured>()
+    }
+
+    pub(crate) fn capture_request_snapshot_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+    ) -> verter_type_engine::resolver_core::RequestSnapshot<WorkspaceSlotClocks> {
+        verter_type_engine::resolver_core::RequestSnapshot::new_in::<M>(
             self.project_type_store().project_generation_clock(),
             self.aggregate_clock_reader(),
         )

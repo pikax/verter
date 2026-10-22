@@ -1680,7 +1680,7 @@ pub fn project_root_summary<C: crate::resolver_core::ResolverCapabilities>(
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<RootOnlySummary> {
-    let data = node_data_for(dispatch.graph(), node)?;
+    let data = node_data_for(dispatch.graph().store(), node)?;
     Some(match data.as_ref() {
         SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
@@ -1832,7 +1832,7 @@ pub fn project_root_summary<C: crate::resolver_core::ResolverCapabilities>(
             // whole composite (the DOCUMENTED ASYMMETRY).
             let keeps_empty_object =
                 crate::project_semantic_dispatch::canonical_algebra::is_kept_primitive_over_empty_object(
-                    dispatch.graph(),
+                    dispatch.graph().store(),
                     members.as_ref(),
                 );
             let mut arms: Vec<RootOnlySummary> = members
@@ -1958,7 +1958,7 @@ pub(in crate::project_semantic_dispatch) fn node_is_unknown_materializing_failur
     // Derived from the SINGLE `QueryError` disposition authority — never a
     // local re-listing of which arms are publishable.
     matches!(
-        node_data_for(dispatch.graph(), node).as_deref(),
+        node_data_for(dispatch.graph().store(), node).as_deref(),
         Some(SemanticNodeData::Opaque(err))
             if crate::project_semantic_dispatch::query_error_disposition::query_error_disposition(
                 err,

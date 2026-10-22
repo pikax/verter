@@ -1,10 +1,10 @@
 use rustc_hash::FxHashMap;
+#[cfg(any(test, feature = "semantic-observe"))]
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::audit_sink::{SinkHandle, VfsAuditLayer, VfsAuditSink, VfsReadEvent};
+use crate::audit_sink::VfsAuditLayer;
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::engine::Engine;
 use crate::path_matches_prefix;
@@ -12,15 +12,24 @@ use crate::project_graph::{ProjectGraph, VfsProjectConfig};
 use crate::types::{ExactResolution, ExactResolutionResult};
 
 thread_local! {
+    #[cfg(any(test, feature = "semantic-observe"))]
     static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }
 
-fn set_last_read_file_trace_detail(canonical_id: &str, detail: impl Into<String>) {
+#[cfg(any(test, feature = "semantic-observe"))]
+fn set_last_read_file_trace_detail<M: verter_audit::observe::ObserveExec>(
+    canonical_id: &str,
+    detail: impl Into<String>,
+) {
+    if !M::CAPTURED && !cfg!(test) {
+        return;
+    }
     LAST_READ_FILE_TRACE_DETAIL.with(|last| {
         *last.borrow_mut() = Some((canonical_id.to_string(), detail.into()));
     });
 }
 
+#[cfg(any(test, feature = "semantic-observe"))]
 fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
     LAST_READ_FILE_TRACE_DETAIL.with(|last| {
         let mut last = last.borrow_mut();
@@ -192,9 +201,8 @@ pub struct MemoryOptions {
 /// Used by playground, WASM, and tests.
 pub struct MemoryWorkspace {
     pub(crate) engine: Engine,
-    /// Registered VFS audit sinks.
-    pub(crate) sinks: parking_lot::RwLock<Vec<(SinkHandle, Arc<dyn VfsAuditSink>)>>,
-    pub(crate) next_sink_id: AtomicU64,
+    /// Registered VFS audit sinks (optional capture).
+    pub(crate) sinks: crate::audit_sink::VfsAuditSinks,
 }
 
 impl std::fmt::Debug for MemoryWorkspace {
@@ -224,35 +232,7 @@ impl MemoryWorkspace {
         }
         Self {
             engine,
-            sinks: parking_lot::RwLock::new(Vec::new()),
-            next_sink_id: AtomicU64::new(1),
-        }
-    }
-
-    /// Fan out a `VfsReadEvent` to every registered sink.
-    fn emit_vfs_read(
-        &self,
-        canonical_id: &str,
-        layer: VfsAuditLayer,
-        cache_hit: bool,
-        bytes_read: u64,
-        read_ns: Option<u64>,
-    ) {
-        let registered = self.sinks.read();
-        if registered.is_empty() {
-            return;
-        }
-        let event = VfsReadEvent {
-            canonical_id: Arc::from(canonical_id),
-            layer,
-            cache_hit,
-            bytes_read,
-            read_ns,
-            request_id: verter_execution::request_context::current_request_id(),
-            thread_id: std::thread::current().id(),
-        };
-        for (_, sink) in registered.iter() {
-            sink.on_vfs_read(&event);
+            sinks: crate::audit_sink::VfsAuditSinks::default(),
         }
     }
 
@@ -336,30 +316,25 @@ impl MemoryWorkspace {
 // read-only methods live on the
 // `WorkspaceRead` impl; mutators stay on `WorkspaceAccess`.
 
-impl crate::traits::WorkspaceRead for MemoryWorkspace {
-    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
-        // Per-file `read_ns` capture is gated on the active request's
-        // `audit_timing_capture` flag — when `false`, the zero-cost
-        // path skips the `Instant::now()` calls entirely.
-        let timing_on = verter_execution::request_context::current_timing_enabled();
-        let started = if timing_on {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        let read_ns = |started: Option<std::time::Instant>| -> Option<u64> {
-            started.map(|t| t.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64)
-        };
+impl MemoryWorkspace {
+    fn read_file_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        canonical_id: &str,
+        capture: Option<&crate::audit_sink::VfsReadCapture>,
+    ) -> Option<Arc<str>> {
+        // Optional capture: the per-file read clock and the audit-sink
+        // fan-out. Without `semantic-observe` the probe does nothing.
+        let probe = crate::audit_sink::VfsReadProbe::<M>::start(capture);
 
         // 1. Check overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
-            set_last_read_file_trace_detail(canonical_id, "layer=overlay cache=hit");
-            self.emit_vfs_read(
+            set_last_read_file_trace_detail::<M>(canonical_id, "layer=overlay cache=hit");
+            probe.emit(
+                &self.sinks,
                 canonical_id,
                 VfsAuditLayer::Overlay,
                 true,
                 content.len() as u64,
-                read_ns(started),
             );
             return Some(content);
         }
@@ -367,27 +342,36 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         let content = self.engine.snapshot.read().read(canonical_id);
         match content.as_ref() {
             Some(content) => {
-                set_last_read_file_trace_detail(canonical_id, "layer=snapshot cache=hit");
-                self.emit_vfs_read(
+                set_last_read_file_trace_detail::<M>(canonical_id, "layer=snapshot cache=hit");
+                probe.emit(
+                    &self.sinks,
                     canonical_id,
                     VfsAuditLayer::Snapshot,
                     true,
                     content.len() as u64,
-                    read_ns(started),
                 );
             }
             None => {
-                set_last_read_file_trace_detail(canonical_id, "layer=missing cache=miss");
-                self.emit_vfs_read(
-                    canonical_id,
-                    VfsAuditLayer::Missing,
-                    false,
-                    0,
-                    read_ns(started),
-                );
+                set_last_read_file_trace_detail::<M>(canonical_id, "layer=missing cache=miss");
+                probe.emit(&self.sinks, canonical_id, VfsAuditLayer::Missing, false, 0);
             }
         }
         content
+    }
+}
+
+impl crate::traits::WorkspaceRead for MemoryWorkspace {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.read_file_in::<verter_audit::observe::Uncaptured>(canonical_id, None)
+    }
+
+    #[cfg(feature = "semantic-observe")]
+    fn read_file_captured(
+        &self,
+        canonical_id: &str,
+        capture: &crate::audit_sink::VfsReadCapture,
+    ) -> Option<Arc<str>> {
+        self.read_file_in::<verter_audit::observe::Captured>(canonical_id, Some(capture))
     }
 
     fn take_last_read_file_trace_detail(&self, canonical_id: &str) -> Option<String> {
@@ -686,6 +670,7 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         self.engine.record_content_transition(canonical_id);
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         self.engine.vfs_provenance.snapshot()
     }
@@ -1096,27 +1081,20 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         )
     }
 
+    #[cfg(feature = "semantic-observe")]
     fn register_audit_sink(
         &self,
         sink: Arc<dyn crate::audit_sink::VfsAuditSink>,
-    ) -> Result<SinkHandle, crate::audit_sink::AuditSinkError> {
-        let handle = SinkHandle(self.next_sink_id.fetch_add(1, Ordering::Relaxed));
-        self.sinks.write().push((handle, sink));
-        Ok(handle)
+    ) -> Result<crate::audit_sink::SinkHandle, crate::audit_sink::AuditSinkError> {
+        Ok(self.sinks.register(sink))
     }
 
+    #[cfg(feature = "semantic-observe")]
     fn deregister_audit_sink(
         &self,
-        handle: SinkHandle,
+        handle: crate::audit_sink::SinkHandle,
     ) -> Result<(), crate::audit_sink::AuditSinkError> {
-        let mut sinks = self.sinks.write();
-        let len_before = sinks.len();
-        sinks.retain(|(h, _)| *h != handle);
-        if sinks.len() < len_before {
-            Ok(())
-        } else {
-            Err(crate::audit_sink::AuditSinkError::HandleNotFound)
-        }
+        self.sinks.deregister(handle)
     }
 
     // ── Ambient lib registry ──
@@ -1184,3 +1162,15 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
 #[cfg(test)]
 #[path = "memory_tests.rs"]
 mod tests;
+
+#[cfg(not(any(test, feature = "semantic-observe")))]
+fn set_last_read_file_trace_detail<M: verter_audit::observe::ObserveExec>(
+    _canonical_id: &str,
+    _detail: impl Into<String>,
+) {
+}
+
+#[cfg(not(any(test, feature = "semantic-observe")))]
+fn take_last_read_file_trace_detail(_canonical_id: &str) -> Option<String> {
+    None
+}

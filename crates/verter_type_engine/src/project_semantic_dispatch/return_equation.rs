@@ -173,8 +173,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => leaves.push(*node),
             }
         }
-        crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut leaves);
-        leaves.dedup_by(|a, b| crate::semantic_query::stable_key::provably_equal(graph, *a, *b));
+        crate::semantic_query::stable_key::sort_by_stable_key(graph.store(), &mut leaves);
+        leaves.dedup_by(|a, b| {
+            crate::semantic_query::stable_key::provably_equal(graph.store(), *a, *b)
+        });
         let normalized = self.intern_normalized_union(&leaves, nullability);
         match graph.node_data(normalized).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.to_vec(),

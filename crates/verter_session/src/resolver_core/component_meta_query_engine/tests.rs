@@ -1758,6 +1758,8 @@ export interface SourceProps {
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// FAIL-FIRST ( Step 9.1 / D32 / D24 — `surface_node_ids_partition`):
 /// when audit is on, `ResolvedComponentMetaState.surface_identities`
 /// is populated with vector-aligned `Option<SemanticNodeId>` per

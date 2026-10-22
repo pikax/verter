@@ -133,8 +133,8 @@ impl ComponentMetaOutput {
     /// Assemble the envelope. Requires the terminal output sink's capability
     /// — only `meta_resolve::projectors::output_sink` can mint it, so only
     /// the sink can construct an envelope.
-    pub(crate) fn from_parts(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
+    pub(crate) fn from_parts<M: verter_audit::observe::ObserveExec>(
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities<M>>,
         analysis: ComponentMetaAnalysis,
         resolution: Option<ComponentMetaResolutionOutput>,
         types: MaterializedComponentMetaTypes,
@@ -214,8 +214,8 @@ pub struct TerminalTypeDisplay {
 }
 
 impl TerminalTypeDisplay {
-    pub(crate) fn from_text(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
+    pub(crate) fn from_text<M: verter_audit::observe::ObserveExec>(
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities<M>>,
         text: Option<String>,
     ) -> Self {
         Self { text }
@@ -243,8 +243,8 @@ pub struct MaterializedTypePublication {
 }
 
 impl MaterializedTypePublication {
-    pub(crate) fn from_parts(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
+    pub(crate) fn from_parts<M: verter_audit::observe::ObserveExec>(
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities<M>>,
         publication: PublicationResult,
         materialized_type: Option<TypeExpr>,
         terminal_display: TerminalTypeDisplay,
@@ -310,8 +310,8 @@ impl MaterializedTypePublication {
 impl MaterializedComponentMetaTypes {
     /// Assemble all output lanes. Requires the terminal output sink's
     /// capability — only the sink materializes output lanes.
-    pub(crate) fn from_lanes(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
+    pub(crate) fn from_lanes<M: verter_audit::observe::ObserveExec>(
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities<M>>,
         lanes: MaterializedComponentMetaTypeLanes,
     ) -> Self {
         Self { lanes }

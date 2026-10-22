@@ -604,9 +604,10 @@ impl VerterLanguageServer {
             self.publish_full_diagnostics(uri).await;
             return;
         }
-        let target_identity = crate::audit_harness::target_identity_for_uri(&self.documents, uri);
+        let target_identity =
+            || crate::audit_harness::target_identity_for_uri(&self.documents, uri);
         let uri_for_body = uri.clone();
-        let _ = crate::audit_harness::run_with_audit::<usize, _, _>(
+        let _ = crate::audit_harness::run_with_audit::<usize, _, _, _>(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Diagnostics,
             target_identity,
@@ -636,9 +637,7 @@ impl VerterLanguageServer {
         diagnostics: Vec<Diagnostic>,
         publication: &crate::documents::BackgroundPublication,
     ) {
-        let _timer = self
-            .statistics
-            .timer("diagnostics", Some(uri.as_str().to_string()));
+        let _timer = self.statistics.timer("diagnostics", Some(uri.as_str()));
 
         tracing::info!(
             "publish_diagnostics ENTER {} ({} diags)",
@@ -706,9 +705,7 @@ impl VerterLanguageServer {
 
     #[allow(dead_code)] // Used by sync_coordinator, may be useful for future callers
     pub(super) async fn sync_ide_to_provider(&self, uri: &Uri) {
-        let _timer = self
-            .statistics
-            .timer("ide_sync", Some(uri.as_str().to_string()));
+        let _timer = self.statistics.timer("ide_sync", Some(uri.as_str()));
         let Some(sync) = &self.project_sync else {
             return;
         };
@@ -1046,7 +1043,8 @@ impl VerterLanguageServer {
     }
 
     pub(super) async fn notify_editor_carrier_store_changed(&self) {
-        if self.carrier_publish_coordinator.is_none() {
+        if self.carrier_publish_coordinator.is_none() || !self.subscriptions.carrier_store_changed()
+        {
             return;
         }
         self.client

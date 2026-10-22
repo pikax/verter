@@ -15,14 +15,19 @@
 //! one) would surface `expansions == 0`. The post-change tree
 //! produces `navigations == 2 + expansions >= 1`.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use verter_audit::ProjectionModeTag;
+#[cfg(feature = "semantic-observe")]
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryKey,
 };
 
+#[cfg(feature = "semantic-observe")]
 const TYPES_TS: &str = r#"
 export type A = {
     c: {
@@ -34,6 +39,8 @@ export type A = {
 };
 "#;
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {

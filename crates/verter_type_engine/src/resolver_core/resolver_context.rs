@@ -183,6 +183,8 @@ impl RequestFlags {
 pub struct RequestSnapshot<W> {
     flags: RequestFlags,
     clocks: verter_session_query::facts::clocks::AggregateClockReader<W>,
+    #[cfg(feature = "semantic-observe")]
+    observation: crate::request_observers::CaptureTargets,
 }
 
 impl<W> RequestSnapshot<W> {
@@ -191,9 +193,53 @@ impl<W> RequestSnapshot<W> {
         project_generation: ProjectGenerationClock,
         clocks: verter_session_query::facts::clocks::AggregateClockReader<W>,
     ) -> Self {
+        Self::new_in::<verter_audit::observe::Uncaptured>(project_generation, clocks)
+    }
+
+    /// Admit receivers once, for the execution mode selected by the root.
+    #[must_use]
+    pub fn new_in<M: verter_audit::observe::ObserveExec>(
+        project_generation: ProjectGenerationClock,
+        clocks: verter_session_query::facts::clocks::AggregateClockReader<W>,
+    ) -> Self {
         Self {
             flags: RequestFlags::new(project_generation),
             clocks,
+            #[cfg(feature = "semantic-observe")]
+            observation: crate::request_observers::CaptureTargets::installed::<M>(),
+        }
+    }
+
+    /// Reuse the admitting request's receivers for a derived resolver context.
+    #[must_use]
+    pub fn with_capture_targets(
+        self,
+        observation: crate::request_observers::CaptureTargets,
+    ) -> Self {
+        #[cfg(feature = "semantic-observe")]
+        {
+            Self {
+                observation,
+                ..self
+            }
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = observation;
+            self
+        }
+    }
+
+    /// Capture receivers retained at admission, independent of ambient worker state.
+    #[inline(always)]
+    pub fn capture_targets(&self) -> &crate::request_observers::CaptureTargets {
+        #[cfg(feature = "semantic-observe")]
+        {
+            &self.observation
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            &crate::request_observers::CaptureTargets::EMPTY
         }
     }
 
@@ -257,6 +303,20 @@ pub trait ResolverContext<C: ResolverCapabilities>:
 {
 }
 
+/// Borrow a captured request's retained receivers. The uncaptured instantiation
+/// returns its static empty carrier without calling a request port.
+#[inline(always)]
+pub fn capture_targets<C: ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
+) -> &crate::request_observers::CaptureTargets {
+    if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+        crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx)
+            .capture_targets()
+    } else {
+        &crate::request_observers::CaptureTargets::EMPTY
+    }
+}
+
 /// The concrete capability types one family of request contexts hands out.
 ///
 /// The host chooses them once; every request context it builds — base or
@@ -278,6 +338,11 @@ pub trait ResolverCapabilities: 'static {
     type HostAttachment: ?Sized + Sync + 'static;
     /// The request-retained macro hot-mirror selector an engine binding holds.
     type MacroMirrors: crate::resolver_core::request_ports::MacroMirrorSource + Send + 'static;
+    /// The concrete capture execution a request context of this family runs
+    /// ([`verter_audit::observe::Captured`] or
+    /// [`verter_audit::observe::Uncaptured`]). A dispatcher over `C` is
+    /// compiled for this mode, so its emission sites test a constant.
+    type Observe: verter_audit::observe::ObserveExec;
 }
 
 // Sealed marker — `VerterHost` is the base implementer,

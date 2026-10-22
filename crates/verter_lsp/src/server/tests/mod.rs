@@ -3035,6 +3035,10 @@ struct WatchedDependencyFixture {
     published_changed: Arc<tokio::sync::Notify>,
     sync_complete: Arc<parking_lot::Mutex<Vec<u64>>>,
     store_changed: Arc<std::sync::atomic::AtomicUsize>,
+    /// Every server-to-client method, in wire order.
+    methods: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// Signalled after each message is recorded in `methods`.
+    methods_changed: Arc<tokio::sync::Notify>,
     drain: tokio::task::JoinHandle<()>,
 }
 
@@ -3044,7 +3048,20 @@ impl Drop for WatchedDependencyFixture {
     }
 }
 
+/// The watched-dependency fixture for a client subscribed to carrier-store
+/// changes, as the VS Code extension is.
 async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFixture {
+    watched_dependency_fixture_declaring(
+        helper_exists,
+        serde_json::json!({ "subscriptions": { "carrierStoreChanged": true } }),
+    )
+    .await
+}
+
+async fn watched_dependency_fixture_declaring(
+    helper_exists: bool,
+    initialization_options: serde_json::Value,
+) -> WatchedDependencyFixture {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::test_utils::canonical_test_path(temp.path());
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
@@ -3077,7 +3094,12 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
         &mut service,
         tower_lsp_server::jsonrpc::Request::build("initialize")
             .id(1)
-            .params(serde_json::json!({ "processId": null, "rootUri": null, "capabilities": {} }))
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": initialization_options,
+            }))
             .finish(),
     )
     .await
@@ -3093,8 +3115,14 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
     let captured_complete = sync_complete.clone();
     let store_changed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let captured_store_changed = store_changed.clone();
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured_methods = methods.clone();
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let captured_methods_changed = methods_changed.clone();
     let drain = tokio::spawn(async move {
         while let Some(message) = socket.next().await {
+            captured_methods.lock().push(message.method().to_string());
+            captured_methods_changed.notify_waiters();
             if message.method() == "$/verter/carrierStoreChanged" {
                 captured_store_changed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
@@ -3166,6 +3194,8 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
         published_changed,
         sync_complete,
         store_changed,
+        methods,
+        methods_changed,
         drain,
     }
 }
@@ -3290,6 +3320,33 @@ impl ScanPublicationFixture {
             () = self.server().sync_coordinator.await_until(ready, || panic!("{what}")) => {}
         }
     }
+}
+
+/// Record that a request demanded the complete carrier frontier, so the next
+/// initialization generation starts the workspace scan.
+fn demand_workspace_scan(server: &VerterLanguageServer) {
+    server
+        .workspace_scan_demanded
+        .store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Wait for the workspace scan to end, on the server's own settle wake — the
+/// event the production level-2 waiter awaits — never on elapsed time. The
+/// timeout only converts a lost wake into a failure instead of a hang.
+async fn await_workspace_scan_settled(server: &VerterLanguageServer) {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let settled = server.workspace_scan_settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if !server.sync_coordinator.workspace_scan_in_progress() {
+                return;
+            }
+            settled.await;
+        }
+    })
+    .await
+    .expect("the workspace scan settles");
 }
 
 /// A real workspace for the production init path: a `Target` carrier that
@@ -3852,6 +3909,7 @@ pub(super) fn rename_edit_ranges(
 
 /// Frame `count` full-document `textDocument/didChange` notifications for
 /// `uri`, versions `first_version..`, each carrying a distinguishable source.
+#[cfg(feature = "semantic-observe")]
 fn did_change_burst_frames(uri: &Uri, first_version: i32, count: usize) -> (Vec<u8>, String) {
     let revision = |marker: i32| {
         format!(
@@ -3945,6 +4003,8 @@ async fn serve_over_duplex_initialized(
 /// execute a cold compile per keystroke while a tick-based counter reported
 /// zero. A malformed intermediate revision is the ordinary state of a file
 /// being typed, so the instrument has to see it.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn cold_compile_runs(host: &Arc<VerterHost>) -> u64 {
     host.provenance_snapshot().compile_cold_runs
 }
@@ -3989,6 +4049,8 @@ fn ingress_measurement_server(
 /// pads every run. This polls for the first movement, then requires the rail to
 /// hold still across a full debounce window — so a per-notification storm cannot
 /// be sampled mid-flight and read as a small number.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 async fn await_settled_cold_compiles(host: &Arc<VerterHost>, before: u64) -> u64 {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let quiet_for = std::time::Duration::from_millis(crate::sync_coordinator::DEBOUNCE_MS * 3);
@@ -4012,6 +4074,7 @@ async fn await_settled_cold_compiles(host: &Arc<VerterHost>, before: u64) -> u64
 
 /// Frame `count` full-document `didChange` notifications carrying revisions that
 /// do NOT compile — the ordinary mid-edit state of a file being typed.
+#[cfg(feature = "semantic-observe")]
 fn invalid_did_change_burst_frames(
     uri: &Uri,
     first_version: i32,
@@ -4039,6 +4102,7 @@ fn invalid_did_change_burst_frames(
 }
 
 /// Whether the host still has no IDE TSX for `canonical_id` (a pure cached read).
+#[cfg(feature = "semantic-observe")]
 fn service_projection_still_absent(host: &Arc<VerterHost>, canonical_id: &str) -> bool {
     host.get_ide(canonical_id, &verter_session::CompileProfile::default())
         .is_none()
@@ -4050,6 +4114,7 @@ fn lane_interleaving_deps(
     crate::sync_coordinator::SyncCoordinatorDeps {
         documents: Arc::clone(&server.documents),
         dependency_receipts: Default::default(),
+        subscriptions: Arc::clone(&server.subscriptions),
         project_sync: server.project_sync.clone(),
         needs_provider_sync: Arc::clone(&server.needs_deferred_sync),
         pending_snapshot_provider_sync: Arc::clone(&server.pending_snapshot_provider_sync),

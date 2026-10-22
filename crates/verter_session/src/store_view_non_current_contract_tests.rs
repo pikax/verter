@@ -348,7 +348,9 @@ fn cold_seed_context_fails_warm_probes_closed() {
             .current()
             .expect("a quiescent host must yield a Current read");
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
-        let ctx = HostResolverContext::from_current(&host, &current, overlay);
+        let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(
+            &host, &current, overlay,
+        );
 
         assert!(
             verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
@@ -375,7 +377,11 @@ fn cold_seed_context_fails_warm_probes_closed() {
         // The seed must be classified non-current under sustained churn.
         let seed_is_current = cold_seed.is_current();
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
-        let ctx = HostResolverContext::from_cold_seed(&host_for_seed, &cold_seed, overlay);
+        let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(
+            &host_for_seed,
+            &cold_seed,
+            overlay,
+        );
 
         let validates =
             verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
@@ -519,8 +525,12 @@ fn session_cold_seed_context_fails_warm_probes_closed() {
             "control: a quiescent host must yield a Current cold-seed"
         );
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
-        let ctx =
-            SessionResolverContext::from_cold_seed(&host, &session_view, &current_seed, overlay);
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(
+            &host,
+            &session_view,
+            &current_seed,
+            overlay,
+        );
 
         assert!(
             verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
@@ -551,7 +561,7 @@ fn session_cold_seed_context_fails_warm_probes_closed() {
             .into_cold_seed_view();
         let seed_is_current = cold_seed.is_current();
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
-        let ctx = SessionResolverContext::from_cold_seed(
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(
             &host_for_seed,
             &session_view,
             &cold_seed,
@@ -637,7 +647,7 @@ fn view_bound_cold_seed_currentness_comes_from_its_own_read() {
         .into_cold_seed_view()
         .with_session_overlay(&host_a, &session_view_a);
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
-        let ctx = SessionResolverContext::from_cold_seed(
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(
             &host_a,
             &session_view_a,
             &mismatched_seed,
@@ -679,8 +689,12 @@ fn view_bound_cold_seed_currentness_comes_from_its_own_read() {
         let cold_seed = host_b.view_bound_cold_seed(&session_view_b);
         let seed_is_current = cold_seed.is_current();
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
-        let ctx =
-            SessionResolverContext::from_cold_seed(&host_b, &session_view_b, &cold_seed, overlay);
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(
+            &host_b,
+            &session_view_b,
+            &cold_seed,
+            overlay,
+        );
         let validates =
             verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
                 .validates(&fact_b);
@@ -742,7 +756,11 @@ fn fallthrough_cold_compute_node_cache_validation_fails_closed_under_churn() {
             crate::resolver_store::StoreViewRead::from_executor_snapshot(snapshot_view, is_current)
                 .into_cold_seed_view();
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
-        let ctx = HostResolverContext::from_cold_seed(&host_for_seed, &cold_seed, overlay);
+        let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(
+            &host_for_seed,
+            &cold_seed,
+            overlay,
+        );
 
         let validates =
             verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)

@@ -15,11 +15,11 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
+use crate::meta_provenance::MetaProvenanceSnapshot;
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
-use crate::{
-    meta_provenance::MetaProvenanceSnapshot,
-    types::{HostConfig, UpsertRequest},
-};
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::semantic_query::ProjectionMode;
 
 fn make_host() -> Arc<VerterHost> {
@@ -43,6 +43,8 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
         .expect("upsert must succeed");
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn snap(host: &VerterHost) -> MetaProvenanceSnapshot {
     host.provenance().snapshot()
 }
@@ -50,6 +52,7 @@ fn snap(host: &VerterHost) -> MetaProvenanceSnapshot {
 /// Miniature `slow.ts` shape: ONE requested symbol plus INDEPENDENT
 /// filler decls (each body references nothing) the resolve must never
 /// lower. 5 declaration bodies total.
+#[cfg(feature = "semantic-observe")]
 const SCRATCH: &str = "export type Unrelated = { a: 1 };\n\
      type Var0 = { v: 0 };\n\
      type Var1 = { v: 1 };\n\
@@ -60,21 +63,27 @@ const SCRATCH: &str = "export type Unrelated = { a: 1 };\n\
      const Val1: { v: 1 } = { v: 1 };\n\
      const Val2: { v: 2 } = { v: 2 };\n\
      const Val3: { v: 3 } = { v: 3 };\n";
+#[cfg(feature = "semantic-observe")]
 const SCRATCH_DECLS: u64 = 10;
+#[cfg(feature = "semantic-observe")]
 const SCRATCH_ID: &str = "/workspace/src/scratch.ts";
 
 /// Dependency-chain fixture: `A → B → C` plus two unreachable decls.
 /// The walked closure of `A` under `Expanded` is exactly {A, B, C}.
+#[cfg(feature = "semantic-observe")]
 const CHAIN: &str = "export type A = B & { a: 1 };\n\
      type B = C;\n\
      type C = { c: 1 };\n\
      type D = { d: 1 };\n\
      type E = { e: 1 };\n";
+#[cfg(feature = "semantic-observe")]
 const CHAIN_ID: &str = "/workspace/src/chain.ts";
 
 /// Publishing the canonical post-parse artifact is INDEX work: imports,
 /// exports, symbol names/kinds/spans, member headers. It must lower
 /// zero declaration bodies — bodies lower on first semantic demand.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn indexed_ready_publish_lowers_zero_decl_bodies() {
     let host = make_host();
@@ -113,6 +122,8 @@ fn indexed_ready_publish_lowers_zero_decl_bodies() {
 
 /// Cold-resolving one dependency-free symbol lowers exactly that one
 /// declaration body — never the file's other `N - 1` bodies.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_unrelated_symbol_lowers_only_demanded_decl() {
     let host = make_host();
@@ -137,6 +148,8 @@ fn resolve_unrelated_symbol_lowers_only_demanded_decl() {
 /// Positive control proving the counter counts the WALKED closure: a
 /// symbol with same-file dependencies lowers its transitive dependency
 /// chain — and still never the unreachable decls.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_with_dependencies_lowers_exactly_the_walked_closure() {
     let host = make_host();
@@ -168,6 +181,8 @@ fn resolve_with_dependencies_lowers_exactly_the_walked_closure() {
 /// Concurrent cold first-touch of the same symbol lowers its body ONCE
 /// (per-entry singleflight or idempotent race — never duplicate
 /// lowering published twice).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn lazy_decl_body_singleflight_lowers_once() {
@@ -207,6 +222,8 @@ fn lazy_decl_body_singleflight_lowers_once() {
 /// A content edit invalidates the body memo: the post-edit demand
 /// lowers the NEW body (it is never served from the superseded
 /// content's memo) and the projected type reflects the new content.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn content_edit_invalidates_decl_body_memo() {
     let host = make_host();
@@ -259,6 +276,8 @@ fn content_edit_invalidates_decl_body_memo() {
 /// Lazy body lowering reuses the scheduler-retained parse snapshot:
 /// demanding several DISTINCT symbols of one file performs exactly ONE
 /// eval-program parse in total — never a re-parse per body touch.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn lazy_decl_lowering_uses_scheduler_snapshot_not_reparse() {
     let host = make_host();
@@ -294,6 +313,8 @@ fn lazy_decl_lowering_uses_scheduler_snapshot_not_reparse() {
 /// file reuses its still-pinned snapshot — ZERO additional eval-program
 /// parses. A reintroduced LRU/budget cap would evict the first file's
 /// snapshot and force a silent re-parse.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn live_artifact_memo_pins_snapshot_across_many_other_files() {
     let host = make_host();
@@ -357,6 +378,8 @@ fn live_artifact_memo_pins_snapshot_across_many_other_files() {
 /// `LocalDecl` facts are produced by the lazy body fact path on first
 /// observation — they are absent from the eager publish-time registry,
 /// while the header-derived `MemberShape` fact stays eager.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn emit_parse_facts_never_hashes_decl_bodies() {
     use verter_session_query::facts::registry::{FactKey, SymbolSpace};
@@ -437,6 +460,8 @@ fn emit_parse_facts_never_hashes_decl_bodies() {
 /// absent from the eager publish-time registry (publish stays body-free),
 /// and only the demanded backing declarations lower — not the aliases or
 /// unrelated decls.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn local_export_alias_lazy_fact_uses_public_key_and_backing_decl() {
     use verter_session_query::facts::registry::{FactKey, SymbolSpace};
@@ -541,6 +566,8 @@ fn local_export_alias_lazy_fact_uses_public_key_and_backing_decl() {
 /// An overlay (session) body never serves a base read: the overlay
 /// artifact owns its own memo, and the base demand lowers the BASE
 /// body and projects the base content.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn overlay_decl_body_never_serves_base_read() {
     use crate::session_view::OverlaidView;

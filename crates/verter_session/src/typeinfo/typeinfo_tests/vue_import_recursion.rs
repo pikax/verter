@@ -100,7 +100,12 @@ fn public_member_names(host: &VerterHost, canonical_id: &str) -> Vec<String> {
 fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<String> {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     let _whole_hash = host
@@ -153,7 +158,12 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
 fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Option<Vec<String>> {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     let _whole_hash = host
@@ -204,7 +214,12 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
 fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]) -> TypeExpr {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     let _whole_hash = host
@@ -431,7 +446,12 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
     let host = make_host_with_files(&[(A, A_VUE)]);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
@@ -456,7 +476,7 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
 
     assert!(
         !matches!(
-            verter_type_engine::project_semantic_dispatch::node_data_for(verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx).graph(), node).as_deref(),
+            verter_type_engine::project_semantic_dispatch::node_data_for(verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx).graph().store(), node).as_deref(),
             Some(SemanticNodeData::Object(view))
                 if view.positive_members().iter().any(|member| member.string_name().expect("string-key fixture") == "$props")
         ),
@@ -966,7 +986,12 @@ fn typeof_construct_return_is_produced_by_instantiate_vue_default() {
 
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     // ONLY TypeOf is dispatched here — so an Instantiate provenance edge on the

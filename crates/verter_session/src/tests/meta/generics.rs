@@ -23,6 +23,8 @@ use super::*;
 /// Mutation recipe: returning the no-value arm to `(false, true)` —
 /// build-local taint only — flips every `NO_ANSWER` row's suppress to
 /// `false` and its replay delta to 1.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
@@ -210,6 +212,8 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
 /// with no signal, making `Known | Missing` byte-identical to `Known`.
 ///
 /// CONTROL: both arms resolvable — the union surface is complete and warms.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_union_macro_arg_with_an_unresolvable_arm_never_publishes_complete_or_warm() {
@@ -296,6 +300,8 @@ defineProps<Known | Extra>()
 ///
 /// The constrained arm is the public discrimination: `T extends { a: number }`
 /// must publish the `a` prop rather than an empty exact surface.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn an_sfc_generic_props_payload_publishes_its_constraint_lower_bound() {

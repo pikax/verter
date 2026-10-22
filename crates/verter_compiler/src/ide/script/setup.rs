@@ -40,12 +40,12 @@ use super::{
 // ── Script Setup Processing ───────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn process_tsx_script_setup<'alloc>(
+pub(super) fn process_tsx_script_setup<'alloc, M: verter_audit::observe::ObserveExec>(
     setup: &RootNodeScript,
     normal_script: Option<&RootNodeScript>,
     template_ast: Option<&TemplateAst>,
     source: &'alloc str,
-    ct: &mut CodeTransform<'alloc>,
+    ct: &mut CodeTransform<'alloc, M>,
     out: &mut CodeGenOutput<'alloc>,
     bindings: &mut FxHashMap<&'alloc str, BindingType>,
     type_constructs: &mut String,
@@ -940,7 +940,7 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             let push_group = |segments: &mut Vec<DestructSegment<'alloc>>,
                               keyword: &str,
                               names: &[&str],
-                              ct: &mut CodeTransform<'alloc>| {
+                              ct: &mut CodeTransform<'alloc, M>| {
                 if names.is_empty() {
                     return;
                 }

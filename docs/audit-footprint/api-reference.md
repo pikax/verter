@@ -90,11 +90,14 @@ Six `u64` counters (decimal-string serialized, `string` in TS) on
 | `dep_signature_merges`             | Non-empty dispatch dependency signatures published into the request fact tracer.   |
 | `dep_signature_intern_hits`        | Warm-candidate dependency signatures reused from the store-owned weak interner.    |
 
-The two `materialize_structure_*` rows have no production producer and
-stay `0`; they remain on the payload as schema. `family_map_lock_acquisitions`
+The `materialize_structure_*` and `store.bypass_diagnostics.resolver_store_view_calls`
+fields are legacy compatibility schema. They have no backing counters, bump hooks
+or snapshot reads and serialize as decimal-string `"0"` in captured records.
+Without capture, audited entries report `Unavailable` and construct no captured
+payload or placeholder metrics. `family_map_lock_acquisitions`
 is produced only when the default-off `semantic-observe` feature is compiled
 in (see [`docs/arch/semantic-observe.md`](../arch/semantic-observe.md)); a
-default build reports `0` for it. `dep_signature_intern_hits`
+default build reports capture as unavailable. `dep_signature_intern_hits`
 independently measures allocations avoided by the content-hash bucketed
 `Weak`-reference interner; it is not a subset of request-tracer merge events.
 
@@ -429,3 +432,8 @@ pub struct AuditConfig {
 `HostConfig` exposes `audit_enabled` + `footprint_capture` as the
 top-level toggles; both must be on for `getComponentMetaWithAudit`
 to produce a populated record.
+
+Uncaptured component-meta fallback records have no kind payload, including in
+instrumented binaries when audit is disabled or filtered, a session is closed,
+or a captured record is unavailable from the bounded store. Legacy zero-valued
+ComponentMeta compatibility fields occur only in genuinely captured records.

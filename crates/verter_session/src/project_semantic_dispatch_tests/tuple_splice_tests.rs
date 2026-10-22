@@ -198,7 +198,7 @@ fn an_open_variadic_stays_between_the_spliced_elements() {
     let host = default_probe_host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let literal = |n: f64| {
         graph.intern_node(SemanticNodeData::Literal(
             verter_type_expr::LiteralValue::Number(n),
@@ -389,7 +389,12 @@ fn an_expression_splice_past_the_limit_is_ts2800() {
             .unwrap_or_else(|error| panic!("`{function}` returns: {error:?}"));
         let store_view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                &host,
+                &store_view,
+                overlay,
+            );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let node = result.return_type();
         let measured = match expected {
@@ -440,7 +445,12 @@ fn elements_after_a_refused_splice_still_evaluate() {
         .unwrap_or_else(|error| panic!("`refused` returns: {error:?}"));
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&ctx);
     let data = dispatch.graph().node_data(result.return_type());
     let Some(SemanticNodeData::Tuple { elements, .. }) = data.as_deref() else {
@@ -501,7 +511,7 @@ fn splice_in_demand(
 ) {
     let dispatch = ProjectSemanticDispatch::new(host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let zero = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::Number(0.0),
     ));
@@ -636,7 +646,12 @@ fn root_read(
     use verter_type_engine::semantic_query::{QueryResult, SemanticQueryValue};
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&ctx);
     dispatch.set_connected_limits_for_tests(work, 24);
     if let Some(bytes) = bytes {
@@ -966,19 +981,23 @@ fn inline_indexed_arguments_check_their_declared_tuple_return() {
          export function indexedMember() {{ return wrap(concat(z)!); }}\n",
         zeros(5_000)
     );
-    let answer = |function: &str| {
-        let result = flow_return_audited_on_host(&host, &source, function)
-            .into_result()
-            .unwrap_or_else(|error| panic!("`{function}` returns: {error:?}"));
-        let store_view = host.resolver_store_view_read().into_owned_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&ctx);
-        (
-            abbreviated(&render_node(&dispatch, result.return_type(), 0)),
-            result.degradation(),
-        )
-    };
+    let answer =
+        |function: &str| {
+            let result = flow_return_audited_on_host(&host, &source, function)
+                .into_result()
+                .unwrap_or_else(|error| panic!("`{function}` returns: {error:?}"));
+            let store_view = host.resolver_store_view_read().into_owned_view();
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::new(&host, &store_view, overlay);
+            let dispatch = ProjectSemanticDispatch::new(&ctx);
+            (
+                abbreviated(&render_node(&dispatch, result.return_type(), 0)),
+                result.degradation(),
+            )
+        };
     for (lowered, indexed) in [("lowered", "indexed"), ("loweredMember", "indexedMember")] {
         let expected = answer(lowered);
         assert_eq!(
@@ -1006,20 +1025,24 @@ fn a_declared_return_check_does_not_depend_on_the_first_demand() {
          export function h() {{ return concat(z); }}\n",
         zeros(5_000)
     );
-    let answer = |host: &Arc<crate::VerterHost>, module: &str| {
-        let result = flow_return_audited_on_host(host, module, "h")
-            .into_result()
-            .unwrap_or_else(|error| panic!("`h` returns: {error:?}"));
-        let store_view = host.resolver_store_view_read().into_owned_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&ctx);
-        (
-            recovery(&dispatch, result.return_type())
-                .map(|(diagnostic, basis, _)| (diagnostic, basis)),
-            result.degradation(),
-        )
-    };
+    let answer =
+        |host: &Arc<crate::VerterHost>, module: &str| {
+            let result = flow_return_audited_on_host(host, module, "h")
+                .into_result()
+                .unwrap_or_else(|error| panic!("`h` returns: {error:?}"));
+            let store_view = host.resolver_store_view_read().into_owned_view();
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::new(host, &store_view, overlay);
+            let dispatch = ProjectSemanticDispatch::new(&ctx);
+            (
+                recovery(&dispatch, result.return_type())
+                    .map(|(diagnostic, basis, _)| (diagnostic, basis)),
+                result.degradation(),
+            )
+        };
     let expected = (
         Some((TS2800, RecoveryBasis::Budget)),
         Some(verter_type_engine::semantic_query::FlowReturnDegradation::OperationBudget),
@@ -1154,7 +1177,7 @@ fn substitution_reuse_pays_for_tuple_construction() {
 fn an_unrootable_substitution_operand_is_an_unpriced_miss() {
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let parameter = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
@@ -1187,7 +1210,7 @@ fn a_stored_inner_overflow_preserves_the_outer_tuple() {
     let host = default_probe_host();
     let dispatch = ProjectSemanticDispatch::new(&*host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let zero = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::Number(0.0),
     ));
@@ -1230,7 +1253,7 @@ fn shared_empty_spreads_have_bounded_construction_work() {
     let host = default_probe_host();
     let dispatch = ProjectSemanticDispatch::new(&*host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let mut node = graph.intern_node(SemanticNodeData::Tuple {
         elements: verter_type_engine::semantic_query::PayloadArray::from(
             Vec::new().into_boxed_slice(),
@@ -1286,7 +1309,7 @@ fn a_suspended_indexed_call_keeps_its_recovery_site_on_another_thread() {
     with_probe_on_host(&host, ProbeProject::default(), &source, "1", |_, _| ());
     let dispatch = ProjectSemanticDispatch::new(&*host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let key = |name: &str| {
         dispatch.typeof_key_for(
             ValueRootKey {
@@ -1372,7 +1395,7 @@ fn a_task_producing_a_query_at_one_site_still_evaluates_it_at_the_other() {
     with_probe_on_host(&host, ProbeProject::default(), &source, "1", |_, _| ());
     let dispatch = ProjectSemanticDispatch::new(&*host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let key = dispatch.typeof_key_for(
         ValueRootKey {
             scope: ScopeId::file(
@@ -1434,7 +1457,7 @@ fn a_request_local_completion_at_one_site_still_evaluates_at_the_other() {
         let host = default_probe_host();
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _builder = dispatch.enter_construction_scope();
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));

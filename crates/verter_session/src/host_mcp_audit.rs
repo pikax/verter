@@ -32,15 +32,19 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
+use verter_audit::WaitAudit;
 use verter_audit::{
     AuditedResult, McpToolPayload, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestMemoryAudit, RequestStoreAudit, RequestTargetIdentity, RequestTimingAudit, WaitAudit,
+    RequestMemoryAudit, RequestStoreAudit, RequestTargetIdentity, RequestTimingAudit,
 };
 
+#[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::VerterHost;
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::instant::Instant;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 
 /// Success payload a caller closure produces. Carries the tool's value
 /// alongside the one audit-payload fact the wrapper cannot infer on
@@ -70,20 +74,20 @@ impl VerterHost {
     /// 1. Stamps a fresh request id from the host's monotonic counter
     ///    and bumps the per-thread audited-run counter so the harness
     ///    multi-request guard observes the call.
-    /// 2. Constructs a [`RequestContext`] with
-    ///    [`RequestKind::Mcp`] tagged by `tool_name`. The constructor
-    ///    sniffs the scheduler-side TLS slot; tools nested under an
-    ///    enclosing audited request inherit `parent_request_id`
-    ///    automatically.
-    /// 3. Constructs an [`AuditRequestRegistration`] BEFORE installing
-    ///    the TLS guard. The `Active` arm enters the host's
-    ///    active-request registry; the `Noop` arm short-circuits when
-    ///    the audit-config consumer filter rejects the kind.
-    /// 4. Installs [`RequestContextGuard`] (active arm) or the
-    ///    no-op observer (filtered arm) so any sub-requests the
-    ///    closure spawns (`get_component_meta_with_resolution`,
-    ///    `compile_with_audit`, …) record the MCP request as their
-    ///    parent.
+    /// 2. Selects the capture mode once and constructs the request's
+    ///    [`verter_type_engine::request_context::RequestContext`] — the
+    ///    same canonical, host projection budget and cancellation in both
+    ///    modes. A captured context tagged [`RequestKind::Mcp`] sniffs the
+    ///    scheduler-side TLS slot; tools nested under an enclosing audited
+    ///    request inherit `parent_request_id` automatically.
+    /// 3. When captured, constructs the audit registration BEFORE
+    ///    installing the TLS guard so the request enters the host's
+    ///    active-request registry first.
+    /// 4. Installs [`RequestContextGuard`] in both modes so any
+    ///    sub-requests the closure spawns
+    ///    (`get_component_meta_with_resolution`, `compile_with_audit`, …)
+    ///    run under this request's budget and cancellation; only a
+    ///    captured context plants the audit observer.
     /// 5. Runs the closure. The closure returns
     ///    `Result<McpToolSuccess<T>, E>`: the success arm carries the
     ///    tool value plus its caller-measured result size; the error
@@ -111,154 +115,145 @@ impl VerterHost {
         E: Debug,
         F: FnOnce(&Arc<Self>) -> Result<McpToolSuccess<T>, E>,
     {
-        // Audit-disabled fast path: drive the closure with NO
-        // RequestContextGuard installed. Producer-side
-        // current_observer() returns None and the instrumentation
-        // short-circuits. The carrier still carries a cheap
-        // default-filled record marked `AuditDisabled`.
-        if !self.config.audit_enabled {
-            let request_id = self.next_request_id();
-            let outcome = f(self);
-            let parent_request_id =
-                verter_execution::request_context::current_request_id().map(|id| id.to_string());
-            let record = noop_mcp_record(
-                request_id,
-                canonical_id,
-                parent_request_id,
-                tool_name,
-                args_size_bytes,
-                verter_audit::AuditCaptureState::AuditDisabled,
-            );
-            return audited_mcp_outcome(outcome, record);
-        }
-
-        // 1. Stamp request id and bump the harness multi-request guard.
+        // One request context for BOTH modes: the same canonical, the
+        // host's projection budget and cancellation, so the tool answers,
+        // refuses and cancels alike whether or not it is captured. The
+        // root entry selects its capture mode once, here.
         let request_id = self.next_request_id();
-        verter_type_engine::request_context::increment_requests_created();
-
-        // 2. Build the per-request context. Footprint capture is
-        //    disabled — MCP tools do not collect semantic-footprint
-        //    events the way component-meta does. Timing capture
-        //    follows the host config.
-        let footprint_capture = false;
-        let timing_capture = self.config.audit_timing_capture;
-        let ctx = RequestContext::with_kind_and_timing(
+        let parent_request_id = verter_execution::request_context::current_request_id();
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::<str>::from(canonical_id),
-            RequestKind::Mcp {
+            || RequestKind::Mcp {
                 tool: tool_name.to_string(),
             },
-            footprint_capture,
-            timing_capture,
+            // MCP tools do not collect semantic-footprint events the way
+            // component-meta does. Timing capture follows the host config.
+            false,
+            self.config.audit_timing_capture,
             None,
+            verter_execution::cancellation::CancellationToken::new(),
         );
 
-        // 3. Construct the registration BEFORE installing the TLS
-        //    guard so the active-request registry slot precedes the
-        //    closure body. The `Noop` arm returns when the consumer
-        //    filter rejects `RequestKind::Mcp`.
-        let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        let _ = ctx.install_audit_registration(registration.clone());
+        #[cfg(feature = "semantic-observe")]
+        if ctx.observe_mode.is_captured() {
+            verter_type_engine::request_context::increment_requests_created();
 
-        // 4. Install the matching TLS observer. The active arm uses
-        //    the real RequestContextGuard so sub-requests spawned by
-        //    the closure inherit `parent_request_id` from this MCP
-        //    request via the scheduler-side TLS slot. The filtered
-        //    arm installs a no-op observer; downstream emit sites
-        //    short-circuit but child requests can still observe the
-        //    parent id.
-        let total_start = Instant::now();
-        let outcome = match registration.as_ref() {
-            AuditRequestRegistration::Active(_) => {
+            // Construct the registration BEFORE installing the TLS guard so
+            // the active-request registry slot precedes the closure body.
+            let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
+            let _ = ctx.install_audit_registration(registration.clone());
+
+            // Sub-requests spawned by the closure inherit
+            // `parent_request_id` from this MCP request via the
+            // scheduler-side TLS slot.
+            let total_start = Instant::now();
+            let outcome = {
                 let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                 f(self)
-            }
-            AuditRequestRegistration::Noop => {
-                let _noop_guard = verter_audit::install_noop_observer();
-                f(self)
-            }
-        };
-        let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+            };
+            let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-        // 5. Filtered kinds: return the cheap default-filled record.
-        //    The tool's work still ran; no payload is collected.
-        if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            let record = noop_mcp_record(
-                request_id,
-                canonical_id,
-                ctx.parent_request_id.map(|id| id.to_string()),
-                tool_name,
+            // The consumer filter admitted the kind when the mode was
+            // selected; a registration that still declines returns the
+            // cheap default-filled record.
+            if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
+                let record = noop_mcp_record(
+                    request_id,
+                    canonical_id,
+                    ctx.parent_request_id.map(|id| id.to_string()),
+                    tool_name,
+                    args_size_bytes,
+                    verter_audit::AuditCaptureState::FilteredNoop,
+                );
+                return audited_mcp_outcome(outcome, record);
+            }
+
+            // Assemble the payload and the envelope. The success arm
+            // contributes `result_size_bytes`; the error arm contributes
+            // the payload error string via `Debug`.
+            let (result_size_bytes, error) = match &outcome {
+                Ok(success) => (success.result_size_bytes, None),
+                Err(err) => (0, Some(format!("{err:?}"))),
+            };
+            let payload = McpToolPayload {
+                tool_name: tool_name.to_string(),
                 args_size_bytes,
-                verter_audit::AuditCaptureState::FilteredNoop,
-            );
-            return audited_mcp_outcome(outcome, record);
+                result_size_bytes,
+                error,
+            };
+
+            let timings = RequestTimingAudit {
+                total_ms,
+                ..RequestTimingAudit::default()
+            };
+            let store = RequestStoreAudit {
+                cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+                bypass_diagnostics:
+                    crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
+                ..RequestStoreAudit::default()
+            };
+            let memory = RequestMemoryAudit {
+                process_rss_peak_bytes: ctx
+                    .process_rss_peak_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                ..RequestMemoryAudit::default()
+            };
+            let waits = if ctx.timing_capture {
+                Some(WaitAudit {
+                    lock_wait_ns: ctx.lock_wait_ns.load(std::sync::atomic::Ordering::Relaxed),
+                    queue_wait_ns: ctx.queue_wait_ns.load(std::sync::atomic::Ordering::Relaxed),
+                    lock_acquisitions: ctx
+                        .lock_acquisitions
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                })
+            } else {
+                None
+            };
+
+            let record = RequestAuditRecord {
+                request_id,
+                canonical_id: canonical_id.to_string(),
+                target_identity: Some(mcp_target_identity(canonical_id)),
+                kind: RequestKind::Mcp {
+                    tool: tool_name.to_string(),
+                },
+                parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
+                from_cache: false,
+                timings,
+                memory,
+                store,
+                footprint: None,
+                scheduler: ctx.scheduler_audit.lock().clone(),
+                files: Vec::new(),
+                waits,
+                kind_payload: RequestKindPayload::Mcp(payload),
+                capture_state: verter_audit::AuditCaptureState::ActiveStored,
+                trace_id: String::new(),
+            };
+
+            let cloned = record.clone();
+            registration.finalize(record);
+            return audited_mcp_outcome(outcome, cloned);
         }
 
-        // 6. Assemble the payload and the envelope. The success arm
-        //    contributes `result_size_bytes`; the error arm contributes
-        //    the payload error string via `Debug`.
-        let (result_size_bytes, error) = match &outcome {
-            Ok(success) => (success.result_size_bytes, None),
-            Err(err) => (0, Some(format!("{err:?}"))),
+        // Uncaptured: audit disabled by the host, the kind filtered, or
+        // capture compiled out. The tool still runs under the request's
+        // context.
+        let outcome = {
+            let _ctx_guard = RequestContextGuard::install(ctx);
+            f(self)
         };
-        let payload = McpToolPayload {
-            tool_name: tool_name.to_string(),
-            args_size_bytes,
-            result_size_bytes,
-            error,
-        };
-
-        let timings = RequestTimingAudit {
-            total_ms,
-            ..RequestTimingAudit::default()
-        };
-        let store = RequestStoreAudit {
-            cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
-            bypass_diagnostics: crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
-            ..RequestStoreAudit::default()
-        };
-        let memory = RequestMemoryAudit {
-            process_rss_peak_bytes: ctx
-                .process_rss_peak_bytes
-                .load(std::sync::atomic::Ordering::Relaxed),
-            ..RequestMemoryAudit::default()
-        };
-        let waits = if ctx.timing_capture {
-            Some(WaitAudit {
-                lock_wait_ns: ctx.lock_wait_ns.load(std::sync::atomic::Ordering::Relaxed),
-                queue_wait_ns: ctx.queue_wait_ns.load(std::sync::atomic::Ordering::Relaxed),
-                lock_acquisitions: ctx
-                    .lock_acquisitions
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            })
-        } else {
-            None
-        };
-
-        let record = RequestAuditRecord {
+        let record = noop_mcp_record(
             request_id,
-            canonical_id: canonical_id.to_string(),
-            target_identity: Some(mcp_target_identity(canonical_id)),
-            kind: RequestKind::Mcp {
-                tool: tool_name.to_string(),
-            },
-            parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
-            from_cache: false,
-            timings,
-            memory,
-            store,
-            footprint: None,
-            scheduler: ctx.scheduler_audit.lock().clone(),
-            files: Vec::new(),
-            waits,
-            kind_payload: RequestKindPayload::Mcp(payload),
-            capture_state: verter_audit::AuditCaptureState::ActiveStored,
-            trace_id: String::new(),
-        };
-
-        let cloned = record.clone();
-        registration.finalize(record);
-        audited_mcp_outcome(outcome, cloned)
+            canonical_id,
+            parent_request_id.map(|id| id.to_string()),
+            tool_name,
+            args_size_bytes,
+            crate::capture::uncaptured_state(self.config.audit_enabled),
+        );
+        audited_mcp_outcome(outcome, record)
     }
 }
 

@@ -101,7 +101,8 @@ fn view_build_count_drops_under_hosted_request() {
 
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(&host, &view, overlay);
+    let ctx =
+        HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(&host, &view, overlay);
 
     // Drive ~10 resolver-tier reads through the request context. The warm-hit
     // path must read through the request-bound borrow.
@@ -147,7 +148,8 @@ fn repeated_prepared_type_decl_no_view_rebuild() {
 
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(&host, &view, overlay);
+    let ctx =
+        HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(&host, &view, overlay);
 
     // Warm the bundle: the first call walks the cold path
     // (`materialize_prepared_decl_bundle` etc.). Subsequent calls
@@ -206,7 +208,11 @@ fn complete_canonical_is_no_op_when_epoch_superseded() {
     // Capture the base view at the current epoch.
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(&host, &view, overlay.clone());
+    let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        overlay.clone(),
+    );
 
     // Construct a parallel `RequestStoreView` over the SAME overlay
     // so the test can peek at overlay state. The wrapper borrows the
@@ -307,7 +313,12 @@ fn session_overlay_rooting_runs_once_per_request() {
         .into_owned_view()
         .with_session_overlay(&host, &session_view);
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = SessionResolverContext::new(&host, &session_view, &base, overlay);
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &session_view,
+        &base,
+        overlay,
+    );
 
     let builds_after_construction = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.get());
     assert_eq!(
@@ -425,7 +436,12 @@ fn complete_canonical_writes_session_overlay_hash_not_base_hash() {
         .into_owned_view()
         .with_session_overlay(&host, &view);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = SessionResolverContext::new(&host, &view, &base, Arc::clone(&overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &base,
+        Arc::clone(&overlay),
+    );
 
     // Mid-request: promote the overlaid canonical into the completion
     // overlay. This must write `overlay_hash`.
@@ -672,7 +688,11 @@ fn repeated_completion_of_one_content_version_promotes_once() {
     );
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(&host, &view, overlay.clone());
+    let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        overlay.clone(),
+    );
     for _ in 0..50 {
         ctx.complete_canonical(&canonical);
     }
@@ -874,7 +894,11 @@ fn terminal_macro_inventory_preserves_indexed_absence_and_paired_base_fallback()
         .script_analysis
         .is_none());
     let view = host.resolver_store_view_read().into_owned_view();
-    let ctx = HostResolverContext::new(&host, &view, Arc::new(CanonicalCompletionOverlay::new()));
+    let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        Arc::new(CanonicalCompletionOverlay::new()),
+    );
     let answer = ctx.terminal_macro_inventory(&canonical);
     assert_eq!(answer.origin_whole_hash, Some(indexed.whole_hash));
     assert!(
@@ -889,7 +913,11 @@ fn terminal_macro_inventory_preserves_indexed_absence_and_paired_base_fallback()
             > 0
     );
     let view = host.resolver_store_view_read().into_owned_view();
-    let ctx = HostResolverContext::new(&host, &view, Arc::new(CanonicalCompletionOverlay::new()));
+    let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        Arc::new(CanonicalCompletionOverlay::new()),
+    );
     let answer = ctx.terminal_macro_inventory(&canonical);
     assert_eq!(answer.origin_whole_hash, Some(scheduler_source.whole_hash));
     assert!(Arc::ptr_eq(
@@ -934,7 +962,7 @@ fn terminal_macro_inventory_preserves_indexed_absence_and_paired_base_fallback()
         identity: host.host_view_project_identity(),
         env: crate::session_view::EnvHashes::default(),
     };
-    let ctx = SessionResolverContext::new(
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &session,
         &view,

@@ -73,19 +73,15 @@ impl ResourceClass {
 ///
 /// The reservation carries the [`ResourceClass`] it was taken
 /// against so multi-class admission accounting stays type-safe — the
-/// holder cannot accidentally release against the wrong pool. Typed
-/// reservations decrement BOTH the per-class counter and the aggregate
-/// counter atomically (independent fetches, but consumed by the same
-/// `release`/`Drop`).
+/// holder cannot accidentally release against the wrong pool. The
+/// aggregate in-flight count is derived from the per-class counters on
+/// read, so a reservation owns exactly one counter.
 pub struct DagCapacityReservation {
     pub(super) permits: u32,
     pub(super) class: ResourceClass,
-    /// Per-class counter (cpu or io) — decremented on release.
-    /// `None` for untyped reservations taken via the diagnostic
-    /// `reserve_capacity` entry point that bypasses class accounting.
+    /// Per-class counter (cpu or io) — decremented on release; taken
+    /// (`None`) once the permits are given back.
     pub(super) class_counter: Option<Arc<AtomicU64>>,
-    /// Aggregate in-flight counter — always decremented on release.
-    pub(super) counter: Option<Arc<AtomicU64>>,
     /// The ledger's reset epoch and its value when this reservation was
     /// taken. [`crate::dag::SchedulerDag::clear`] zeroes the counters and
     /// bumps the epoch; a reservation from before the reset (still held by
@@ -111,8 +107,8 @@ impl DagCapacityReservation {
         self.give_back();
     }
 
-    /// Return the permits to both counters exactly once (subsequent calls
-    /// find the counters taken), unless the ledger was reset since the
+    /// Return the permits to the class counter exactly once (subsequent
+    /// calls find the counter taken), unless the ledger was reset since the
     /// reservation was taken. Saturating, so a straggler can never wrap a
     /// counter.
     fn give_back(&mut self) {
@@ -131,11 +127,6 @@ impl DagCapacityReservation {
                 saturating_sub(&counter);
             }
         }
-        if let Some(counter) = self.counter.take() {
-            if current {
-                saturating_sub(&counter);
-            }
-        }
     }
 }
 
@@ -144,7 +135,7 @@ impl std::fmt::Debug for DagCapacityReservation {
         f.debug_struct("DagCapacityReservation")
             .field("permits", &self.permits)
             .field("class", &self.class)
-            .field("released", &self.counter.is_none())
+            .field("released", &self.class_counter.is_none())
             .finish()
     }
 }

@@ -11,6 +11,7 @@ import test from "node:test";
 import {
   RECEIPT_MARKER,
   censusForbiddenHits,
+  compareCapture,
   compareIdentities,
   defaultRunBrowsers,
   evaluateBrowserResult,
@@ -26,6 +27,7 @@ import {
   emptyOperationFailures,
   nodeGlobalsPresent,
   normalizeSymbolIdentities,
+  queryCaptureFailures,
 } from "../packages/browser-host/src/index.js";
 
 const SYMBOLS = [
@@ -42,7 +44,8 @@ function operations(overrides = {}) {
     typeinfo: SYMBOLS,
     style: [{ selectorText: ".probe", matches: [{ tag: "div", result: "match" }] }],
     mapping: ['{"version":3}'],
-    query: [{ decl: "ProbeAlias", hasRecord: true }],
+    // The default build: capture compiled out, so the query stores no record.
+    query: [{ decl: "ProbeAlias", capture: "Unavailable", kind: null, hasRecord: false }],
     ...overrides,
   };
 }
@@ -69,6 +72,7 @@ function browserResult(overrides = {}) {
 
 const WASM_JS = `
 export function initSync() {}
+export function captureAvailability() {}
 export class VerterHost {
   upsert() {}
   compileRequest() {}
@@ -231,6 +235,54 @@ test("evaluateBrowserResult rejects a waitForFunction boolean handle", () => {
   assert.ok(failed.some((row) => /operations object missing/.test(row)));
 });
 
+test("queryCaptureFailures requires a known capture state that agrees with hasRecord", () => {
+  assert.deepEqual(queryCaptureFailures(operations()), []);
+  assert.deepEqual(
+    queryCaptureFailures(
+      operations({
+        query: [{ decl: "ProbeAlias", capture: "Available", kind: "ResolveDecl", hasRecord: true }],
+      }),
+    ),
+    [],
+  );
+  const missing = queryCaptureFailures(
+    operations({ query: [{ decl: "ProbeAlias", hasRecord: true }] }),
+  );
+  assert.equal(missing.length, 1);
+  assert.match(missing[0], /capture availability is missing or unknown/);
+  // A record claimed while capture is unavailable, and a missing record
+  // while capture is available, are both contradictions.
+  for (const row of [
+    { decl: "ProbeAlias", capture: "Unavailable", kind: "ResolveDecl", hasRecord: true },
+    { decl: "ProbeAlias", capture: "Available", kind: null, hasRecord: false },
+  ]) {
+    const contradicted = queryCaptureFailures(operations({ query: [row] }));
+    assert.equal(contradicted.length, 1, JSON.stringify(row));
+    assert.match(contradicted[0], /contradicts capture/);
+  }
+});
+
+test("evaluateBrowserResult fails a query row without a capture state", () => {
+  const failed = evaluateBrowserResult(
+    "webkit",
+    browserResult({ operations: operations({ query: [{ decl: "ProbeAlias", hasRecord: true }] }) }),
+  );
+  assert.ok(failed.some((row) => /webkit: query capture availability is missing/.test(row)));
+});
+
+test("compareCapture fails when native and browser disagree on the stored record", () => {
+  const native = receipt();
+  assert.deepEqual(compareCapture(native, browserResult()), []);
+  const captured = browserResult({
+    operations: operations({
+      query: [{ decl: "ProbeAlias", capture: "Available", kind: "ResolveDecl", hasRecord: true }],
+    }),
+  });
+  const failures = compareCapture(native, captured);
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /native\/browser audit capture diverges/);
+});
+
 test("censusForbiddenHits catches a wasm32 tokio edge and ignores inert noise", () => {
   assert.deepEqual(censusForbiddenHits("serde v1\nwasm-bindgen v0.2\n"), []);
   assert.deepEqual(censusForbiddenHits("tokio v1.40.0\nserde v1\n"), ["tokio"]);
@@ -240,6 +292,12 @@ test("missingArtifactExports fails a stub without host methods", () => {
   const missing = missingArtifactExports("export default function init() {}");
   assert.ok(missing.includes("initSync"));
   assert.ok(missing.includes("VerterHost"));
+  assert.ok(missing.includes("captureAvailability"));
+  assert.ok(
+    missingArtifactExports(
+      WASM_JS.replace("export function captureAvailability() {}\n", ""),
+    ).includes("captureAvailability"),
+  );
   assert.deepEqual(missingArtifactExports(WASM_JS), []);
 });
 
@@ -432,6 +490,31 @@ test("defaultRunBrowsers launches off CJS default instead of reporting launcher 
   assert.equal(outcome.results.chromium.pending, false);
 });
 
+test("runGate fails closed when the browser captures but the native probe does not", async () => {
+  const root = makeSandbox();
+  try {
+    const outcome = await runGate({
+      repoRoot: root,
+      skipBuild: true,
+      spawn: spawnOk(),
+      playwrightModule: {},
+      runBrowsers: browsersAll(
+        browserResult({
+          operations: operations({
+            query: [
+              { decl: "ProbeAlias", capture: "Available", kind: "ResolveDecl", hasRecord: true },
+            ],
+          }),
+        }),
+      ),
+    });
+    assert.equal(outcome.ok, false);
+    assert.ok(outcome.failures.some((row) => /audit capture diverges/.test(row)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runGate passes only with matching native/browser evidence", async () => {
   const root = makeSandbox();
   try {
@@ -557,7 +640,7 @@ test("isInsideDir is separator-bounded: a sibling directory sharing the prefix i
   assert.equal(isInsideDir(root, path.join(tmpdir(), "elsewhere.txt")), false);
 });
 
-test("runProbes requires the query audit record before the worker can report success", async () => {
+test("runProbes requires the query audit record exactly when capture is available", async () => {
   const { runProbes } = await import("../packages/browser-host/src/probes.js");
   const hostWith = (query) => ({
     upsert() {},
@@ -571,9 +654,9 @@ test("runProbes requires the query audit record before the worker can report suc
   // The stored record arrives as the JSON string the WASM boundary emits for
   // an `ActiveStored` capture; the probe derives `hasRecord` from that state.
   const stored = JSON.stringify({ kind: "ResolveDecl", capture_state: "ActiveStored" });
-  const probed = runProbes(hostWith(stored), sources);
+  const probed = runProbes(hostWith(stored), { ...sources, capture: "Available" });
   assert.deepEqual(probed.operations.query, [
-    { decl: "ProbeAlias", kind: "ResolveDecl", hasRecord: true },
+    { decl: "ProbeAlias", capture: "Available", kind: "ResolveDecl", hasRecord: true },
   ]);
   for (const query of [
     null,
@@ -583,6 +666,29 @@ test("runProbes requires the query audit record before the worker can report suc
     { error: "boom" },
     "[]",
   ]) {
-    assert.throws(() => runProbes(hostWith(query), sources), /query audit record is absent/);
+    assert.throws(
+      () => runProbes(hostWith(query), { ...sources, capture: "Available" }),
+      /query audit record is absent/,
+    );
+  }
+
+  // A module built without capture returns no record; the probe reports the
+  // unavailable capture instead of failing the query operation.
+  const uncaptured = runProbes(hostWith(null), { ...sources, capture: "Unavailable" });
+  assert.deepEqual(uncaptured.operations.query, [
+    { decl: "ProbeAlias", capture: "Unavailable", kind: null, hasRecord: false },
+  ]);
+  assert.deepEqual(queryCaptureFailures(uncaptured.operations), []);
+  assert.throws(
+    () => runProbes(hostWith(stored), { ...sources, capture: "Unavailable" }),
+    /returned a record although capture is unavailable/,
+  );
+
+  // An artifact that does not report its capture availability fails closed.
+  for (const capture of [undefined, "Partial"]) {
+    assert.throws(
+      () => runProbes(hostWith(stored), { ...sources, capture }),
+      /capture availability is not reported/,
+    );
   }
 });

@@ -163,6 +163,10 @@ interface WasmHostBinding {
   releaseInputSnapshot: WasmHostReleaseInputSnapshotFn;
 }
 type WasmHostCtor = new (config?: HostConfig) => WasmHostBinding;
+type WasmCaptureAvailabilityFn = () => string;
+
+/** Whether the loaded WASM module can capture request audit records. */
+export type CaptureAvailability = "Available" | "Unavailable";
 
 /**
  * One asynchronously acquired file row: canonical identity plus the
@@ -204,6 +208,7 @@ export type HostInputSnapshotObservation =
   | { canonical: string; status: "needInputs" };
 
 let wasmHostCtor: WasmHostCtor | null = null;
+let wasmCaptureAvailability: WasmCaptureAvailabilityFn | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
 
@@ -227,6 +232,10 @@ export async function initialize(): Promise<void> {
     const wasm = await import("../wasm/verter_wasm.js");
     await (wasm.default as WasmInitFn)();
     wasmHostCtor = getOptionalExport<WasmHostCtor>(wasm, "VerterHost");
+    wasmCaptureAvailability = getOptionalExport<WasmCaptureAvailabilityFn>(
+      wasm,
+      "captureAvailability",
+    );
     initialized = true;
   })();
 
@@ -238,6 +247,28 @@ export async function initialize(): Promise<void> {
  */
 export function isInitialized(): boolean {
   return initialized;
+}
+
+/**
+ * Whether the loaded module captures request audit records: `"Available"`
+ * when it was built with the `semantic-observe` feature, `"Unavailable"`
+ * otherwise. Without capture, `resolveTypeWithAudit` returns `null`, the
+ * `auditRecord` of `resolveSymbolWithAudit` is `null`, and the module's
+ * record-store and walker methods throw "audit capture is unavailable".
+ * Requires initialize() first.
+ */
+export function captureAvailability(): CaptureAvailability {
+  if (!initialized) {
+    throw new Error("WASM module not initialized. Call initialize() first.");
+  }
+  if (!wasmCaptureAvailability) {
+    throw new Error("WASM module does not export captureAvailability.");
+  }
+  const availability = wasmCaptureAvailability();
+  if (availability !== "Available" && availability !== "Unavailable") {
+    throw new Error(`WASM module reported an unknown capture availability: ${availability}`);
+  }
+  return availability;
 }
 
 /**
@@ -386,7 +417,11 @@ export class Host {
     return this.inner.resolveSymbolWithAudit(canonicalId, name, typeArgsJson, mode);
   }
 
-  /** Resolve `declName` in the ordinary module top-level and return the audit record. */
+  /**
+   * Resolve `declName` in the ordinary module top-level and return the audit
+   * record — `null` when audit is disabled or capture is unavailable (see
+   * {@link captureAvailability}).
+   */
   resolveTypeWithAudit(canonicalId: string, declName: string): unknown {
     return this.inner.resolveTypeWithAudit(canonicalId, declName);
   }

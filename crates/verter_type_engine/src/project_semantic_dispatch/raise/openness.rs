@@ -1928,7 +1928,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
             return Flow::open(self.undecidable());
         }
         let Some(data) =
-            crate::project_semantic_dispatch::node_data_for(self.dispatch.graph(), node)
+            crate::project_semantic_dispatch::node_data_for(self.dispatch.graph().store(), node)
         else {
             // Unresolved / un-interned node: the KEY-DOMAIN question treats
             // it as open (not provably finite); the

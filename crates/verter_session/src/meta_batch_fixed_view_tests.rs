@@ -113,6 +113,8 @@ fn encode_counts(output: crate::meta_resolve::ComponentMetaOutput) -> Vec<u8> {
 /// constant. The companion `>= 1` assertion proves the counter is LIVE
 /// (the warm capture's read was counted), so a dead/unwired counter
 /// cannot trivially satisfy the `< N` bound with 0.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn warm_batch_payload_from_host_calls_are_o1_not_per_item() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -402,6 +404,8 @@ fn batch_payload_equals_scalar_payload() {
 /// The `< N` bound FAILS against such a path. The companion `>= 1`
 /// assertion proves the counter is LIVE, so a dead/unwired counter cannot
 /// trivially satisfy the bound with 0.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn warm_analysis_batch_from_host_calls_are_o1_not_per_item() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -607,6 +611,8 @@ fn overlay_session_payload_probe_validates_against_overlaid_view_not_base() {
 /// base-session warm-hit path. An empty overlay yields a view that validates
 /// identically to the base, so the warm probe still hits and returns the
 /// cached payload.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn base_session_payload_probe_still_warm_hits_with_empty_overlay() {
     let project = make_project();
@@ -701,6 +707,8 @@ fn base_session_payload_probe_still_warm_hits_with_empty_overlay() {
 /// holds for any N. The companion `>= 1` assertion proves the overlay is
 /// genuinely non-empty (the per-batch setup DID perform a COW) — so a `0`
 /// count cannot trivially satisfy the `< N` bound.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn batch_over_overlay_session_applies_overlay_o1_not_per_job() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1381,6 +1389,8 @@ fn arc_shared_snapshot_preserves_full_meta_surface_bytes() {
 /// The companion `>= 1` assertion proves the overlay is genuinely
 /// non-empty (a full computation DID run) — so a `0` count cannot
 /// trivially satisfy the `< N` bound.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn batch_over_overlay_session_computes_fingerprint_o1_not_per_job() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1511,6 +1521,8 @@ fn batch_over_overlay_session_computes_fingerprint_o1_not_per_job() {
 /// run the full sort+hash body (the empty short-circuit returns 0 without
 /// counting) — the `0` assertion cannot be trivially satisfied by an empty
 /// overlay set.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn analysis_only_overlay_read_never_computes_fingerprint() {
     use std::sync::atomic::Ordering::Relaxed;

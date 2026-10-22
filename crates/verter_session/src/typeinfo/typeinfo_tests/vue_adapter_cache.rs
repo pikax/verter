@@ -93,6 +93,8 @@ defineSlots<{ default(props: { item: string }): any }>();
 </script>
 "#;
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vue_public_type_carries_synthesized_instance_members_without_component_meta() {
     const FILE: &str = "/w/FullComp.vue";
@@ -744,7 +746,11 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
     host.ensure_indexed_ready(FILE).expect("indexed");
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(&host, &store_view, overlay);
+    let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &store_view,
+        overlay,
+    );
 
     // The projection-op fuse lives on the per-request `RequestContext` TLS slot
     // (the executor installs it from `HostConfig::projection_op_budget`). A

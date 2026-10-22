@@ -13,6 +13,7 @@ import {
   formatRecordTagFromKind,
   recordsToQuickPickItems,
   formatRecordAsJson,
+  isAuditCaptureUnavailable,
   type AuditRecordSummary,
 } from "./audit.transforms";
 
@@ -157,5 +158,25 @@ describe("formatRecordAsJson", () => {
 
   it("handles null records (record drained or unknown id) gracefully", () => {
     expect(formatRecordAsJson(null)).toBe("null");
+  });
+});
+
+describe("isAuditCaptureUnavailable", () => {
+  const UNAVAILABLE =
+    "audit capture is unavailable: the server was built without the semantic-observe feature";
+
+  it("recognises the MethodNotFound answer of a server built without capture", () => {
+    expect(isAuditCaptureUnavailable({ code: -32601, message: UNAVAILABLE })).toBe(true);
+  });
+
+  it("keeps every other request failure an error", () => {
+    // A server that does not register the method at all, a different
+    // error code with the same text, and non-object rejections all stay
+    // genuine failures the command must surface as errors.
+    expect(isAuditCaptureUnavailable({ code: -32601, message: "Method not found" })).toBe(false);
+    expect(isAuditCaptureUnavailable({ code: -32603, message: UNAVAILABLE })).toBe(false);
+    expect(isAuditCaptureUnavailable(new Error(UNAVAILABLE))).toBe(false);
+    expect(isAuditCaptureUnavailable(UNAVAILABLE)).toBe(false);
+    expect(isAuditCaptureUnavailable(null)).toBe(false);
   });
 });

@@ -269,7 +269,11 @@ fn measure(case: &Case) -> AdmissionVerdict {
     host.ensure_indexed_ready(case.canonical).expect("indexed");
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(&host, &store_view, overlay);
+    let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &store_view,
+        overlay,
+    );
     let locator = SourceLocator {
         reference_canonical: case.canonical.to_string(),
         reference_name: case.symbol.to_string(),

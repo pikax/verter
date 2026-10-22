@@ -20,7 +20,7 @@ use super::helpers::is_package_canonical;
 use super::{ComponentMetaQueryEngine, FastShallowFieldExpr, FastShallowFieldExprExactness};
 use rustc_hash::FxHashSet;
 
-impl<'a> ComponentMetaQueryEngine<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'a, M> {
     /// Field-level fast path predicate (node-domain).
     ///
     /// Returns `true` when the macro field at `output_path` MUST take the
@@ -785,10 +785,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 /// bound as `TypeParam` shells by the locator-shape lowering, so a name hit
 /// IS a parent-parameter reference). Every node is read once, whatever the
 /// nesting; purely carrier-data-driven.
-fn node_references_type_param_names(
+fn node_references_type_param_names<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     param_names: &FxHashSet<&str>,

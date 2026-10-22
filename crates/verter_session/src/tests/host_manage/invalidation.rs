@@ -184,6 +184,8 @@ fn prepared_decl_name_resolution_barrel_retarget_invalidates_final_canonical() {
 /// lookup REUSES the stale bundle — `bundle_materializations` stays 1 and
 /// `Base` keeps resolving to `/src/base.ts`. If reuse regressed, step 2
 /// rematerializes (`bundle_materializations` climbs to 2 prematurely).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn prepared_decl_bundle_reuses_then_invalidates_on_exact_resolution_change() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -1713,7 +1715,10 @@ fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
         .into_owned_view()
         .with_session_overlay(&host, &view);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::SessionResolverContext::new(&host, &view, &base, overlay);
+    let ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host, &view, &base, overlay,
+        );
     let warm = verter_type_engine::resolver_core::request_ports::IndexedInputs::indexed_for_current_content(
         &ctx, barrel,
     )

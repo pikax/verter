@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
 
 import {
   EXPECTED_ARTIFACTS_MANIFEST,
@@ -311,6 +312,16 @@ describe("createWorkerBackendInstance", () => {
   });
 });
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const nativeBinding: any = (() => {
+  try {
+    return createRequire(import.meta.url)("@verter/native");
+  } catch {
+    return null;
+  }
+})();
+const captured = nativeBinding !== null && nativeBinding.captureAvailability() === "Available";
+
 describe("verter repeated benchmark queries", () => {
   const defaultUiRoot = parseMetaUiBenchArgs([]).uiRoot;
   const tablePath = resolve(defaultUiRoot, "src", "runtime", "components", "Table.vue");
@@ -346,17 +357,26 @@ describe("verter repeated benchmark queries", () => {
         const firstStartedAt = performance.now();
         const first = await checker.getComponentMeta(table!.absolutePath);
         const firstLatencyMs = performance.now() - firstStartedAt;
-        const provenanceAfterFirst = (checker as any)._session.getProvenance();
+        // Provenance counters exist only in a binding built with
+        // `semantic-observe`; without it the call reports unavailable capture.
+        const readProvenance = () => (captured ? (checker as any)._session.getProvenance() : null);
+        const provenanceAfterFirst = readProvenance();
 
         const secondStartedAt = performance.now();
         const second = await checker.getComponentMeta(table!.absolutePath);
         const secondLatencyMs = performance.now() - secondStartedAt;
-        const provenanceAfterSecond = (checker as any)._session.getProvenance();
+        const provenanceAfterSecond = readProvenance();
 
         expect(second.props.length).toBe(first.props.length);
-        expect(provenanceAfterSecond.componentMetaResolvedStateRecomputes).toBe(
-          provenanceAfterFirst.componentMetaResolvedStateRecomputes,
-        );
+        if (captured) {
+          expect(provenanceAfterSecond.componentMetaResolvedStateRecomputes).toBe(
+            provenanceAfterFirst.componentMetaResolvedStateRecomputes,
+          );
+        } else {
+          expect(() => (checker as any)._session.getProvenance()).toThrow(
+            /audit capture is unavailable/,
+          );
+        }
         expect(secondLatencyMs).toBeLessThan(firstLatencyMs * 2);
       } finally {
         checker.close();

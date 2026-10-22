@@ -15,27 +15,41 @@
 //! `verter_session::component_meta_audit::<Type>` import paths so
 //! same-crate callers do not need to retarget every import.
 
+//!
+//! Everything that collects, mines, stores or renders a record is
+//! optional capture and compiles only with `semantic-observe`; a default
+//! build keeps the DTO re-exports and no-op recording hooks.
+
+#[cfg(feature = "semantic-observe")]
 use std::cell::RefCell;
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::instant::Instant;
 
+#[cfg(feature = "semantic-observe")]
 pub mod assertions;
+#[cfg(feature = "semantic-observe")]
 pub mod audit_records_store;
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) mod expected_display_snapshots;
+#[cfg(feature = "semantic-observe")]
 pub mod footprint_miner;
+#[cfg(feature = "semantic-observe")]
 pub(crate) mod footprint_structural_hash;
 pub mod structured_event;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 mod mod_tests;
 
+#[cfg(feature = "semantic-observe")]
 pub use assertions::{
     render_chain_text, AssertionDiff, ChainTermination, ProvenanceChain, ProvenanceStep,
     WALKER_DEPTH_CAP,
 };
+#[cfg(feature = "semantic-observe")]
 pub use audit_records_store::{AuditRecordsStore, AUDIT_RECORDS_STORE_CAPACITY};
+#[cfg(feature = "semantic-observe")]
 pub use footprint_miner::mine_footprint;
 
 // ----------------------------------------------------------------------------
@@ -51,9 +65,9 @@ pub use verter_audit::footprint::{
     RequestFootprintAudit, SharedLoadReuseRecord, SubstitutionRecord, VfsReadRecord,
 };
 pub use verter_audit::memory::{current_process_rss, RequestMemoryAudit};
-pub use verter_audit::observer::{
-    current_observer, install_observer, AuditEvent, AuditObserver, ObserverGuard,
-};
+#[cfg(feature = "semantic-observe")]
+pub use verter_audit::observer::{current_observer, install_observer, ObserverGuard};
+pub use verter_audit::observer::{AuditEvent, AuditObserver};
 pub use verter_audit::origin_graph::{
     ConditionalBranch, DerivationEdgeRaw, DerivationEdgeRecord, DerivationSubgraph,
     DispatchKeyKind, EdgeId, MaterializationScopeAudit, MaterializationSubject,
@@ -105,8 +119,11 @@ pub fn projection_mode_audit_from(
 /// The prepared-decl-bundle cold producers push materialisation
 /// records here so per-request cost attribution has one envelope per
 /// cold prepared-decl build.
-#[inline]
+#[inline(always)]
 pub fn record_materialization(subject: MaterializationSubject, duration_ms: f64) {
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = (subject, duration_ms);
+    #[cfg(feature = "semantic-observe")]
     if let Some(acc) = verter_type_engine::request_context::current_accumulator() {
         acc.push_materialization(MaterializationRecord {
             subject,
@@ -115,6 +132,7 @@ pub fn record_materialization(subject: MaterializationSubject, duration_ms: f64)
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Snapshot the per-request cache counters from the currently
 /// installed [`verter_type_engine::request_context::RequestContext`] into a
 /// [`verter_audit::store::CacheLayerBreakdown`]. Used at request
@@ -151,6 +169,7 @@ pub fn snapshot_cache_layers_from_tls() -> verter_audit::store::CacheLayerBreakd
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Snapshot the per-request bypass diagnostic counters
 /// from the currently installed [`verter_type_engine::request_context::RequestContext`]
 /// into a [`verter_audit::store::BypassDiagnostics`] DTO. Returns a
@@ -164,11 +183,11 @@ pub fn snapshot_bypass_diagnostics_from_tls() -> verter_audit::store::BypassDiag
     let Some(ctx) = verter_type_engine::request_context::current_request_context() else {
         return BypassDiagnostics::default();
     };
-    let (builds, bare_engines, store_view_calls) = ctx.cache_counters.bypass_diagnostics.snapshot();
+    let (builds, bare_engines) = ctx.cache_counters.bypass_diagnostics.snapshot();
     BypassDiagnostics {
         host_store_view_from_host_builds: builds,
         bare_engine_constructions: bare_engines,
-        resolver_store_view_calls: store_view_calls,
+        resolver_store_view_calls: 0,
     }
 }
 
@@ -176,6 +195,7 @@ pub fn snapshot_bypass_diagnostics_from_tls() -> verter_audit::store::BypassDiag
 // Audit builder — accumulates data during a request
 // ----------------------------------------------------------------------------
 
+#[cfg(feature = "semantic-observe")]
 /// Builder for accumulating audit data during a component-meta
 /// request. Created only when `audit_enabled` is true.
 pub struct AuditBuilder {
@@ -198,6 +218,7 @@ pub struct AuditBuilder {
     from_cache: bool,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl AuditBuilder {
     /// Construct a new builder stamped with `request_id` and the
     /// resolved `canonical_id`. Captures the current process RSS for
@@ -253,23 +274,19 @@ impl AuditBuilder {
         self.store = store;
     }
 
-    /// Replace the component-meta store + materialiser counter
-    /// block. These fields live on [`ComponentMetaPayload`] rather
-    /// than the generic [`RequestStoreAudit`] envelope because they
-    /// are kind-specific (only component-meta requests run the
-    /// materialiser).
+    /// Replace the component-meta store counter block and clear its
+    /// legacy compatibility fields. These fields live on
+    /// [`ComponentMetaPayload`] rather than the generic store envelope.
     pub fn record_component_meta_store(
         &mut self,
-        materialize_structure_calls: u64,
-        materialize_structure_cache_hits: u64,
         node_arena_lock_acquisitions: u64,
         family_map_lock_acquisitions: u64,
         dep_signature_merges: u64,
         dep_signature_intern_hits: u64,
     ) {
-        self.component_meta_payload.materialize_structure_calls = materialize_structure_calls;
-        self.component_meta_payload.materialize_structure_cache_hits =
-            materialize_structure_cache_hits;
+        // Legacy wire fields have no runtime producer or backing counter.
+        self.component_meta_payload.materialize_structure_calls = 0;
+        self.component_meta_payload.materialize_structure_cache_hits = 0;
         self.component_meta_payload.node_arena_lock_acquisitions = node_arena_lock_acquisitions;
         self.component_meta_payload.family_map_lock_acquisitions = family_map_lock_acquisitions;
         self.component_meta_payload.dep_signature_merges = dep_signature_merges;
@@ -503,6 +520,7 @@ impl AuditBuilder {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Named phases for timing capture.
 #[derive(Debug, Clone, Copy)]
 pub enum AuditPhase {
@@ -524,11 +542,13 @@ pub enum AuditPhase {
     Serialize,
 }
 
+#[cfg(feature = "semantic-observe")]
 thread_local! {
     static ACTIVE_REQUEST_AUDIT: RefCell<Vec<(u64, RequestPhaseAudit)>> =
         const { RefCell::new(Vec::new()) };
 }
 
+#[cfg(feature = "semantic-observe")]
 /// RAII guard returned by [`begin_request_audit`]. Drops the
 /// corresponding entry from the `ACTIVE_REQUEST_AUDIT` TLS stack on
 /// scope exit.
@@ -536,6 +556,7 @@ pub struct RequestAuditGuard {
     request_id: u64,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl RequestAuditGuard {
     /// Snapshot the phase-audit state for this request without
     /// removing it from the stack.
@@ -552,6 +573,7 @@ impl RequestAuditGuard {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 impl Drop for RequestAuditGuard {
     fn drop(&mut self) {
         ACTIVE_REQUEST_AUDIT.with(|stack| {
@@ -566,6 +588,7 @@ impl Drop for RequestAuditGuard {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Compute the deduplicated per-file attribution vector for a finished
 /// request from the drained accumulator's file ledger.
 ///
@@ -765,10 +788,12 @@ pub fn build_file_audit_vec(
     out
 }
 
+#[cfg(feature = "semantic-observe")]
 fn ns_to_ms(ns: u64) -> f64 {
     (ns as f64) / 1_000_000.0
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Push a new [`RequestPhaseAudit`] entry for `request_id` onto the
 /// TLS stack and return the RAII guard that removes it on drop.
 pub fn begin_request_audit(request_id: u64) -> RequestAuditGuard {
@@ -783,7 +808,16 @@ pub fn begin_request_audit(request_id: u64) -> RequestAuditGuard {
 /// Accumulate `elapsed_ms` into the current request's imported-root
 /// proof phase. Zero or negative values are dropped (defensive guard
 /// against timer skew).
+#[inline(always)]
 pub fn record_imported_root_proof_ms(elapsed_ms: f64) {
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = elapsed_ms;
+    #[cfg(feature = "semantic-observe")]
+    record_imported_root_proof_ms_captured(elapsed_ms);
+}
+
+#[cfg(feature = "semantic-observe")]
+fn record_imported_root_proof_ms_captured(elapsed_ms: f64) {
     if elapsed_ms <= 0.0 {
         return;
     }
@@ -794,6 +828,7 @@ pub fn record_imported_root_proof_ms(elapsed_ms: f64) {
     });
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Snapshot the top-of-stack request's phase-audit without removing
 /// it. Used by consumers that need a sidecar view without owning a
 /// guard.
@@ -811,6 +846,7 @@ pub fn current_request_audit_snapshot() -> RequestPhaseAudit {
 // Trace emission
 // ----------------------------------------------------------------------------
 
+#[cfg(feature = "semantic-observe")]
 /// Emit an audit record via the component-meta trace system and, when
 /// `VERTER_COMPONENT_META_AUDIT_JSON_OUT` is set, also serialise the
 /// record to the named path.
@@ -867,6 +903,7 @@ pub fn emit_audit_trace(record: &RequestAuditRecord) {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Serialise an audit record to JSON.
 pub fn emit_json(record: &RequestAuditRecord) -> String {
     serde_json::to_string(record).unwrap_or_default()
@@ -878,10 +915,14 @@ pub fn emit_json(record: &RequestAuditRecord) -> String {
 /// on the happy path) and the equivalent [`StructuredAuditEvent`]
 /// (fallback lane when the direct records vec is empty). No-op when
 /// no request context is installed.
+#[inline(always)]
 pub fn record_indexed_ready_built(
     canonical_id: Arc<str>,
     whole_hash: verter_session_query::analysis::types::Hash16,
 ) {
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = (canonical_id, whole_hash);
+    #[cfg(feature = "semantic-observe")]
     if let Some(acc) = verter_type_engine::request_context::current_accumulator() {
         acc.push_indexed_ready_build(IndexedReadyBuildRecord {
             canonical_id: Arc::clone(&canonical_id),
@@ -898,6 +939,7 @@ pub fn record_indexed_ready_built(
 // Stable display key for SemanticNodeId
 // ----------------------------------------------------------------------------
 
+#[cfg(feature = "semantic-observe")]
 /// Produce a deterministic, human-readable key for a
 /// [`SemanticNodeId`](verter_type_engine::semantic_query::SemanticNodeId)
 /// suitable for audit trace output and

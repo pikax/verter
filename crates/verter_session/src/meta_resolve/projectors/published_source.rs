@@ -26,8 +26,8 @@ fn published_anchor_for_identity(
 /// when the node decided one, the closed LEAF-UNION fact when the node is a
 /// union of complete leaves, otherwise the caller's `existing` source
 /// unchanged (never a fabricated stand-in).
-pub(super) fn published_source_for_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn published_source_for_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: Option<SemanticNodeId>,
     existing: verter_type_expr::facts::SemanticTypeSource,
 ) -> verter_type_expr::facts::SemanticTypeSource {
@@ -39,8 +39,8 @@ pub(super) fn published_source_for_node(
 /// leaf / leaf-union, else `None` — the caller decides what its position
 /// publishes when no upgrade exists (its authored source, a proven absence,
 /// or a typed required-position failure; never a fabricated stand-in).
-pub(super) fn published_source_upgrade_for_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn published_source_upgrade_for_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: Option<SemanticNodeId>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     match node.and_then(|node| dispatch.node_leaf_fact(node)) {

@@ -1,8 +1,14 @@
-//! Runtime-gated deep memory audit for the native binding.
+//! Runtime-gated deep memory audit for the instrumented native binding.
 //!
-//! One single binary: the wrapper [`std::alloc::GlobalAlloc`] over
-//! [`std::alloc::System`] is ALWAYS compiled. A runtime gate decides the
-//! cost:
+//! Allocator attribution is optional observation state
+//! (`docs/arch/semantic-observe.md`): the counting
+//! [`std::alloc::GlobalAlloc`] wrapper, its counters and its sampler
+//! compile only with `semantic-observe`. A default binding keeps the
+//! system allocator untouched and the four NAPI functions report the audit
+//! as unavailable — `memoryAuditEnable()` returns `false`, the readers
+//! return `null` / `false` — never fabricated zero counters.
+//!
+//! In an instrumented binding a runtime gate decides the cost:
 //!
 //! - **Disabled (the default):** every allocator call is a delegate to
 //!   `System` plus exactly ONE cached relaxed atomic load + branch — no
@@ -36,7 +42,7 @@
 //!
 //! The NAPI surface is always exported; `memoryAuditSnapshot()` /
 //! `memoryAuditSites()` return `null` and `memoryAuditResetHighWater()`
-//! returns `false` while the gate is disabled.
+//! returns `false` while the gate is disabled or capture is compiled out.
 
 use napi_derive::napi;
 
@@ -88,6 +94,7 @@ pub struct NapiMemoryAuditEnableOptions {
 /// Runtime gate + env arming. The allocator hot path reads ONLY the
 /// [`ENABLED`] atomic (and, once enabled, the sampling-interval atomic);
 /// the (allocating) env read happens exclusively on NAPI entry points.
+#[cfg(feature = "semantic-observe")]
 mod runtime {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
@@ -148,6 +155,7 @@ mod runtime {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 mod counting {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -384,6 +392,7 @@ mod counting {
 /// thread-local `IN_SAMPLER` flag makes them count-only (never
 /// re-sample), preventing unbounded self-sampling and same-thread mutex
 /// re-entry.
+#[cfg(feature = "semantic-observe")]
 mod sampling {
     use std::cell::Cell;
     use std::hash::{Hash, Hasher};
@@ -700,11 +709,24 @@ mod sampling {
 /// enabled after this call). Call BEFORE the workload of interest —
 /// enabling mid-flight is safe but the counters then cover a partial
 /// window.
+///
+/// Returns `false` in a binding built without `semantic-observe`: the
+/// counting allocator is not compiled in, so the audit cannot be enabled.
 #[napi]
 pub fn memory_audit_enable(options: Option<NapiMemoryAuditEnableOptions>) -> bool {
-    runtime::ensure_env_init();
-    runtime::enable(options.and_then(|options| options.sampleEvery.map(|every| every as usize)));
-    true
+    #[cfg(feature = "semantic-observe")]
+    {
+        runtime::ensure_env_init();
+        runtime::enable(
+            options.and_then(|options| options.sampleEvery.map(|every| every as usize)),
+        );
+        true
+    }
+    #[cfg(not(feature = "semantic-observe"))]
+    {
+        let _ = options;
+        false
+    }
 }
 
 /// Return the current allocator counters, or `null` while the runtime
@@ -715,11 +737,16 @@ pub fn memory_audit_enable(options: Option<NapiMemoryAuditEnableOptions>) -> boo
 /// so a snapshot can advance the mark it reports.
 #[napi]
 pub fn memory_audit_snapshot() -> Option<NapiMemoryAuditSnapshot> {
-    runtime::ensure_env_init();
-    if !runtime::enabled() {
-        return None;
+    #[cfg(feature = "semantic-observe")]
+    {
+        runtime::ensure_env_init();
+        if !runtime::enabled() {
+            return None;
+        }
+        Some(counting::snapshot())
     }
-    Some(counting::snapshot())
+    #[cfg(not(feature = "semantic-observe"))]
+    None
 }
 
 /// Reset the live-bytes high-water mark to the current live-bytes level,
@@ -730,12 +757,17 @@ pub fn memory_audit_snapshot() -> Option<NapiMemoryAuditSnapshot> {
 /// while the runtime audit gate is disabled.
 #[napi]
 pub fn memory_audit_reset_high_water() -> bool {
-    runtime::ensure_env_init();
-    if !runtime::enabled() {
-        return false;
+    #[cfg(feature = "semantic-observe")]
+    {
+        runtime::ensure_env_init();
+        if !runtime::enabled() {
+            return false;
+        }
+        counting::reset_high_water();
+        true
     }
-    counting::reset_high_water();
-    true
+    #[cfg(not(feature = "semantic-observe"))]
+    false
 }
 
 /// JSON report of the top-`top_k` sampled allocation sites by sampled
@@ -747,13 +779,36 @@ pub fn memory_audit_reset_high_water() -> bool {
 /// `VERTER_MEMORY_AUDIT_SAMPLE`).
 #[napi]
 pub fn memory_audit_sites(top_k: u32) -> Option<String> {
-    runtime::ensure_env_init();
-    if !runtime::enabled() {
-        return None;
+    #[cfg(feature = "semantic-observe")]
+    {
+        runtime::ensure_env_init();
+        if !runtime::enabled() {
+            return None;
+        }
+        sampling::sites_json(top_k)
     }
-    sampling::sites_json(top_k)
+    #[cfg(not(feature = "semantic-observe"))]
+    {
+        let _ = top_k;
+        None
+    }
 }
 
-#[cfg(test)]
+// Reads the counting allocator: runs in the instrumentation lane.
+#[cfg(all(test, feature = "semantic-observe"))]
 #[path = "memory_audit_tests.rs"]
 mod memory_audit_tests;
+
+#[cfg(all(test, not(feature = "semantic-observe")))]
+mod unavailable_tests {
+    /// A binding without `semantic-observe` compiles no counting allocator:
+    /// the audit cannot be enabled and every reader reports it unavailable
+    /// rather than a zero measurement.
+    #[test]
+    fn a_default_binding_reports_the_memory_audit_unavailable() {
+        assert!(!super::memory_audit_enable(None));
+        assert!(super::memory_audit_snapshot().is_none());
+        assert!(!super::memory_audit_reset_high_water());
+        assert!(super::memory_audit_sites(8).is_none());
+    }
+}

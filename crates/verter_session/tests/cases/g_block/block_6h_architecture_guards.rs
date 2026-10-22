@@ -57,7 +57,7 @@ fn fn_body_slice<'a>(content: &'a str, signature_anchor: &str) -> &'a str {
 #[test]
 fn member_shape_peek_or_compute_peeks_cache_before_node_gates() {
     let content = read_output_sink();
-    let body = fn_body_slice(&content, "fn member_shape_peek_or_compute(");
+    let body = fn_body_slice(&content, "fn member_shape_peek_or_compute<");
 
     let peek_idx = body
         .find("scope.peek(&key")
@@ -91,7 +91,7 @@ fn member_shape_peek_or_compute_peeks_cache_before_node_gates() {
 #[test]
 fn member_shape_admissions_run_only_after_package_backed_gate() {
     let content = read_output_sink();
-    let body = fn_body_slice(&content, "fn member_shape_peek_or_compute(");
+    let body = fn_body_slice(&content, "fn member_shape_peek_or_compute<");
 
     let route_gate_idx = body
         .find("node_package_backed_object_like_root_with_fence(")
@@ -130,7 +130,7 @@ fn member_shape_peek_or_compute_runs_node_gates_before_graph_native_reducer() {
     // fact APIs, and materialisation happens only at the terminal seal / the
     // graph-native reducer.
     let content = read_output_sink();
-    let body = fn_body_slice(&content, "fn member_shape_peek_or_compute(");
+    let body = fn_body_slice(&content, "fn member_shape_peek_or_compute<");
 
     // NODE-DOMAIN: no up-front raise of member_value to a TypeExpr, no shared
     // operator-shape peek — re-introducing either reverts to materialize-then-gate.

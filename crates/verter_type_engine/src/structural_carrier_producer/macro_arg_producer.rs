@@ -133,7 +133,6 @@ use crate::semantic_query::{
     QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind,
     SurfaceEntry, SurfaceMember, TupleElement, TypeParamDecl, ValueRootKey,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
 
 // =============================================================================
 // Query-free structural lowering internals (PRIVATE to this module).
@@ -169,8 +168,8 @@ pub enum StructuralLowerError {
 /// producer is NOT compiler-confined (Rust privacy is module-scoped, so code
 /// written INSIDE this module CAN name it) and is instead POLICED by the bounded
 /// single-producer architecture guards.
-fn lower_type_expr_structural(
-    graph: &SemanticGraphStore,
+fn lower_type_expr_structural<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     expr: &TypeExpr,
     scope: NodeScopeId,
     ctx: &StructuralLowerContext<'_>,
@@ -195,8 +194,8 @@ fn lower_type_expr_structural(
 ///
 /// Emission arms are implemented one `TypeExpr` variant at a time under
 /// test; see `structural_lower_tests`.
-fn lower_node(
-    graph: &SemanticGraphStore,
+fn lower_node<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     expr: &TypeExpr,
     scope: &NodeScopeId,
     ctx: &StructuralLowerContext<'_>,
@@ -738,7 +737,7 @@ fn lower_node(
             let mapper_decl = DeclIdentity::from_scope(
                 scope,
                 crate::mapper_binder_registry::mapper_binder_decl_name(
-                    graph,
+                    graph.store(),
                     source,
                     value,
                     *optional,
@@ -813,8 +812,12 @@ fn lower_node(
                 MappedModifier::Remove => ReadonlyMod::Remove,
                 _ => ReadonlyMod::Keep,
             };
-            let kind =
-                MapperKind::classify_value_expr(graph, value_expr, source_node, parameter_node);
+            let kind = MapperKind::classify_value_expr(
+                graph.store(),
+                value_expr,
+                source_node,
+                parameter_node,
+            );
             let mapper = MapperKey {
                 parameter_node,
                 key_space,
@@ -824,14 +827,18 @@ fn lower_node(
                 name_remap,
                 kind,
                 over_type_variable: match source.as_ref() {
-                    TypeExpr::KeyOf(_) => {
-                        crate::semantic_query::keyof_operand_is_type_variable(graph, source_node)
-                    }
+                    TypeExpr::KeyOf(_) => crate::semantic_query::keyof_operand_is_type_variable(
+                        graph.store(),
+                        source_node,
+                    ),
                     _ => false,
                 },
                 modifiers_type: match source.as_ref() {
                     TypeExpr::KeyOf(_) => None,
-                    _ => crate::semantic_query::modifiers_type_of_key_parameter(graph, source_node),
+                    _ => crate::semantic_query::modifiers_type_of_key_parameter(
+                        graph.store(),
+                        source_node,
+                    ),
                 },
             };
             Ok(graph.intern_node_with_scope(
@@ -845,8 +852,8 @@ fn lower_node(
     }
 }
 
-fn lower_authored_property_key(
-    graph: &SemanticGraphStore,
+fn lower_authored_property_key<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     key: &verter_type_expr::TypeAuthoredPropertyKey,
     scope: &NodeScopeId,
     ctx: &StructuralLowerContext<'_>,
@@ -891,8 +898,8 @@ fn value_root_scope(scope: &NodeScopeId) -> Result<ScopeId, StructuralLowerError
 /// arm, and a multi-arm list interns the composite (matching the eager
 /// structural shape). No set normalization (dedup / absorption) is
 /// performed — that is a reduction.
-fn lower_union_or_intersection(
-    graph: &SemanticGraphStore,
+fn lower_union_or_intersection<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     arms: &[TypeExpr],
     scope: &NodeScopeId,
     ctx: &StructuralLowerContext<'_>,
@@ -935,8 +942,8 @@ fn lower_union_or_intersection(
 /// not itself or any following parameter — the first parameter's head
 /// therefore lowers under the OUTER context alone. An absent return
 /// annotation mirrors the eager `Opaque(Miss)` placeholder.
-fn lower_function_signature(
-    graph: &SemanticGraphStore,
+fn lower_function_signature<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     func: &FunctionExpr,
     scope: &NodeScopeId,
     ctx: &StructuralLowerContext<'_>,
@@ -1063,8 +1070,8 @@ fn lower_function_signature(
 
 /// Lower a slice of `TypeExpr` arguments structurally, in order, into the
 /// interned-id slice carried by a reference / import-type carrier.
-fn lower_args(
-    graph: &SemanticGraphStore,
+fn lower_args<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     args: &[TypeExpr],
     scope: &NodeScopeId,
     ctx: &StructuralLowerContext<'_>,
@@ -1143,9 +1150,9 @@ fn register_structural_function_alias(
 /// / default lowers through [`lower_type_expr_structural`] DIRECTLY — the
 /// binder-seed lowering is part of building the macro handle's scope, NOT a
 /// second macro-arg producer.
-fn build_script_setup_seed_frames(
+fn build_script_setup_seed_frames<M: verter_audit::observe::ObserveExec>(
     params: &[verter_type_expr::TypeParam],
-    graph: &SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     scope: &NodeScopeId,
 ) -> Vec<BinderScope> {
     if params.is_empty() {
@@ -1390,9 +1397,10 @@ impl Clone for MacroHotMirror {
 pub(crate) fn macro_type_arg_hot_ref<
     D: ExpressionSourceDemand + Clone,
     M: crate::resolver_core::request_ports::MacroMirrorSource,
+    Mode: verter_audit::observe::ObserveExec,
 >(
     ctx: &dyn crate::resolver_core::request_ports::ExpressionSourceSelection<ExpressionDemand = D>,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, Mode>,
     selector: &M,
     owner_canonical: &str,
     macro_index: usize,
@@ -1404,9 +1412,10 @@ pub(crate) fn macro_type_arg_hot_ref<
 fn macro_hot_product<
     D: ExpressionSourceDemand + Clone,
     M: crate::resolver_core::request_ports::MacroMirrorSource,
+    Mode: verter_audit::observe::ObserveExec,
 >(
     ctx: &dyn crate::resolver_core::request_ports::ExpressionSourceSelection<ExpressionDemand = D>,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, Mode>,
     selector: &M,
     owner_canonical: &str,
     macro_index: usize,
@@ -1443,7 +1452,7 @@ fn macro_hot_product<
     // Lock-free warm read first. A committed handle a document close released
     // is not served: the cold path below re-lowers it in place.
     if let Some(committed) = cell.committed() {
-        if committed_is_servable(graph, &committed) {
+        if committed_is_servable(graph.store(), &committed) {
             return committed;
         }
     }
@@ -1463,7 +1472,7 @@ fn macro_hot_product<
     // committed while this thread waited on the lock.
     let build_guard = cell.lock_build();
     if let Some(committed) = cell.committed() {
-        if committed_is_servable(graph, &committed) {
+        if committed_is_servable(graph.store(), &committed) {
             return committed;
         }
     }
@@ -1515,11 +1524,11 @@ enum MacroHotRefOutcome {
 /// PRIVATE: it names [`lower_type_expr_structural`] and
 /// [`build_script_setup_seed_frames`] DIRECTLY — both are module-private, so
 /// only this module's own producer paths can reach them.
-fn build_macro_hot_ref(
+fn build_macro_hot_ref<M: verter_audit::observe::ObserveExec>(
     ctx: &dyn crate::resolver_core::request_ports::OwnedLowering,
     serve: &verter_session_query::inputs::indexed::IndexedInputServe,
     source_demand: Option<&impl ExpressionSourceDemand>,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     owner_canonical: &str,
     indexed: &verter_session_query::inputs::indexed::IndexedInputRecord,
     macro_index: usize,
@@ -1651,12 +1660,17 @@ fn inline_macro_object_property_type<'a>(
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn lower_type_expr_structural_for_tests(
-    graph: &SemanticGraphStore,
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
     expr: &TypeExpr,
     scope: NodeScopeId,
     ctx: &StructuralLowerContext<'_>,
 ) -> Result<HotTypeRef, StructuralLowerError> {
-    lower_type_expr_structural(graph, expr, scope, ctx)
+    lower_type_expr_structural(
+        crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
+        expr,
+        scope,
+        ctx,
+    )
 }
 
 /// Test-support entry to the `<script setup generic="…">` binder-seed builder,
@@ -1665,8 +1679,12 @@ pub fn lower_type_expr_structural_for_tests(
 #[doc(hidden)]
 pub fn build_script_setup_seed_frames_for_tests(
     params: &[verter_type_expr::TypeParam],
-    graph: &SemanticGraphStore,
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
     scope: &NodeScopeId,
 ) -> Vec<BinderScope> {
-    build_script_setup_seed_frames(params, graph, scope)
+    build_script_setup_seed_frames(
+        params,
+        crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
+        scope,
+    )
 }

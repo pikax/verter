@@ -5,7 +5,7 @@
 //! unconditionally (macros name a site even when disabled) but carry no
 //! storage. Everything that can produce a number — [`snapshot`],
 //! [`read`], `record_*`, the report renderers — is behind the
-//! non-default `attribution` feature. A default build cannot write
+//! non-default `semantic-observe` feature. A default build cannot write
 //! `if attribution::read(site).calls > n`: the path does not resolve.
 //! There is no disabled stub returning zero.
 //!
@@ -14,7 +14,7 @@
 //! expand to a `const` that names the site. The amount/digest argument
 //! is **not evaluated**. Naming the site in the disabled arm is
 //! deliberate: a typo fails a default build. Amounts are type-checked
-//! only under `--features verter_audit/attribution`.
+//! only under `--features verter_audit/semantic-observe`.
 //!
 //! ```ignore
 //! use verter_audit::{attribute_n, attribute_scope};
@@ -34,35 +34,35 @@ mod schema;
 
 pub use schema::{WorkDomain, WorkSite, WorkUnit};
 
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 mod alloc;
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 pub mod report;
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 mod scope;
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 mod table;
 
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 pub use alloc::AttributingAllocator;
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 pub use scope::ScopeGuard;
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 pub use table::{
     read, record_amount, record_call, record_digest, record_scope, reset, snapshot, snapshot_all,
     SiteSample,
 };
 
-#[cfg(all(test, not(feature = "attribution")))]
+#[cfg(all(test, not(feature = "semantic-observe")))]
 mod disabled_tests;
-#[cfg(all(test, feature = "attribution"))]
+#[cfg(all(test, feature = "semantic-observe"))]
 mod table_tests;
 
 /// Record one hit on a work site.
 ///
 /// Expands to a site-name check and nothing else when the `attribution`
 /// feature is off.
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! attribute {
     ($site:ident) => {{
@@ -74,7 +74,7 @@ macro_rules! attribute {
 ///
 /// Expands to a site-name check and nothing else when the `attribution`
 /// feature is off.
-#[cfg(not(feature = "attribution"))]
+#[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! attribute {
     ($site:ident) => {{
@@ -85,8 +85,8 @@ macro_rules! attribute {
 /// Record one hit carrying `$amount` in the site's declared unit.
 ///
 /// `$amount` is cast with `as u64`, so any integer expression works.
-/// When the `attribution` feature is off `$amount` IS NOT EVALUATED.
-#[cfg(feature = "attribution")]
+/// When the `semantic-observe` feature is off `$amount` IS NOT EVALUATED.
+#[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! attribute_n {
     ($site:ident, $amount:expr) => {{
@@ -99,8 +99,8 @@ macro_rules! attribute_n {
 /// Record one hit carrying `$amount` in the site's declared unit.
 ///
 /// `$amount` is cast with `as u64`, so any integer expression works.
-/// When the `attribution` feature is off `$amount` IS NOT EVALUATED.
-#[cfg(not(feature = "attribution"))]
+/// When the `semantic-observe` feature is off `$amount` IS NOT EVALUATED.
+#[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! attribute_n {
     ($site:ident, $amount:expr) => {{
@@ -112,8 +112,8 @@ macro_rules! attribute_n {
 ///
 /// Only meaningful on a [`WorkUnit::Gauge`](crate::attribution::WorkUnit::Gauge)
 /// site; on a summing site this is identical to [`attribute_n!`].
-/// When the `attribution` feature is off `$amount` IS NOT EVALUATED.
-#[cfg(feature = "attribution")]
+/// When the `semantic-observe` feature is off `$amount` IS NOT EVALUATED.
+#[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! attribute_max {
     ($site:ident, $amount:expr) => {{
@@ -127,8 +127,8 @@ macro_rules! attribute_max {
 ///
 /// Only meaningful on a [`WorkUnit::Gauge`](crate::attribution::WorkUnit::Gauge)
 /// site; on a summing site this is identical to [`attribute_n!`].
-/// When the `attribution` feature is off `$amount` IS NOT EVALUATED.
-#[cfg(not(feature = "attribution"))]
+/// When the `semantic-observe` feature is off `$amount` IS NOT EVALUATED.
+#[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! attribute_max {
     ($site:ident, $amount:expr) => {{
@@ -141,8 +141,8 @@ macro_rules! attribute_max {
 ///
 /// Binds a guard in the current block; timing is INCLUSIVE of nested
 /// guards. Expands to a site-name check and nothing else when the
-/// `attribution` feature is off.
-#[cfg(feature = "attribution")]
+/// `semantic-observe` feature is off.
+#[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! attribute_scope {
     ($site:ident) => {
@@ -156,8 +156,8 @@ macro_rules! attribute_scope {
 ///
 /// Binds a guard in the current block; timing is INCLUSIVE of nested
 /// guards. Expands to a site-name check and nothing else when the
-/// `attribution` feature is off.
-#[cfg(not(feature = "attribution"))]
+/// `semantic-observe` feature is off.
+#[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! attribute_scope {
     ($site:ident) => {
@@ -170,9 +170,9 @@ macro_rules! attribute_scope {
 /// Fold `$value` into a site's order-independent determinism digest.
 ///
 /// Two runs that produced the same multiset of values agree, whatever
-/// order the threads reported them in. When the `attribution` feature is
+/// order the threads reported them in. When the `semantic-observe` feature is
 /// off `$value` IS NOT EVALUATED.
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! attribute_digest {
     ($site:ident, $value:expr) => {{
@@ -185,9 +185,9 @@ macro_rules! attribute_digest {
 /// Fold `$value` into a site's order-independent determinism digest.
 ///
 /// Two runs that produced the same multiset of values agree, whatever
-/// order the threads reported them in. When the `attribution` feature is
+/// order the threads reported them in. When the `semantic-observe` feature is
 /// off `$value` IS NOT EVALUATED.
-#[cfg(not(feature = "attribution"))]
+#[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! attribute_digest {
     ($site:ident, $value:expr) => {{

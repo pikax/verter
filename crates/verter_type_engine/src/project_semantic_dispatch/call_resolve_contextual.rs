@@ -644,7 +644,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             state.completed = None;
             state.diagnostic = None;
             let setup = InferenceSessionSetup::new(
-                self.graph(),
+                self.graph().store(),
                 self.call_inference_infos(&type_parameters),
                 VariancePhase::Covariant,
                 InferencePassKind::CallApplicability,
@@ -1164,7 +1164,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         positions.sort_unstable();
-        let retained_substitution = CanonicalTypeSubstitution::new(self.graph(), retained.clone());
+        let retained_substitution =
+            CanonicalTypeSubstitution::new(self.graph().store(), retained.clone());
         let declarations: Vec<_> = positions
             .iter()
             .map(|&position| {
@@ -1201,13 +1202,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 inferred.push((*param, *bound));
             }
         }
-        let fixed = CanonicalTypeSubstitution::new(self.graph(), fixed);
+        let fixed = CanonicalTypeSubstitution::new(self.graph().store(), fixed);
         let fixed = self
             .fresh_widened_substitution_outside_top_level(id, &fixed, None)?
             .unwrap_or(fixed);
         let inferred_params: FxHashSet<_> = inferred.iter().map(|(param, _)| *param).collect();
         let inference_mapper = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             fixed
                 .bindings()
                 .iter()
@@ -1216,7 +1217,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .collect(),
         );
         let contextual_mapper = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             fixed
                 .bindings()
                 .iter()

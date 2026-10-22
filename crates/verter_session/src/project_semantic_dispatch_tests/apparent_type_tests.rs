@@ -155,7 +155,7 @@ fn no_ambient_host() -> Arc<VerterHost> {
 fn rootless_signature(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
 ) -> SemanticNodeId {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let return_type = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String("rootless".into()),
@@ -251,7 +251,12 @@ fn rootless_apparent_surface_is_project_scoped_and_never_cached() {
     let host = two_project_ambient_host();
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
@@ -307,7 +312,12 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     let host = two_project_ambient_host();
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
@@ -381,7 +391,12 @@ fn rootless_apparent_without_registered_ambient_fails_closed() {
     let host = no_ambient_host();
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
@@ -406,7 +421,12 @@ fn rootless_apparent_without_demand_site_fails_closed() {
     let host = two_project_ambient_host();
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let base = rootless_signature(&dispatch);
 
@@ -585,17 +605,30 @@ fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
     assert_eq!(graph.slot_candidate_count_for_tests(&path_key(string)), 0);
 }
 
-/// Run `f` over a dispatch on a fresh store view of `host`.
+/// Run `f` over a dispatch on a fresh store view of `host`, compiled for
+/// captured execution so the flow counters some of these tests read record.
 fn with_fresh_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
+    f: impl FnOnce(
+        &ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+        >,
+    ) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Captured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     f(&ProjectSemanticDispatch::new(&host_ctx))
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A flow whose return reads a primitive's or an array's wrapper member
 /// (`s.length`, `arr.length`) is admitted and served warm: two demands,
 /// one cold computation, one candidate, and the member's declared type.
@@ -618,7 +651,7 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
     for name in ["readArrayLength", "readStringLength"] {
         let key = |dispatch: &ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
         >| {
             verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
@@ -637,7 +670,10 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
         }
         };
         let with_dispatch = |f: &dyn Fn(
-            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+            &ProjectSemanticDispatch<
+                '_,
+                crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+            >,
         ) -> Option<String>| { with_fresh_dispatch(&host, f) };
         let request = verter_type_engine::request_context::RequestContext::new(
             1,

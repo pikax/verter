@@ -136,7 +136,12 @@ fn degradation_of(
     });
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(

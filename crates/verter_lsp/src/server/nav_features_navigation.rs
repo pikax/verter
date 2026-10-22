@@ -158,9 +158,7 @@ pub(super) async fn handle_goto_definition(
 ) -> Result<Option<GotoDefinitionResponse>> {
     let _hg = HandlerGuard::new(&server.handler_activity, "goto_definition");
     let uri = &params.text_document_position_params.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("definition", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("definition", Some(uri.as_str()));
     let position = &params.text_document_position_params.position;
     tracing::debug!(
         "definition: {} at {}:{}",
@@ -459,6 +457,9 @@ async fn handle_goto_definition_attempt(
     // B4: a GLOBAL css class token (declared non-scoped / :global) extends its
     // definition targets with every global declaration workspace-wide.
     if let Some(class_name) = super::nav_features_css::global_class_target(server, uri, position) {
+        if !server.workspace_inventory_ready().await {
+            return Err(VerterLanguageServer::workspace_inventory_pending_error());
+        }
         return Ok(super::nav_features_css::merge_global_class_definitions(
             server,
             uri,
@@ -755,7 +756,7 @@ pub(super) async fn handle_goto_type_definition(
     let uri = &params.text_document_position_params.text_document.uri;
     let _timer = server
         .statistics
-        .timer("type_definition", Some(uri.as_str().to_string()));
+        .timer("type_definition", Some(uri.as_str()));
     let position = &params.text_document_position_params.position;
     tracing::debug!(
         "type_definition: {} at {}:{}",
@@ -944,9 +945,7 @@ pub(super) async fn handle_references(
 ) -> Result<Option<Vec<Location>>> {
     let _hg = HandlerGuard::new(&server.handler_activity, "references");
     let uri = &params.text_document_position.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("references", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("references", Some(uri.as_str()));
     let position = &params.text_document_position.position;
     let include_declaration = params.context.include_declaration;
     tracing::debug!(
@@ -1082,6 +1081,9 @@ pub(super) async fn handle_references(
     // this leg completes natively and returns. Scoped classes never enter
     // (fail closed: same-file only via the native path above).
     if let Some(class_name) = super::nav_features_css::global_class_target(server, uri, position) {
+        if !server.workspace_inventory_ready().await {
+            return Err(VerterLanguageServer::workspace_inventory_pending_error());
+        }
         let locations = super::nav_features_css::merge_global_class_references(
             server,
             uri,

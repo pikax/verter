@@ -72,7 +72,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // (`absorbed_output`) and make no canonical claim (an undecided peek
         // simply skips the fast-reject), so the peek runs evidence-free —
         // no per-call allocation, lock traffic, or root recording.
-        super::canonical_algebra::peek_special_via_graph(self.graph(), id, None)
+        super::canonical_algebra::peek_special_via_graph(self.graph().store(), id, None)
     }
 
     /// Intern a bare primitive node.

@@ -247,7 +247,10 @@ struct ArenaSlot<P: Program> {
     record: Option<FrameRecord<P>>,
 }
 
-/// Counters describing one execution's work.
+/// Counters describing one execution's work. Measurement-only: no
+/// production decision reads them, so they exist only in this crate's test
+/// builds, where the work-bound tests assert on them.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ExecutionCounters {
     /// Frame steps taken.
@@ -261,13 +264,10 @@ pub(crate) struct ExecutionCounters {
     /// Outside producers' subscriptions resolved.
     pub(crate) external_waits: u64,
     /// Polls that returned `Pending`, waiting on an outside producer.
-    /// Observation only.
-    #[cfg(any(test, feature = "semantic-observe"))]
     pub(crate) pending_polls: u64,
     /// Most frames alive at once.
     pub(crate) peak_frames: usize,
-    /// Subscription slots inspected to find the one to wait on. Test-only.
-    #[cfg(any(test, feature = "test-support"))]
+    /// Subscription slots inspected to find the one to wait on.
     pub(crate) subscription_inspections: u64,
 }
 
@@ -385,6 +385,7 @@ pub(crate) struct SemanticExecution<P: Program> {
     /// The request context each step runs under, when the execution may be
     /// stepped away from the thread that began it.
     request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
+    #[cfg(test)]
     counters: ExecutionCounters,
 }
 
@@ -407,10 +408,12 @@ impl<P: Program> SemanticExecution<P> {
             root: None,
             root_outcome: None,
             request_context: None,
+            #[cfg(test)]
             counters: ExecutionCounters::default(),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn counters(&self) -> ExecutionCounters {
         self.counters
     }
@@ -513,7 +516,7 @@ impl<P: Program> SemanticExecution<P> {
                 continue;
             }
             // Nothing can run: the chain's tip waits on an outside producer.
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             {
                 self.counters.subscription_inspections += 1;
             }
@@ -523,7 +526,7 @@ impl<P: Program> SemanticExecution<P> {
             let demand = *demand;
             let external = match program.poll_subscription(subscription, waker) {
                 Poll::Pending => {
-                    #[cfg(any(test, feature = "semantic-observe"))]
+                    #[cfg(test)]
                     {
                         self.counters.pending_polls += 1;
                     }
@@ -532,7 +535,10 @@ impl<P: Program> SemanticExecution<P> {
                 Poll::Ready(external) => external,
             };
             self.subscription = None;
-            self.counters.external_waits += 1;
+            #[cfg(test)]
+            {
+                self.counters.external_waits += 1;
+            }
             match external {
                 External::Complete(outcome) => self.complete(program, demand, outcome, root),
                 External::Restart => self.begin(program, demand, root),
@@ -550,7 +556,10 @@ impl<P: Program> SemanticExecution<P> {
         if let Some(&id) = self.index.get(&root) {
             let record = &self.demands[id.0 as usize];
             verter_debug_assert!(record.state == DemandState::Complete);
-            self.counters.reuses += 1;
+            #[cfg(test)]
+            {
+                self.counters.reuses += 1;
+            }
             return Err(Ok(record
                 .value
                 .clone()
@@ -565,7 +574,10 @@ impl<P: Program> SemanticExecution<P> {
 
     /// Ask the program to start the demand `id` and install what it returns.
     fn begin(&mut self, program: &mut P, id: DemandId, root: DemandId) {
-        self.counters.starts += 1;
+        #[cfg(test)]
+        {
+            self.counters.starts += 1;
+        }
         self.demands[id.0 as usize].state = DemandState::Starting;
         let start = program.start(
             self.demands[id.0 as usize]
@@ -597,7 +609,10 @@ impl<P: Program> SemanticExecution<P> {
             (record.produces, record.delivery.take())
         };
         self.demands[produces.0 as usize].state = DemandState::Running(id);
-        self.counters.steps += 1;
+        #[cfg(test)]
+        {
+            self.counters.steps += 1;
+        }
         let step = {
             let record = self.frame_mut(id);
             let _scope = StepScope::enter();
@@ -658,7 +673,10 @@ impl<P: Program> SemanticExecution<P> {
         };
         match self.demands[id.0 as usize].state {
             DemandState::Complete => {
-                self.counters.reuses += 1;
+                #[cfg(test)]
+                {
+                    self.counters.reuses += 1;
+                }
                 let value = self.demands[id.0 as usize]
                     .value
                     .clone()
@@ -676,7 +694,10 @@ impl<P: Program> SemanticExecution<P> {
                     self.ready.is_empty(),
                     "a drive runs one chain; a ready frame beside the running one breaks the cycle rule"
                 );
-                self.counters.cycles += 1;
+                #[cfg(test)]
+                {
+                    self.counters.cycles += 1;
+                }
                 let outcome = program.close_cycle(&demand, role);
                 self.deliver(waiter, outcome);
             }
@@ -740,7 +761,10 @@ impl<P: Program> SemanticExecution<P> {
             delivery: None,
         };
         self.live_frames += 1;
-        self.counters.peak_frames = self.counters.peak_frames.max(self.live_frames);
+        #[cfg(test)]
+        {
+            self.counters.peak_frames = self.counters.peak_frames.max(self.live_frames);
+        }
         if let Some(slot) = self.free_frames.pop() {
             let entry = &mut self.frames[slot as usize];
             entry.generation = entry.generation.wrapping_add(1);

@@ -38,8 +38,15 @@ mod tests {
             let harness = GraphFixture::new();
             let host = crate::VerterHost::new_standalone(Default::default());
             let dispatch = ProjectSemanticDispatch::with_graph_fixture(&host, harness);
-            let graph = Arc::clone(dispatch.graph());
-            let owner = build_keys_union_node(&graph, &keys).unwrap();
+            let graph = Arc::clone(dispatch.graph_arc());
+            let owner =
+                build_keys_union_node(
+                    verter_type_engine::semantic_query_memo::GraphIn::<
+                        verter_audit::observe::Uncaptured,
+                    >::of(&graph),
+                    &keys,
+                )
+                .unwrap();
             let node = owner.id();
             let data = graph.node_data(node).unwrap();
             match data.as_ref() {
@@ -95,8 +102,8 @@ mod tests {
 /// produces a `Union` of literals. Both are interned at global scope
 /// (no file scope) since the keys are workspace-shared sentinels.
 /// The returned root owns the key topology across the consuming dispatch.
-pub(crate) fn build_keys_union_node(
-    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+pub(crate) fn build_keys_union_node<M: verter_audit::observe::ObserveExec>(
+    graph: verter_type_engine::semantic_query_memo::GraphIn<'_, M>,
     keys: &[verter_type_expr::facts::FactPropertyKey],
 ) -> Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot> {
     // Construction lane: the caller's dispatcher holds it.
@@ -158,8 +165,8 @@ pub(crate) fn build_keys_union_node(
 ///   `Published(Navigate)`) and extract the resolved identity; a real miss yields
 ///   `None`.
 /// - anything else — `None`.
-fn node_root_identity(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn node_root_identity<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     depth: u32,
 ) -> Option<verter_type_engine::semantic_query::DeclIdentity> {
@@ -222,8 +229,10 @@ fn node_root_identity(
 /// — so the verdict + fence are computed by the one shared identity tail over the
 /// resolved root identity. A node with no extractable root identity is not
 /// package-backed (empty fence — admittable).
-pub(crate) fn node_package_backed_object_like_root_with_fence(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+pub(crate) fn node_package_backed_object_like_root_with_fence<
+    M: verter_audit::observe::ObserveExec,
+>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     scope_canonical_id: &str,
     node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> (
@@ -259,8 +268,8 @@ pub(crate) fn node_package_backed_object_like_root_with_fence(
 /// stops a push or a descent that could have contributed a root, `truncated`
 /// is set so the aggregate demotes to a fallback instead of silently ORing a
 /// partial root set.
-fn collect_node_root_identities(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn collect_node_root_identities<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     depth: u32,
     out: &mut Vec<verter_type_engine::semantic_query::DeclIdentity>,
@@ -365,10 +374,12 @@ fn collect_node_root_identities(
 /// is observed via `emit_dispatch_dep_signature_facts`. Takes `ctx` (the
 /// node carries resolved identities, so no name-resolution engine is
 /// needed).
-pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
+pub(crate) fn node_root_reaches_transitive_cycle_with_fence<
+    M: verter_audit::observe::ObserveExec,
+>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     scope_canonical_id: &str,
     node: verter_type_engine::semantic_query::SemanticNodeId,

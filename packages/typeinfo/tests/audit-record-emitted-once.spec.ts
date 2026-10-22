@@ -9,11 +9,18 @@
  * REGRESSION — discriminates against a substrate that fails to
  * finalise the registration / publish to the records store exactly
  * once.
+ *
+ * Records exist only in a binding built with `semantic-observe`. A
+ * default binding still resolves every call but carries no record, and
+ * its record store reports unavailable capture instead of an empty list.
  */
 
+import { captureAvailability } from "@verter/native";
 import { describe, expect, it } from "vitest";
 
 import { TypeInfoSession } from "../src/index.js";
+
+const captured = captureAvailability() === "Available";
 
 interface AuditRecordsResponse {
   length: number;
@@ -30,7 +37,7 @@ function countAuditRecords(session: TypeInfoSession): number {
   return Array.isArray(arr) ? arr.length : 0;
 }
 
-describe("typeinfo audit record emission", () => {
+describe.runIf(captured)("typeinfo audit record emission (capture available)", () => {
   it("emits exactly one RequestAuditRecord per resolveSymbol call", () => {
     const session = new TypeInfoSession({ root: "/fixtures" });
     session.host.upsert({
@@ -111,6 +118,33 @@ describe("typeinfo audit record emission", () => {
       ids.add(r.auditRecord!.request_id);
     }
     expect(ids.size, "three calls must produce three distinct request_ids").toBe(3);
+
+    session.host.close();
+  });
+});
+
+describe.runIf(!captured)("typeinfo audit record emission (capture unavailable)", () => {
+  it("resolves and evaluates without a record, and the record store reports unavailable capture", () => {
+    const session = new TypeInfoSession({ root: "/fixtures" });
+    session.host.upsert({
+      inputId: "/fixtures/types.ts",
+      source: `export type Foo = { a: number };\n`,
+    });
+
+    const resolved = session.resolveSymbol("/fixtures/types.ts", "Foo", { mode: "expanded" });
+    expect(resolved.type?.kind).toBe("object");
+    expect(resolved.auditRecord).toBeUndefined();
+
+    const evaluated = session.evaluateTypeExpression({
+      scope: "/fixtures/types.ts",
+      expression: "Foo",
+      mode: "expanded",
+      cacheable: false,
+    });
+    expect(evaluated.type?.kind).toBe("object");
+    expect(evaluated.auditRecord).toBeUndefined();
+
+    expect(() => session.host.getAuditRecords()).toThrow(/audit capture is unavailable/);
 
     session.host.close();
   });

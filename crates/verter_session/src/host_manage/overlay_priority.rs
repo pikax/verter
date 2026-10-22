@@ -78,8 +78,23 @@ pub(crate) fn ensure_loaded_with_view(
 /// A declined explicit-overlay materialisation fails closed; only a request
 /// with no explicit overlay may fall through to
 /// [`VerterHost::ensure_indexed_ready_serve`].
+#[cfg(any(test, feature = "test-support"))]
+#[allow(dead_code)]
 pub(crate) fn ensure_indexed_ready_serve_with_view(
     host: &VerterHost,
+    view: &dyn SessionView,
+    canonical_id: &str,
+) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        ensure_indexed_ready_serve_with_view_in::<M>(host,
+            &verter_type_engine::request_observers::CaptureTargets::installed::<M>(), view, canonical_id)
+    })
+}
+
+/// Overlay selection using the calling execution's capture receivers.
+pub(crate) fn ensure_indexed_ready_serve_with_view_in<M: verter_audit::observe::ObserveExec>(
+    host: &VerterHost,
+    observation: &verter_type_engine::request_observers::CaptureTargets,
     view: &dyn SessionView,
     canonical_id: &str,
 ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
@@ -106,8 +121,14 @@ pub(crate) fn ensure_indexed_ready_serve_with_view(
     // `whole_hash`.
     select_indexed_ready_serve(
         view.overlay_content_hash_for(canonical_id).is_some(),
-        || host.materialize_overlay_indexed_ready_serve_with_view(canonical_id, view),
-        || host.ensure_indexed_ready_serve(canonical_id),
+        || {
+            host.materialize_overlay_indexed_ready_serve_with_view_in::<M>(
+                observation,
+                canonical_id,
+                view,
+            )
+        },
+        || host.ensure_indexed_ready_serve_in::<M>(observation, canonical_id),
     )
 }
 
@@ -152,18 +173,20 @@ pub(crate) fn prewarm_view_overlays(host: &VerterHost, view: &dyn SessionView) {
         .into_cold_seed_view()
         .with_session_overlay(host, view);
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-        host,
-        view,
-        &store_view,
-        overlay,
-    );
-    for canonical in view.overlay_canonicals() {
-        let _ = verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
-            &session_ctx,
-            canonical.as_str(),
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        let session_ctx = crate::resolver_core::SessionResolverContext::<'_, M>::from_cold_seed(
+            host,
+            view,
+            &store_view,
+            overlay,
         );
-    }
+        for canonical in view.overlay_canonicals() {
+            let _ = verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
+                &session_ctx,
+                canonical.as_str(),
+            );
+        }
+    })
 }
 
 #[cfg(test)]

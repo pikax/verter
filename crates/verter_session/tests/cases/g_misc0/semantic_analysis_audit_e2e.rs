@@ -24,9 +24,12 @@
 use std::sync::Arc;
 
 use verter_audit::RequestKind;
-use verter_session::{HostConfig, UpsertRequest, VerterHost};
+#[cfg(feature = "semantic-observe")]
+use verter_session::UpsertRequest;
+use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
+#[cfg(feature = "semantic-observe")]
 const SFC: &str = r#"<script setup lang="ts">
 import { ref } from 'vue';
 import type { Ref } from 'vue';
@@ -51,6 +54,7 @@ export const exportedHelper = (n: number) => n + 1;
 </template>
 "#;
 
+#[cfg(feature = "semantic-observe")]
 fn setup_host_with_sfc(canonical: &str, source: &str) -> Arc<VerterHost> {
     let workspace: Arc<dyn WorkspaceAccess> =
         Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
@@ -74,6 +78,8 @@ fn setup_host_with_sfc(canonical: &str, source: &str) -> Arc<VerterHost> {
     host
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn analyze_with_audit_populates_payload_and_reports_fresh_build_on_cold_call() {
     let host = setup_host_with_sfc("/Probe.vue", SFC);
@@ -155,6 +161,8 @@ fn analyze_with_audit_populates_payload_and_reports_fresh_build_on_cold_call() {
     let _ = analysis.snapshot.imports.len(); // surface use to silence dead-code warnings
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn analyze_with_audit_reports_warm_cache_reuse_on_repeat_call() {
     let host = setup_host_with_sfc("/Probe.vue", SFC);

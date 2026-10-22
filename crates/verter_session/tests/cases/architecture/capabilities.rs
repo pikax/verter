@@ -2096,6 +2096,9 @@ fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
     }
 }
 
+// Pins the provenance walker's depth cap, which exists only with optional
+// capture.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn recursion_budget_invariant_across_module_boundary() {
     // Plan §4.5: the recursion-budget mechanism must remain reachable and
@@ -4159,7 +4162,7 @@ fn store_view_capability_split_guard_is_discriminating() {
     // non-allowlisted file that does `.into_cold_seed_view().into_inner()`
     // (the INDIRECT-validation seam — raw cold-seed view fed into a
     // context that then validates) must be flagged.
-    let leaky_indirect = "let v = self\n    .resolver_store_view_read()\n    .into_cold_seed_view()\n    .into_inner();\nlet ctx = SessionResolverContext::new(self, view, &v, overlay);";
+    let leaky_indirect = "let v = self\n    .resolver_store_view_read()\n    .into_cold_seed_view()\n    .into_inner();\nlet ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(self, view, &v, overlay);";
     assert!(
         contains_cold_seed_into_inner(leaky_indirect),
         "cold-seed-into-inner predicate must catch the `.into_cold_seed_view().into_inner()` \
@@ -5214,11 +5217,12 @@ fn structural_carrier_producer_lowerer_is_module_private() {
     // is MODULE-scoped (a same-module second producer that NAMES these builders is
     // representable), so widening ANY of the three re-opens a producer surface.
     for builder in STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS {
-        let needle = format!("fn {builder}(");
+        let heads = structural_builder_definition_heads(builder);
+        let defines = |src: &str| heads.iter().any(|head| src.contains(head.as_str()));
         // (a) Anti-vacuity: the owner module must exist at this path and carry the
         // builder's definition — its absence means the owner re-home regressed.
         assert!(
-            body.contains(&needle),
+            defines(&body),
             "anti-vacuity: the producer builder `{builder}` (`fn {builder}(`) must live at \
              `{rel}` (`{STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE}`) — its absence means the \
              structural-carrier-producer owner re-home regressed"
@@ -5227,7 +5231,7 @@ fn structural_carrier_producer_lowerer_is_module_private() {
         // definition, in `macro_arg_producer.rs`.
         let definitions: Vec<String> = production_files
             .iter()
-            .filter(|(_, src)| src.contains(&needle))
+            .filter(|(_, src)| defines(src))
             .map(|(rel, _)| rel.clone())
             .collect();
         assert_eq!(
@@ -5286,7 +5290,7 @@ fn macro_arg_producer_has_no_production_expansion_surface() {
     // Anti-vacuity: the producer module must exist and carry the lowerer — its
     // absence means the owner re-home regressed.
     assert!(
-        src.contains("fn lower_type_expr_structural("),
+        src.contains("fn lower_type_expr_structural<"),
         "anti-vacuity: the producer module `{rel}` must carry the structural lowerer"
     );
     let violations = macro_arg_producer_expansion_surface_violations(&src);

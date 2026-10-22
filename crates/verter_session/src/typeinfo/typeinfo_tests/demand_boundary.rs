@@ -57,6 +57,8 @@ fn demand_boundary_barrel_resolution_does_not_load_unrequested_reexport() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn demand_boundary_projection_into_selected_alias_loads_needed_but_not_unused() {
     let host = make_host_with_footprint();
@@ -93,6 +95,8 @@ fn demand_boundary_projection_into_selected_alias_loads_needed_but_not_unused() 
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn demand_boundary_terminal_projection_resolves_value_without_unused_branch() {
     let host = make_host_with_footprint();

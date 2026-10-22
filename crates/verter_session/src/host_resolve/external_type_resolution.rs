@@ -22,14 +22,16 @@ impl VerterHost {
     /// The resolved payload is the component-meta-owned keep-all native row
     /// set, memoized only in the request-local native projection cache.
     #[allow(clippy::too_many_arguments)]
-    fn resolve_component_meta_native_props_target_with_view(
+    fn resolve_component_meta_native_props_target_with_view<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         owner_canonical: &str,
         import_source: &str,
@@ -145,10 +147,10 @@ impl VerterHost {
     /// carriers of ambient `declare module` augmentations. One bounded hop
     /// over the owner's own import list (never a transitive walk); each
     /// ensure is the canonical once-per-generation materialization.
-    fn ensure_owner_direct_imports_indexed(
+    fn ensure_owner_direct_imports_indexed<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         owner_canonical: &str,
     ) {
@@ -174,10 +176,10 @@ impl VerterHost {
         }
     }
 
-    fn build_imported_macro_declaration_from_target(
+    fn build_imported_macro_declaration_from_target<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         requested_name: &str,
         target_canonical: &str,
@@ -214,7 +216,7 @@ impl VerterHost {
     }
 
     /// Base wrapper that fixes `view = None`. Test-only.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "semantic-observe"))]
     pub(crate) fn resolve_component_meta_macro_surface(
         &self,
         owner_canonical: &str,
@@ -246,14 +248,16 @@ impl VerterHost {
     /// Threads `view` into the macro-target resolver so the resolved-type
     /// cache slot and dep-source reads honour the active session overlay.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn resolve_component_meta_macro_surface_with_view(
+    pub(crate) fn resolve_component_meta_macro_surface_with_view<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         owner_canonical: &str,
         import_source: &str,
@@ -263,7 +267,7 @@ impl VerterHost {
         cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
         _view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
-        component_meta_trace_custom!(
+        component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
             "resolve_component_meta_native_props",
             format!(
                 "owner={} import={} type={} store_view={} cache_entries={}",
@@ -331,14 +335,16 @@ impl VerterHost {
     /// Threads `view` into the macro-target resolver so cross-file macro type
     /// resolution observes the session overlay.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn resolve_component_meta_native_props_with_view(
+    pub(crate) fn resolve_component_meta_native_props_with_view<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         owner_canonical: &str,
         import_source: &str,

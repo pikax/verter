@@ -41,6 +41,7 @@
     "opt:wasm": "node ../../scripts/wasm-opt-cache.mjs wasm/verter_wasm_bg.wasm wasm/verter_wasm_bg.wasm -- -Os",
     "build:wasm": "pnpm run build:bindgen && pnpm run opt:wasm",
     "build:dev": "pnpm run build:bindgen",
+    "build:observe": "pnpm run clean:wasm && cargo build --manifest-path ../../Cargo.toml --release -p verter_wasm --target wasm32-unknown-unknown --features semantic-observe && wasm-bindgen --target web --out-dir wasm --out-name verter_wasm ../../target/wasm32-unknown-unknown/release/verter_wasm.wasm",
     "build:ts": "tsdown",
     "build": "pnpm run build:wasm && pnpm run build:ts",
     "test:types": "tsc -p tsconfig.types.json",

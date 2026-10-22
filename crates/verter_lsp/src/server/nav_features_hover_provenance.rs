@@ -9,6 +9,7 @@
 //! module; it lives apart from `nav_features` so both modules remain a readable
 //! size.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::Arc;
 
 use tower_lsp_server::ls_types::*;
@@ -56,36 +57,43 @@ pub(super) fn enrich_hover_with_provenance(
     // Short-circuit here so the user sees the legacy hover and
     // no blocking-pool slots are burned on a capture-disabled
     // host.
-    let host = server.documents.host_arc();
-    if !host.as_ref().config().audit_enabled || !host.as_ref().config().footprint_capture {
-        return hover;
-    }
+    // A server built without `semantic-observe` has no audit records to
+    // read: the hover stays the legacy payload.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let host = server.documents.host_arc();
+        if !host.as_ref().config().audit_enabled || !host.as_ref().config().footprint_capture {
+            return hover;
+        }
 
-    // Cache miss + capture enabled — return the legacy payload
-    // immediately and spawn a background AuditedRequest to populate
-    // the cache for the next hover.
-    let cache = Arc::clone(&server.hover_provenance_cache);
-    let canonical_for_task = canonical_id;
-    tokio::task::spawn_blocking(move || {
-        let Some((_analysis, resolution)) = host
-            .as_ref()
-            .get_component_meta_with_resolution(&canonical_for_task)
-        else {
-            return;
-        };
-        let Some(record) = host
-            .as_ref()
-            .host_audit_runtime()
-            .take_record(resolution.request_id)
-        else {
-            return;
-        };
-        let markdown = crate::features::hover_provenance::render_provenance_markdown(&record);
-        cache.insert(
-            key,
-            crate::features::hover_provenance::HoverProvenancePayload { markdown },
-        );
-    });
+        // Cache miss + capture enabled — return the legacy payload
+        // immediately and spawn a background AuditedRequest to populate
+        // the cache for the next hover.
+        let cache = Arc::clone(&server.hover_provenance_cache);
+        let canonical_for_task = canonical_id;
+        tokio::task::spawn_blocking(move || {
+            let Some((_analysis, resolution)) = host
+                .as_ref()
+                .get_component_meta_with_resolution(&canonical_for_task)
+            else {
+                return;
+            };
+            let Some(record) = host
+                .as_ref()
+                .host_audit_runtime()
+                .take_record(resolution.request_id)
+            else {
+                return;
+            };
+            let markdown = crate::features::hover_provenance::render_provenance_markdown(&record);
+            cache.insert(
+                key,
+                crate::features::hover_provenance::HoverProvenancePayload { markdown },
+            );
+        });
+    }
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = (key, canonical_id);
 
     hover
 }
