@@ -2738,6 +2738,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             .dispatch
                             .intern_normalized_union_or_intersection(&values, true),
                         readonly,
+                        key_name: None,
                         spans: verter_type_expr::IndexSignatureSpans::default(),
                         declaration_origin: None,
                     });
@@ -11348,6 +11349,7 @@ fn shallow_surface_from_projection_alternative<M: verter_audit::observe::Observe
                 key_type: index.key_type(),
                 value_type: *value_type,
                 readonly: *readonly,
+                key_name: None,
                 spans: index.spans(),
                 declaration_origin: index.declaration_origin().cloned(),
             })

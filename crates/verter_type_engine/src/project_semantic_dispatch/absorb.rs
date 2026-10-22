@@ -109,6 +109,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 key_type: self.primitive_node(*kind),
                 value_type: any,
                 readonly: false,
+                key_name: None,
                 spans: verter_type_expr::IndexSignatureSpans::default(),
                 declaration_origin: None,
             })

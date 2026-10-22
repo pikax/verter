@@ -507,12 +507,14 @@ impl PayloadHeap for IndexSignature {
             key_type,
             value_type,
             readonly,
+            key_name,
             spans,
             declaration_origin,
         } = self;
         key_type.visit_payload_heap(visitor);
         value_type.visit_payload_heap(visitor);
         readonly.visit_payload_heap(visitor);
+        key_name.visit_payload_heap(visitor);
         spans.visit_payload_heap(visitor);
         declaration_origin.visit_payload_heap(visitor);
     }

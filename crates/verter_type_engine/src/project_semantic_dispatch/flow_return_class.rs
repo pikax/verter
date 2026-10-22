@@ -591,6 +591,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     key_type,
                     value_type,
                     readonly: signature.readonly,
+                    key_name: Some(verter_type_expr::OwnedStr::from(&signature.key_name)),
                     spans: verter_type_expr::IndexSignatureSpans::default(),
                     declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
                 });
@@ -1177,6 +1178,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     key_type,
                     value_type,
                     readonly,
+                    key_name: None,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
                     declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
                 });

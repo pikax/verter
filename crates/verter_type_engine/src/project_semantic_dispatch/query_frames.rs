@@ -891,7 +891,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
             producer: Some(producer),
             tracer: None,
             taint: BuildLocalTaint {
-                produces: super::instantiation_frame_identity(key),
+                produces: super::FrameProduction::of(key, self.dispatch.checking_site.get()),
                 ..BuildLocalTaint::default()
             },
             build: None,
