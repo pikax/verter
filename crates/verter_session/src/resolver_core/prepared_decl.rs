@@ -30,6 +30,7 @@ mod type_prep;
 use type_prep::{
     build_type_name_resolution_base, build_value_name_resolution_base,
     prepare_authored_partial_type_decl, prepare_type_decl_from_lowered,
+    with_global_block_resolutions,
 };
 
 /// One per-symbol prepared-decl slot: a warm write-once committed value plus a
@@ -729,6 +730,7 @@ fn prepare_local_value_decl_outcome_with_base(
     // value, or the one `declare module "..." { ... }` block declaring it —
     // is that block's value declaration, prepared under the same
     // `(canonical, name)` identity the type space's global fallback uses.
+    let mut in_global_block = false;
     let lowered: Arc<LoweredValueDecl> = match state.value_decl_outcome_in(owner, symbol_name) {
         DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
         DemandOutcome::Ready(Some(lowered)) => lowered,
@@ -736,6 +738,10 @@ fn prepare_local_value_decl_outcome_with_base(
             let Some(scope) = state.value_fallback_augmentation_scope(owner, symbol_name) else {
                 return PreparedDeclOutcome::Ready(None);
             };
+            in_global_block = matches!(
+                scope,
+                verter_session_query::declarations::AugmentationScopeKind::Global
+            );
             match state.augmentation_value_decl_outcome_in(&scope, owner, symbol_name) {
                 DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
                 DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
@@ -869,6 +875,17 @@ fn prepare_local_value_decl_outcome_with_base(
             Err(failure) => return PreparedDeclOutcome::Failed(failure),
         },
     };
+    // A `declare global` block member reads the names its blocks declare
+    // as the global ones.
+    if in_global_block {
+        prepared.name_resolution = with_global_block_resolutions(
+            prepared.name_resolution,
+            canonical_id,
+            state,
+            owner,
+            interner,
+        );
+    }
 
     let hash_u64 = u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default());
     prepared.cache_deps.defining_file = Some((canonical_id.as_ref().to_string(), hash_u64));
@@ -1214,6 +1231,20 @@ impl PreparedValueDeclCache {
                 Ok(base) => NameResolutionTable::new(base),
                 Err(failure) => return PreparedDeclOutcome::Failed(failure),
             },
+        };
+        // A `declare global` block member reads the names its blocks
+        // declare as the global ones.
+        let name_resolution = match scope {
+            verter_session_query::declarations::AugmentationScopeKind::Global => {
+                with_global_block_resolutions(
+                    name_resolution,
+                    &self.canonical_id,
+                    self.state.as_ref(),
+                    owner,
+                    &self.interner,
+                )
+            }
+            verter_session_query::declarations::AugmentationScopeKind::Module(_) => name_resolution,
         };
         let mut prepared = PreparedValueDecl::new(
             ResolvedRootIdentity::new_in_owner(

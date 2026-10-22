@@ -3071,6 +3071,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.typeof_reference_key_in_scope(canonical, owner, None, None, value_ref, prc)
     }
 
+    /// Whether the `typeof` root `name`, written in a body whose name
+    /// environment is `name_resolution` and whose root heads in the lexical
+    /// `scope`, names a VALUE the module's own `declare global` blocks
+    /// declare: a body written inside those blocks binds such a name to the
+    /// module's global-augmentation scope, ahead of the module's namesake.
+    pub(super) fn names_global_block_value(
+        &self,
+        name_resolution: Option<
+            &rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+        >,
+        scope: &crate::semantic_query::ScopeId,
+        name: &str,
+    ) -> bool {
+        name_resolution
+            .and_then(|names| names.get(name))
+            .is_some_and(|bound| {
+                bound.owner.is_global_augmentation()
+                    && bound.owner.lexical() == scope.owner
+                    && bound.canonical_id.as_ref() == scope.canonical_id.as_ref()
+            })
+            && self
+                .ctx
+                .ensure_indexed_ready_serve(scope.canonical_id.as_ref())
+                .is_some_and(|serve| {
+                    serve
+                        .indexed
+                        .shallow_state
+                        .headers
+                        .augmentation_value_header_in(
+                            &verter_session_query::declarations::AugmentationScopeKind::Global,
+                            scope.owner,
+                            name,
+                        )
+                        .is_some()
+                })
+    }
+
     /// The qualified value a `typeof` path written in a declaration body
     /// heads, with the number of path segments it consumes, when its head
     /// names a member of an enclosing namespace: in a block of a global

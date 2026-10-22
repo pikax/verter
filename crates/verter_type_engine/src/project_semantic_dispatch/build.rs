@@ -4220,7 +4220,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Recover a module-scoped value root's retained augmentation inventory.
+    /// Recover a value root's retained augmentation inventory: the
+    /// `declare module "…"` or `declare global` block scope it heads in.
     pub(super) fn ambient_value_scope<'headers>(
         scope: &crate::semantic_query::ScopeId,
         headers: &'headers verter_session_query::declarations::header_index::DeclHeaderIndex,
@@ -4230,16 +4231,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         headers.augmentation_blocks.iter().find_map(|block| {
             use verter_session_query::declarations::AugmentationScopeKind;
-            let AugmentationScopeKind::Module(specifier) = &block.scope else {
-                return None;
-            };
-            (block.owner == scope.owner
-                && scope.binder_scope_id
-                    == crate::semantic_query::BinderScopeId::augmentation_module_scope(
+            let block_scope_id = match &block.scope {
+                AugmentationScopeKind::Module(specifier) => {
+                    crate::semantic_query::BinderScopeId::augmentation_module_scope(
                         block.owner,
                         specifier.as_str().into(),
-                    ))
-            .then_some(&block.scope)
+                    )
+                }
+                AugmentationScopeKind::Global => {
+                    crate::semantic_query::BinderScopeId::augmentation_global_scope(block.owner)
+                }
+            };
+            (block.owner == scope.owner && scope.binder_scope_id == block_scope_id)
+                .then_some(&block.scope)
         })
     }
 

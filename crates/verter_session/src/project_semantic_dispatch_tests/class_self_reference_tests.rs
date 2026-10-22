@@ -402,6 +402,80 @@ export type First = LocalBox['local'];";
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Inside a module's `declare global` block a name the block declares —
+/// a type or a value — is the global one, ahead of the module's own
+/// namesake: the block's `Methods<T> = ThisType<T>` names the global
+/// marker beside a module-scope `ThisType`, the global `Box`'s `self` and
+/// `peer` members name the global `Box` and `Peer` beside module-scope
+/// ones, `typeof value` reads the block's `value: 9` beside a module
+/// `const value = 6`, and `Alias` the block's `2` beside a module `1`.
+/// The module's own references keep its namesakes. TypeScript answers the
+/// reader's receiver `3`, `Box['self']['peer']['p']` `4`, `Box['gv']` and
+/// `Box['self']['gv']` `9` and `Box['al']` `2` — and the same through a
+/// global `Solo` the module does not declare and the global value
+/// `holder`'s annotation — and the importer's `LocalBox['local']` `1`,
+/// `Outer` `6` and `OuterAlias` `1`, cold and warm.
+#[test]
+fn a_global_blocks_own_names_win_over_module_namesakes_inside_it() {
+    use super::checker_probe_lane_tests::{mismatches_on_host, probe_host, ProbeProject};
+    let augmenting = "export interface ThisType<T> { shadow: T }
+export interface Box { local: 1 }
+export interface Peer { local: 1 }
+const value = 6 as const;
+type Alias = 1;
+export const outer: typeof value = value;
+export type OuterAlias = Alias;
+declare global {
+    interface ThisType<T> {}
+    type Methods<T> = ThisType<T>;
+    const value: 9;
+    type Alias = 2;
+    interface Peer { p: 4 }
+    interface Box { self: Box; peer: Peer; gv: typeof value; al: Alias }
+    interface Solo { gv: typeof value; peer: Peer; al: Alias }
+    const holder: { v: typeof value; a: Alias };
+}";
+    let reader =
+        "export function obj() { return { m() { return this.n; } } satisfies Methods<{ n: 3 }>; }";
+    let importer = "import type { Box as LocalBox, OuterAlias } from './a';
+import { outer } from './a';
+export type First = LocalBox['local'];
+export type Outer = typeof outer;
+export type Aliased = OuterAlias;";
+    let global_rows = [
+        ("ReturnType<ReturnType<typeof obj>['m']>", "3"),
+        ("Box['self']['peer']['p']", "4"),
+        ("Box['gv']", "9"),
+        ("Box['self']['gv']", "9"),
+        ("Box['al']", "2"),
+        ("Solo['gv']", "9"),
+        ("Solo['peer']['p']", "4"),
+        ("Solo['al']", "2"),
+        ("(typeof holder)['v']", "9"),
+        ("(typeof holder)['a']", "2"),
+    ];
+    let local_rows = [("First", "1"), ("Outer", "6"), ("Aliased", "1")];
+    let files = [("a.ts", augmenting)];
+    let project = ProbeProject {
+        files: &files,
+        ..Default::default()
+    };
+    let mut failures = Vec::new();
+    for (role, source, rows) in [
+        ("global reader", reader, &global_rows[..]),
+        ("importer", importer, &local_rows[..]),
+    ] {
+        let rows: Vec<_> = rows.iter().chain(rows).copied().collect();
+        let host = probe_host(project);
+        failures.extend(
+            mismatches_on_host(&host, project, source, &rows)
+                .into_iter()
+                .map(|failure| format!("{role}: {failure}")),
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A module whose `declare global` block contributes to a global its own
 /// import names (`import type { Box }` beside `declare global { interface
 /// Box … }`) still contributes: the import names the imported type in the
