@@ -1,0 +1,1158 @@
+{
+  "description": "TypeScript 7.0 references that remain after the 7.1 cutoff, by file. The guard (node scripts/typescript-pin.mjs --guard) fails on any reference not counted here and on any count larger than what remains; regenerate with --guard --write-baseline.",
+  "reasons": {
+    "measured-record": "an expected answer or evidence record measured on TypeScript 7.0; something reads it, so it waits for a re-measurement the operator schedules",
+    "evidence-record": "a historical evidence record or report of a 7.0 measurement that is not regenerable here; left for the operator",
+    "third-party": "a third-party product or package version that is not the TypeScript pin (e.g. an editor extension, a peer dependency)"
+  },
+  "allowed": {
+    ".claude/skills/type-resolution/references/checker-diagnostics.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    ".claude/skills/type-resolution/references/conditional-decisions.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    ".claude/skills/type-resolution/references/flow-return-substrate.md": {
+      "count": 4,
+      "reason": "evidence-record"
+    },
+    ".github/workflows/perf-gate.yml": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "crates/verter_lsp/src/real_provider_tests/carrier_dx_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_lsp/src/real_provider_tests/diagnostics.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_lsp/src/test_harness_gating.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_lsp/src/test_harness_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_semantic/src/analysis/flow/mod.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_semantic/src/analysis/flow/skeleton_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_semantic/src/analysis/function_program_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_semantic/src/analysis/type_eval_build_shallow.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_semantic/src/analysis/type_eval_build_tests.rs": {
+      "count": 7,
+      "reason": "measured-record"
+    },
+    "crates/verter_semantic_source/src/flow_slice_content.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/component_meta_flow_return_admission_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/error_propagation_lattice_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/flow_completion_inventory_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/flow_gap_retraction_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/flow_slice_content_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/for_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/host_resolve_creo_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/host_resolve_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_invariants_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/abstract_construct_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/accessor_property_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/ambient_module_value_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/base_signature_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/call_resolve_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/callee_signature_effect_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/captured_declared_type_tests.rs": {
+      "count": 8,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/class_evaluation_flow_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/class_inherited_member_tests.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/class_member_evidence_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/class_member_return_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/class_owner_tests.rs": {
+      "count": 11,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/class_prototype_property_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/class_self_reference_tests.rs": {
+      "count": 13,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/class_value_heritage_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/closure_narrowing_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/conditional_decision_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/conditional_indexed_check_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/conditional_operand_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/conditional_scale_tests.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/conditional_tail_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/const_literal_widening_tests.rs": {
+      "count": 18,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/constrained_infer_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/contextual_call_inference_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/continuation_depth_tests.rs": {
+      "count": 25,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/deep_input_tests.rs": {
+      "count": 30,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_call_tests.rs": {
+      "count": 32,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_class_tests.rs": {
+      "count": 13,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_depth_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_fishing_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_flow_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_global_library_tests.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_harness_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_inference_tests.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_literal_tests.rs": {
+      "count": 9,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_module_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_narrowing_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_relation_tests.rs": {
+      "count": 13,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/differential_type_operator_tests.rs": {
+      "count": 7,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/divergence_certificate_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/enum_literal_tests.rs": {
+      "count": 21,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/equality_value_narrowing_tests.rs": {
+      "count": 7,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_narrowing_parity_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_accessor_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_class_tests.rs": {
+      "count": 18,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_construct_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs": {
+      "count": 49,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_frame_seal_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_global_tests.rs": {
+      "count": 15,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_lexical_tests.rs": {
+      "count": 44,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_loop_completion_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_null_policy_tests.rs": {
+      "count": 168,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_positional_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_root_gate_tests.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_schedule_tests.rs": {
+      "count": 25,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_tagged_template_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_tests.rs": {
+      "count": 31,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_type_argument_default_tests.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/generic_source_inference_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/heritage_signature_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/homomorphic_mapped_tests.rs": {
+      "count": 9,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/index_signature_access_tests.rs": {
+      "count": 15,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/indexed_access_name_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/indexed_access_relation_tests.rs": {
+      "count": 9,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/infer_inventory_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/infer_scope_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/inference_census_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/inference_fixation_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/intersection_complexity_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/intersection_distribution_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/intersection_reduction_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/keyof_application_tests.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/lib_generic_relation_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/lib_global_tests.rs": {
+      "count": 8,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/local_declaration_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/mapped_domain_parity_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/mapped_expand_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/member_accessibility_relation_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/merged_declaration_signature_tests.rs": {
+      "count": 12,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/module_object_tests.rs": {
+      "count": 9,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/module_value_surface_tests.rs": {
+      "count": 11,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/named_arm_reduction_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/namespace_member_value_tests.rs": {
+      "count": 9,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/namespace_merge_tests.rs": {
+      "count": 8,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/namespace_value_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/narrowing_call_named_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/narrowing_chain_growth_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/nested_reference_reduction_tests.rs": {
+      "count": 15,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/never_callee_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/object_literal_accessor_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/object_literal_key_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/object_spread_projection_eval_tests.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/projected_terminal_surface_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/reference_inference_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/relation_depth_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/relation_operand_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/relation_variance_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/relation_work_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/signature_discovery_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/signature_epoch_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/signature_predicate_inference_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/signature_predicate_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/signature_relation_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/string_mapping_template_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/template_complexity_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/template_pattern_relation_tests.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/tests.rs": {
+      "count": 12,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/this_receiver_tests.rs": {
+      "count": 6,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/tuple_length_and_apparent_member_tests.rs": {
+      "count": 8,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/tuple_splice_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/type_syntax_depth_tests.rs": {
+      "count": 8,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/undecided_call_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/undecided_conditional_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/unique_symbol_key_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/unique_symbol_widening_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/unread_marker_relation_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/project_semantic_dispatch_tests/wide_union_relation_tests.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/signature_corpus_rows_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/signature_corpus_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/tests/meta/events.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/tests/meta/fallthrough.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/tests/meta/general.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/tests/meta/generics.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/tests/meta/props.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/tests/meta/publication.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/oracle_core/gen.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/oracle_core/hover_extract/tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/oracle_core/identity.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/oracle_core/identity/tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/apparent_types.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/basic.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/call_rootless.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/contextual_typing.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/enums.rs": {
+      "count": 7,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/apparent_types.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/contextual_typing.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/mode_boundary_chain.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/mode_boundary_reexport_principal.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/modern_ts_features.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/narrow_discriminated_union.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/narrow_equality.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/narrow_in_operator.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/narrow_instanceof.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/narrow_truthiness.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/narrow_typeof.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/fixtures/substitution_types.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_substrate.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_discriminated_union.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_equality.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_in_operator.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_instanceof.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_truthiness.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_typeof.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/operator_reduction.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_gen_spike.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_query_specs.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_query_specs_vendored_sources.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_query_specs_vendored_sources_module_aug.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_toolchain.json": {
+      "count": 2,
+      "reason": "evidence-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/substitution_types.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/typeinfo/typeinfo_tests/value_inference.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/u6_flow_expect_tests.rs": {
+      "count": 10,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/u6_flow_shape_corpus_rows_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/src/u6_flow_shape_corpus_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/tests/allocation_cases/construction_bytes.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/tests/cases/g_block/framework_surface_executor.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/tests/cases/g_block/u2_display_projection_guards.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/tests/cases/g_block/u2b9_awaited_relation_guards.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/tests/cases/g_type/typeinfo_graph_query_executor.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/tests/cases/manifest_data/typeinfo_guard_registry.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_session/tests/cases/relation_nominal_authority.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsc/tests/cases/declaration_fail_closed.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsc/tests/cases/diagnostic_set_parity.rs": {
+      "count": 4,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsc/tests/cases/js_carrier_script_kind.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsgo_api/src/api_attach_tests.rs": {
+      "count": 10,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsgo_api/src/attach_tests.rs": {
+      "count": 21,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsgo_api/src/client.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsgo_api/src/control/messages_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsgo_api/src/control/server_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsgo_api/src/proto/schema_manifest.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsgo_api/src/relay_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsgo_api/tests/cases/codec_roundtrip.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_tsgo_api/tests/fixtures/wire-frames.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/build.rs": {
+      "count": 10,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/canonical_algebra.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/connected_demand.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/evaluate.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs": {
+      "count": 10,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/flow_return_operators.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/flow_return_widening.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/relation.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/template_relation.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/project_semantic_dispatch/tuple_product.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/semantic_query.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/semantic_query/checker_policy.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/semantic_query/display.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/semantic_query/stable_key_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_engine/src/signature_kernel/discovery_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_expr/tests/cases/type_expr_display.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_expr_oxc/src/binder_env_tests.rs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_expr_oxc/src/type_parameter_scope_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_expr_oxc/tests/cases/compound_lowering_shapes.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_runtime/src/discovery.rs": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_runtime/src/semantic_tokens_tests.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_runtime/src/tsgo/ipc.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_runtime/src/tsgo/ipc_tests.rs": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "crates/verter_type_runtime/tests/cases/owned_attach_version_gate.rs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "docs/arch/signature-kernel.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "docs/evidence/relation-benchmark.md": {
+      "count": 3,
+      "reason": "evidence-record"
+    },
+    "docs/evidence/signature-kernel/determinism-matrix.md": {
+      "count": 2,
+      "reason": "evidence-record"
+    },
+    "docs/evidence/signature-kernel/manifest.json": {
+      "count": 2,
+      "reason": "evidence-record"
+    },
+    "docs/evidence/signature-kernel/oxc-deep-parse.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "docs/evidence/signature-kernel/performance-gates.md": {
+      "count": 12,
+      "reason": "evidence-record"
+    },
+    "docs/evidence/signature-kernel/semantic-difference-ledger.md": {
+      "count": 7,
+      "reason": "evidence-record"
+    },
+    "editors/nvim/tests/fixtures/real-client/package.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "examples/reference/manifest.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "packages/benchmark/baselines/block6.1.1.0.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "packages/benchmark/baselines/block6.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "packages/benchmark/src/perf/axis-a-child.spec.ts": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "packages/benchmark/src/perf/gate.spec.ts": {
+      "count": 15,
+      "reason": "measured-record"
+    },
+    "packages/benchmark/src/perf/run.spec.ts": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "packages/component-meta/src/type-expr-bridge.spec.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "packages/dx-harness/test/earlyVerification.test.ts": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "packages/framework-conformance-harness/evidence/current-state.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "packages/vue-vscode/src/e2eProfileProvisioning.spec.ts": {
+      "count": 2,
+      "reason": "measured-record"
+    },
+    "scripts/benchmark/evidence-runs/README.md": {
+      "count": 3,
+      "reason": "evidence-record"
+    },
+    "scripts/benchmark/semantic-perf/expected.json": {
+      "count": 481,
+      "reason": "evidence-record"
+    },
+    "scripts/benchmark/semantic-perf/lib/bench-globals.d.ts": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "scripts/benchmark/semantic-perf/tsc-probe.mjs": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "scripts/benchmark/semantic-perf/tsc-session-probe.mjs": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "scripts/manifests/typeinfo-programme-reconciliation.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/architecture-health/ARH0/products/capability-matrix.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/browser-host/BWH0/products/browser-execution-manifest.v1.json": {
+      "count": 2,
+      "reason": "evidence-record"
+    },
+    "tests/component-workbench/CWB0/contract.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/product-experience/DX0/products/cross-surface-inventory.v1.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/product-experience/DX0/products/feature-exposure-contract.v1.json": {
+      "count": 3,
+      "reason": "evidence-record"
+    },
+    "tests/product-experience/DX0/products/host-execution-class.v1.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/STP1/products/current-feature-inventory.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/STP1/products/engine-matrix.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/STP5/mapper.spec.ts": {
+      "count": 5,
+      "reason": "measured-record"
+    },
+    "tests/sfc-projection/STP5/protocol.mjs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "tests/sfc-projection/STP6/protocol.mjs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "tests/sfc-projection/STP7/protocol.mjs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "tests/sfc-projection/STP8/abi-ratify.spec.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "tests/sfc-projection/STP8/products/accepted-vue-constructor-abi.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/STP8/protocol.mjs": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "tests/sfc-projection/STS0/manifest.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/STS0/products/svelte-current-feature-inventory.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/STS0/products/svelte-engine-framework-matrix.json": {
+      "count": 2,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/STS0/protocol.mjs": {
+      "count": 3,
+      "reason": "measured-record"
+    },
+    "tests/sfc-projection/STS0/svelte-lock.spec.ts": {
+      "count": 1,
+      "reason": "measured-record"
+    },
+    "tests/sfc-projection/evidence/STP10/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/evidence/STP12/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/evidence/STP13/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/evidence/STP32/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/evidence/STP5/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/evidence/STP6/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/evidence/STP7/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/evidence/STP8/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/evidence/STP9/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/sfc-projection/evidence/STS0/cases.md": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tests/workspace-responsiveness/WSP1B/products/issue93-early-verification.v1.json": {
+      "count": 1,
+      "reason": "evidence-record"
+    },
+    "tools/tsgo-api-gate/README.md": {
+      "count": 2,
+      "reason": "evidence-record"
+    },
+    "tools/tsgo-api-gate/run-gate.mjs": {
+      "count": 2,
+      "reason": "measured-record"
+    }
+  }
+}

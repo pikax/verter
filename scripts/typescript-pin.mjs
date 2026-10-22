@@ -27,6 +27,11 @@
  *   node scripts/typescript-pin.mjs --relock-evidence-manifest
  *       Re-lock the signature-kernel evidence manifest's derived digests (the
  *       contract bytes and the oracle section, from the toolchain record).
+ *   node scripts/typescript-pin.mjs --guard [--write-baseline]
+ *       Fail when a TypeScript 7.0 reference appears anywhere it is not
+ *       recorded in the guard baseline, or when the baseline records more than
+ *       remains (it can only shrink). --write-baseline rewrites the baseline
+ *       from the tree, keeping the recorded reason of every surviving entry.
  */
 
 import { execFileSync, execSync } from "node:child_process";
@@ -527,6 +532,178 @@ export function writeToolchainRecord(root = ROOT) {
 }
 
 // ---------------------------------------------------------------------------
+// Guard: TypeScript 7.0 references
+// ---------------------------------------------------------------------------
+
+export const GUARD_BASELINE = "scripts/typescript-pin.guard-baseline.json";
+
+/**
+ * TypeScript 7.0 reference patterns that hold anywhere in the tree: each
+ * names TypeScript (or its engine) next to the version, so a third-party
+ * package that happens to be 7.0.x never matches.
+ */
+export const CONTEXT_PATTERNS = [
+  /\bTypeScript 7\.0\b/,
+  /\btypescript@[~^]?7\.0\b/i,
+  /\b(?:tsgo|tsc) 7\.0\b/,
+  /"typescript"\s*:\s*"[~^]?7\.0\./,
+  /\btypescript-[a-z0-9]+-[a-z0-9]+@7\.0\./,
+  /\bVersion 7\.0\./,
+  /\b7\.0\.0-dev\./,
+  /<\s*7\.1\.0\b/,
+  /\b7\.0\.x\b/,
+  /\bts7-stable\b/,
+  /\bts-native[ @]7\.0\b/,
+  /\btypescript-7\.0\./,
+  /\bTypeScript `7\.0\b/,
+];
+
+/** A bare `7.0.N` is a TypeScript reference inside the engine-facing paths. */
+export const ENGINE_PATHS = [
+  "crates/verter_tsgo_api/",
+  "crates/verter_type_runtime/src/tsgo/",
+  "crates/verter_type_runtime/src/discovery.rs",
+  "crates/verter_tsc/",
+  "crates/verter_session/src/typeinfo/oracle_core/",
+  "tools/tsgo-api-gate/",
+  "scripts/sfc-projection/",
+  "tests/sfc-projection/",
+  "tests/architecture-health/",
+];
+export const BARE_PATTERN = /\b7\.0\.\d+\b/;
+
+/** Files the guard never reads: lockfiles (third-party resolutions) and itself. */
+const GUARD_SKIP = [
+  /(^|\/)pnpm-lock\.yaml$/,
+  /(^|\/)package-lock\.json$/,
+  /(^|\/)Cargo\.lock$/,
+  /^scripts\/typescript-pin(\.test)?\.mjs$/,
+  /^scripts\/typescript-pin\.guard-baseline\.json$/,
+];
+
+/** Why a remaining reference is allowed; every baseline entry names one. */
+export const GUARD_REASONS = {
+  "measured-record":
+    "an expected answer or evidence record measured on TypeScript 7.0; something reads it, so it waits for a re-measurement the operator schedules",
+  "evidence-record":
+    "a historical evidence record or report of a 7.0 measurement that is not regenerable here; left for the operator",
+  "third-party":
+    "a third-party product or package version that is not the TypeScript pin (e.g. an editor extension, a peer dependency)",
+};
+
+/**
+ * Tracked and untracked (not ignored) text files that mention `7.0` or
+ * `7.1.0` at all — a cheap prefilter; the patterns decide.
+ */
+function guardFiles(root) {
+  let out;
+  try {
+    out = execFileSync(
+      "git",
+      ["grep", "--untracked", "-I", "-l", "-z", "-E", "7\\.0|7\\.1\\.0|ts7-stable"],
+      { cwd: root, maxBuffer: 1 << 30 },
+    );
+  } catch (error) {
+    if (error.status === 1) return [];
+    throw error;
+  }
+  return out
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .filter((p) => !GUARD_SKIP.some((re) => re.test(p)));
+}
+
+/** Count the guarded lines of one file's text. */
+export function guardCount(path, text) {
+  // A crate manifest's dependency table names third-party versions only.
+  const engine =
+    ENGINE_PATHS.some((prefix) => path.startsWith(prefix)) && !path.endsWith("Cargo.toml");
+  let count = 0;
+  for (const line of text.split("\n")) {
+    if (CONTEXT_PATTERNS.some((re) => re.test(line)) || (engine && BARE_PATTERN.test(line)))
+      count++;
+  }
+  return count;
+}
+
+/** `{ path: count }` for every file carrying a guarded reference. */
+export function scanGuard(root = ROOT) {
+  const counts = {};
+  for (const path of guardFiles(root)) {
+    const file = join(root, path);
+    if (!existsSync(file)) continue;
+    const bytes = readFileSync(file);
+    if (bytes.includes(0)) continue;
+    const count = guardCount(path, bytes.toString("utf8"));
+    if (count > 0) counts[path] = count;
+  }
+  return counts;
+}
+
+export function readGuardBaseline(root = ROOT) {
+  const path = join(root, GUARD_BASELINE);
+  return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")).allowed : {};
+}
+
+/** Compare the tree against the baseline: new, grown, shrunk or unclassified entries. */
+export function checkGuard(counts, allowed) {
+  const problems = [];
+  for (const [path, count] of Object.entries(counts)) {
+    const entry = allowed[path];
+    if (!entry) problems.push(`${path}: ${count} new TypeScript 7.0 reference(s)`);
+    else if (count > entry.count)
+      problems.push(`${path}: ${count - entry.count} new TypeScript 7.0 reference(s)`);
+  }
+  for (const [path, entry] of Object.entries(allowed)) {
+    if (!GUARD_REASONS[entry.reason]) problems.push(`${path}: unknown reason \`${entry.reason}\``);
+    const count = counts[path] ?? 0;
+    if (count < entry.count) {
+      problems.push(
+        `${path}: the baseline allows ${entry.count} but ${count} remain — shrink it ` +
+          `(node scripts/typescript-pin.mjs --guard --write-baseline)`,
+      );
+    }
+  }
+  return problems;
+}
+
+/**
+ * The reason a NEW baseline entry starts with; review it. Source and test
+ * files carry the provenance of measured answers; documents and benchmark
+ * data are evidence records.
+ */
+export function defaultGuardReason(path) {
+  if (/^(docs|tests\/[^/]+\/evidence|packages\/[^/]+\/evidence|scripts\/benchmark)\//.test(path)) {
+    return "evidence-record";
+  }
+  if (/\.(rs|ts|mjs|js)$/.test(path)) return "measured-record";
+  return "evidence-record";
+}
+
+export function writeGuardBaseline(root = ROOT) {
+  const counts = scanGuard(root);
+  const previous = readGuardBaseline(root);
+  const allowed = {};
+  for (const path of Object.keys(counts).sort()) {
+    allowed[path] = {
+      count: counts[path],
+      reason: previous[path]?.reason ?? defaultGuardReason(path),
+    };
+  }
+  const doc = {
+    description:
+      "TypeScript 7.0 references that remain after the 7.1 cutoff, by file. The guard " +
+      "(node scripts/typescript-pin.mjs --guard) fails on any reference not counted here and on " +
+      "any count larger than what remains; regenerate with --guard --write-baseline.",
+    reasons: GUARD_REASONS,
+    allowed,
+  };
+  writeFileSync(join(root, GUARD_BASELINE), `${JSON.stringify(doc, null, 2)}\n`);
+  return allowed;
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -552,6 +729,18 @@ function main(argv) {
     console.log(`wrote ${relockEvidenceManifest(ROOT)}`);
     return 0;
   }
+  if (argv.includes("--guard")) {
+    if (argv.includes("--write-baseline")) {
+      const allowed = writeGuardBaseline(ROOT);
+      console.log(`wrote ${GUARD_BASELINE}: ${Object.keys(allowed).length} file(s)`);
+      return 0;
+    }
+    const problems = checkGuard(scanGuard(ROOT), readGuardBaseline(ROOT));
+    for (const p of problems) console.error(`typescript-7.0-guard: ${p}`);
+    if (problems.length === 0)
+      console.log("typescript-7.0-guard: no new TypeScript 7.0 references");
+    return problems.length ? 1 : 0;
+  }
   if (argv.includes("--check")) {
     const { pin, problems } = checkPins(ROOT);
     for (const p of problems) {
@@ -564,7 +753,7 @@ function main(argv) {
   }
   console.error(
     "Usage: typescript-pin.mjs --check | --set <version> [--allow-line-change] | " +
-      "--write-toolchain-record | --relock-evidence-manifest",
+      "--write-toolchain-record | --relock-evidence-manifest | --guard [--write-baseline]",
   );
   return 2;
 }

@@ -7,8 +7,10 @@ import { gzipSync } from "node:zlib";
 
 import {
   AUTHORITY,
+  checkGuard,
   checkPins,
   extractTarball,
+  guardCount,
   jsonStringValues,
   parseVersion,
   PIN_SITES,
@@ -109,6 +111,56 @@ test("JSON values are located by key path without re-serialising the file", () =
   assert.equal(b.value, 'x"y');
   assert.equal(text.slice(b.start, b.end), '"x\\"y"');
   assert.ok(values.some((v) => v.path.join(".") === "c.0.v" && v.value === "1"));
+});
+
+test("the guard flags TypeScript 7.0 references but not third-party 7.0.x versions", () => {
+  const flagged = [
+    "Measured on TypeScript 7.0.2: `x` is string",
+    "npm install -D typescript@7.0.2",
+    "the pinned tsgo 7.0.2 answers",
+    '"typescript": "7.0.2",',
+    "node_modules/.pnpm/@typescript+typescript-win32-x64@7.0.2",
+    "Version 7.0.2",
+    "7.0.0-dev.20260526.1",
+    "stable >=7.0.2, <7.1.0",
+    "verter-signature-corpus-v0@typescript-7.0.2",
+  ];
+  for (const line of flagged) assert.equal(guardCount("docs/x.md", line), 1, line);
+  const unrelated = [
+    'imbl = "7.0.1"',
+    '"webpack-cli": "^7.0.2",',
+    "hosted-git-info@7.0.2",
+    "http://127.0.0.1:6772/mcp",
+    "vite: 7.0.0",
+    "TypeScript 7.1.0-beta",
+  ];
+  for (const line of unrelated) assert.equal(guardCount("docs/x.md", line), 0, line);
+  // A bare version counts only on the engine-facing paths, never in a crate manifest.
+  assert.equal(guardCount("crates/verter_tsgo_api/src/x.rs", '"7.0.3"'), 1);
+  assert.equal(guardCount("crates/verter_tsc/Cargo.toml", 'oxc_sourcemap = "7.0.0"'), 0);
+  assert.equal(guardCount("crates/verter_semantic/src/x.rs", '"7.0.3"'), 0);
+});
+
+test("the guard baseline can only shrink and every entry names a known reason", () => {
+  const allowed = { "a.md": { count: 2, reason: "evidence-record" } };
+  assert.deepEqual(checkGuard({ "a.md": 2 }, allowed), []);
+  assert.match(checkGuard({ "a.md": 3 }, allowed).join(), /1 new TypeScript 7\.0 reference/);
+  assert.match(checkGuard({ "a.md": 2, "b.md": 1 }, allowed).join(), /b\.md: 1 new/);
+  assert.match(checkGuard({ "a.md": 1 }, allowed).join(), /shrink it/);
+  assert.match(checkGuard({}, allowed).join(), /shrink it/);
+  assert.match(
+    checkGuard({ "a.md": 2 }, { "a.md": { count: 2, reason: "because" } }).join(),
+    /unknown reason/,
+  );
+});
+
+test("no TypeScript 7.0 reference outside the guard baseline", async () => {
+  const { checkGuard: check, readGuardBaseline, scanGuard } = await import("./typescript-pin.mjs");
+  assert.deepEqual(
+    check(scanGuard(ROOT), readGuardBaseline(ROOT)),
+    [],
+    "run `node scripts/typescript-pin.mjs --guard` for the details",
+  );
 });
 
 test("an npm tarball unpacks without its package/ prefix and refuses path escapes", () => {
