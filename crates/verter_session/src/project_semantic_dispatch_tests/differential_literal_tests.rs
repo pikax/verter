@@ -502,8 +502,8 @@ fn an_optional_spread_property_over_an_existing_one_is_their_union() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Module values whose object or array literal initializers hold calls,
-/// beside a bare call and a call-free literal.
+/// Module and namespace values whose object or array literal initializers
+/// hold calls, beside a bare call and a call-free literal.
 const CALLS_IN_LITERALS: &str = r##"
 type __BenchInit = 0;
 declare function g(): 1;
@@ -522,31 +522,130 @@ export const rc = [g(), 2] as const;
 export const os = { a: f(), b: 1 } satisfies { a: number; b: number };
 export const S = f();
 export const plain = { a: n };
+namespace N {
+    export const r = [g()];
+    export const o = { a: f() };
+    export const nested = { a: [f()], b: { c: g() } };
+    export const S = f();
+    export const plain = { a: n };
+}
+namespace P { export namespace Q { export const o = { a: f() }; } }
 "##;
 
 /// A call that is an array-literal element or an object-literal property
-/// value types as its return: a call's result is no fresh literal, so a
+/// value types as its return, in a module value and in a namespace's,
+/// nested namespaces included: a call's result is no fresh literal, so a
 /// literal return type stays as it is where an authored literal beside it
-/// widens.
+/// widens. The answers are complete and read the same warm.
 #[test]
 fn a_call_inside_a_literal_types_as_its_return() {
-    let matrix = Matrix::new(CALLS_IN_LITERALS);
-    let failures = matrix.types(&[
-        ("typeof r", "1[]"),
-        ("typeof rLet", "1[]"),
-        ("typeof o", "{ a: number; }"),
-        ("typeof oLit", "{ a: 1; }"),
-        ("typeof nested", "{ a: number[]; }"),
-        ("typeof deep", "{ a: number; b: number[]; }[]"),
-        ("typeof mixed", "{ a: number; b: string; c: number; }"),
-        ("typeof fresh", "number[]"),
-        ("typeof lo", "{ a: 1; b: number; }"),
-        ("typeof rc", "readonly [1, 2]"),
-        ("typeof os", "{ a: number; b: number; }"),
-        ("typeof S", "number"),
-        ("typeof plain", "{ a: number; }"),
-    ]);
+    let failures = cold_and_warm(
+        &Matrix::new(CALLS_IN_LITERALS),
+        &[
+            ("typeof r", "1[]"),
+            ("typeof rLet", "1[]"),
+            ("typeof o", "{ a: number; }"),
+            ("typeof oLit", "{ a: 1; }"),
+            ("typeof nested", "{ a: number[]; }"),
+            ("typeof deep", "{ a: number; b: number[]; }[]"),
+            ("typeof mixed", "{ a: number; b: string; c: number; }"),
+            ("typeof fresh", "number[]"),
+            ("typeof lo", "{ a: 1; b: number; }"),
+            ("typeof rc", "readonly [1, 2]"),
+            ("typeof os", "{ a: number; b: number; }"),
+            ("typeof S", "number"),
+            ("typeof plain", "{ a: number; }"),
+            ("typeof N.r", "1[]"),
+            ("typeof N.o", "{ a: number; }"),
+            ("typeof N.nested", "{ a: number[]; b: { c: 1; }; }"),
+            ("typeof N.S", "number"),
+            ("typeof N.plain", "{ a: number; }"),
+            ("typeof P.Q.o", "{ a: number; }"),
+        ],
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Object literals holding `get` / `set` accessors, alone and paired, in
+/// either order, beside a call and beside a call-free value, as module
+/// values, nested, under `as const` and as a function's return.
+const ACCESSORS_IN_LITERALS: &str = r##"
+declare function f(): number;
+declare const n: number;
+export const getCall = { a: f(), get b() { return 1; } };
+export const setCall = { a: f(), set b(v: number) {} };
+export const pairCall = { a: f(), get b() { return 1; }, set b(v: number) {} };
+export const pairCallReversed = { a: f(), set b(v: number) {}, get b() { return 1; } };
+export const getPlain = { a: n, get b() { return 1; } };
+export const setPlain = { a: n, set b(v: number) {} };
+export const pairPlain = { a: n, get b() { return 1; }, set b(v: number) {} };
+export const nestedGet = { o: { get b() { return 1; } } };
+export const constPair = { get b() { return 1; }, set b(v: number) {} } as const;
+export const annotatedSetter = { get b() { return "a"; }, set b(v: string | number) {} };
+export function returnedGetCall() { return { a: f(), get b() { return 1; } }; }
+export function returnedPairCall() { return { a: f(), get b() { return 1; }, set b(v: number) {} }; }
+export function returnedGetPlain() { return { a: n, get b() { return 1; } }; }
+"##;
+
+/// An accessor in an object literal is the property the checker gives it,
+/// with or without a call beside it: a getter alone is a `readonly`
+/// property of its return, a setter alone a mutable property of its
+/// parameter, and a get / set pair, in either order, ONE mutable property
+/// (the getter's return, else the setter's annotated parameter) — never the
+/// accessor function, never two members. The answers are complete and read
+/// the same warm.
+#[test]
+fn an_accessor_in_a_literal_is_the_property_it_reads_as() {
+    let matrix = Matrix::new(ACCESSORS_IN_LITERALS);
+    let mut failures = cold_and_warm(
+        &matrix,
+        &[
+            ("typeof getCall", "{ a: number; readonly b: number; }"),
+            ("typeof setCall", "{ a: number; b: number; }"),
+            ("typeof pairCall", "{ a: number; b: number; }"),
+            ("typeof pairCallReversed", "{ a: number; b: number; }"),
+            ("typeof getPlain", "{ a: number; readonly b: number; }"),
+            ("typeof setPlain", "{ a: number; b: number; }"),
+            ("typeof pairPlain", "{ a: number; b: number; }"),
+            ("typeof nestedGet", "{ o: { readonly b: number; }; }"),
+            ("typeof constPair", "{ b: number; }"),
+            ("typeof annotatedSetter", "{ b: string | number; }"),
+        ],
+    );
+    failures.extend(matrix.returns(&[
+        ("returnedGetCall", "{ a: number; readonly b: number; }"),
+        ("returnedPairCall", "{ a: number; b: number; }"),
+        ("returnedGetPlain", "{ a: number; readonly b: number; }"),
+    ]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every `(type probe, checker print)` row answering the same in every
+/// setting, read cold and then warm on one host, as the failure list: a
+/// degraded, partial or wrong answer fails either read.
+fn cold_and_warm(matrix: &Matrix<'_>, rows: &[(&str, &str)]) -> Vec<String> {
+    let settings = super::differential_harness_tests::ALL.len();
+    let rows: Vec<(Read<'_>, Vec<&str>)> = rows
+        .iter()
+        .map(|(probe, answer)| (Read::Type(probe), vec![*answer; settings]))
+        .collect();
+    let host = matrix.host(&rows);
+    let mut failures = Vec::new();
+    for read in ["cold", "warm"] {
+        for ((probe, answers), verdicts) in rows.iter().zip(matrix.verdicts_on(&host, &rows)) {
+            for (expected, verdict) in answers.iter().zip(verdicts) {
+                if !verdict.matched {
+                    failures.push(format!(
+                        "{} `{}` ({read}): the checker answers `{expected}`, {}",
+                        verdict.class,
+                        probe.text(),
+                        verdict.lane
+                    ));
+                }
+            }
+        }
+    }
+    failures
 }
 
 /// Object and array literals holding block-bodied function values, as

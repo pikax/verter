@@ -15503,6 +15503,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         self.apply_accessor_annotation_precedence(entries, &mut surface_members);
         self.apply_accessor_annotation_precedence(entries, &mut unwidened_members);
+        // The literal's type holds each accessor as the one property the
+        // checker gives it (`checkObjectLiteral` keeps the accessor symbol,
+        // whose type is its read type): a getter alone is a `readonly`
+        // property of its return, a setter alone a property of its
+        // parameter, a get / set pair one mutable property at the first's
+        // position — never the accessor function.
+        let graph = self.dispatch.graph();
+        let surface_members = crate::semantic_query::members_with_accessors_as_properties(
+            surface_members,
+            &graph,
+            |signature| self.dispatch.materialize_returned_callable(signature),
+        );
+        let unwidened_members = crate::semantic_query::members_with_accessors_as_properties(
+            unwidened_members,
+            &graph,
+            |signature| self.dispatch.materialize_returned_callable(signature),
+        );
         let identify = |surface: SemanticNodeId| {
             if !recursive {
                 return surface;

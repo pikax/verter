@@ -7723,7 +7723,8 @@ fn indexed_read_path(expr: &Expression<'_>) -> Option<(Vec<String>, verter_span:
 /// Whether an object or array literal holds, as a property value or an
 /// element at any depth of literal nesting, a function value whose return
 /// derives from a statement block: an arrow function with a block body or a
-/// function expression, without a return annotation. The value inference
+/// function expression, without a return annotation, or a `get` / `set`
+/// accessor, whose property is its read type. The value inference
 /// types an expression body directly, but a block body's return is the flow
 /// evaluator's, so such a literal is typed where it is written by the flow
 /// evaluator. Facts and function discovery use this same classification.
@@ -7756,6 +7757,15 @@ pub(super) fn literal_holds_block_bodied_function(mut expression: &Expression<'_
                 pending.push(&assertion.expression);
             }
             Expression::ObjectExpression(object) => {
+                // An accessor's body is a statement block, and the literal's
+                // property is the accessor's read type, which the flow
+                // evaluator derives from that body (or the annotation).
+                if object.properties.iter().any(|property| {
+                    matches!(property, ObjectPropertyKind::ObjectProperty(property)
+                        if matches!(property.kind, PropertyKind::Get | PropertyKind::Set))
+                }) {
+                    return true;
+                }
                 pending.extend(
                     object
                         .properties

@@ -1618,6 +1618,99 @@ fn discover_function_declaration_named<'ast>(
     );
 }
 
+/// Record the program expression a variable's initializer `init` is, at
+/// `descent` under the contributor, for the declaration `name` (qualified
+/// by its enclosing namespaces). An initializer the flow evaluator types —
+/// a call holding a callback, a literal holding a block-bodied function or
+/// a call, a member read it names — is served as an expression body of its
+/// own, so a module variable and a namespace's variable take the one
+/// served path; any other initializer's call arguments are discovered
+/// where they stand.
+fn discover_variable_initializer<'ast>(
+    init: &'ast Expression<'ast>,
+    name: &str,
+    kind: oxc_ast::ast::VariableDeclarationKind,
+    contributor_index: usize,
+    descent: &FunctionDescent,
+    ctx: &mut DiscoveryCtx<'_, 'ast>,
+) {
+    let Some(anchor) = ctx.anchor(contributor_index) else {
+        return;
+    };
+    let mut source = program_expression_source(&ctx.walks, init);
+    let contextual_call = matches!(&source, ProgramExpressionSource::SemanticCall { site, .. }
+        if site.args.iter().any(|argument| argument.is_function_value))
+        || matches!(unwrap_program_expression(init), Expression::CallExpression(call)
+            if call.arguments.iter().any(|argument|
+                super::type_eval_build::indexed_context_sensitive(argument.as_expression())
+                    || argument.as_expression().is_some_and(
+                        super::type_eval_build::literal_holds_block_bodied_function)));
+    // A literal holding a block-bodied function value is typed by the
+    // flow evaluator, which owns that function's body-derived return.
+    let contextual_literal = super::type_eval_build::contextual_object_initializer(init)
+        || (super::type_eval_build::literal_holds_block_bodied_function(init)
+            && !super::type_eval_build::has_authoritative_value_assertion(init));
+    // An object or array literal holding a call is typed by the
+    // flow evaluator, which evaluates each call where the literal
+    // holds it, so the literal is a served expression body too.
+    let call_literal = matches!(source, ProgramExpressionSource::UnsupportedCall)
+        && matches!(
+            unwrap_program_expression(init),
+            Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
+        )
+        && !super::type_eval_build::has_authoritative_value_assertion(init);
+    // A member read through a computed key or an optional chain is
+    // typed by the flow evaluator too, which reads the member it names.
+    let member_read = super::type_eval_build::flow_typed_member_read(init)
+        && !super::type_eval_build::has_authoritative_value_assertion(init);
+    let served_initializer = contextual_literal || call_literal || member_read;
+    if contextual_call || served_initializer {
+        // The initializer is a served expression body. Its callbacks
+        // use the same flow evaluator and call continuation as bodies.
+        discover_initializer_inner(
+            init,
+            name,
+            FunctionPartIdentity::Initializer,
+            contributor_index,
+            descent.clone(),
+            ctx,
+        );
+        let served = verter_session_query::function_program::ProgramInitializerSource {
+            function: FlowFunctionReturnIdentity {
+                anchor: AuthoredAnchor {
+                    canonical_id: verter_type_expr::OwnedStr::from(ctx.canonical_id.clone()),
+                    owner: anchor.owner,
+                    symbol: verter_type_expr::OwnedStr::from(name),
+                    space: LocatorSymbolSpace::Value,
+                },
+                function_part: FunctionPartIdentity::Initializer,
+                overload_ordinal: 0,
+            },
+            preserve_literals: kind == oxc_ast::ast::VariableDeclarationKind::Const,
+        };
+        if let ProgramExpressionSource::SemanticCall { initializer, .. } = &mut source {
+            *initializer = Some(served);
+        } else {
+            source = ProgramExpressionSource::VariableInitializer(served);
+        }
+    }
+    ctx.expressions.push(ProgramExpressionRecord {
+        point: ProgramExpressionIdentity {
+            canonical_id: Arc::clone(&ctx.canonical_id),
+            offset: init.span().start,
+        },
+        span: verter_span::Span::new(init.span().start, init.span().end),
+        locator: FunctionBodyLocator {
+            contributor: anchor,
+            descent: descent.clone(),
+        },
+        source,
+    });
+    if !contextual_call && !served_initializer {
+        discover_top_level_call_arg_positions(init, name, anchor, descent, ctx);
+    }
+}
+
 fn discover_variable_declaration<'ast>(
     var_decl: &'ast VariableDeclaration<'ast>,
     contributor_index: usize,
@@ -1638,83 +1731,14 @@ fn discover_variable_declaration<'ast>(
         let declarator_ordinal = u32::try_from(declarator_ordinal).unwrap_or(u32::MAX);
         let base_descent = FunctionDescent::new()
             .then(FunctionDescentStep::VariableInitializer { declarator_ordinal });
-        if let Some(anchor) = ctx.anchor(contributor_index) {
-            let mut source = program_expression_source(&ctx.walks, init);
-            let contextual_call = matches!(&source, ProgramExpressionSource::SemanticCall { site, .. }
-                if site.args.iter().any(|argument| argument.is_function_value))
-                || matches!(unwrap_program_expression(init), Expression::CallExpression(call)
-                    if call.arguments.iter().any(|argument|
-                        super::type_eval_build::indexed_context_sensitive(argument.as_expression())
-                            || argument.as_expression().is_some_and(
-                                super::type_eval_build::literal_holds_block_bodied_function)));
-            // A literal holding a block-bodied function value is typed by the
-            // flow evaluator, which owns that function's body-derived return.
-            let contextual_literal = super::type_eval_build::contextual_object_initializer(init)
-                || (super::type_eval_build::literal_holds_block_bodied_function(init)
-                    && !super::type_eval_build::has_authoritative_value_assertion(init));
-            // An object or array literal holding a call is typed by the
-            // flow evaluator, which evaluates each call where the literal
-            // holds it, so the literal is a served expression body too.
-            let call_literal = matches!(source, ProgramExpressionSource::UnsupportedCall)
-                && matches!(
-                    unwrap_program_expression(init),
-                    Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
-                )
-                && !super::type_eval_build::has_authoritative_value_assertion(init);
-            // A member read through a computed key or an optional chain is
-            // typed by the flow evaluator too, which reads the member it names.
-            let member_read = super::type_eval_build::flow_typed_member_read(init)
-                && !super::type_eval_build::has_authoritative_value_assertion(init);
-            let served_initializer = contextual_literal || call_literal || member_read;
-            if contextual_call || served_initializer {
-                // The initializer is a served expression body. Its callbacks
-                // use the same flow evaluator and call continuation as bodies.
-                discover_initializer_inner(
-                    init,
-                    &name,
-                    FunctionPartIdentity::Initializer,
-                    contributor_index,
-                    base_descent.clone(),
-                    ctx,
-                );
-                let served = verter_session_query::function_program::ProgramInitializerSource {
-                    function: FlowFunctionReturnIdentity {
-                        anchor: AuthoredAnchor {
-                            canonical_id: verter_type_expr::OwnedStr::from(
-                                ctx.canonical_id.clone(),
-                            ),
-                            owner: anchor.owner,
-                            symbol: verter_type_expr::OwnedStr::from(name.as_str()),
-                            space: LocatorSymbolSpace::Value,
-                        },
-                        function_part: FunctionPartIdentity::Initializer,
-                        overload_ordinal: 0,
-                    },
-                    preserve_literals: var_decl.kind
-                        == oxc_ast::ast::VariableDeclarationKind::Const,
-                };
-                if let ProgramExpressionSource::SemanticCall { initializer, .. } = &mut source {
-                    *initializer = Some(served);
-                } else {
-                    source = ProgramExpressionSource::VariableInitializer(served);
-                }
-            }
-            ctx.expressions.push(ProgramExpressionRecord {
-                point: ProgramExpressionIdentity {
-                    canonical_id: Arc::clone(&ctx.canonical_id),
-                    offset: init.span().start,
-                },
-                span: verter_span::Span::new(init.span().start, init.span().end),
-                locator: FunctionBodyLocator {
-                    contributor: anchor,
-                    descent: base_descent.clone(),
-                },
-                source,
-            });
-            if !contextual_call && !served_initializer {
-                discover_top_level_call_arg_positions(init, &name, anchor, &base_descent, ctx);
-            }
-        }
+        discover_variable_initializer(
+            init,
+            &name,
+            var_decl.kind,
+            contributor_index,
+            &base_descent,
+            ctx,
+        );
         let descent = |extra: FunctionDescentStep| base_descent.then(extra);
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
@@ -2025,21 +2049,7 @@ fn discover_variable_declaration_ns<'ast>(
         };
         let declarator_ordinal = u32::try_from(declarator_ordinal).unwrap_or(u32::MAX);
         let base = descent.then(FunctionDescentStep::VariableInitializer { declarator_ordinal });
-        if let Some(anchor) = ctx.anchor(contributor_index) {
-            ctx.expressions.push(ProgramExpressionRecord {
-                point: ProgramExpressionIdentity {
-                    canonical_id: Arc::clone(&ctx.canonical_id),
-                    offset: init.span().start,
-                },
-                span: verter_span::Span::new(init.span().start, init.span().end),
-                locator: FunctionBodyLocator {
-                    contributor: anchor,
-                    descent: base.clone(),
-                },
-                source: program_expression_source(&ctx.walks, init),
-            });
-            discover_top_level_call_arg_positions(init, &name, anchor, &base, ctx);
-        }
+        discover_variable_initializer(init, &name, var_decl.kind, contributor_index, &base, ctx);
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
                 discover_arrow_inner(

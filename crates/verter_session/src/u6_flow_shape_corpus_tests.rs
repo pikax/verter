@@ -3950,7 +3950,7 @@ mod corpus_suite {
             ),
             (
                 "X14_accessor_pair",
-                "checker prints `{ get g(): string; set g(v: string | number); n: number; }`; the renderer spells the duplicate-member surface `{ g: () => string, g: (Union(string | number)) => void, n: number }` — accessor spelling and member terminators differ",
+                "checker prints `{ get g(): string; set g(v: string | number); n: number; }`; the renderer spells the one property the pair reads as `{ g: string, n: number }` — accessor spelling and member terminators differ| number)) => void, n: number }` — accessor spelling and member terminators differ",
             ),
             (
                 "X18_async_return",
@@ -5471,8 +5471,6 @@ const OPEN_DEBTS: &[&str] = &[
     // ── NARROWING ────────────────────────────────────────────────────
     "N55_in_operator_nonliteral_key",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
-    // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
-    "X14_accessor_pair",
     // A generator return: the generator wrap has no lib `Generator` head to
     // resolve in this standalone environment, so the return is the typed
     // unmodelled-position marker.

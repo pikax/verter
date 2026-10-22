@@ -524,9 +524,17 @@ namespace Ns {
     let object_members: Vec<_> = index
         .entries_for_test()
         .iter()
-        .filter(|entry| entry.key().declaration.name.as_ref() == "obj")
+        .filter(|entry| {
+            entry.key().declaration.name.as_ref() == "obj"
+                && matches!(entry.key().part, FunctionPartIdentity::Member { .. })
+        })
         .collect();
     assert_eq!(object_members.len(), 2, "method + accessor both index");
+    // A literal holding an accessor is a served initializer of its own.
+    assert!(matches!(
+        entry_of(&index, "obj").key().part,
+        FunctionPartIdentity::Initializer
+    ));
 
     let inner = entry_of(&index, "Ns.inner");
     assert!(matches!(
