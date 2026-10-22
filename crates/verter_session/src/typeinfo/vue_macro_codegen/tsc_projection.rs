@@ -21,8 +21,8 @@ use verter_type_engine::semantic_query::FactStatus;
 /// payload parameters reach the render through two further hops and had
 /// no widen at all. A carrier declared in ANOTHER module is nameable and
 /// keeps its precise `typeof` spelling at every depth.
-fn nameable_render_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn nameable_render_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
 ) -> verter_type_engine::semantic_query_memo::node_roots::Constructed<
@@ -33,8 +33,8 @@ fn nameable_render_node(
         .widen_owner_local_nominal_typeofs(node, owner_canonical)
 }
 
-pub(super) fn render_tsc_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn render_tsc_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
@@ -95,8 +95,8 @@ pub(super) fn render_tsc_node(
 /// on the owning `TscDependencyDeclaration` wherever the member's
 /// declaration is a tracked local dependency. A genuine miss (no rendered
 /// node at all) still fails closed, matching every other caller.
-pub(super) fn render_tsc_testing_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn render_tsc_testing_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
@@ -146,10 +146,10 @@ fn testing_degradation(
     }
 }
 
-pub(super) fn tsc_scope_requirements(
+pub(super) fn tsc_scope_requirements<M: verter_audit::observe::ObserveExec>(
     mac: &AnalyzedMacro,
     inventory: &TscScopeInventory<'_>,
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
 ) -> Result<TscScopeRequirements, ProjectionFailure> {
     tsc_scope_requirements_for(
@@ -171,12 +171,12 @@ pub(super) fn tsc_scope_requirements(
 /// `None` for that caller: there is no macro type-argument span to join
 /// `macro_type_deps` rows against, so that lookup is skipped rather than
 /// matching a span that does not describe this demand.
-pub(super) fn tsc_scope_requirements_for(
+pub(super) fn tsc_scope_requirements_for<M: verter_audit::observe::ObserveExec>(
     owner: verter_type_expr::TopLevelOwnerId,
     macro_span: Option<verter_span::Span>,
     type_references: &[String],
     inventory: &TscScopeInventory<'_>,
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
 ) -> Result<TscScopeRequirements, ProjectionFailure> {
     let macro_owner = tsc_script_owner(owner)?;
@@ -552,14 +552,14 @@ fn inferred_class_static_key_name(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn inferred_class_members(
+fn inferred_class_members<M: verter_audit::observe::ObserveExec>(
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
     contributor_ordinal: usize,
     declaration_span: verter_span::Span,
     include_static: bool,
     inventory: &TscScopeInventory<'_>,
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
 ) -> Result<InferredClassProjection, ClassInferenceFailure> {
     fn collect_overload_groups(
@@ -1224,8 +1224,8 @@ fn binding_usage_precedence(usage: TscBindingUsage) -> u8 {
 /// the registry-backed [`verter_session_query::resolution::path_is_carrier`], the
 /// single structural authority (a new carrier extends the registry, not this
 /// predicate).
-pub(super) fn emit_type_is_cross_sfc_carrier(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn emit_type_is_cross_sfc_carrier<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     payload: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
 ) -> bool {
@@ -1254,9 +1254,9 @@ pub(super) fn emit_type_is_cross_sfc_carrier(
 /// Returns `None` — deferring to the display path — for a local type, or a
 /// cross-file type whose bare name IS a directly-imported binding (the scope
 /// requirements retain that named import, so the bare form already resolves).
-pub(super) fn cross_file_namespace_import_type(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn cross_file_namespace_import_type<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     attempt: &mut verter_compiler::compile_transaction::CompileAttempt<'_>,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
@@ -1301,8 +1301,8 @@ pub(super) fn cross_file_namespace_import_type(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn tsc_emit_rows(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn tsc_emit_rows<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
     surface: &TypeInfoSurface,
     mac: &AnalyzedMacro,
@@ -1423,8 +1423,8 @@ fn push_tsc_emit(
     true
 }
 
-fn render_emit_payload_parameters(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn render_emit_payload_parameters<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
@@ -1456,8 +1456,8 @@ fn render_emit_payload_parameters(
     }
 }
 
-fn render_tuple_parameters(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn render_tuple_parameters<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
     elements: &[verter_type_engine::semantic_query::TupleElement],
     counters: &mut VueMacroCodegenCounters,
@@ -1482,8 +1482,8 @@ fn render_tuple_parameters(
     )))
 }
 
-fn render_function_parameters(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn render_function_parameters<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
     params: &[verter_type_engine::semantic_query::FunctionParam],
     counters: &mut VueMacroCodegenCounters,

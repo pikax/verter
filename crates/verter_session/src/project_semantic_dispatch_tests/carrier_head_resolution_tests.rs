@@ -75,8 +75,8 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
 
 /// The `NodeScopeId::File` for `canonical`, sourced from the host's live
 /// shallow state (so the `whole_hash` matches the eager lowering path's scope).
-pub(super) fn file_scope(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn file_scope<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical: &str,
 ) -> NodeScopeId {
     file_scope_in_owner(
@@ -86,8 +86,8 @@ pub(super) fn file_scope(
     )
 }
 
-fn file_scope_in_owner(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn file_scope_in_owner<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
 ) -> NodeScopeId {
@@ -105,13 +105,13 @@ fn file_scope_in_owner(
 
 /// Construct a `BareRef(name, scope, args)` carrier node, where `args` are the
 /// interned primitive type arguments (`Foo<string, …>`).
-pub(super) fn bare_ref_carrier(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn bare_ref_carrier<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     name: &str,
     scope: NodeScopeId,
     args: &[PrimitiveKind],
 ) -> SemanticNodeId {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let arg_nodes: Vec<SemanticNodeId> = args
         .iter()
         .map(|k| graph.intern_node_with_scope(SemanticNodeData::Primitive(*k), scope.clone()))
@@ -139,7 +139,7 @@ pub(super) fn import_type_carrier(
     typeof_query: bool,
     owner_scope: NodeScopeId,
 ) -> SemanticNodeId {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let qualifier: Arc<[Arc<str>]> = Arc::from(
         qualifier
             .iter()
@@ -164,8 +164,8 @@ pub(super) fn import_type_carrier(
 
 /// Drive a carrier node through the dispatch as the base of an empty-path
 /// `ProjectPath` query in `mode`, returning the resolved subject node.
-fn resolve_subject(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn resolve_subject<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     carrier: SemanticNodeId,
     mode: ProjectionMode,
 ) -> SemanticNodeId {
@@ -232,8 +232,8 @@ fn eager_resolved(
     resolve_subject(dispatch, lowered, mode)
 }
 
-fn is_opaque(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn is_opaque<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
 ) -> bool {
     matches!(
@@ -242,8 +242,8 @@ fn is_opaque(
     )
 }
 
-fn is_bare_ref(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn is_bare_ref<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
 ) -> bool {
     matches!(
@@ -928,7 +928,7 @@ fn nested_bare_ref_carrier_in_intersection_resolves() {
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let scope = file_scope(&dispatch, "/n.ts");
 
     // Build `BareRef("A") & BareRef("B")` as an Intersection of two carriers.
@@ -1159,7 +1159,7 @@ fn normal_path_walker_reenters_carrier_normalization_behind_alias() {
     upsert_ts(&host, "/aw.ts", "export type Foo = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let scope = file_scope(&dispatch, "/aw.ts");
 
     // `Alias(BareRef("Foo"))` — the carrier is reached behind the alias, NOT as
@@ -1216,7 +1216,7 @@ fn normal_path_walker_unresolvable_carrier_behind_alias_misses() {
     upsert_ts(&host, "/aw2.ts", "export type Real = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let scope = file_scope(&dispatch, "/aw2.ts");
 
     // `Alias(BareRef("DoesNotExist"))` — the head names no symbol in /aw2.ts.
@@ -2136,12 +2136,15 @@ fn a_builtin_utility_build_reads_the_scope_payload_once() {
         "/p.ts",
         "export type Foo = { a: string };\nexport type X = Partial<Foo>;\n",
     );
-    let dispatch = ProjectSemanticDispatch::new(&host);
+    // Bind the observer before the captured resolver snapshots its receivers.
+    let counter = Arc::new(ScopePayloadReadCounter::default());
+    let guard = verter_audit::observer::install_observer(counter.clone());
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch = ProjectSemanticDispatch::new(&captured);
     let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/p.ts");
     let carrier = bare_ref_carrier(&dispatch, "Partial", scope, &[PrimitiveKind::String]);
-    let counter = Arc::new(ScopePayloadReadCounter::default());
-    let guard = verter_audit::observer::install_observer(counter.clone());
     let resolved = resolve_subject(&dispatch, carrier, ProjectionMode::Expanded);
     drop(guard);
     assert!(
@@ -2188,7 +2191,7 @@ fn a_budget_trip_after_resolution_never_answers_complete() {
         );
         let dispatch = ProjectSemanticDispatch::new(&host);
         let _builder = dispatch.enter_construction_scope();
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let literal = |text: &str| {
             graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text.into())))
         };

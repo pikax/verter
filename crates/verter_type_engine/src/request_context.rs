@@ -610,12 +610,20 @@ pub struct SynthesisScopeGuard {
 
 impl SynthesisScopeGuard {
     /// Enter the synthesis phase: raise the active depth on the current
-    /// request context (if any).
+    /// request context (if any). `M` is the entering unit's capture
+    /// execution; the uncaptured one reads no request context.
     #[inline(always)]
-    pub fn enter() -> Self {
+    pub fn enter<M: verter_audit::observe::ObserveExec>(
+        observation: &crate::request_observers::CaptureTargets,
+    ) -> Self {
+        let _ = observation;
         #[cfg(feature = "semantic-observe")]
         {
-            let ctx = current_request_context();
+            let ctx = if M::CAPTURED {
+                observation.request.clone()
+            } else {
+                None
+            };
             if let Some(ctx) = ctx.as_ref() {
                 ctx.synthesis_active_depth.fetch_add(1, Ordering::Relaxed);
             }
@@ -641,10 +649,20 @@ impl Drop for SynthesisScopeGuard {
 /// `build_instantiate` alongside the request-wide
 /// [`RequestContext::expanded_instantiate_calls`] bump. No-op when no
 /// context is installed or synthesis is not active.
+///
+/// `M` is the instantiating dispatcher's capture execution; the uncaptured
+/// one reads no request context.
 #[inline(always)]
-pub fn note_expanded_instantiate_for_synthesis_scope() {
+pub fn note_expanded_instantiate_for_synthesis_scope<M: verter_audit::observe::ObserveExec>(
+    observation: &crate::request_observers::CaptureTargets,
+) {
+    let _ = observation;
     #[cfg(feature = "semantic-observe")]
-    if let Some(ctx) = current_request_context() {
+    if !M::CAPTURED {
+        return;
+    }
+    #[cfg(feature = "semantic-observe")]
+    if let Some(ctx) = observation.request.as_deref() {
         if ctx.synthesis_active_depth.load(Ordering::Relaxed) > 0 {
             ctx.synthesis_expanded_instantiate_calls
                 .fetch_add(1, Ordering::Relaxed);
@@ -751,10 +769,9 @@ pub struct PerRequestCacheCounters {
 /// each component-meta request emits its own delta (no host-global
 /// accumulation, no cross-request leakage).
 ///
-/// Atomic increments are negligible (~ns) compared with the µs–ms
-/// of work each bump observes, so the counters stay on in production
-/// builds — that is the only state in which the bench corpus surfaces
-/// the bypass leverage these counters measure.
+/// Only counters with live producers are retained. Their storage and
+/// snapshot reader compile only with `semantic-observe`; compatibility-only
+/// wire fields are emitted as literal zeros by the audit builder.
 #[derive(Debug, Default)]
 pub struct BypassDiagnosticCounters {
     /// Number of `HostStoreView::from_host` invocations on the
@@ -770,13 +787,6 @@ pub struct BypassDiagnosticCounters {
     /// Final-state invariant: `0` — every production engine is bound
     /// to a request-bound ctx.
     pub bare_engine_constructions: ObservedU64,
-    /// Number of `ResolverContext::resolver_store_view()` calls on
-    /// the current request. Each call rebuilds a full owned
-    /// `HostStoreView` via `HostStoreView::from_host`; warm-hit
-    /// validator paths in `fact_signature_helpers` now consult the
-    /// borrowed `store_view()` directly, so this counter trends to 0
-    /// in production.
-    pub resolver_store_view_calls: ObservedU64,
 }
 
 impl BypassDiagnosticCounters {
@@ -785,32 +795,12 @@ impl BypassDiagnosticCounters {
     /// observe every prior bump.
     #[cfg(feature = "semantic-observe")]
     #[must_use]
-    pub fn snapshot(&self) -> (u64, u64, u64) {
+    pub fn snapshot(&self) -> (u64, u64) {
         (
             self.host_store_view_from_host_builds
                 .load(Ordering::Relaxed),
             self.bare_engine_constructions.load(Ordering::Relaxed),
-            self.resolver_store_view_calls.load(Ordering::Relaxed),
         )
-    }
-}
-
-/// Bump the per-request `resolver_store_view_calls` diagnostic
-/// counter when a request context is installed. The bump is a noop
-/// outside an audited request (synthesised tests, non-audited
-/// callers). Called from every
-/// `impl ResolverContext::resolver_store_view()` so the counter
-/// observes all trait-dispatched owned-view rebuilds — the
-/// warm-hit validator path was the dominant consumer until the
-/// borrowed-view substitution landed.
-#[inline(always)]
-pub fn bump_resolver_store_view_call() {
-    #[cfg(feature = "semantic-observe")]
-    if let Some(ctx) = current_request_context() {
-        ctx.cache_counters
-            .bypass_diagnostics
-            .resolver_store_view_calls
-            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -821,7 +811,7 @@ pub fn bump_resolver_store_view_call() {
 #[inline(always)]
 pub fn bump_bare_engine_construction() {
     #[cfg(feature = "semantic-observe")]
-    if let Some(ctx) = current_request_context() {
+    if let Some(ctx) = current_captured_request_context() {
         ctx.cache_counters
             .bypass_diagnostics
             .bare_engine_constructions
@@ -872,6 +862,22 @@ pub struct RequestContext {
     /// context.
     #[cfg(feature = "semantic-observe")]
     pub kind: verter_audit::RequestKind,
+    /// The concrete execution mode the request's root entry selected (see
+    /// [`Self::for_root_entry`]). Installing the context plants the audit
+    /// observer and the footprint accumulator only for
+    /// [`verter_audit::observe::ObserveMode::Captured`], and
+    /// [`crate::observe_request!`] records only into a captured context, so
+    /// an uncaptured request in an instrumented binary emits nothing. Every
+    /// scheduler resumption reinstalls this same context: the choice is made
+    /// once at entry and carried, never re-selected per operation.
+    #[cfg(feature = "semantic-observe")]
+    pub observe_mode: verter_audit::observe::ObserveMode,
+    /// Whether an audited root entry selected [`Self::observe_mode`]
+    /// ([`Self::for_root_entry`]) rather than a fixture constructor taking
+    /// the build's compiled mode. Every execution unit started under a
+    /// root-selected context must run compiled for that mode.
+    #[cfg(feature = "semantic-observe")]
+    pub selected_at_root: bool,
     /// Whether the request is capturing its semantic footprint. When
     /// `true`, `audit_accumulator` is populated.
     #[cfg(feature = "semantic-observe")]
@@ -920,19 +926,10 @@ pub struct RequestContext {
     /// `ColdAbortSwept` — a cold entry reaped during generation
     /// reconciliation.
     pub cold_aborts_swept: ObservedU64,
-    /// Per-context structural-materialisation call counter. No
-    /// production producer bumps it (the projector pipeline publishes
-    /// structural surfaces without a separate materialiser); it stays
-    /// on the audit payload as a zero-valued field.
-    pub materialize_structure_calls: ObservedU64,
     /// Per-request projection-operation fuse used by semantic dispatch.
     /// Stored on the existing request context so scheduler worker TLS
     /// propagation carries the same budget state as audit/cache counters.
     pub projection_budget: Arc<RequestBudget>,
-    /// Per-context structural-materialisation warm-hit counter. No
-    /// production producer bumps it; it stays on the audit payload as a
-    /// zero-valued field.
-    pub materialize_structure_cache_hits: ObservedU64,
     /// Per-context counter — lock acquisitions on the per-scope
     /// `NodeArena` dedup index.
     pub node_arena_lock_acquisitions: ObservedU64,
@@ -1022,6 +1019,12 @@ pub struct RequestContext {
     /// ([`crate::request_route_memo::NormalizedCanonicalMemo`]):
     /// request-scoped, dropped with the context.
     pub normalized_canonicals: crate::request_route_memo::NormalizedCanonicalMemo,
+    /// The results the request's semantic dispatchers completed and may
+    /// serve again, shared by every dispatcher of the request
+    /// ([`crate::project_semantic_dispatch::request_completions`]):
+    /// request-scoped, dropped with the context, which releases them.
+    pub(crate) semantic_completions:
+        crate::project_semantic_dispatch::request_completions::RequestCompletions,
 
     // ─────── Type-resolution counters ───────
     //
@@ -1544,12 +1547,77 @@ impl RequestContext {
             request_id,
             canonical_id,
             kind,
+            verter_audit::observe::ObserveMode::compiled(),
             footprint_capture,
             timing_capture,
             audit_accumulator,
             projection_op_budget,
             CancellationToken::new(),
+            false,
         )
+    }
+
+    /// Construct the context an audited root entry installs for its whole
+    /// run.
+    ///
+    /// `kind` is built only when capture is compiled in. `mode` is the
+    /// entry's one capture selection
+    /// ([`verter_audit::observe::ObserveMode::select`]). Everything else is
+    /// REQUIRED state and identical in both modes — the canonical, the
+    /// host's projection-operation budget and the cancellation token — so a
+    /// captured and an uncaptured run of the same request answer, refuse
+    /// and cancel alike. An uncaptured context drops the footprint and
+    /// timing flags and the accumulator, whatever the caller passed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_root_entry(
+        request_id: u64,
+        canonical_id: Arc<str>,
+        kind: impl FnOnce() -> verter_audit::RequestKind,
+        mode: verter_audit::observe::ObserveMode,
+        footprint_capture: bool,
+        timing_capture: bool,
+        audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
+        projection_op_budget: usize,
+        cancellation: CancellationToken,
+    ) -> Arc<Self> {
+        let captured = mode.is_captured();
+        // The kind attributes a record: a build without capture never
+        // builds it.
+        #[cfg(feature = "semantic-observe")]
+        let kind = kind();
+        #[cfg(not(feature = "semantic-observe"))]
+        let kind = {
+            let _ = kind;
+            verter_audit::RequestKind::ComponentMeta
+        };
+        Self::constructed(
+            request_id,
+            canonical_id,
+            kind,
+            mode,
+            footprint_capture && captured,
+            timing_capture && captured,
+            audit_accumulator.filter(|_| captured),
+            projection_op_budget,
+            cancellation,
+            true,
+        )
+    }
+
+    /// The execution mode the request's root entry selected. Always
+    /// [`verter_audit::observe::ObserveMode::Uncaptured`] in a build
+    /// without `semantic-observe`.
+    #[inline(always)]
+    #[must_use]
+    pub fn observe_mode(&self) -> verter_audit::observe::ObserveMode {
+        #[cfg(feature = "semantic-observe")]
+        {
+            self.observe_mode
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            verter_audit::observe::ObserveMode::Uncaptured
+        }
     }
 
     /// Construct a new per-request context whose cancellation is the
@@ -1568,11 +1636,13 @@ impl RequestContext {
             request_id,
             canonical_id,
             kind,
+            verter_audit::observe::ObserveMode::compiled(),
             footprint_capture,
             timing_capture,
             audit_accumulator,
             0,
             cancellation,
+            false,
         )
     }
 
@@ -1581,17 +1651,26 @@ impl RequestContext {
         request_id: u64,
         canonical_id: Arc<str>,
         kind: verter_audit::RequestKind,
+        observe_mode: verter_audit::observe::ObserveMode,
         footprint_capture: bool,
         timing_capture: bool,
         audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
         projection_op_budget: usize,
         cancellation: CancellationToken,
+        selected_at_root: bool,
     ) -> Arc<Self> {
         // Without `semantic-observe` the capture selection carries nothing:
         // there is no record to attribute, no accumulator to feed and no
         // trace to correlate, so the request keeps only required state.
         #[cfg(not(feature = "semantic-observe"))]
-        let _ = (kind, footprint_capture, timing_capture, audit_accumulator);
+        let _ = (
+            kind,
+            observe_mode,
+            footprint_capture,
+            timing_capture,
+            audit_accumulator,
+            selected_at_root,
+        );
         // With capture compiled in, a sub-request created inside another
         // request's TLS context records the parent's id (read from the
         // scheduler's TLS) and a fresh uuid v4 trace id correlates the
@@ -1604,6 +1683,10 @@ impl RequestContext {
             canonical_id,
             #[cfg(feature = "semantic-observe")]
             kind,
+            #[cfg(feature = "semantic-observe")]
+            observe_mode,
+            #[cfg(feature = "semantic-observe")]
+            selected_at_root,
             #[cfg(feature = "semantic-observe")]
             footprint_capture,
             #[cfg(feature = "semantic-observe")]
@@ -1618,9 +1701,7 @@ impl RequestContext {
             sentinels: Default::default(),
             inflight_aborted_retries: Default::default(),
             cold_aborts_swept: Default::default(),
-            materialize_structure_calls: Default::default(),
             projection_budget: RequestBudget::new(projection_op_budget),
-            materialize_structure_cache_hits: Default::default(),
             node_arena_lock_acquisitions: Default::default(),
             family_map_lock_acquisitions: Default::default(),
             lock_wait_ns: Default::default(),
@@ -1637,6 +1718,7 @@ impl RequestContext {
             process_rss_peak_bytes: Arc::new(AtomicU64::new(0)),
             import_route_observations: Default::default(),
             normalized_canonicals: Default::default(),
+            semantic_completions: Default::default(),
             type_resolution_hops: Default::default(),
             type_resolution_navigations: Default::default(),
             type_resolution_expansions: Default::default(),
@@ -1913,7 +1995,7 @@ impl RequestContext {
                 (_, true) => verter_audit::AuditEvent::MappedMemberSelectedKeyUnique,
                 (_, false) => verter_audit::AuditEvent::MappedMemberSelectedKeyRepeated,
             };
-            verter_audit::observe!(|obs| obs.record_event(event));
+            <Self as verter_audit::AuditObserver>::record_event(self, event);
         }
         #[cfg(not(feature = "semantic-observe"))]
         let _ = identity;
@@ -1978,10 +2060,29 @@ impl RequestContext {
             } else {
                 verter_audit::AuditEvent::RecursiveSubstituteRepeated
             };
-            verter_audit::observe!(|obs| obs.record_event(event));
+            <Self as verter_audit::AuditObserver>::record_event(self, event);
         }
         #[cfg(not(feature = "semantic-observe"))]
         let _ = identity;
+    }
+}
+
+#[cfg(feature = "semantic-observe")]
+impl RequestContext {
+    /// Record through a receiver already bound to captured execution.
+    /// Untyped scheduler callers retain the mode guard on `RequestContextLike`.
+    #[inline(always)]
+    pub(crate) fn record_captured_cache_event(&self, event: CacheEventKind) {
+        let counter = match event {
+            CacheEventKind::Hit => &self.warm_hits,
+            CacheEventKind::Miss => &self.cold_builds,
+            CacheEventKind::JoinedWait => &self.joined_waits,
+            CacheEventKind::Sentinel => &self.sentinels,
+            CacheEventKind::ColdBuild => &self.cold_builds,
+            CacheEventKind::InflightAbortedRetry => &self.inflight_aborted_retries,
+            CacheEventKind::ColdAbortSwept => &self.cold_aborts_swept,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1992,6 +2093,10 @@ impl RequestContextLike for RequestContext {
     #[cfg(feature = "semantic-observe")]
     fn capture_enabled(&self) -> bool {
         self.footprint_capture
+    }
+    #[cfg(feature = "semantic-observe")]
+    fn captured(&self) -> bool {
+        self.observe_mode.is_captured()
     }
     #[cfg(feature = "semantic-observe")]
     fn timing_enabled(&self) -> bool {
@@ -2013,16 +2118,10 @@ impl RequestContextLike for RequestContext {
     }
     #[cfg(feature = "semantic-observe")]
     fn record_cache_event(&self, event: CacheEventKind) {
-        let counter = match event {
-            CacheEventKind::Hit => &self.warm_hits,
-            CacheEventKind::Miss => &self.cold_builds,
-            CacheEventKind::JoinedWait => &self.joined_waits,
-            CacheEventKind::Sentinel => &self.sentinels,
-            CacheEventKind::ColdBuild => &self.cold_builds,
-            CacheEventKind::InflightAbortedRetry => &self.inflight_aborted_retries,
-            CacheEventKind::ColdAbortSwept => &self.cold_aborts_swept,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
+        if !self.observe_mode.is_captured() {
+            return;
+        }
+        self.record_captured_cache_event(event);
     }
     fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
         let guard = RequestContextGuard::install(self);
@@ -2411,6 +2510,8 @@ thread_local! {
         Cell<u32> = const { Cell::new(0) };
 }
 
+pub use verter_audit::observe::{Captured, ObserveExec, ObserveMode, Uncaptured};
+
 /// RAII guard that installs a `RequestContext` (and its accumulator,
 /// if present) into TLS and restores the previous slots on drop. Both
 /// the `CURRENT_REQUEST_CONTEXT` and `CURRENT_ACCUMULATOR` TLS slots
@@ -2452,18 +2553,26 @@ impl RequestContextGuard {
     /// every prior TLS value on drop.
     pub fn install(ctx: Arc<RequestContext>) -> Self {
         #[cfg(feature = "semantic-observe")]
-        let acc = ctx.audit_accumulator.clone();
+        let captured = ctx.observe_mode.is_captured();
+        #[cfg(feature = "semantic-observe")]
+        let acc = ctx.audit_accumulator.clone().filter(|_| captured);
         let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
         let opaque_guard = OpaqueContextGuard::install(opaque);
         // Plant the same `RequestContext` into the `verter_audit`
-        // substrate's TLS slot. Producers in lower crates retrieve it
-        // via `verter_audit::observe!` — they never reach into
-        // `verter_session` for context. An instrumented binary captures
-        // every request it runs; a default build has no observer slot.
+        // substrate's TLS slot for a request whose root entry selected
+        // captured execution. Producers in lower crates retrieve it via
+        // `verter_audit::observe!` — they never reach into `verter_session`
+        // for context. An uncaptured request CLEARS the slot instead, so
+        // neither it nor an enclosing captured request receives its
+        // emissions; a default build has no observer slot at all.
         #[cfg(feature = "semantic-observe")]
-        let audit_observer_guard = verter_audit::observer::install_observer(
-            Arc::clone(&ctx) as Arc<dyn verter_audit::AuditObserver>
-        );
+        let audit_observer_guard = if captured {
+            verter_audit::observer::install_observer(
+                Arc::clone(&ctx) as Arc<dyn verter_audit::AuditObserver>
+            )
+        } else {
+            verter_audit::observer::clear_observer()
+        };
         let prev_context = CURRENT_REQUEST_CONTEXT.with(|c| c.replace(Some(ctx)));
         #[cfg(feature = "semantic-observe")]
         let prev_accumulator = CURRENT_ACCUMULATOR.with(|c| c.replace(acc));
@@ -2611,6 +2720,21 @@ pub fn current_request_context() -> Option<Arc<RequestContext>> {
     CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_ref().map(Arc::clone))
 }
 
+/// The request context installed on this thread when its root entry
+/// selected captured execution: the one accessor optional recorders read,
+/// so an uncaptured request records nothing. Exists only with
+/// `semantic-observe`.
+#[cfg(feature = "semantic-observe")]
+#[must_use]
+pub fn current_captured_request_context() -> Option<Arc<RequestContext>> {
+    CURRENT_REQUEST_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|ctx| ctx.observe_mode.is_captured())
+            .map(Arc::clone)
+    })
+}
+
 /// Run `read` against the request context installed on this thread, in
 /// place: `None` when none is installed. For a caller that only reads or
 /// records into the context, so the context's handle is not cloned.
@@ -2618,19 +2742,88 @@ pub fn with_current_request_context<R>(read: impl FnOnce(&RequestContext) -> R) 
     CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_deref().map(read))
 }
 
-/// Record optional capture into the request context installed on this
-/// thread: `observe_request!(|ctx| ctx.counter.fetch_add(1, Relaxed))`.
+/// The capture execution mode carried on this thread: the installed request
+/// context's selected mode; with no request context, captured exactly when
+/// an audit observer is planted (an audited LSP handler window plants only
+/// the observer). Always [`verter_audit::observe::ObserveMode::Uncaptured`]
+/// in a build without `semantic-observe`.
 ///
-/// With `semantic-observe` the body runs against the installed context (and
-/// not at all when none is installed). Without it the body is type-checked
-/// inside a closure that is never built or called, so the request-context
-/// TLS slot is not read and nothing is recorded.
+/// An execution unit reads it once, where it starts, and specialises on it
+/// ([`verter_audit::specialise!`]); its per-operation paths never read it.
+#[inline]
+#[must_use]
+pub fn installed_observe_mode() -> verter_audit::observe::ObserveMode {
+    #[cfg(feature = "semantic-observe")]
+    {
+        CURRENT_REQUEST_CONTEXT
+            .with(|c| c.borrow().as_ref().map(|ctx| ctx.observe_mode))
+            .unwrap_or_else(|| {
+                if verter_audit::observer::current_observer().is_some() {
+                    verter_audit::observe::ObserveMode::Captured
+                } else {
+                    verter_audit::observe::ObserveMode::Uncaptured
+                }
+            })
+    }
+    #[cfg(not(feature = "semantic-observe"))]
+    {
+        verter_audit::observe::ObserveMode::Uncaptured
+    }
+}
+
+/// The capture mode an audited root entry selected for the request installed
+/// on this thread; `None` when none is installed or its context came from a
+/// fixture constructor rather than a root entry's selection.
+#[cfg(all(feature = "semantic-observe", debug_assertions))]
+#[must_use]
+pub fn installed_root_selected_mode() -> Option<verter_audit::observe::ObserveMode> {
+    CURRENT_REQUEST_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|ctx| ctx.selected_at_root)
+            .map(|ctx| ctx.observe_mode)
+    })
+}
+
+/// Record optional capture into the request context installed on this
+/// thread.
+///
+/// Two forms:
+///
+/// - `observe_request!(M => on receiver => |ctx| body)` records from execution compiled
+///   for the mode type `M` ([`verter_audit::observe::ObserveExec`]); the
+///   uncaptured expansion is a constant-false branch that reads no
+///   request-context slot. Per-operation paths use this form.
+/// - `observe_request!(|ctx| body)` reads the slot directly and belongs only
+///   at once-per-request boundaries.
+///
+/// With `semantic-observe` the body runs against the installed context when
+/// its root entry selected captured execution (and not at all when none is
+/// installed or the request is uncaptured). Without it the body is
+/// type-checked inside a closure that is never built or called, so the
+/// request-context TLS slot is not read and nothing is recorded.
+/// The body remains a callback with local `return` control flow and payload
+/// locals outside the emitting caller's debug stack frame.
 #[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! observe_request {
+    ($M:ty => on $receiver:expr => |$ctx:ident| $body:expr) => {{
+        if <$M as $crate::request_context::ObserveExec>::CAPTURED {
+            if let ::core::option::Option::Some(context) = $receiver {
+                // Preserve callback control flow and keep its payload locals
+                // off the recursive caller's debug stack frame.
+                #[allow(clippy::redundant_closure_call)]
+                (|$ctx: &$crate::request_context::RequestContext| {
+                    $body;
+                })(context);
+            }
+        }
+    }};
     (|$ctx:ident| $body:expr) => {{
         $crate::request_context::with_current_request_context(|$ctx| {
-            $body;
+            if $ctx.observe_mode.is_captured() {
+                $body;
+            }
         });
     }};
 }
@@ -2641,6 +2834,10 @@ macro_rules! observe_request {
 #[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! observe_request {
+    ($M:ty => on $receiver:expr => |$ctx:ident| $body:expr) => {{
+        let _ = ::core::marker::PhantomData::<$M>;
+        $crate::observe_request!(|$ctx| $body)
+    }};
     (|$ctx:ident| $body:expr) => {{
         #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
         if false {
@@ -2669,11 +2866,18 @@ pub(crate) fn current_request_canonical() -> Option<Arc<str>> {
 pub fn install_test_request_for(canonical: &str) -> RequestContextGuard {
     static NEXT_TEST_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
     let request_id = NEXT_TEST_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    RequestContextGuard::install(RequestContext::new(
+    // A configuration-only request: it captures nothing, so dispatchers the
+    // test builds run uncaptured.
+    RequestContextGuard::install(RequestContext::for_root_entry(
         request_id,
         Arc::from(canonical),
+        || verter_audit::RequestKind::ComponentMeta,
+        verter_audit::observe::ObserveMode::Uncaptured,
+        false,
         false,
         None,
+        0,
+        CancellationToken::new(),
     ))
 }
 
@@ -2756,6 +2960,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn request_observer_callback_return_keeps_the_callers_control_flow() {
+        use std::cell::Cell;
+        use verter_audit::observe::{Captured, Uncaptured};
+
+        fn invoke<M: ObserveExec>(_request: &RequestContext, seen: &Cell<u32>, after: &Cell<bool>) {
+            crate::observe_request!(M => on Some(_request) => |_context| {
+                seen.set(seen.get() + 1);
+                if seen.get() == 1 {
+                    return;
+                }
+                seen.set(99);
+            });
+            after.set(true);
+        }
+
+        let request = make_ctx(200, true);
+        let seen = Cell::new(0);
+        let after = Cell::new(false);
+        invoke::<Captured>(&request, &seen, &after);
+        assert!(after.get(), "return belongs to the observation callback");
+        assert_eq!(seen.get(), u32::from(cfg!(feature = "semantic-observe")));
+
+        seen.set(0);
+        after.set(false);
+        invoke::<Uncaptured>(&request, &seen, &after);
+        assert!(after.get());
+        assert_eq!(seen.get(), 0);
+    }
+
+    #[test]
     fn task_completeness_preserves_sticky_deferral_across_polls() {
         for defer in [false, true] {
             let request = make_ctx(201, false);
@@ -2802,6 +3036,16 @@ mod tests {
         RequestContext::new(id, Arc::from("/x.vue"), capture, None)
     }
 
+    #[cfg(feature = "semantic-observe")]
+    #[test]
+    fn bypass_diagnostics_retains_only_produced_counters() {
+        assert_eq!(
+            std::mem::size_of::<BypassDiagnosticCounters>(),
+            2 * std::mem::size_of::<ObservedU64>(),
+            "only host-view builds and bare-engine constructions have producers"
+        );
+    }
+
     // Reads optional capture state.
     #[cfg(feature = "semantic-observe")]
     #[test]
@@ -2811,44 +3055,24 @@ mod tests {
         // under an installed RequestContext must increment the counter.
         // Without an installed context the bump is a noop.
         let ctx = make_ctx(101, false);
-        let (_, bare_before, _) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        let (_, bare_before) = ctx.cache_counters.bypass_diagnostics.snapshot();
         assert_eq!(bare_before, 0, "fresh context starts at 0");
         {
             let _g = RequestContextGuard::install(Arc::clone(&ctx));
             bump_bare_engine_construction();
             bump_bare_engine_construction();
         }
-        let (_, bare_after, _) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        let (_, bare_after) = ctx.cache_counters.bypass_diagnostics.snapshot();
         assert_eq!(
             bare_after, 2,
             "counter must increment twice under an installed context"
         );
         // Outside the guard the bump is a noop.
         bump_bare_engine_construction();
-        let (_, bare_outside, _) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        let (_, bare_outside) = ctx.cache_counters.bypass_diagnostics.snapshot();
         assert_eq!(
             bare_outside, 2,
             "bump outside an installed context must be a noop"
-        );
-    }
-
-    // Reads optional capture state.
-    #[cfg(feature = "semantic-observe")]
-    #[test]
-    fn bump_resolver_store_view_call_increments_on_installed_context() {
-        let ctx = make_ctx(102, false);
-        let (_, _, calls_before) = ctx.cache_counters.bypass_diagnostics.snapshot();
-        assert_eq!(calls_before, 0, "fresh context starts at 0");
-        {
-            let _g = RequestContextGuard::install(Arc::clone(&ctx));
-            bump_resolver_store_view_call();
-            bump_resolver_store_view_call();
-            bump_resolver_store_view_call();
-        }
-        let (_, _, calls_after) = ctx.cache_counters.bypass_diagnostics.snapshot();
-        assert_eq!(
-            calls_after, 3,
-            "counter must increment three times under an installed context"
         );
     }
 

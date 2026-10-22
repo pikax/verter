@@ -71,7 +71,7 @@ fn typeof_carrier_node(
     path: &[&str],
     arg: PrimitiveKind,
 ) -> SemanticNodeId {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let arg_node = graph.intern_node(SemanticNodeData::Primitive(arg));
     let value_root = ValueRootKey {
         scope: ScopeId {
@@ -106,7 +106,7 @@ fn function_shape(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<(usize, Option<PrimitiveName>)> {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let data = graph.node_data(node)?;
     match data.as_ref() {
         SemanticNodeData::Signature {
@@ -294,7 +294,7 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
 
     // `typeof C.make` — a NON-EMPTY internal path (`["make"]`) so the arm runs
     // the internal-path `ProjectPath` (an empty internal path would skip it).
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let value_root = ValueRootKey {
         scope: ScopeId {
             canonical_id: verter_type_expr::OwnedStr::from("/holder.ts"),
@@ -510,7 +510,7 @@ fn typeof_carrier_arity_overflow_is_honest_miss_after_projection() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     // Two args for a one-type-param `g`.
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let value_root = ValueRootKey {

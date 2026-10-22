@@ -161,7 +161,7 @@ pub fn generate_ide_script<'alloc>(
     script_setup: Option<&RootNodeScript>,
     template_ast: Option<&TemplateAst>,
     source: &'alloc str,
-    ct: &mut CodeTransform<'alloc>,
+    ct: &mut CodeTransform<'alloc, impl verter_audit::observe::ObserveExec>,
     alloc: &'alloc Allocator,
     options: &IdeScriptOptions<'_>,
     template_end: Option<u32>,

@@ -183,11 +183,11 @@ pub fn snapshot_bypass_diagnostics_from_tls() -> verter_audit::store::BypassDiag
     let Some(ctx) = verter_type_engine::request_context::current_request_context() else {
         return BypassDiagnostics::default();
     };
-    let (builds, bare_engines, store_view_calls) = ctx.cache_counters.bypass_diagnostics.snapshot();
+    let (builds, bare_engines) = ctx.cache_counters.bypass_diagnostics.snapshot();
     BypassDiagnostics {
         host_store_view_from_host_builds: builds,
         bare_engine_constructions: bare_engines,
-        resolver_store_view_calls: store_view_calls,
+        resolver_store_view_calls: 0,
     }
 }
 
@@ -274,23 +274,19 @@ impl AuditBuilder {
         self.store = store;
     }
 
-    /// Replace the component-meta store + materialiser counter
-    /// block. These fields live on [`ComponentMetaPayload`] rather
-    /// than the generic [`RequestStoreAudit`] envelope because they
-    /// are kind-specific (only component-meta requests run the
-    /// materialiser).
+    /// Replace the component-meta store counter block and clear its
+    /// legacy compatibility fields. These fields live on
+    /// [`ComponentMetaPayload`] rather than the generic store envelope.
     pub fn record_component_meta_store(
         &mut self,
-        materialize_structure_calls: u64,
-        materialize_structure_cache_hits: u64,
         node_arena_lock_acquisitions: u64,
         family_map_lock_acquisitions: u64,
         dep_signature_merges: u64,
         dep_signature_intern_hits: u64,
     ) {
-        self.component_meta_payload.materialize_structure_calls = materialize_structure_calls;
-        self.component_meta_payload.materialize_structure_cache_hits =
-            materialize_structure_cache_hits;
+        // Legacy wire fields have no runtime producer or backing counter.
+        self.component_meta_payload.materialize_structure_calls = 0;
+        self.component_meta_payload.materialize_structure_cache_hits = 0;
         self.component_meta_payload.node_arena_lock_acquisitions = node_arena_lock_acquisitions;
         self.component_meta_payload.family_map_lock_acquisitions = family_map_lock_acquisitions;
         self.component_meta_payload.dep_signature_merges = dep_signature_merges;

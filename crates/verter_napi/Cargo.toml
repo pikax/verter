@@ -25,8 +25,9 @@ generate-host-request-ts = []
 # The coordinated, default-off observation opt-in
 # (docs/arch/semantic-observe.md). Builds the instrumentation binding: the
 # audit records, footprints and provenance counters the audit methods
-# return. A default build reports unavailable capture from those methods.
-semantic-observe = ["verter_session/semantic-observe"]
+# return, and the counting global allocator behind the memory audit. A
+# default build reports unavailable capture from those methods.
+semantic-observe = ["verter_session/semantic-observe", "dep:backtrace"]
 
 # The generator that writes `packages/native/host-compile-request.generated.ts`.
 # Declared explicitly so `required-features` can keep it out of the default
@@ -63,10 +64,10 @@ verter_span = { path = "../verter_span" }
 verter_scheduler = { path = "../verter_scheduler" }
 napi = { version = "3", default-features = false, features = ["napi8", "serde-json", "async", "dyn-symbols"] }
 napi-derive = "3"
-# Runtime-gated memory audit (src/memory_audit.rs): unresolved stack
-# capture at sampled allocation sites, resolved lazily at
-# memoryAuditSites() read time. Zero-cost while the runtime gate is off.
-backtrace = "0.3.76"
+# Memory audit of the instrumented binding (src/memory_audit.rs):
+# unresolved stack capture at sampled allocation sites, resolved lazily at
+# memoryAuditSites() read time. Compiled only with `semantic-observe`.
+backtrace = { version = "0.3.76", optional = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # The published TypeScript declaration of the host compile request is

@@ -66,7 +66,7 @@ pub(super) async fn handle_document_symbol_with_audit(
 ) -> Result<Option<DocumentSymbolResponse>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let target_identity = || crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::DocumentSymbols,
@@ -775,7 +775,7 @@ pub(super) async fn handle_code_action_with_audit(
 ) -> Result<Option<CodeActionResponse>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let target_identity = || crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::CodeAction,
@@ -860,7 +860,7 @@ pub(super) async fn handle_semantic_tokens_full_with_audit(
 ) -> Result<Option<SemanticTokensResult>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let target_identity = || crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::SemanticTokens,
@@ -1093,7 +1093,7 @@ pub(super) async fn handle_inlay_hint_with_audit(
 ) -> Result<Option<Vec<InlayHint>>> {
     let host = server.documents.host_arc();
     let uri = params.text_document.uri.clone();
-    let target_identity = crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
+    let target_identity = || crate::audit_harness::target_identity_for_uri(&server.documents, &uri);
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::InlayHints,

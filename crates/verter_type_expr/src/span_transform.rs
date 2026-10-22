@@ -499,6 +499,7 @@ mod tests {
         ty_span: Span,
     ) -> TypeExpr {
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::Property(
                 ObjectProperty::with_key_spans_public(
                     crate::TypeAuthoredPropertyKey::string(name),

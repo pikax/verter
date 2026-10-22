@@ -36,9 +36,10 @@ use super::dispatch_txn::{
     ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
 };
 use super::flow_products::{
-    DefiniteAssignment, DefiniteAssignmentProduct, FlowNarrowingFact, FlowProductBudget,
-    FlowProductEvidence, FlowProductExecution, FlowProductFailure, FlowProductInputs,
-    NarrowingProduct, ReachingTypeProduct, WideningMembership,
+    DefiniteAssignment, DefiniteAssignmentProduct, FlowArmRemainder, FlowNarrowed,
+    FlowNarrowingFact, FlowProductBudget, FlowProductEvidence, FlowProductExecution,
+    FlowProductFailure, FlowProductInputs, NarrowingProduct, ReachingTypeProduct,
+    WideningMembership,
 };
 use super::flow_return_callee::{
     CallValue, CalleeClause, CalleeClauseLookup, HeldCallee, ReturnOrigin, SignatureCall,
@@ -1057,7 +1058,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if rebuilt.as_slice() == members.as_ref()
                     && !members
                         .iter()
-                        .any(|member| is_nullable_node(graph, *member))
+                        .any(|member| is_nullable_node(graph.store(), *member))
                 {
                     node
                 } else {
@@ -1245,7 +1246,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if matches!(
                             graph.node_data(expanded).as_deref(),
                             Some(SemanticNodeData::Union(members))
-                                if members.iter().any(|member| is_nullable_node(graph, *member))
+                                if members.iter().any(|member| is_nullable_node(graph.store(), *member))
                         ) =>
                     {
                         // The checker keeps the alias on a union that still
@@ -1308,11 +1309,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// overload order) keeps every combination, and the origin, in factor
     /// order.
     ///
-    /// The combinations are the checker's ([`Self::intersection_parts`]): a
-    /// cross product the checker refuses is its TS2590 recovery, a resource
-    /// partial holding the undistributed intersection as its origin. `None`
-    /// when every factor is empty, or when the connected-work ledger stops
-    /// the distribution (the demand is then partial).
+    /// The checker's strategies ahead of a cross product run first, from the
+    /// one distribution authority
+    /// ([`presimplify_factors`](super::canonical_algebra::presimplify_factors)):
+    /// unions of primitives intersect member-wise and a nullish member every
+    /// factor holds is set aside and added back, so a product written wide
+    /// is weighed at what it reduces to. The combinations are then the
+    /// checker's ([`Self::intersection_parts`]): a cross product the checker
+    /// refuses is its TS2590 recovery, a resource partial holding the
+    /// undistributed intersection as its origin. `None` when some factor is
+    /// empty, or when the connected demand cannot pay for the distribution
+    /// (the demand is then partial).
     pub(super) fn distribute_intersection(
         &self,
         factors: &[Vec<SemanticNodeId>],
@@ -1326,7 +1333,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let graph = self.graph();
         let mut undecided = false;
         let parts =
-            match self.intersection_parts(factors, false, nullability, ordered, &mut undecided) {
+            match self.simplified_parts(factors, false, nullability, ordered, &mut undecided) {
                 Ok(Some(parts)) => parts,
                 Ok(None) => return None,
                 Err(refusal) => {
@@ -1359,15 +1366,74 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(DistributedIntersection { node, undecided })
     }
 
+    /// [`Self::distribute_intersection`] of `factors`, unordered, with
+    /// `origin` as the written intersection: the type the distribution
+    /// forms, `None` where it formed none. Test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn distribute_intersection_for_tests(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        origin: &[SemanticNodeId],
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> Option<SemanticNodeId> {
+        self.distribute_intersection(factors, origin, nullability, false)
+            .map(|distributed| distributed.node)
+    }
+
+    /// The parts of the intersection of `factors`, as the checker's
+    /// `getIntersectionType` forms them each time it intersects — the whole
+    /// intersection and each half it divides into alike: its strategies ahead
+    /// of a cross product run first
+    /// ([`presimplify_factors`](super::canonical_algebra::presimplify_factors)),
+    /// so a half is weighed at what it reduces to, then the surviving
+    /// combinations ([`Self::intersection_parts`]), with any nullish member
+    /// every factor held added back as a part of its own.
+    fn simplified_parts(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        divided: bool,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        ordered: bool,
+        undecided: &mut bool,
+    ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::checker_policy::OperationRefusal>
+    {
+        let graph = self.graph();
+        let presimplified = super::canonical_algebra::presimplify_factors(graph, factors);
+        let (factors, nullish) = match &presimplified {
+            Some(presimplified) => (
+                presimplified.factors.as_slice(),
+                presimplified.nullish.as_slice(),
+            ),
+            None => (factors, &[][..]),
+        };
+        let mut parts = if factors.iter().any(Vec::is_empty) {
+            // The factors share no member: the intersection is empty.
+            Vec::new()
+        } else {
+            match self.intersection_parts(factors, divided, nullability, ordered, undecided)? {
+                Some(parts) => parts,
+                None => return Ok(None),
+            }
+        };
+        parts.extend(
+            nullish
+                .iter()
+                .map(|kind| graph.intern_node(SemanticNodeData::Primitive(*kind))),
+        );
+        Ok(Some(parts))
+    }
+
     /// The combinations of `factors` that survive, each interned, in the
     /// checker's order: three or more factors divide in half, each half
     /// distributed on its own and the two results distributed over each
-    /// other; two or fewer take the cross product, checked against the
-    /// checker's limit before a combination is formed
-    /// ([`checker_policy::cross_product_union`](crate::semantic_query::checker_policy::cross_product_union)).
-    /// `Err` is the product's TS2590 refusal; `Ok(None)` a connected-work trip, folded
-    /// into the demand as partial. Every combination is charged to the
-    /// connected-work ledger.
+    /// other; two or fewer take the cross product, admitted by the one
+    /// distribution authority before a combination is formed
+    /// ([`admit_cross_product`](super::canonical_algebra::admit_cross_product)):
+    /// weighed against the checker's limit from the factors' widths, then
+    /// paid for whole — every combination's work and construction bytes —
+    /// to the connected demand. `Err` is the product's TS2590 refusal;
+    /// `Ok(None)` a demand that could not pay, folded into it as partial.
+    /// A divided half is paid for the same way, before it is built.
     fn intersection_parts(
         &self,
         factors: &[Vec<SemanticNodeId>],
@@ -1378,7 +1444,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::checker_policy::OperationRefusal>
     {
         use super::relation::ComparabilityVerdict;
-        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
         let graph = self.graph();
         if factors.len() >= 3 {
             let middle = factors.len() / 2;
@@ -1386,16 +1451,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             for half in [&factors[..middle], &factors[middle..]] {
                 let parts = match half {
                     [only] => only.clone(),
-                    _ => match self.intersection_parts(
-                        half,
-                        false,
-                        nullability,
-                        ordered,
-                        undecided,
-                    )? {
-                        Some(parts) => parts,
-                        None => return Ok(None),
-                    },
+                    _ => {
+                        match self.simplified_parts(half, false, nullability, ordered, undecided)? {
+                            Some(parts) => parts,
+                            None => return Ok(None),
+                        }
+                    }
                 };
                 // The half is a union: identical constituents are one.
                 let mut seen = rustc_hash::FxHashSet::default();
@@ -1406,16 +1467,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .collect(),
                 );
             }
-            return self.intersection_parts(&halves, true, nullability, ordered, undecided);
+            return self.simplified_parts(&halves, true, nullability, ordered, undecided);
         }
-        let combinations = cross_product_union(
-            factors.iter().map(|arms| match arms.len() {
-                0 => ProductFactor::Never,
-                1 => ProductFactor::Single,
-                width => ProductFactor::Union(width),
-            }),
-            crate::semantic_query::CheckerDiagnosticOperation::Intersection,
-        )?;
+        let combinations = match super::canonical_algebra::admit_cross_product(
+            factors.iter().map(Vec::len),
+            // A combination holds each part's members once it is interned.
+            || {
+                super::canonical_algebra::flattened_arity(
+                    graph.store(),
+                    factors.iter().map(Vec::as_slice),
+                )
+            },
+            Some(self.construction_meter()),
+        ) {
+            Ok(combinations) => combinations,
+            Err(super::canonical_algebra::DistributionStop::Refused(refusal)) => {
+                return Err(refusal)
+            }
+            Err(super::canonical_algebra::DistributionStop::Exhausted(reasons)) => {
+                self.fold_local_partial_completeness(reasons);
+                return Ok(None);
+            }
+        };
         let nullish = |node: SemanticNodeId| {
             matches!(
                 graph.node_data(node).as_deref(),
@@ -1479,10 +1552,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut combination: Vec<(usize, SemanticNodeId)> = Vec::with_capacity(factors.len());
         let mut members: Vec<SemanticNodeId> = Vec::with_capacity(factors.len());
         for mut index in 0..combinations {
-            if let Err(reasons) = self.charge_connected_work() {
-                self.fold_local_partial_completeness(reasons);
-                return Ok(None);
-            }
             combination.clear();
             for (factor, arms) in factors.iter().enumerate() {
                 combination.extend(
@@ -2792,7 +2861,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         callee_arg: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::FlowFunctionReturnIdentity> {
-        let data = crate::project_semantic_dispatch::node_data_for(self.graph(), callee_arg)?;
+        let data =
+            crate::project_semantic_dispatch::node_data_for(self.graph().store(), callee_arg)?;
         if let SemanticNodeData::Object(view) = data.as_ref() {
             if let [signature] = view.call_signatures.as_ref() {
                 return self.flow_return_callee_for_typeof_arg(*signature);
@@ -2901,7 +2971,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// single-member `FlowReturn` demand instead of a whole-signature
     /// composition.
     pub(super) fn is_flow_return_type_member_base(&self, node: SemanticNodeId) -> bool {
-        match crate::project_semantic_dispatch::node_data_for(self.graph(), node) {
+        match crate::project_semantic_dispatch::node_data_for(self.graph().store(), node) {
             Some(data) => self.is_flow_return_type_member_base_data(&data),
             None => false,
         }
@@ -3241,7 +3311,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // frame) never funnels through `execute_via_cold_build_helper`, so
         // the family's participation is recorded here — idempotent per
         // tag, no-op without an installed `RequestContext`.
-        crate::observe_request!(|ctx| {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
             ctx.record_dispatched_query_tag(crate::semantic_query::SemanticQueryKeyTag::FlowReturn);
         });
         // The callee schedule learns what each frame's call resolution
@@ -3257,7 +3327,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // Cold-path flow-cycle sentinel: a re-entry only occurs
                 // while the component is being cold-evaluated (a warm
                 // hit never opens a frame to re-enter).
-                crate::flow_return_audit::record_flow_cycle_reentry(
+                crate::flow_return_audit::record_flow_cycle_reentry::<C::Observe>(
+                    crate::resolver_core::resolver_context::capture_targets(self.ctx),
                     u32::try_from(idx).unwrap_or(u32::MAX),
                     &key.function.declaration_slot.merged_symbol_name,
                 );
@@ -3427,7 +3498,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = if return_type == result.return_type() {
             result
         } else {
-            result.with_return_type(self.graph().as_ref(), return_type)
+            result.with_return_type(self.graph().store(), return_type)
         };
         let result = match predicate {
             Some(predicate) => result.with_inferred_predicate(predicate),
@@ -3532,10 +3603,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // transaction-local value channel's work is done.
             txn.flow.closed_values.clear();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
@@ -3926,7 +3994,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = if substituted == result.return_type() {
             result
         } else {
-            result.with_return_type(self.graph().as_ref(), substituted)
+            result.with_return_type(self.graph().store(), substituted)
         };
         match predicate {
             Some(predicate) => result.with_inferred_predicate(predicate),
@@ -4048,7 +4116,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if closed == node {
                 return result;
             }
-            result.with_return_type(self.graph().as_ref(), closed)
+            result.with_return_type(self.graph().store(), closed)
         }
     }
 
@@ -4088,7 +4156,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // wins when it has one).
         let result = if undecided && result.degradation().is_none() {
             FlowReturnResult::new_with_fresh_literal_arms(
-                self.graph().as_ref(),
+                self.graph().store(),
                 result.return_type(),
                 result.can_fall_through,
                 Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
@@ -4143,9 +4211,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !nullability.is_strict() {
             if contributions
                 .iter()
-                .any(|contribution| !is_nullable_node(graph, contribution.node))
+                .any(|contribution| !is_nullable_node(graph.store(), contribution.node))
             {
-                contributions.retain(|contribution| !is_nullable_node(graph, contribution.node));
+                contributions
+                    .retain(|contribution| !is_nullable_node(graph.store(), contribution.node));
             } else {
                 widening_nullish_only = contributions
                     .iter()
@@ -4175,7 +4244,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let arms: Vec<SemanticNodeId> = arms.iter().map(|arm| arm.node).collect();
         let joined = self.intern_normalized_union(&arms, nullability);
         let joined = self.normalize_widened_object_literals(joined, nullability);
-        if widening_nullish_only && is_nullable_node(graph, joined) {
+        if widening_nullish_only && is_nullable_node(graph.store(), joined) {
             return (
                 Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))),
                 undecided,
@@ -4404,7 +4473,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
         FlowReturnResult::new_with_fresh_literal_arms(
-            graph,
+            graph.store(),
             wrapper,
             result.can_fall_through,
             result.degradation(),
@@ -4419,7 +4488,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn materialize_wrap_typed_gap(&self, result: FlowReturnResult) -> FlowReturnResult {
         let marker = super::flow_return_callee::unmodeled_position_marker(self);
         FlowReturnResult::new_with_fresh_literal_arms(
-            self.graph(),
+            self.graph().store(),
             marker,
             result.can_fall_through,
             None,
@@ -4597,7 +4666,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 crate::semantic_query::PrimitiveKind::Number,
             ));
         let value = crate::semantic_query::FlowReturnResult::new(
-            self.graph(),
+            self.graph().store(),
             number,
             NormalCompletion::minted(false, CompletionConstruction::HermeticFixture),
             None,
@@ -4639,7 +4708,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// another demand, another runtime, another store, or a stale request
     /// generation is a typed partial, never a proof.
     pub(super) fn current_flow_evaluation_provenance(&self) -> FlowEvaluationProvenance {
-        let store_identity = Arc::as_ptr(self.graph()) as *const () as usize as u64;
+        let store_identity = std::ptr::from_ref::<crate::semantic_query_memo::SemanticGraphStore>(
+            self.graph().store(),
+        ) as *const () as usize as u64;
         let runtime_identity = self.dispatch_txn.borrow().obligations.instance_identity();
         FlowEvaluationProvenance::new(
             store_identity,
@@ -5917,7 +5988,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 self_roots,
                                 materialized,
                             }
-                            .held(self.graph());
+                            .held(self.graph().store());
                             self.dispatch_txn
                                 .borrow_mut()
                                 .flow
@@ -6109,7 +6180,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .map(|result| result.fresh_literal_arms().to_vec())
                     .unwrap_or_default();
                 let mut next = FlowReturnResult::new_with_fresh_literal_arms(
-                    graph,
+                    graph.store(),
                     // Each member joins under its OWN function's null
                     // algebra — a component may span projects.
                     self.intern_normalized_union(&flat, entries[i].key.context.policy.nullability),
@@ -6203,7 +6274,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let result = if component_is_fresh {
                 let widened = widen_literal_node(self, result.return_type());
                 let proof = result.independent_member(&entry.key).cloned();
-                let result = result.with_return_type(self.graph(), widened);
+                let result = result.with_return_type(self.graph().store(), widened);
                 // Widening is this producer's completed transformation of
                 // the certified value, rather than an arbitrary replacement.
                 if let Some(mut proof) = proof {
@@ -6333,20 +6404,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 display_name: name.clone(),
             })
         };
-        // PASS 1 — every binder of this clause, bare. Sibling references
-        // in a constraint / default resolve against these, in either
-        // direction.
+        // PASS 1 — every binder of this clause, bare: what a self or later
+        // sibling reference in a constraint / default resolves to.
         for tp in type_parameters.iter() {
             env.insert(
                 tp.name.to_string(),
                 intern_binder(&OwnedStr::from(&tp.name), None, None),
             );
         }
-        // PASS 2 — the constraints and defaults, lowered under the
-        // composed environment, then the final binders.
+        // PASS 2 — left to right, the constraints and defaults, then the
+        // final binders. A sibling declared BEFORE a bound reads as its
+        // final, bound-carrying binder, as the shared binder-frame
+        // constructor lowers a clause: `U extends A` keeps `A`'s own
+        // constraint reachable from `U`'s, which a bare `A` would lose.
         let mut type_param_decls: Vec<crate::semantic_query::TypeParamDecl> =
-            Vec::with_capacity(type_parameters.len());
-        let mut finalized: Vec<(String, SemanticNodeId)> =
             Vec::with_capacity(type_parameters.len());
         for tp in type_parameters.iter() {
             let mut lower = |gated: &verter_session_query::flow::slice::GatedType| {
@@ -6366,7 +6437,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let default = tp.default.as_ref().map(&mut lower);
             let display_name = OwnedStr::from(&tp.name);
             let binder = intern_binder(&display_name, constraint, default);
-            finalized.push((tp.name.to_string(), binder));
+            env.insert(tp.name.to_string(), binder);
             type_param_decls.push(crate::semantic_query::TypeParamDecl {
                 name: display_name,
                 param: binder,
@@ -6378,7 +6449,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 is_const: false,
             });
         }
-        env.extend(finalized);
         let mut exact_binders = outer
             .map(|outer| outer.exact_binders.clone())
             .unwrap_or_default();
@@ -6655,7 +6725,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // (root and nested inline frames) passes through here; the warm
         // family hit in `execute_flow_return` returns before any frame
         // opens, so a warm hit can never reach this emission.
-        crate::flow_return_audit::record_flow_return_started(
+        crate::flow_return_audit::record_flow_return_started::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(self.ctx),
             &key.function.declaration_slot.defining_canonical,
             &key.function.declaration_slot.merged_symbol_name,
         );
@@ -6730,7 +6801,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     observed = exceeded.observed,
                     "flow-slice budget exceeded: typed Budget failure, ReturnOnly"
                 );
-                crate::flow_return_audit::record_flow_slice_budget_exceeded(&exceeded);
+                crate::flow_return_audit::record_flow_slice_budget_exceeded::<C::Observe>(
+                    crate::resolver_core::resolver_context::capture_targets(self.ctx),
+                    &exceeded,
+                );
                 return degraded(
                     FlowReturnFailure::Budget(
                         verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
@@ -7102,6 +7176,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             resolving_functions: std::rc::Rc::default(),
             this_free_values: std::rc::Rc::default(),
             declared_type_reads: std::rc::Rc::default(),
+            carrier_unwraps: std::rc::Rc::default(),
+            discriminant_members: std::rc::Rc::default(),
+            guard_relations: std::rc::Rc::default(),
+            arm_indexes: std::rc::Rc::default(),
             canonical,
             owner,
             nullability: key.context.policy.nullability,
@@ -7675,7 +7753,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // earlier in that order survives.
         let order: Vec<usize> = {
             let nodes: Vec<SemanticNodeId> = arms.iter().map(|arm| arm.node).collect();
-            crate::semantic_query::stable_key::union_rank_order(self.graph(), &nodes)
+            crate::semantic_query::stable_key::union_rank_order(self.graph().store(), &nodes)
         };
         let mut kept: Vec<bool> = vec![true; arms.len()];
         let mut decided: rustc_hash::FxHashMap<(SemanticNodeId, SemanticNodeId), bool> =
@@ -7835,9 +7913,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !nullability.is_strict() {
             if parts
                 .iter()
-                .any(|(node, _)| !is_nullable_node(graph, *node))
+                .any(|(node, _)| !is_nullable_node(graph.store(), *node))
             {
-                parts.retain(|(node, _)| !is_nullable_node(graph, *node));
+                parts.retain(|(node, _)| !is_nullable_node(graph.store(), *node));
             } else if !parts.is_empty() && parts.iter().all(|(_, widening)| *widening) {
                 parts = vec![(any, false)];
             }
@@ -8007,6 +8085,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// when it names none, or when its carrier does not resolve).
     pub(super) fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
         match self.graph().node_data(view).as_deref() {
+            Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
+                return self.regularized_empty_object_program(view);
+            }
             Some(
                 SemanticNodeData::Alias(_)
                 | SemanticNodeData::DeclRef { .. }
@@ -8015,7 +8096,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return view,
         }
         match self.unwrap_identity_carrier_for_relation(view) {
-            super::relation::IdentityCarrierUnwrap::Concrete(resolved) => resolved,
+            super::relation::IdentityCarrierUnwrap::Concrete(resolved) => {
+                self.regularized_empty_object_program(resolved)
+            }
             super::relation::IdentityCarrierUnwrap::Unresolvable => view,
         }
     }
@@ -8025,8 +8108,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// flag: a fresh object literal source is excess-checked, so a
     /// property the target neither lists nor admits through an index
     /// signature refuses the pair; an object literal target admits no
-    /// source property it does not list. Either side must be a plain
-    /// object surface for the rules to apply.
+    /// source property it does not list. Both operands must expose a
+    /// known object member surface for the rules to apply.
     fn literal_arm_lists_an_unknown_property(
         &self,
         (source, source_literal): (SemanticNodeId, bool),
@@ -8041,8 +8124,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         else {
             return false;
         };
-        let SemanticNodeData::Object(target_surface) = &*target_data else {
-            return false;
+        let target_surface = match &*target_data {
+            SemanticNodeData::Object(surface) => surface.clone(),
+            SemanticNodeData::ObjectSpreadProgram(program)
+                if target_literal && program.is_literal && program.effects.is_empty() =>
+            {
+                // The empty literal has an exact empty key domain, just as
+                // a plain literal surface does, and must not absorb a sibling
+                // before their missing properties can be normalized.
+                crate::semantic_query::SurfaceView::from_entries(Vec::new(), None, false)
+            }
+            _ => return false,
         };
         // A spread-built source lists the members its construction
         // program surfaces (`{ ...s, a: 2 }` over `s: { z: number }` lists
@@ -8162,7 +8254,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ) => !(optional && nullability.is_strict()),
                 // A member whose value is a constant is a unit type.
                 Some(SemanticNodeData::EnumLiteral(literal)) => {
-                    super::canonical_algebra::enum_literal_is_unit(graph, literal)
+                    super::canonical_algebra::enum_literal_is_unit(graph.store(), literal)
                         && !(optional && nullability.is_strict())
                 }
                 _ => false,
@@ -8310,9 +8402,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ctx
                 .prepared_decl_bundle(&identity.canonical_id)
                 .map(|bundle| {
-                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    self.declaration_scope_payload(
                         &bundle,
+                        identity.canonical_id.as_ref(),
                         identity.owner,
+                        identity.decl_name.as_ref(),
                     )
                 });
             let shadowing =
@@ -8386,7 +8480,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !nullability.is_strict() {
             let (nullable, other): (Vec<FlowContribution>, Vec<FlowContribution>) = contributors
                 .into_iter()
-                .partition(|contribution| is_nullable_node(graph, contribution.node));
+                .partition(|contribution| is_nullable_node(graph.store(), contribution.node));
             if other.is_empty() {
                 widening_nullish_only = holds.is_empty()
                     && !nullable.is_empty()
@@ -8403,9 +8497,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // fail()` over `fail(): never` is `number`, as is a bare self-call.
         if contributors
             .iter()
-            .any(|contribution| !is_never_node(graph, contribution.node))
+            .any(|contribution| !is_never_node(graph.store(), contribution.node))
         {
-            contributors.retain(|contribution| !is_never_node(graph, contribution.node));
+            contributors.retain(|contribution| !is_never_node(graph.store(), contribution.node));
         }
         // Literal widening is a SINGLE-contributor rule (tsc aggregates
         // the return-expression types with `pushIfUnique`, then widens
@@ -8434,7 +8528,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if contribution.fresh_literal {
                 continue;
             }
-            for lit in top_level_literal_nodes_in(graph, contribution.node) {
+            for lit in top_level_literal_nodes_in(graph.store(), contribution.node) {
                 let data = graph.node_data(lit);
                 let fresh_here = contribution
                     .fresh_values
@@ -8556,7 +8650,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let return_type =
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
                 return Ok((
-                    FlowReturnResult::new(graph, return_type, can_fall_through, degradation),
+                    FlowReturnResult::new(
+                        graph.store(),
+                        return_type,
+                        can_fall_through,
+                        degradation,
+                    ),
                     false,
                 ));
             }
@@ -8644,12 +8743,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // values alone is the widening nullable type, and the checker's
         // return widening turns it into `any` (a declared `null` read
         // keeps `null`).
-        if widening_nullish_only && is_nullable_node(graph, return_type) {
+        if widening_nullish_only && is_nullable_node(graph.store(), return_type) {
             return_type = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
         }
         Ok((
             FlowReturnResult::new_with_fresh_literal_arms(
-                graph,
+                graph.store(),
                 return_type,
                 can_fall_through,
                 degradation,
@@ -8924,6 +9023,53 @@ fn slice_expr_reads_frame(expr: &verter_session_query::flow::slice::SliceExpr) -
         }
         _ => false,
     }
+}
+
+/// Whether an object or array literal argument's indexed value holds, in
+/// it or in a literal nested in it, a function whose return the value
+/// inference left to its body: a block body without a declared return,
+/// which only the flow evaluator reads.
+fn indexed_literal_holds_body_return(
+    expression: &verter_type_expr::IndexedValueExpression,
+) -> bool {
+    use verter_type_expr::{ObjectMember, TypeExpr};
+    let verter_type_expr::IndexedValueExpression::Value(value) = expression else {
+        return false;
+    };
+    let mut pending = match value {
+        TypeExpr::Object(_) | TypeExpr::Array { .. } | TypeExpr::Tuple { .. } => vec![value],
+        _ => return false,
+    };
+    while let Some(value) = pending.pop() {
+        match value {
+            TypeExpr::Function(function) => {
+                if function.return_type.is_none() && function.flow_return.is_none() {
+                    return true;
+                }
+            }
+            TypeExpr::Object(object) => {
+                for member in &object.properties {
+                    match member {
+                        ObjectMember::Property(property) => pending.push(&property.ty),
+                        ObjectMember::Method(method)
+                            if method.has_implementation_body
+                                && method.function.return_type.is_none()
+                                && method.function.flow_return.is_none() =>
+                        {
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TypeExpr::Array { element, .. } => pending.push(element),
+            TypeExpr::Tuple { elements, .. } => {
+                pending.extend(elements.iter().map(|element| &element.ty));
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Every expression-position write in an expression tree, in tree order —
@@ -9734,7 +9880,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return false;
         };
         let graph = self.graph();
-        let literals = top_level_literal_nodes_in(graph, return_type);
+        let literals = top_level_literal_nodes_in(graph.store(), return_type);
         !literals.is_empty()
             && literals.iter().all(|literal| {
                 let data = graph.node_data(*literal);
@@ -10003,6 +10149,13 @@ enum GuardNarrowing {
         verter_session_query::flow::slice::SliceNarrowSubject,
         SemanticNodeId,
     ),
+    /// The subject keeps the arms of its union the guard did not exclude,
+    /// held unbuilt ([`FlowArmRemainder`]): only a guard's excluding edge
+    /// over an indexed union establishes it.
+    Excluded(
+        verter_session_query::flow::slice::SliceNarrowSubject,
+        FlowArmRemainder,
+    ),
 }
 
 /// Parent dispatch and member reads can retain different information after
@@ -10042,7 +10195,9 @@ thread_local! {
     /// COLD heritage-authority reads made by the `instanceof` guard
     /// ([`FlowEvaluator::node_heritage_reading`]) — D10-AC4's counter.
     ///
-    /// One per union ARM per cold EDGE, plus one for the tested class per
+    /// At most one per union ARM per cold EDGE — one per evaluation when
+    /// the subject's arm index stands for its union, which reads it for
+    /// every guard over the union — plus one for the tested class per
     /// edge, and none at all for an arm that carries no declaration. The
     /// ancestry walk behind each read is the authority's
     /// ([`ProjectSemanticDispatch::class_heritage_ancestry`]) and is
@@ -10099,6 +10254,32 @@ impl HeritageReading {
                 .iter()
                 .any(|ancestor| super::build::same_class_identity(ancestor, target)),
         }
+    }
+}
+
+/// The `instanceof` verdict of an arm carrying `arm_identity` and read as
+/// `arm_heritage`, against the tested class's identity and heritage
+/// ([`FlowEvaluator::instanceof_heritage_verdict`]).
+fn instanceof_verdict(
+    arm_identity: Option<&crate::semantic_query::DeclIdentity>,
+    arm_heritage: &HeritageReading,
+    instance_identity: Option<&crate::semantic_query::DeclIdentity>,
+    instance_heritage: &HeritageReading,
+) -> InstanceofHeritage {
+    if let Some(instance_identity) = instance_identity {
+        if arm_heritage.reaches(instance_identity) {
+            return InstanceofHeritage::ArmInFamily;
+        }
+    }
+    if let Some(arm_identity) = arm_identity {
+        if instance_heritage.reaches(arm_identity) {
+            return InstanceofHeritage::InstanceDerivesFromArm;
+        }
+    }
+    if arm_heritage.decided() && instance_heritage.decided() {
+        InstanceofHeritage::Unrelated
+    } else {
+        InstanceofHeritage::Undecidable
     }
 }
 
@@ -10363,12 +10544,16 @@ mod call_effects;
 #[path = "flow_return_contextual.rs"]
 mod contextual;
 use contextual::ContextualSignature;
+#[path = "flow_return_arm_index.rs"]
+mod arm_index;
 #[path = "flow_return_correlation.rs"]
 mod correlation;
 #[path = "flow_return_destructure.rs"]
 mod destructure;
 #[path = "flow_return_disjunction.rs"]
 mod disjunction;
+#[cfg(any(test, feature = "test-support"))]
+pub use arm_index::{index_preparation_for_tests, indexed_arm_visits_for_tests};
 #[path = "flow_return_footprint.rs"]
 mod footprint;
 #[cfg(any(test, feature = "semantic-observe"))]
@@ -10654,6 +10839,14 @@ pub(super) trait FlowDemandDriver {
         &self,
         node: SemanticNodeId,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>>;
+    /// The occurrence of the diagnostic a recovery node carries, bound now to
+    /// where the checker reports it for the body of `canonical`.
+    fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence>;
     /// Spread-normalise the tuple an array literal produces.
     fn normalize_expression_tuple_spread(
         &self,
@@ -10773,11 +10966,18 @@ pub(super) trait FlowDemandDriver {
     ) -> SemanticNodeId;
     fn type_parameter_apparent_receiver(&self, receiver: SemanticNodeId) -> SemanticNodeId;
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>>;
+    fn assignability_refuting_keys(
+        &self,
+        target: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<Vec<Arc<str>>>;
+    fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>>;
     fn unique_symbol_identity_for_typeof_node(
         &self,
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart>;
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap;
+    fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId;
     fn value_read_widens(
         &self,
         canonical: &str,
@@ -10794,7 +10994,12 @@ pub(super) trait FlowDemandDriver {
             verter_span::Span,
         ) -> super::call_resolve::ArgumentReadLiterals,
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>;
-    fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
+    fn arena(
+        &self,
+    ) -> super::arena_ops::ArenaOps<
+        '_,
+        <Self::Caps as crate::resolver_core::ResolverCapabilities>::Observe,
+    >;
     fn call_undecided_relations(&self) -> u64;
     fn discard_call_relation_observations(&self, count: u64);
     /// Count again the undecided relations a held executor attempt
@@ -10932,7 +11137,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         ProjectSemanticDispatch::unresolved_head_is_authored_import(self, scope, name)
     }
     fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
-        top_level_literal_nodes_in(self.graph(), node)
+        top_level_literal_nodes_in(self.graph().store(), node)
     }
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
         ProjectSemanticDispatch::widened_literal(self, node)
@@ -11284,6 +11489,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         self.indexed_call_return_key(node)
             .and_then(|key| self.read_declared_call_return(key))
     }
+    fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        ProjectSemanticDispatch::bind_checker_recovery(self, node, canonical, call_span)
+    }
     fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
@@ -11461,6 +11674,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
         ProjectSemanticDispatch::union_arms_of(self, node)
     }
+    fn assignability_refuting_keys(
+        &self,
+        target: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<Vec<Arc<str>>> {
+        ProjectSemanticDispatch::assignability_refuting_keys(self, target, canonical)
+    }
+    fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+        ProjectSemanticDispatch::closed_object_own_string_keys(self, source)
+    }
     fn unique_symbol_identity_for_typeof_node(
         &self,
         node: SemanticNodeId,
@@ -11469,6 +11692,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
         ProjectSemanticDispatch::unwrap_identity_carrier_for_relation(self, id)
+    }
+    fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
+        ProjectSemanticDispatch::regularized_empty_object_program(self, node)
     }
     fn value_read_widens(
         &self,
@@ -11492,7 +11718,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             self, canonical, owner, authored, reads,
         )
     }
-    fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
+    fn arena(&self) -> super::arena_ops::ArenaOps<'_, C::Observe> {
         super::arena_ops::ArenaOps::new(self.graph())
     }
     fn call_undecided_relations(&self) -> u64 {
@@ -11543,8 +11769,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[Vec<crate::semantic_query::SurfaceMember>],
     ) -> Vec<crate::semantic_query::SurfaceMember> {
         let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
-        let result =
-            super::walk::presence_intersection_members(self.graph(), members, &mut evidence);
+        let result = super::walk::presence_intersection_members(
+            self.graph(),
+            members,
+            self.construction_meter(),
+            &mut evidence,
+        );
         self.deposit_canonical_evidence(evidence);
         result
     }
@@ -11556,8 +11786,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         super::flow_products::LiteralProvenanceResult,
         verter_session_query::flow::policy::FlowGap,
     > {
-        let (membership, evidence) =
-            super::canonical_algebra::inspect_literal_provenance(self.graph(), inputs, result);
+        let (membership, evidence) = super::canonical_algebra::inspect_literal_provenance(
+            self.graph().store(),
+            inputs,
+            result,
+        );
         let incomplete = evidence.incomplete;
         self.deposit_canonical_evidence(evidence);
         if incomplete {
@@ -11571,8 +11804,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
-        let composite =
-            super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability);
+        let composite = super::canonical_algebra::intern_ordered_union_charged(
+            self.graph(),
+            members,
+            nullability,
+            self.construction_meter(),
+        );
         let incomplete = composite.evidence.incomplete;
         self.deposit_canonical_evidence(composite.evidence);
         super::flow_products::FlowAlgebraComposite {
@@ -11612,7 +11849,10 @@ impl<D: FlowDemandDriver> crate::semantic_query::CheckerDiagnosticPrinter
 
 pub(super) struct FlowCx<'a, D: FlowDemandDriver> {
     driver: &'a D,
-    arena: super::arena_ops::ArenaOps<'a>,
+    arena: super::arena_ops::ArenaOps<
+        'a,
+        <D::Caps as crate::resolver_core::ResolverCapabilities>::Observe,
+    >,
     inputs: &'a dyn crate::resolver_core::request_ports::IndexedInputs,
     source: &'a dyn crate::resolver_core::request_ports::ExpressionSourceSelection<
         ExpressionDemand = <D::Caps as crate::resolver_core::ResolverCapabilities>::ExpressionDemand,
@@ -11633,7 +11873,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> FlowCx<'a, ProjectSemant
     }
 }
 impl<D: FlowDemandDriver> FlowCx<'_, D> {
-    fn graph(&self) -> &super::arena_ops::ArenaOps<'_> {
+    fn graph(
+        &self,
+    ) -> &super::arena_ops::ArenaOps<
+        '_,
+        <D::Caps as crate::resolver_core::ResolverCapabilities>::Observe,
+    > {
         &self.arena
     }
 }
@@ -12056,6 +12301,15 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
         self.driver.declared_call_return_read(node)
     }
+    fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        self.driver
+            .bind_checker_recovery(node, canonical, call_span)
+    }
     fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
@@ -12234,6 +12488,16 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
         self.driver.union_arms_of(node)
     }
+    fn assignability_refuting_keys(
+        &self,
+        target: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<Vec<Arc<str>>> {
+        self.driver.assignability_refuting_keys(target, canonical)
+    }
+    fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+        self.driver.closed_object_own_string_keys(source)
+    }
     fn unique_symbol_identity_for_typeof_node(
         &self,
         node: SemanticNodeId,
@@ -12242,6 +12506,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
         self.driver.unwrap_identity_carrier_for_relation(id)
+    }
+    fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
+        self.driver.regularized_empty_object_program(node)
     }
     fn value_read_widens(
         &self,
@@ -12264,7 +12531,12 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         self.driver
             .resolve_scoped_argument_literal_provenance(canonical, owner, authored, reads)
     }
-    fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
+    fn arena(
+        &self,
+    ) -> super::arena_ops::ArenaOps<
+        '_,
+        <D::Caps as crate::resolver_core::ResolverCapabilities>::Observe,
+    > {
         self.arena
     }
     fn call_undecided_relations(&self) -> u64 {
@@ -12329,6 +12601,10 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
 }
 
+/// A memo one root evaluation shares with every nested evaluator and drops
+/// with them.
+type SharedEvaluationMemo<K, V> = std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<K, V>>>;
+
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     dispatch: &'d FlowCx<'d, D>,
@@ -12376,6 +12652,31 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// structure entering the flow again is walked once.
     declared_type_reads:
         std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>>>,
+    /// Every identity-carrier unwrap this evaluation's guards read
+    /// ([`FlowEvaluator::carrier_unwrap`]), by node, shared by every nested
+    /// evaluator of one root evaluation and dropped with it. A chain of
+    /// guards over one subject reads each of the subject's remaining arms
+    /// at every guard; this keeps each arm's unwrap to one read per
+    /// evaluation rather than one per guard. Request-scoped: it holds only
+    /// nodes this evaluation read.
+    carrier_unwraps: SharedEvaluationMemo<SemanticNodeId, super::relation::IdentityCarrierUnwrap>,
+    /// Every union arm's member a discriminant test has read
+    /// ([`FlowEvaluator::discriminant_member`]), by arm and member name,
+    /// shared by every nested evaluator of one root evaluation and dropped
+    /// with it: a chain of discriminant tests reads the tested member of
+    /// every remaining arm at every test. Request-scoped: it holds only
+    /// members this evaluation read.
+    discriminant_members: SharedEvaluationMemo<(SemanticNodeId, Arc<str>), Option<SemanticNodeId>>,
+    /// Every assignability a guard's narrow asked
+    /// ([`FlowEvaluator::narrowing_assignable`]), by source and target,
+    /// shared by every nested evaluator of one root evaluation and dropped
+    /// with it. Request-scoped: it holds only pairs this evaluation related.
+    guard_relations: SharedEvaluationMemo<(SemanticNodeId, SemanticNodeId), Option<bool>>,
+    /// Every union a guard chain indexed ([`arm_index::ArmIndex`]), by the
+    /// node its arms are enumerated from, shared by every nested evaluator
+    /// of one root evaluation and dropped with it. Request-scoped: it holds
+    /// only unions this evaluation's guards narrowed.
+    arm_indexes: SharedEvaluationMemo<SemanticNodeId, std::rc::Rc<arm_index::ArmIndex>>,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
@@ -12949,6 +13250,20 @@ thread_local! {
     static UNION_LEAF_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Members the flow evaluator's union constructions took
+    /// ([`FlowEvaluator::union`]), a remainder's built union included.
+    static UNION_CONSTRUCTION_MEMBERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Members the flow evaluator's union constructions took on this thread
+/// (test-only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn union_construction_members_for_tests() -> usize {
+    UNION_CONSTRUCTION_MEMBERS.with(std::cell::Cell::get)
+}
+
 /// Leaves visited by flow union enumeration on this thread (test-only).
 /// Count at the shared enumeration boundary so both switch partitions and
 /// per-clause relation narrowing contribute their actual traversal work.
@@ -13115,7 +13430,7 @@ pub enum NarrowingLedgerEntry {
     Established {
         root: FlowProductSubject,
         subject: verter_session_query::flow::slice::SliceNarrowSubject,
-        node: SemanticNodeId,
+        node: FlowNarrowed,
     },
     /// Every fact rooted at `root` was dropped — what a write to the
     /// binding does to the facts about the value it replaced.
@@ -13149,12 +13464,12 @@ pub fn standing_narrowings(
     window: &[NarrowingLedgerEntry],
 ) -> Vec<(
     verter_session_query::flow::slice::SliceNarrowSubject,
-    SemanticNodeId,
+    FlowNarrowed,
 )> {
     let mut standing: Vec<(
         &FlowProductSubject,
         &verter_session_query::flow::slice::SliceNarrowSubject,
-        SemanticNodeId,
+        &FlowNarrowed,
     )> = Vec::with_capacity(window.len());
     for entry in window {
         match entry {
@@ -13162,7 +13477,7 @@ pub fn standing_narrowings(
                 root,
                 subject,
                 node,
-            } => standing.push((root, subject, *node)),
+            } => standing.push((root, subject, node)),
             NarrowingLedgerEntry::Cleared { root } => {
                 standing.retain(|(candidate, _, _)| *candidate != root);
             }
@@ -13176,7 +13491,7 @@ pub fn standing_narrowings(
     }
     standing
         .into_iter()
-        .map(|(_, subject, node)| (subject.clone(), node))
+        .map(|(_, subject, node)| (subject.clone(), node.clone()))
         .collect()
 }
 
@@ -13297,13 +13612,19 @@ fn reestablish_narrowings(
         .map(NarrowingProduct::facts)
         .unwrap_or_default();
     fn position(fact: &FlowNarrowingFact) -> (&[Arc<str>], u64) {
-        (fact.path.as_ref(), fact.narrowed_to.0)
+        (fact.path.as_ref(), fact.narrowed_to.order_key())
     }
-    let mut held = standing.iter().map(position).peekable();
+    let mut held = standing.iter().peekable();
     let holds_all = facts.iter().all(|fact| {
         let wanted = position(fact);
-        while held.next_if(|standing| *standing < wanted).is_some() {}
-        held.next_if_eq(&wanted).is_some()
+        while held
+            .next_if(|standing| position(standing) < wanted)
+            .is_some()
+        {}
+        held.next_if(|standing| {
+            position(standing) == wanted && standing.narrowed_to == fact.narrowed_to
+        })
+        .is_some()
     });
     if holds_all {
         return;
@@ -13317,7 +13638,7 @@ fn reestablish_narrowings(
         .chain(facts.iter().map(|fact| FlowNarrowingFact {
             binding: identity.clone(),
             path: Arc::clone(&fact.path),
-            narrowed_to: fact.narrowed_to,
+            narrowed_to: fact.narrowed_to.clone(),
             fresh_literal: fact.fresh_literal,
         }))
         .collect();
@@ -13344,7 +13665,7 @@ fn push_narrowing_into(
     products: &mut FlowProductStore,
     root: &FlowProductSubject,
     path: &Arc<[Arc<str>]>,
-    node: SemanticNodeId,
+    narrowed: FlowNarrowed,
     fresh_literal: Option<SemanticNodeId>,
 ) {
     let mut facts: Vec<FlowNarrowingFact> = products
@@ -13367,7 +13688,7 @@ fn push_narrowing_into(
             }
         },
         path: Arc::clone(path),
-        narrowed_to: node,
+        narrowed_to: narrowed,
         fresh_literal,
     });
     products.set_narrowing(root, NarrowingProduct::new(facts));
@@ -13838,6 +14159,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// The canonical union of `members` under this frame's null algebra —
     /// the one union construction of the evaluation.
     fn union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
+        #[cfg(any(test, feature = "test-support"))]
+        UNION_CONSTRUCTION_MEMBERS.with(|count| count.set(count.get() + members.len()));
         self.dispatch
             .intern_normalized_union(members, self.nullability)
     }
@@ -14409,6 +14732,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         holds_before,
                         widens_unique_symbols,
                         outcome,
+                        None,
                     ) {
                         return step;
                     }
@@ -14505,6 +14829,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         self.holds.len(),
                         false,
                         Positional::Value(any),
+                        None,
                     ) {
                         return step;
                     }
@@ -14642,6 +14967,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         holds_before,
                         widens_unique_symbols,
                         outcome,
+                        Some(member_context),
                     ) {
                         return step;
                     }
@@ -14758,6 +15084,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         holds_before: usize,
         widens_unique_symbols: bool,
         outcome: Positional<SemanticNodeId>,
+        contextual: Option<SemanticNodeId>,
     ) -> Option<ObjectEvalStep<'e>> {
         let value = self.settle_composite_part(outcome, holds_before);
         // Selective object widening (BL02-class): a member read of a
@@ -14766,8 +15093,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // publishes `b: number`), while `as const` / annotated
         // literal locals stay pinned. Direct literal members already
         // widened (or stayed pinned under a const assertion) at IR
-        // lowering.
-        let value = self.widen_value_position_read(member_value, value);
+        // lowering. A member's contextual type that is a literal context
+        // for the read keeps it (`{ a: c } satisfies { a: "a" }` is
+        // `{ a: "a" }`, the checker's
+        // `getWidenedLiteralLikeTypeForContextualType`).
+        let value = match contextual {
+            Some(contextual) if self.literal_of_contextual_type(value, contextual) => value,
+            _ => self.widen_value_position_read(member_value, value),
+        };
         let value = if widens_unique_symbols {
             widen_unique_symbols(self.dispatch, value, self.nullability)
         } else {
@@ -14953,6 +15286,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
             super::relation::IdentityCarrierUnwrap::Unresolvable => operand,
         };
+        let resolved = self.dispatch.regularized_empty_object_program(resolved);
         let surface = match self.dispatch.arena().node_data(resolved).as_deref() {
             Some(SemanticNodeData::Object(surface))
                 if surface.index_signatures.is_empty()
@@ -15123,12 +15457,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .any(|member| self.value_mentions_receiver(member.value, receiver.binder))
         });
         self.receiver = enclosing_receiver;
-        if spread_seen {
+        if spread_seen || entries.is_empty() {
             if late_bound.any() {
                 return Positional::Unmodeled;
             }
             return Positional::Value(self.dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 }),
                 self.binder_env.scope.clone(),
@@ -15358,8 +15693,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// per constituent of a union, the declared property, else a tuple's
     /// element at a numeric name, else an applicable index signature's
     /// value; a constrained type parameter's through its constraint (the
-    /// apparent type `getApparentTypeOfContextualType` reads). `None` when
-    /// no constituent types the property.
+    /// apparent type `getApparentTypeOfContextualType` reads), and an
+    /// intersection holding one as the intersection of its constituents'
+    /// (`reducers: R & {}` types `reducers.inc` by `R`'s constraint).
+    /// `None` when no constituent types the property.
     fn contextual_property_type(
         &self,
         contextual: SemanticNodeId,
@@ -15368,6 +15705,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let graph = self.dispatch.graph();
         let contextual = self.dispatch.resolved_reduction_view(contextual);
         let data = graph.node_data(contextual);
+        if let Some(SemanticNodeData::Intersection(members)) = data.as_deref() {
+            let members = members.to_vec();
+            if members.iter().any(|member| {
+                matches!(
+                    graph
+                        .node_data(self.dispatch.resolved_reduction_view(*member))
+                        .as_deref(),
+                    Some(SemanticNodeData::TypeParam { .. })
+                )
+            }) {
+                drop(data);
+                let types: Vec<SemanticNodeId> = members
+                    .iter()
+                    .filter_map(|member| self.contextual_property_type(*member, name))
+                    .collect();
+                return match types.as_slice() {
+                    [] => None,
+                    [only] => Some(*only),
+                    _ => Some(
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&types, false),
+                    ),
+                };
+            }
+        }
         match data.as_deref()? {
             SemanticNodeData::Union(members) => {
                 let members = members.to_vec();
@@ -15398,6 +15760,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::TypeParam { .. } => None,
+            // A mapped type's members are its template at each key it
+            // produces (`Partial<{ a: 1 }>` types `a` as `1`), which
+            // only a path projection materialises: its one-level surface
+            // lists none of them.
+            SemanticNodeData::Mapped { .. } => {
+                drop(data);
+                self.contextual_mapped_property_type(contextual, name)
+            }
             _ => {
                 drop(data);
                 let surface = match graph.node_data(contextual).as_deref() {
@@ -15427,6 +15797,40 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .map(|signature| signature.value_type)
             }
         }
+    }
+
+    /// The member `name` of the mapped type `contextual` through the
+    /// shared path projection; `None` when the projection does not answer
+    /// it with a modelled type.
+    fn contextual_mapped_property_type(
+        &self,
+        contextual: SemanticNodeId,
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        let _demand_scope = self
+            .dispatch
+            .enter_lexical_demand(Arc::from(self.canonical));
+        let crate::semantic_query::QueryResult::Value(output) =
+            self.dispatch
+                .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+                    base: contextual,
+                    path: verter_type_expr::OwnedSlice::from([
+                        crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(Arc::from(name)),
+                        ),
+                    ]),
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                })
+        else {
+            return None;
+        };
+        (!matches!(
+            self.dispatch.graph().node_data(output.value).as_deref(),
+            None | Some(SemanticNodeData::Opaque(_))
+        ))
+        .then_some(output.value)
     }
 
     /// The checker's contextual type of the element at `position` of an
@@ -15746,7 +16150,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     } else if widening_nullish {
                         frame.parts.push((ReductionArm::plain(node), true));
                     } else {
-                        let read = self.widen_value_position_read(value, node);
+                        let read = match element_context {
+                            Some(context) if self.literal_of_contextual_type(node, context) => node,
+                            _ => self.widen_value_position_read(value, node),
+                        };
                         let read = if element_context.is_none() {
                             widen_unique_symbols(self.dispatch, read, self.nullability)
                         } else {
@@ -16401,7 +16808,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         node: SemanticNodeId,
     ) {
-        self.push_narrowing_with_fresh_literal(subject, node, None);
+        self.push_narrowed(subject, FlowNarrowed::Node(node), None);
     }
 
     /// [`Self::push_narrowing`] for a literal equality's narrow, carrying
@@ -16412,6 +16819,28 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         node: SemanticNodeId,
         fresh_literal: Option<SemanticNodeId>,
     ) {
+        self.push_narrowed(subject, FlowNarrowed::Node(node), fresh_literal);
+    }
+
+    /// Record the fact a guard application established, whichever form
+    /// the narrowed type takes.
+    fn push_guard_narrowing(&mut self, fact: GuardNarrowing) {
+        match fact {
+            GuardNarrowing::Unchanged => {}
+            GuardNarrowing::Narrowed(subject, node) => self.push_narrowing(&subject, node),
+            GuardNarrowing::Excluded(subject, remainder) => {
+                self.push_narrowed(&subject, FlowNarrowed::Remainder(remainder), None);
+            }
+        }
+    }
+
+    /// [`Self::push_narrowing`] over a narrowed type in either form.
+    fn push_narrowed(
+        &mut self,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        narrowed: FlowNarrowed,
+        fresh_literal: Option<SemanticNodeId>,
+    ) {
         let Some(root) = self.resolved_narrow_subject(&subject.root) else {
             return;
         };
@@ -16419,14 +16848,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             &mut self.products,
             &root,
             &subject.path,
-            node,
+            narrowed.clone(),
             fresh_literal,
         );
         self.narrowing_writes
             .push(NarrowingLedgerEntry::Established {
                 root,
                 subject: subject.clone(),
-                node,
+                node: narrowed,
             });
     }
 
@@ -16448,14 +16877,34 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// over the ledger vocabulary alone. Establishment and kill are
     /// separated there rather than here because a window's own state
     /// diff cannot express either one.
+    ///
+    /// A remainder stays unbuilt: an arm whose window is never joined
+    /// with another's never builds it ([`Self::built_narrowings`]).
     fn narrowings_since(
         &self,
         mark: &NarrowingSnapshot,
     ) -> Vec<(
         verter_session_query::flow::slice::SliceNarrowSubject,
-        SemanticNodeId,
+        FlowNarrowed,
     )> {
         standing_narrowings(&self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..])
+    }
+
+    /// `narrowings`, every remainder built.
+    fn built_narrowings(
+        &self,
+        narrowings: Vec<(
+            verter_session_query::flow::slice::SliceNarrowSubject,
+            FlowNarrowed,
+        )>,
+    ) -> Vec<(
+        verter_session_query::flow::slice::SliceNarrowSubject,
+        SemanticNodeId,
+    )> {
+        narrowings
+            .into_iter()
+            .map(|(subject, narrowed)| (subject, self.narrowed_node(&narrowed)))
+            .collect()
     }
 
     /// Join the original ordered predecessors of one continuation. A merge
@@ -16468,6 +16917,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         incoming: &[&FlowLayerState],
         observation: &FlowWriteObservation,
     ) -> FlowLayerState {
+        let _ = observation;
         let first = incoming.first().expect("a continuation has a predecessor");
         let frame_algebra = super::flow_products::DispatchFlowAlgebra {
             dispatch: self.dispatch,
@@ -16590,7 +17040,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .iter()
                 .flat_map(|state| {
                     match root_fact(&state.products, subject) {
-                        Some(fact) => Some(fact.narrowed_to),
+                        Some(fact) => Some(self.narrowed_node(&fact.narrowed_to)),
                         None => state.products.reaching(subject),
                     }
                     .map(arms)
@@ -16604,7 +17054,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ) else {
                     return false;
                 };
-                let narrowed = arms(fact.narrowed_to);
+                let narrowed = arms(self.narrowed_node(&fact.narrowed_to));
                 arms(reaching)
                     .into_iter()
                     .any(|arm| !narrowed.contains(&arm) && !edge_arms.contains(&arm))
@@ -16625,11 +17075,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         if products.reaching_type(subject).is_none() {
                             continue;
                         }
-                        let fresh = (fact.fresh_literal == Some(fact.narrowed_to))
+                        let narrowed = self.narrowed_node(&fact.narrowed_to);
+                        let fresh = (fact.fresh_literal == Some(narrowed))
                             .then_some(WideningMembership::All);
                         products.set_reaching_type(
                             subject,
-                            ReachingTypeProduct::of(fact.narrowed_to).with_widening(fresh),
+                            ReachingTypeProduct::of(narrowed).with_widening(fresh),
                         );
                         let kept: Vec<FlowNarrowingFact> = products
                             .narrowing(subject)
@@ -17497,13 +17948,33 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &self,
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
     ) -> Option<SemanticNodeId> {
+        self.narrowed_read_unbuilt(subject)
+            .map(|narrowed| self.narrowed_node(&narrowed))
+    }
+
+    /// [`Self::narrowed_read`], a remainder left unbuilt.
+    fn narrowed_read_unbuilt(
+        &self,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+    ) -> Option<FlowNarrowed> {
         let root = self.resolved_narrow_subject(&subject.root)?;
         self.products
             .narrowing(&root)?
             .facts()
             .iter()
             .find(|fact| fact.path == subject.path)
-            .map(|fact| fact.narrowed_to)
+            .map(|fact| fact.narrowed_to.clone())
+    }
+
+    /// The type a narrowing stands for, building a remainder's union on
+    /// its first read ([`FlowArmRemainder`]).
+    fn narrowed_node(&self, narrowed: &FlowNarrowed) -> SemanticNodeId {
+        narrowed
+            .node_or_build(|arms| super::flow_products::FlowAlgebraComposite {
+                node: self.union_or_never(arms),
+                incomplete: false,
+            })
+            .node
     }
 
     /// Apply one evaluated write to its target: a parameter write rides
@@ -18178,6 +18649,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         entry: &FlowProductStore,
         observation: &FlowWriteObservation,
     ) {
+        let _ = observation;
         let mut incoming: Vec<FlowLayerState> = Vec::with_capacity(2);
         if consequent_falls {
             incoming.push(FlowLayerState {
@@ -18222,6 +18694,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         entry: &FlowProductStore,
         observation: &FlowWriteObservation,
     ) -> FlowLayerState {
+        let _ = observation;
         let states: smallvec::SmallVec<[&FlowLayerState; 2]> = incoming.iter().collect();
         let mut joined = self.join_states(&states, observation);
         // The branch join over the function-scoped `var` layer — the ONE
@@ -18498,6 +18971,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         observation: &FlowWriteObservation,
         after: &FlowLayerState,
     ) -> FlowExecutedClauseWrites {
+        let _ = observation;
         FlowExecutedClauseWrites(after.products.writes_since(observation))
     }
 
@@ -19174,7 +19648,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             return;
         }
-        match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+        match self.carrier_unwrap(node) {
             super::relation::IdentityCarrierUnwrap::Concrete(concrete)
                 if concrete != node
                     && matches!(
@@ -19196,6 +19670,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 *gapped = true;
             }
         }
+    }
+
+    /// The shared identity-carrier unwrap of `node`
+    /// ([`ProjectSemanticDispatch::unwrap_identity_carrier_for_relation`]),
+    /// read once per evaluation: every guard of a chain over one subject
+    /// asks it again for each arm it passes over.
+    fn carrier_unwrap(&self, node: SemanticNodeId) -> super::relation::IdentityCarrierUnwrap {
+        if let Some(unwrap) = self.carrier_unwraps.borrow().get(&node) {
+            return *unwrap;
+        }
+        let unwrap = self.dispatch.unwrap_identity_carrier_for_relation(node);
+        self.carrier_unwraps.borrow_mut().insert(node, unwrap);
+        unwrap
     }
 
     /// The CURRENT node of a narrowable reference: the binding's reaching
@@ -19913,26 +20400,37 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return;
             }
         };
-        match fact {
-            GuardNarrowing::Unchanged => {}
-            GuardNarrowing::Narrowed(subject, node) => {
-                self.push_narrowing(&subject, node);
-            }
-        }
+        self.push_guard_narrowing(fact);
         self.apply_guard_aliases(guard, positive);
     }
 
     /// Apply one entered `asserts` call: the call is a throw point first
     /// (if it throws, the narrow never happened), then its predicate
     /// narrows the subject for the rest of the path — to the target, or by
-    /// truthiness for a targetless `asserts v`.
+    /// truthiness for a targetless `asserts v` — or, for a targetless
+    /// assertion passed a condition, the condition holds.
     fn apply_assertion(
         &mut self,
-        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
-        target: Option<&verter_session_query::flow::slice::GatedType>,
+        claim: &verter_session_query::flow::slice::SliceAssertionClaim,
         call: verter_span::Span,
     ) {
+        use verter_session_query::flow::slice::SliceAssertionClaim;
         self.capture_throw_point();
+        let (subject, target) = match claim {
+            SliceAssertionClaim::Reference { subject, target } => (subject, target.as_ref()),
+            SliceAssertionClaim::Condition(guard) => {
+                // A targetless assertion over a condition: the condition
+                // holds past the call (`narrowType(…, assumeTrue)`), its
+                // positive reading landing for the rest of the region as a
+                // reference assertion's narrow does.
+                self.call_evidence.push(FlowCallEvidence {
+                    span: call,
+                    relations_decided: true,
+                });
+                self.apply_guard_scoped(guard, true);
+                return;
+            }
+        };
         // The assertion call's evidence, with the same discipline a
         // predicate call's narrowing takes: the call was evaluated, and
         // its relation decided (or not) the narrow it established. A
@@ -19964,12 +20462,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 self.narrow_truthy(subject, false)
             }
         };
-        match fact {
-            GuardNarrowing::Narrowed(subject, node) => {
-                self.push_narrowing(&subject, node);
-            }
-            GuardNarrowing::Unchanged => {}
-        }
+        self.push_guard_narrowing(fact);
     }
 
     /// Land the union of the per-arm narrows of every reference each
@@ -20002,12 +20495,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// an `asserts` call, or the join of a conditional's arms.
     fn apply_entered_effect(&mut self, effect: &verter_session_query::flow::slice::SliceStatement) {
         match effect {
-            verter_session_query::flow::slice::SliceStatement::Assertion {
-                subject,
-                target,
-                call,
-            } => {
-                self.apply_assertion(subject, target.as_ref(), *call);
+            verter_session_query::flow::slice::SliceStatement::Assertion { claim, call } => {
+                self.apply_assertion(claim, *call);
             }
             verter_session_query::flow::slice::SliceStatement::If {
                 guard,
@@ -20162,6 +20651,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn empty_object_node(&mut self) -> SemanticNodeId {
         self.lower_body_type(&verter_type_expr::TypeExpr::Object(Arc::new(
             verter_type_expr::ObjectExpr {
+                empty_literal: false,
                 properties: Vec::new(),
             },
         )))
@@ -20900,6 +21390,37 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             ));
             return GuardNarrowing::Unchanged;
         }
+        // A strict equality with a string literal over a tested member
+        // whose current union is distinct string literals: the member and
+        // its parent narrow through their indexes. Such a member reaches
+        // nothing unresolved, and its positive edge reads the compared
+        // string only when the member already held it, so no fresh literal
+        // is established.
+        if !subject.path.is_empty() && comparison == LiteralComparison::Strict {
+            let text = arm_index::string_literal_text(self.dispatch.graph(), literal_node);
+            if let Some(text) = text.as_deref() {
+                let test = arm_index::StringTagTest { text, negated };
+                if let Some(leaf_arms) = self.indexed_string_literals(subject) {
+                    let parent = self.narrow_parent_by_discriminant(
+                        subject,
+                        &mut |this, member| {
+                            this.narrow_type_by_equality(member, literal_node, negated, false)
+                        },
+                        Some(test),
+                    );
+                    let leaf = self
+                        .narrow_string_literal_arms(subject, &leaf_arms, test)
+                        .unwrap_or(GuardNarrowing::Unchanged);
+                    return match (parent, leaf) {
+                        (parent, GuardNarrowing::Unchanged) => parent,
+                        (parent, leaf) => {
+                            self.push_guard_narrowing(parent);
+                            leaf
+                        }
+                    };
+                }
+            }
+        }
         let before = self.subject_current_node(subject);
         if subject.path.is_empty() {
             let narrowed = self.narrow_eq_literal_reference(
@@ -20930,9 +21451,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // on the positive edge and `string` on the negated one, whether
         // or not `o` is a union).
         let loose = comparison == LiteralComparison::Loose;
-        let parent = self.narrow_parent_by_discriminant(subject, &mut |this, member| {
-            this.narrow_type_by_equality(member, literal_node, negated, loose)
-        });
+        let text = (comparison == LiteralComparison::Strict)
+            .then(|| arm_index::string_literal_text(self.dispatch.graph(), literal_node))
+            .flatten();
+        let parent = self.narrow_parent_by_discriminant(
+            subject,
+            &mut |this, member| this.narrow_type_by_equality(member, literal_node, negated, loose),
+            text.as_deref()
+                .map(|text| arm_index::StringTagTest { text, negated }),
+        );
         if comparison == LiteralComparison::SwitchCase {
             if let GuardNarrowing::Narrowed(parent_subject, node) = &parent {
                 // A selected unit tag supplies the checker's case type even
@@ -20967,11 +21494,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         match (parent, leaf) {
             (parent, GuardNarrowing::Unchanged) => parent,
-            (GuardNarrowing::Narrowed(parent_subject, node), leaf) => {
-                self.push_narrowing(&parent_subject, node);
+            (parent, leaf) => {
+                self.push_guard_narrowing(parent);
                 leaf
             }
-            (_, leaf) => leaf,
         }
     }
 
@@ -21011,11 +21537,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         let fact = self.narrow_reference_by_value(subject, value_node, negated, loose);
         if let (Some(reference), Some(subject_node)) = (mirror, subject_node) {
-            if let GuardNarrowing::Narrowed(narrowed, node) =
-                self.narrow_reference_by_value(reference, subject_node, negated, loose)
-            {
-                self.push_narrowing(&narrowed, node);
-            }
+            let mirrored = self.narrow_reference_by_value(reference, subject_node, negated, loose);
+            self.push_guard_narrowing(mirrored);
         }
         fact
     }
@@ -21079,12 +21602,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return GuardNarrowing::Unchanged;
         };
         if !subject.path.is_empty() {
-            let parent = self.narrow_parent_by_discriminant(subject, &mut |this, prop| {
-                this.narrow_type_by_equality(prop, value, negated, loose)
-            });
-            if let GuardNarrowing::Narrowed(parent, node) = parent {
-                self.push_narrowing(&parent, node);
-            }
+            let parent = self.narrow_parent_by_discriminant(
+                subject,
+                &mut |this, prop| this.narrow_type_by_equality(prop, value, negated, loose),
+                None,
+            );
+            self.push_guard_narrowing(parent);
         }
         if narrowed == current {
             GuardNarrowing::Unchanged
@@ -21308,7 +21831,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// The union of `arms`, `never` when there is none.
-    fn union_or_never(&mut self, arms: &[SemanticNodeId]) -> SemanticNodeId {
+    fn union_or_never(&self, arms: &[SemanticNodeId]) -> SemanticNodeId {
         if arms.is_empty() {
             self.never_node()
         } else {
@@ -21413,8 +21936,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             )
         };
         let mut undecided = false;
+        let b_arms = self.enumerated_union_arms_or_self(b);
         for a_arm in self.enumerated_union_arms_or_self(a) {
-            for b_arm in self.enumerated_union_arms_or_self(b) {
+            for &b_arm in &b_arms {
                 let verdict = match self.dispatch.nodes_comparable(a_arm, b_arm) {
                     ComparabilityVerdict::Disjoint(_) => Some(false),
                     ComparabilityVerdict::Undecided => None,
@@ -21571,8 +22095,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .iter()
             .find(|fact| fact.path == path)?;
         let literal = fact.fresh_literal?;
-        (fact.narrowed_to == node && self.top_level_literal_nodes(node).contains(&literal))
-            .then_some(literal)
+        (fact.narrowed_to.built() == Some(node)
+            && self.top_level_literal_nodes(node).contains(&literal))
+        .then_some(literal)
     }
 
     /// `reference === literal` over one reference — a binding, or the
@@ -22211,6 +22736,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         narrow_member: &mut dyn FnMut(&mut Self, SemanticNodeId) -> Option<SemanticNodeId>,
+        string_test: Option<arm_index::StringTagTest<'_>>,
     ) -> GuardNarrowing {
         let parent_subject = verter_session_query::flow::slice::SliceNarrowSubject {
             root: subject.root.clone(),
@@ -22225,6 +22751,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .to_vec()
                 .into_boxed_slice(),
         );
+        // `narrow_member` is a strict equality with one string literal: a
+        // parent union whose arms each tag the member with a distinct
+        // string decides it through its index. A union of at least two
+        // arms is a union in the current reading.
+        if let (Some(test), [name]) = (string_test, &*last) {
+            if let Some(arms) = self.indexed_subject(&parent_subject) {
+                if let Some(fact) =
+                    self.narrow_parent_by_string_tag(&parent_subject, &arms, name, test)
+                {
+                    return fact;
+                }
+            }
+        }
         // The checker narrows the parent only through a DISCRIMINANT
         // property of a union — the reference's declared type when that
         // is a union, else its narrowed type
@@ -22240,7 +22779,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let arms = self.enumerated_union_arms_or_self(current);
         let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in &arms {
-            match self.project_segments_navigate(*arm, &last) {
+            match self.discriminant_member(*arm, &last) {
                 Some(member) => projected.push(member),
                 None => return GuardNarrowing::Unchanged,
             }
@@ -22264,10 +22803,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if narrowed == never {
             return GuardNarrowing::Narrowed(parent_subject, never);
         }
+        // A literal is comparable to itself, so an arm whose member IS one
+        // of the narrowed member's literal arms survives without a relation
+        // read. Enumerating the narrowed member once per guard, not once
+        // per arm, keeps a chain of discriminant tests linear in the arms
+        // each test passes over: past `x.kind !== "a"` the narrowed member
+        // is every remaining tag.
+        let graph = self.dispatch.graph();
+        let narrowed_literals: rustc_hash::FxHashSet<SemanticNodeId> = self
+            .enumerated_union_arms_or_self(narrowed)
+            .into_iter()
+            .filter(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                )
+            })
+            .collect();
         let mut undecided = false;
         let mut survivors = Vec::with_capacity(arms.len());
         for (arm, member) in arms.iter().zip(projected) {
             if member == never {
+                continue;
+            }
+            if narrowed_literals.contains(&member) {
+                survivors.push(*arm);
                 continue;
             }
             match self.comparable_either_way(narrowed, member) {
@@ -22497,12 +23057,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in arms {
-            match self.project_segments_navigate(arm, member) {
+            match self.discriminant_member(arm, member) {
                 Some(node) => projected.push(node),
                 None => return false,
             }
         }
         self.members_discriminate(&projected)
+    }
+
+    /// The tested member of one union arm a discriminant test reads
+    /// ([`Self::project_segments_navigate`]), read once per evaluation.
+    fn discriminant_member(
+        &mut self,
+        arm: SemanticNodeId,
+        member: &[Arc<str>],
+    ) -> Option<SemanticNodeId> {
+        let [name] = member else {
+            return self.project_segments_navigate(arm, member);
+        };
+        let key = (arm, Arc::clone(name));
+        if let Some(read) = self.discriminant_members.borrow().get(&key) {
+            return *read;
+        }
+        let read = self.project_segments_navigate(arm, member);
+        self.discriminant_members.borrow_mut().insert(key, read);
+        read
     }
 
     /// Bake a narrow verdict into a state SNAPSHOT's reaching-definition
@@ -22527,7 +23106,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         for (guard, positive) in applied {
             self.apply_guard_scoped(guard, *positive);
         }
-        let narrowed = self.narrowings_since(&mark);
+        let narrowed = self.built_narrowings(self.narrowings_since(&mark));
         self.restore_narrowings(mark);
         self.restore_layer_state(entry.clone());
         let typeof_subjects: Vec<&verter_session_query::flow::slice::SliceNarrowSubject> = applied
@@ -22579,7 +23158,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // direction — never another clause's value.
         if !subject.path.is_empty() {
             let root = self.narrow_subject(&subject.root);
-            push_narrowing_into(&mut state.products, &root, &subject.path, node, None);
+            push_narrowing_into(
+                &mut state.products,
+                &root,
+                &subject.path,
+                FlowNarrowed::Node(node),
+                None,
+            );
             return;
         }
         // A whole-binding fact rides the reaching-TYPE product, keeping
@@ -22647,7 +23232,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             } else {
                 self.settled_guard_fact(fact, Some(node), false)
             };
-            changed |= settled != Some(fact.narrowed_to);
+            changed |= settled.as_ref() != Some(&fact.narrowed_to);
             kept.extend(settled.map(|narrowed_to| FlowNarrowingFact {
                 narrowed_to,
                 ..fact.clone()
@@ -22679,32 +23264,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         fact: &FlowNarrowingFact,
         root_value: Option<SemanticNodeId>,
         written: bool,
-    ) -> Option<SemanticNodeId> {
-        let standing = (!written).then_some(fact.narrowed_to);
+    ) -> Option<FlowNarrowed> {
+        let standing = (!written).then(|| fact.narrowed_to.clone());
         let Some(current) =
             root_value.and_then(|root| self.project_segments_navigate(root, &fact.path))
         else {
             return standing;
         };
-        if current == fact.narrowed_to {
-            return Some(fact.narrowed_to);
+        let fact_node = self.narrowed_node(&fact.narrowed_to);
+        if current == fact_node {
+            return Some(fact.narrowed_to.clone());
         }
-        if self.assignable(current, fact.narrowed_to) == Some(true) {
-            return (self.assignable(fact.narrowed_to, current) == Some(true))
-                .then_some(fact.narrowed_to);
+        if self.assignable(current, fact_node) == Some(true) {
+            return (self.assignable(fact_node, current) == Some(true))
+                .then(|| fact.narrowed_to.clone());
         }
         if written {
             return None;
         }
-        let (narrowed, _) = self.narrow_node_to_candidate(current, fact.narrowed_to);
+        let (narrowed, _) = self.narrow_node_to_candidate(current, fact_node);
         match narrowed {
             // An equivalent narrow keeps the fact's own node, so two
             // predecessors holding the same fact still agree at a join.
-            Some(node)
-                if node != fact.narrowed_to
-                    && self.assignable(fact.narrowed_to, node) != Some(true) =>
-            {
-                Some(node)
+            Some(node) if node != fact_node && self.assignable(fact_node, node) != Some(true) => {
+                Some(FlowNarrowed::Node(node))
             }
             _ => standing,
         }
@@ -22964,10 +23547,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         ) else {
             return GuardNarrowing::Unchanged;
         };
+        // A union of at least two arms an index stands for is neither
+        // `any` nor `unknown`; its guard reads it through the index.
+        let indexed = self.indexed_subject(subject);
         // `any` and `unknown` narrow to the instance type on the true edge
         // (`getNarrowedType` answers the candidate for either) and keep
         // themselves on the false one.
-        if let Some(current) = self.subject_current_node(subject) {
+        if let Some(current) = indexed
+            .is_none()
+            .then(|| self.subject_current_node(subject))
+            .flatten()
+        {
             if matches!(
                 self.dispatch.arena().node_data(current).as_deref(),
                 Some(SemanticNodeData::Primitive(
@@ -22987,6 +23577,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // consults this same reading, and the per-arm survivor question
         // walks the ARM's own chain.
         let instance_heritage = self.node_heritage_reading(instance);
+        if let Some(arms) = &indexed {
+            if let Some(fact) = self.narrow_instanceof_indexed(
+                subject,
+                arms,
+                instance,
+                instance_identity.as_ref(),
+                &instance_heritage,
+                negated,
+            ) {
+                return fact;
+            }
+        }
         if negated {
             // The checker's negated edge drops only an arm PROVED to be
             // within the tested class's family — the tested class itself
@@ -23083,14 +23685,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut remainder: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut changed = false;
-        // The checker's union-level fallback clauses, accumulated from
-        // the SAME per-arm relation reads the unrelated arms already
-        // pay for: a source relates to a union target when it relates to
-        // SOME arm, and a union source relates to a target when EVERY
-        // arm does.
-        let mut instance_into_some_arm = false;
-        let mut every_arm_into_instance = true;
-        let mut structurally_undecided = false;
+        // The arms heritage proved unrelated to the tested class. Their
+        // relation reads feed only the union-level fallback, which the
+        // checker consults only when no arm survives by derivation, so
+        // they are taken after the scan and only then: a chain of
+        // `instanceof` tests over one union finds its survivor at every
+        // guard and pays no relation for the arms it passes over.
+        let mut unrelated: Vec<SemanticNodeId> = Vec::new();
         for arm in &arms {
             if self.instanceof_arm_is_unclassifiable(*arm) {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
@@ -23134,16 +23735,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     changed = true;
                 }
                 InstanceofHeritage::Unrelated => {
-                    match self.assignable(instance, *arm) {
-                        Some(true) => instance_into_some_arm = true,
-                        Some(false) => {}
-                        None => structurally_undecided = true,
-                    }
-                    match self.assignable(*arm, instance) {
-                        Some(true) => {}
-                        Some(false) => every_arm_into_instance = false,
-                        None => structurally_undecided = true,
-                    }
+                    unrelated.push(*arm);
                     remainder.push(*arm);
                 }
                 InstanceofHeritage::Undecidable => {
@@ -23169,8 +23761,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         // No survivor: the checker's per-arm derivation map is empty, so
         // its UNION-LEVEL fallback decides the whole remaining subject.
-        // A relation the authority could not decide is no fact at all —
-        // the fallback is not entered on a guess.
+        // Its clauses come from per-arm relation reads: a source relates
+        // to a union target when it relates to SOME arm, and a union
+        // source relates to a target when EVERY arm does. A relation the
+        // authority could not decide is no fact at all — the fallback is
+        // not entered on a guess.
+        let mut instance_into_some_arm = false;
+        let mut every_arm_into_instance = true;
+        let mut structurally_undecided = false;
+        for arm in &unrelated {
+            match self.assignable(instance, *arm) {
+                Some(true) => instance_into_some_arm = true,
+                Some(false) => {}
+                None => structurally_undecided = true,
+            }
+            match self.assignable(*arm, instance) {
+                Some(true) => {}
+                Some(false) => every_arm_into_instance = false,
+                None => structurally_undecided = true,
+            }
+        }
         if structurally_undecided {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 verter_session_query::flow::policy::FlowGap::GuardNarrowing,
@@ -23224,21 +23834,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> InstanceofHeritage {
         let arm_identity = self.node_class_identity(arm);
         let arm_heritage = self.node_heritage_reading(arm);
-        if let Some(instance_identity) = instance_identity {
-            if arm_heritage.reaches(instance_identity) {
-                return InstanceofHeritage::ArmInFamily;
-            }
-        }
-        if let Some(arm_identity) = arm_identity.as_ref() {
-            if instance_heritage.reaches(arm_identity) {
-                return InstanceofHeritage::InstanceDerivesFromArm;
-            }
-        }
-        if arm_heritage.decided() && instance_heritage.decided() {
-            InstanceofHeritage::Unrelated
-        } else {
-            InstanceofHeritage::Undecidable
-        }
+        instanceof_verdict(
+            arm_identity.as_ref(),
+            &arm_heritage,
+            instance_identity,
+            instance_heritage,
+        )
     }
 
     /// The CLASS declaration identity a node carries, or `None` for any
@@ -23346,6 +23947,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
+        // A union of at least two arms an index stands for is not `any`.
+        if let Some(arms) = self.indexed_subject(subject) {
+            if let Some(fact) = self.narrow_in_indexed(key, subject, &arms, negated) {
+                return fact;
+            }
+        }
         let Some(current) = self.subject_current_node(subject) else {
             return GuardNarrowing::Unchanged;
         };
@@ -23522,7 +24129,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 continue;
             }
             seen.push(node);
-            let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+            let concrete = match self.carrier_unwrap(node) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => {
                     any_unknown = true;
@@ -23696,7 +24303,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return None;
             }
         }
-        self.assignable(source, target)
+        // A predicate guard asks this of every remaining arm on both of
+        // its edges, and a chain of guards asks it again for the arms each
+        // guard passes over: the pair is related once per evaluation.
+        let pair = (source, target);
+        if let Some(known) = self.guard_relations.borrow().get(&pair) {
+            return *known;
+        }
+        let related = self.assignable(source, target);
+        self.guard_relations.borrow_mut().insert(pair, related);
+        related
     }
 
     /// Whether `node` is the global `Object` or `Function` interface.
@@ -24077,6 +24693,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         negated: bool,
     ) -> (GuardNarrowing, PredicateNarrowConsumption) {
         use PredicateNarrowConsumption as Consumption;
+        // A union of at least two arms an index stands for is not `any`.
+        if let Some(arms) = self.indexed_subject(subject) {
+            if let Some(narrowed) =
+                self.narrow_to_predicate_indexed(subject, &arms, target_node, negated)
+            {
+                return narrowed;
+            }
+        }
         let Some(current) = self.subject_current_node(subject) else {
             return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
         };
@@ -24184,6 +24808,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 if type_parameters.is_empty()
                         ) =>
                     {
+                        // The lone signature narrows only for a call it
+                        // applies to: the executor's applicability check
+                        // (the call's own evaluation reuses its cached
+                        // result) records the checker's diagnostic.
+                        self.record_lone_predicate_applicability(callee, site);
                         *only
                     }
                     _ => match self.resolve_call_step(
@@ -24299,6 +24928,35 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) {
         if !self.checker_diagnostics.contains(&occurrence) {
             self.checker_diagnostics.push(occurrence);
+        }
+    }
+
+    /// The applicability check of a call to a lone non-generic predicate
+    /// signature: the executor route's diagnostic for an argument the
+    /// signature does not accept, recorded like the multi-signature path's.
+    fn record_lone_predicate_applicability(
+        &mut self,
+        callee: SemanticNodeId,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) {
+        let recipe = match self.resolve_call_step(
+            callee,
+            site,
+            &verter_session_query::flow::slice::SliceCallArguments::none(),
+        ) {
+            Some(Positional::Value(super::call_resolve::ResolveCallStep::Complete(
+                crate::semantic_query::ResolvedCallResult::Selected {
+                    recovery_diagnostic,
+                    ..
+                },
+            ))) => recovery_diagnostic,
+            Some(Positional::Value(super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::Diagnosed(recipe),
+            ))) => Some(recipe),
+            _ => None,
+        };
+        if let Some(recipe) = recipe {
+            self.record_call_diagnostic(&recipe, site);
         }
     }
 
@@ -26172,11 +26830,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         frame.dead_at_never_call = true;
                     }
                 }
-                verter_session_query::flow::slice::SliceStatement::Assertion {
-                    subject,
-                    target,
-                    call,
-                } => {
+                verter_session_query::flow::slice::SliceStatement::Assertion { claim, call } => {
                     // A same-file assertion call: the narrowing fact lives
                     // in the callee's declared return, and it PERSISTS for
                     // the rest of the region (there is no arm scope to
@@ -26186,11 +26840,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // happened, so the snapshot precedes the fact. A
                     // TARGETLESS `asserts v` narrows by truthiness: the
                     // definitely-falsy arms leave the subject's type.
-                    self.apply_assertion(subject, target.as_ref(), *call);
+                    self.apply_assertion(claim, *call);
                 }
                 verter_session_query::flow::slice::SliceStatement::CalleeEffect {
                     callee,
                     arguments,
+                    conditions,
                     site,
                 } => {
                     // The call throws before any effect it asserts.
@@ -26204,15 +26859,37 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                         }
                         CalleeStatementEffect::Assertion { parameter, target } => {
-                            if let Some(Some(subject)) = arguments.get(parameter) {
-                                let fact = match target {
-                                    Some(target) => {
-                                        self.narrow_to_predicate_node(subject, target, false).0
+                            // A targetless assertion over a condition (an
+                            // aliased one included): the condition holds
+                            // past the call.
+                            let condition = match target {
+                                None => conditions.get(parameter).and_then(Option::as_ref),
+                                Some(_) => None,
+                            };
+                            match condition {
+                                Some(
+                                    verter_session_query::flow::slice::SliceAssertionCondition::Guard(
+                                        guard,
+                                    ),
+                                ) => self.apply_guard_scoped(guard, true),
+                                Some(
+                                    verter_session_query::flow::slice::SliceAssertionCondition::Unexpressible,
+                                ) => self.record_degradation(
+                                    crate::semantic_query::FlowReturnDegradation::FlowGap(
+                                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
+                                    ),
+                                ),
+                                None => {
+                                    if let Some(Some(subject)) = arguments.get(parameter) {
+                                        let fact = match target {
+                                            Some(target) => {
+                                                self.narrow_to_predicate_node(subject, target, false)
+                                                    .0
+                                            }
+                                            None => self.narrow_truthy(subject, false),
+                                        };
+                                        self.push_guard_narrowing(fact);
                                     }
-                                    None => self.narrow_truthy(subject, false),
-                                };
-                                if let GuardNarrowing::Narrowed(subject, node) = fact {
-                                    self.push_narrowing(&subject, node);
                                 }
                             }
                         }
@@ -26745,7 +27422,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 .facts()
                                 .iter()
                                 .find(|fact| fact.path.is_empty())
-                                .map(|fact| fact.narrowed_to)
+                                .map(|fact| self.narrowed_node(&fact.narrowed_to))
                         })
                     })
                     .flatten();
@@ -27553,11 +28230,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     Some(Waiting::Sequence(after)) => {
                         if let Some(assertion) = after {
-                            self.apply_assertion(
-                                &assertion.subject,
-                                assertion.target.as_ref(),
-                                assertion.call,
-                            );
+                            self.apply_assertion(&assertion.claim, assertion.call);
                         }
                     }
                     Some(Waiting::Arithmetic {
@@ -28205,11 +28878,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 let outcome = self.eval_expr(value);
                 if let Some(assertion) = after {
-                    self.apply_assertion(
-                        &assertion.subject,
-                        assertion.target.as_ref(),
-                        assertion.call,
-                    );
+                    self.apply_assertion(&assertion.claim, assertion.call);
                 }
                 outcome
             }
@@ -28490,6 +29159,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         expr: &verter_session_query::flow::slice::SliceExpr,
         authored_literal: bool,
+        body_return: bool,
     ) -> Option<SemanticNodeId> {
         // An argument that reads nothing of this frame is the indexed
         // program's own value, typed where the parameter's context (a
@@ -28500,12 +29170,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // A join of bare literal arms (`authored_literal`) stays the indexed
         // program's: each call candidate widens its literals itself, keeping
         // those its parameter's contextual type is a literal context for.
+        // A literal the indexed program left a function's body-derived
+        // return in is this frame's too: only the flow evaluator reads that
+        // body (`{ r: () => { … } }`).
         let branch_join = !authored_literal
             && matches!(
                 expr,
                 verter_session_query::flow::slice::SliceExpr::Union { .. }
             );
-        if !expression_write_tree(expr).is_empty() || !(branch_join || slice_expr_reads_frame(expr))
+        if !expression_write_tree(expr).is_empty()
+            || !(branch_join || body_return || slice_expr_reads_frame(expr))
         {
             return None;
         }
@@ -28954,10 +29628,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             Some(Positional::Value(step)) => step,
             Some(Positional::Hold) => return Some(Positional::Hold),
             // A route that cannot type the call decides nothing: a lone
-            // declared callee's caller still reads its declared return.
+            // declared callee's caller still reads its declared return, but
+            // its applicability went unchecked, so the result is a recorded
+            // gap, never claimed complete.
             Some(Positional::Unmodeled) | None => {
-                return (!self.callee_is_lone_declared(callee))
-                    .then(|| self.degraded_unrepresentable_callee())
+                if self.callee_is_lone_declared(callee) {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+                    );
+                    return None;
+                }
+                return Some(self.degraded_unrepresentable_callee());
             }
         };
         match step {
@@ -29006,39 +29687,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         .partial_reasons()
                         .contains(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET);
                     if let QueryResult::Value(node) = read.value {
-                        let diagnostic = self.dispatch.arena().node_data(node).and_then(|data| {
-                            match data.as_ref() {
-                                SemanticNodeData::Opaque(QueryError::CheckerRecovery {
-                                    diagnostic,
-                                    ..
-                                }) => Some(*diagnostic),
-                                _ => None,
-                            }
-                        });
+                        let recovers = matches!(
+                            self.dispatch.arena().node_data(node).as_deref(),
+                            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
+                        );
                         if budget {
                             self.record_degradation(
                                 crate::semantic_query::FlowReturnDegradation::OperationBudget,
                             );
                         }
-                        // The carrier holds only the diagnostic, with no
-                        // bound arguments: it is reported at the call only when
-                        // its message takes none, never with a placeholder left
-                        // unfilled.
-                        if let Some(diagnostic) =
-                            diagnostic.filter(|d| !d.code.message().contains('{'))
+                        // Bound now, to this body's file: the recovery's
+                        // message arguments and authored report location are
+                        // read off the carrier at this call, never kept from
+                        // another caller's bind.
+                        if let Some(occurrence) =
+                            self.dispatch
+                                .bind_checker_recovery(node, self.canonical, site.span())
                         {
-                            let span = site.span();
-                            self.record_checker_diagnostic(
-                                crate::semantic_query::CheckerDiagnosticOccurrence::new(
-                                    span.start,
-                                    span.end,
-                                    diagnostic,
-                                    Box::default(),
-                                    Box::default(),
-                                ),
-                            );
+                            self.record_checker_diagnostic(occurrence);
                         }
-                        if budget || diagnostic.is_some() {
+                        if budget || recovers {
                             returned = node;
                         }
                     }
@@ -29580,10 +30248,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // The binding's own reaching definition wins; the
                 // parameter ordinal is the FALLBACK a `var` redeclaring
                 // a parameter name resolves to before its declarator
-                // runs (mirrors the `Local` read).
-                let node = self.read_local(binding).or_else(|| {
-                    param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
-                });
+                // runs (mirrors the `Local` read). A narrowing standing on
+                // the binding is what the callee reads, as any read of it
+                // does: `typeof f === "function"` leaves `f()` calling the
+                // callable arms alone.
+                let node = self
+                    .frame_binding_read(binding)
+                    .or_else(|| self.read_local(binding))
+                    .or_else(|| {
+                        param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
+                    });
                 let Some(node) = node else {
                     // A CAPTURED callee the seeded snapshot does not carry
                     // has no honest value: the POSITION carries the marker

@@ -733,6 +733,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
         source: concrete_object,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: binder,
             key_space: open_key,
             value_expr: concrete_object,
@@ -821,6 +822,7 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
             source: concrete_object,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: binder_k,
                 key_space: concrete_key,
                 value_expr: concrete_object,

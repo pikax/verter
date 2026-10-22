@@ -69,12 +69,14 @@ fn run_with_audit_propagates_observer_into_handler_future() {
             .build()
             .expect("must build single-threaded Tokio runtime");
         let result = runtime.block_on(async {
-            audit_harness::run_with_audit::<u8, _, _>(
+            audit_harness::run_with_audit::<u8, _, _, _>(
                 &std::sync::Arc::clone(&host_clone),
                 LspMethodTag::Hover,
-                verter_audit::RequestTargetIdentity::RegisteredCanonical(
-                    "/lsp_tls_probe.vue".to_string(),
-                ),
+                || {
+                    verter_audit::RequestTargetIdentity::RegisteredCanonical(
+                        "/lsp_tls_probe.vue".to_string(),
+                    )
+                },
                 None,
                 async {
                     // Mid-flight probe: `run_with_audit` constructs
@@ -143,12 +145,14 @@ fn run_with_audit_short_circuits_when_audit_disabled() {
             .build()
             .expect("must build single-threaded Tokio runtime");
         let result = runtime.block_on(async {
-            audit_harness::run_with_audit::<u8, _, _>(
+            audit_harness::run_with_audit::<u8, _, _, _>(
                 &std::sync::Arc::clone(&host_clone),
                 LspMethodTag::Hover,
-                verter_audit::RequestTargetIdentity::RegisteredCanonical(
-                    "/lsp_tls_probe.vue".to_string(),
-                ),
+                || {
+                    verter_audit::RequestTargetIdentity::RegisteredCanonical(
+                        "/lsp_tls_probe.vue".to_string(),
+                    )
+                },
                 None,
                 async {
                     // `run_with_audit` checks `host.config().audit_enabled`

@@ -48,8 +48,9 @@ this row supersedes that owner's gate column.
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
+| `CaptureTargets::{observer,request,accumulator}` and retained/borrowed targets on `RequestSnapshot`, `ProjectSemanticDispatch`, `GraphIn`, `SessionDispatchHost` and `ShapeCacheOwnerScope` | Audit emissions only | OPTIONAL | One admitted execution; sibling tasks share the request's receivers | `src/request_observers.rs`, `src/resolver_core/resolver_context.rs`, `src/project_semantic_dispatch/{mod,memo}.rs`, `src/semantic_query_memo/graph_in.rs` | Receiver fields `cfg(feature = "semantic-observe")`; the carrier is zero-size otherwise; uncaptured typed access compiles away |
 | `AtomicSemanticGraphStats` counters (`hits`, `misses`, `same_path_sentinel_returns`, `waits_ms`, `joined_waits`, `inflight_aborted_retries`, `joiner_view_mismatch_forks`, `cold_aborts_swept`, `origin_edges_emitted`, builder counters, memo hit/miss counters), each a `Tally` | none; tests and measurement readers through `stats_snapshot` | OPTIONAL | One store; `Tally` is zero-size without the gate | `src/semantic_query_memo/stats.rs` | observation gate |
-| `in_flight_current` / `in_flight_peak` and the in-flight CAS loop | none | OPTIONAL | One store; `InFlightStatsGuard` drop is a no-op without the gate | `src/semantic_query_memo/stats.rs` | observation gate |
+| `in_flight_current` / `in_flight_peak` and the in-flight CAS loop | none | OPTIONAL | One store; `InFlightStatsGuard` is zero-size without drop glue when the gate is off | `src/semantic_query_memo/stats.rs` | observation gate |
 | Path-length reservoir (`path_length_samples`, `record_path_length`) | none | OPTIONAL | One store; capped at 8192 samples | `src/semantic_query_memo/{stats,mod}.rs` | observation gate |
 | `SemanticGraphStore::stats_snapshot` / `SemanticGraphStats` reader, `DerivationStore::iter_edges`, `sorted_percentile`, `intern_preserving_scope_call_count` | none; tests and measurement | OPTIONAL | Derived on read | `src/semantic_query_memo/{stats,derivation,nodes}.rs` | observation gate |
 | Blocking-wait clock read feeding `waits_ms` | none | OPTIONAL | One wait | `src/semantic_query_memo/producer.rs` | observation gate |
@@ -71,9 +72,10 @@ this row supersedes that owner's gate column.
 | `ProducerLease.started` | The engine-provenance hold timer and the store's own timing tests | OPTIONAL | One producer lease | `src/semantic_query_memo/producer.rs` | observation gate |
 | Lock-acquisition and dependency-signature observers, structured-event pushes, `component_meta_trace_*!` | Audit records only | OPTIONAL | Per call | `src/request_observers.rs` | `cfg(feature = "semantic-observe")` |
 | Derivation / origin-edge store and `record_origin_edge` (fence interning, bucket record, sidecar tracking, `origin_edges_emitted`) | The audit origin graph (`audit_enabled && footprint_capture`, so capture builds only) and the derivation-layer tests | OPTIONAL content with REQUIRED-lifetime charges while it holds edges | One store | `src/semantic_query_memo/{derivation,origin_edges,stats}.rs` | recording under the observation gate: a production build records no edge, so the store stays empty and charges nothing; the read-only walks stay always compiled and see an empty store |
-| Origin-edge call-site arguments (`sources` slices, `OriginMeta`, builder fence) built at each `record_origin_edge` site | Feeds the recorder above | OPTIONAL | Per derivation | `src/project_semantic_dispatch/` | always (open item) |
+| Origin-edge call-site arguments (`sources` slices, `OriginMeta`, builder fence clones, the placeholder node a macro-instance edge interns) built at each derivation site | Feeds the recorder above | OPTIONAL | Per derivation | `src/project_semantic_dispatch/`, `src/semantic_query_memo/origin_edges.rs` (`record_origin_edge!`) | observation gate: every site emits through `record_origin_edge!`, whose arguments a shipped build type-checks but never evaluates |
 | Origin-edge push into the request accumulator | Audit footprint mining only | OPTIONAL | Per recorded edge | `src/semantic_query_memo/origin_edges.rs` | `cfg(feature = "semantic-observe")` |
-| `tracing::debug!` memo hit / miss / suppress | none beyond a subscriber | OPTIONAL | Per lookup | `src/semantic_query_memo/{mod,producer}.rs` | always (open item) |
+| `tracing::debug!` memo hit / miss / suppress | none beyond a subscriber | OPTIONAL | Per lookup | `src/semantic_query_memo/{mod,producer}.rs` | `cfg(feature = "semantic-observe")` |
+| `RequestContext.observe_mode`, `RequestContext::for_root_entry`, `current_captured_request_context` | Root-entry capture selection carried through every resumption: observer and accumulator install, `observe_request!`, cache-event and dispatch-intent counters, relation-explanation buffer selection | OPTIONAL (the selection; the context it rides is REQUIRED) | One request | `src/request_context.rs`, `src/project_semantic_dispatch/{mod,relation_explanation}.rs` | `cfg(feature = "semantic-observe")`; a default build is always uncaptured |
 | Relation-side explanation state | — | relation-owned | — | `src/project_semantic_dispatch/relation*` | owned by the relation inventory |
 
 ## verter_scheduler
@@ -95,7 +97,7 @@ this row supersedes that owner's gate column.
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | Aggregate owner probe and compaction examination counter (`OwnerEntries.examined`) | none; the crate's own tests | OPTIONAL | Per aggregate token | `src/cancellation.rs` | `cfg(test)` — a test-only proof counter needs no capture gate |
-| `RequestContextLike::capture_enabled` / `timing_enabled` / `record_cache_event` / `on_dedup_joiner`, `current_timing_enabled` | Audit record construction; `timing_enabled` gates optional timing | OPTIONAL | Per request context | `src/request_context.rs` | `cfg(feature = "semantic-observe")` |
+| `RequestContextLike::capture_enabled` / `timing_enabled` / `record_cache_event` / `on_dedup_joiner` | Audit record construction; `timing_enabled` gates optional timing | OPTIONAL | Per request context | `src/request_context.rs` | `cfg(feature = "semantic-observe")` |
 | `cancellation_token`, opaque context install/clear guards | Cancellation and request-context carriage | REQUIRED / REQUIRED-lifetime | Per dispatch | `src/request_context.rs` | always |
 
 ## verter_semantic_source
@@ -155,7 +157,8 @@ this row supersedes that owner's gate column.
 | --- | --- | --- | --- | --- | --- |
 | `hotpath::measure` attributes on compile, codegen, source-map, AST, lint and analysis entries | none; profiling | OPTIONAL | Profiler window | `crates/verter_compiler/src/**`, `crates/verter_parser/src/ast/mod.rs`, `crates/verter_diagnostics/src/linter.rs`, `crates/verter_semantic/src/analysis/build.rs` | `cfg(feature = "semantic-observe")` |
 | Compile phase timers and source-map clocks reported to the audit observer | Audit records only | OPTIONAL | One compile | `crates/verter_compiler/src/compile/mod.rs` | `cfg(feature = "semantic-observe")` (`observe!`, `Stopwatch`) |
-| `CodeTransform` per-op audit emission (`record_audit_op`) | Audit records only | OPTIONAL | Per op | `crates/verter_compiler/src/code_transform/code_transform.rs` | `cfg(feature = "semantic-observe")` (`observe!`) |
+| Compile-result wall-clock durations (`parse_start`, `total_start`, `style_start`, `script_start`, `tpl_start`, `tsx_start`, `tsc_start` clock reads feeding `VerterCompileResult::{parse_duration_ms, total_duration_ms}` and each block's `duration_ms`) | none in production: the public result fields (and the FFI `parseDurationMs`) are read only by the `ffi-bench` measurement | OPTIONAL timers on a public result shape | One compile | `crates/verter_compiler/src/compile/{mod,types}.rs` | always (open item: compiler attribution owns the result-shape change) |
+| `CodeTransform<'_, M>` operation tally (`record_audit_op`) | Audit records only | OPTIONAL | One transform, published on drop | `crates/verter_compiler/src/code_transform/code_transform.rs` | `cfg(feature = "semantic-observe")` and `M::CAPTURED`; uncaptured updates and drop-time observation compile out |
 
 ## Bindings
 
@@ -164,59 +167,56 @@ this row supersedes that owner's gate column.
 | NAPI / WASM audit record encoders and record readers (`getLastAuditRecord`, `getAuditRecords`, `getBundlerBatchSummary`, why-loaded / why-instantiated walkers, `getComponentMetaWithAudit`) | Public audit API | OPTIONAL (capture surface) | Per call | `crates/verter_napi/src/{audit,lib,meta}.rs`, `crates/verter_wasm/src/{audit,lib}.rs` | readers `cfg(feature = "semantic-observe")`; without it they fail with the unavailable-capture error |
 | NAPI / WASM `captureAvailability()` | Consumers choosing whether to expect records | REQUIRED (capability) | Per call | `crates/verter_napi/src/audit.rs`, `crates/verter_wasm/src/audit.rs` | always |
 | LSP `verter/getAuditRecord` / `verter/getAuditRecent`, hover provenance, the LSP audit harness | Audit and debug clients | OPTIONAL | Per request | `crates/verter_lsp/src/` | `cfg(feature = "semantic-observe")`; the methods answer with the unavailable-capture error otherwise |
-| NAPI counting global allocator | Memory audit API | OPTIONAL | Process; runtime-enabled flag | `crates/verter_napi/src/memory_audit.rs` | always (open item) |
+| NAPI counting global allocator, its counters and allocation-site sampler (`backtrace`) | Memory audit API | OPTIONAL | Process; runtime-enabled flag | `crates/verter_napi/src/memory_audit.rs` | `cfg(feature = "semantic-observe")`; a default binding keeps the system allocator, `memoryAuditEnable()` returns `false` and the readers report the audit unavailable |
+| LSP audit target identity (`target_identity_for_uri`, the URI string of an unregistered document) | The LSP audit record | OPTIONAL | Per request | `crates/verter_lsp/src/audit_harness.rs`, `crates/verter_lsp/src/server/{aux_features,nav_features_audit,sync_orchestration}.rs` | resolved by a closure `run_with_audit` calls only for an audited request |
 | FFI offset visit counter | none | OPTIONAL | Per conversion | `crates/verter_ffi/src/offset.rs` | `cfg(any(test, feature = "semantic-observe"))` |
 
-## Paired build evidence
+## Verification
 
-One machine (macOS, aarch64, 8 logical CPUs), release profile, the
-signature-kernel harness's quick corpus
-(`cargo run --release -p verter_session --example signature_kernel_bench -- --modules 4 --depth 4 --samples 6 --cold-samples 3 --soak 20`),
-built once without and once with `--features semantic-observe`. Every host in
-the harness runs with audit capture off, so the comparison is capture-off in
-an instrumented binary against the stripped default binary.
-
-- Answers: the 24 witnesses' outcomes in every state are identical across the
-  two builds (24 complete, 0 degraded, 0 refused in each).
-- Allocations (counting global allocator, deterministic per workload), default
-  then instrumented: warm query 1660 → 1903 allocations (+14.6%), 246 184 →
-  319 704 bytes; declaration edit 3652 → 3902 (+6.8%); augmentation edit
-  2966 → 3015 (+1.7%); local edit 10 543 → 10 624 (+0.8%); cold load 101 188 →
-  101 573 (+0.4%); restart 101 177 → 101 565 (+0.4%). The soak's final live
-  heap is 3 634 059 bytes stripped and 3 946 370 bytes instrumented.
-- Latency medians move the same way (warm query 4.2 µs → 5.6 µs), but six
-  samples per workload make them indicative only; the allocation figures are
-  the deterministic evidence.
-- Generated code: the stripped harness binary is 30 252 560 bytes against
-  33 114 848 instrumented; it carries no `current_observer` /
-  `CURRENT_OBSERVER` or request-accumulator symbol (3 and 2 in the
-  instrumented binary).
+Capture-equivalence fixtures exercise the same public requests with capture
+on and off. Allocation canaries measure cold flow emission without an
+accumulator. Compare answer classes and deterministic work/growth on the
+quick corpus; retain run commands, platform and measurements in the workflow
+report rather than a committed transcript. Inspect instrumented generated
+code for both concrete modes, including the absence of optional slot access
+in uncaptured execution.
 
 ## Open sweep items
 
 These remain after this sweep. Each is optional state still compiled into
 default builds, or work this sweep could not finish, with the reason.
 
-1. Origin-edge call sites still build their arguments (`sources` slices,
-   `OriginMeta`, the builder fence) before calling `record_origin_edge`, whose
-   body records nothing in a production build. Removing that construction
-   means wrapping each of the call sites across `project_semantic_dispatch/`
-   in an emission macro.
-2. `tracing::debug!` memo hit / miss / suppress events and
-   `DeclLoweringService.live_leases` (LSP statistics) are always compiled.
-3. The NAPI counting global allocator stays always compiled behind its
-   runtime-enabled flag; the memory-audit API reads it.
+1. `DeclLoweringService.live_leases` (LSP statistics) is always compiled.
+2. The compile result's wall-clock durations are public result fields read
+   only by the `ffi-bench` measurement; removing the clock reads changes the
+   compile result and FFI shapes, which compiler attribution owns.
+3. Concrete emission uses explicit borrowed receivers. `RequestSnapshot`
+   retains the `CaptureTargets` at admission; dispatchers clone those handles
+   once and carry them through resumptions. `GraphIn` and session cache
+   lookups borrow the targets. Typed `observe!`, `observe_request!` and
+   structured trace forms require their receiver and perform no observer,
+   request or accumulator TLS lookup in either execution mode. Uncaptured
+   receiver access and payload construction compile away. Required scheduler
+   request-context carriage, budgets and cancellation stay unchanged. Plain
+   entry adapters may snapshot targets once; they forward the borrow through
+   typed operations. Compile source-map timers use the selected mode, and
+   per-builder graph telemetry runs only for captured execution or test work
+   accounting. Process-wide instrumentation retains its documented build gate.
+   Acceptance remains open until the required instrumentation CI lanes pass
+   on the pushed candidate.
 4. Always-zero audit wire fields with no writer (`resolver_store_view_calls`,
    `materialize_structure_*`). The audit envelope's additions are purely
    additive and these fields stay on the wire as zero-valued schema until a
-   wire-contract retirement; removing them is owned by the audit and typeinfo
-   wire owners, not this sweep. A default build no longer emits them at all:
+   wire-contract retirement. Their backing counters, bump helper, carrier
+   fields and snapshot reads are removed; audit builders emit literal zeros.
+   A default build no longer emits them at all:
    it returns no captured record.
 5. Diagnostic tools that read audit records — `packages/benchmark/src/_audit-component.ts`,
    `scripts/benchmark/trace-component-corpus.mjs` and the native and WASM
    `probe-transport-surface.mjs` scripts — need a binding built with
-   `semantic-observe`; against a default binding they fail with the
-   unavailable-capture error.
+   `semantic-observe` (`pnpm --filter @verter/native run build:observe`); the
+   audit worker checks `captureAvailability()` first and exits naming that
+   build, and the build-and-profiling recipes state the prerequisite.
 6. Guards that assert only provenance counters now run in the instrumentation
    lane (CI `rust-observe`) rather than the canonical gate:
    `indexed_ready_publish_lowers_zero_decl_bodies`,
@@ -227,7 +227,33 @@ default builds, or work this sweep could not finish, with the reason.
    `fallthrough_runtime_reuse_survives_host_cache_clear` and
    `compat_one_napi_call_audit`.
 7. Relation explanations lease their operands for the dispatcher's lifetime
-   in a capture build, so the public-carrier drain proof
+   only for a captured request: a dispatcher selects its explanation buffer
+   once, at construction, from the execution mode it is compiled for
+   (`C::Observe`), so the
+   public-carrier drain proof
    (`a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it`)
-   holds only in the default build. The explanation state is relation-owned
-   and recorded here for the relation inventory.
+   runs in both builds. The explanation state is relation-owned and recorded
+   here for the relation inventory.
+
+## Optional counter storage
+
+`observe::Counter<S>` owns the common u64 counter operations. Each owner selects
+`AtomicU64`, `Arc<AtomicU64>` or zero-size `()` storage through its existing
+compile gate: audit `ObservedU64` uses `semantic-observe`, engine `Tally` and
+`OccupancyCounter` use the observation gate. Only retained storage has a reader;
+shared clones retain the same atomic. The narrower u32/u16/flag primitives
+keep their typed operations. Availability is computed only by the audit
+substrate and re-exported by the session.
+
+## VFS capture execution
+
+Plain workspace reads are uncaptured. `WorkspaceRead::read_file_captured` takes
+bound `VfsReadCapture` identity/timing; both entries share the same typed read
+implementation. `VfsReadProbe<Uncaptured>` touches no clock, request slot or
+sink registry. Read-detail strings are likewise absent from production defaults
+and skipped by instrumented uncaptured reads; the workspace unit-test seam
+retains its existing detail assertions. Source jobs bind `CapturedSourceLoader`
+at their execution boundary from the submitted context (or the DAG waiter
+group's winner context when no submission context is carried);
+the session loader forwards that data, and typed dependency-source reads borrow
+their existing capture targets. There is no per-read timing-context accessor.

@@ -25,7 +25,9 @@ pub fn emit_dispatch_dep_signature_facts<C: crate::resolver_core::ResolverCapabi
 ) {
     use std::sync::atomic::Ordering::Relaxed;
     if !sig.is_empty() {
-        crate::request_observers::record_dep_signature_merge();
+        crate::request_observers::record_dep_signature_merge::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(dispatch.ctx),
+        );
     }
 
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);

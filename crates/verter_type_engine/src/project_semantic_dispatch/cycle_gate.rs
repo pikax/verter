@@ -82,7 +82,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // No cold build ran on this thread — the family warm-served
             // (or a cross-thread join landed). Attribute the hit on the
             // active request; cheap when no context is installed.
-            crate::observe_request!(|req_ctx| {
+            crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |req_ctx| {
                 req_ctx.bump_type_resolution_ref_root_cycle_hit();
             });
         }
@@ -337,7 +337,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
 
             let body_has_complex_signal = path_has_complex_signal
-                || cycle_gate_has_complex_surface(graph, body_id, 0, &mut reasons);
+                || cycle_gate_has_complex_surface(graph.store(), body_id, 0, &mut reasons);
 
             // Dispatch's recursive-ref back-edge is published as
             // `Opaque(RecursiveRef { name })` — not a DeclRef — so a
@@ -345,7 +345,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // explicitly: any `Opaque(RecursiveRef { name })` whose name
             // matches the walk root's decl_name is a back-edge to root.
             if cycle_gate_body_contains_recursive_ref(
-                graph,
+                graph.store(),
                 body_id,
                 &root_identity.decl_name,
                 0,
@@ -357,7 +357,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
 
             let mut child_refs: Vec<(DeclIdentity, bool)> = Vec::new();
-            cycle_gate_collect_ref_identities(graph, body_id, &mut child_refs, &mut reasons);
+            cycle_gate_collect_ref_identities(
+                graph.store(),
+                body_id,
+                &mut child_refs,
+                &mut reasons,
+            );
 
             for (child_identity, ref_has_type_args) in child_refs {
                 let cycle_has_complex_signal = body_has_complex_signal || ref_has_type_args;
@@ -589,6 +594,7 @@ fn cycle_gate_body_contains_recursive_ref(
                 if let Some(remap) = mapper.name_remap {
                     stack.push(remap);
                 }
+                stack.extend(mapper.modifiers_type);
             }
             SemanticNodeData::TemplateLiteral { expressions, .. } => {
                 for &expr in expressions.iter() {
@@ -745,6 +751,7 @@ fn cycle_gate_collect_ref_identities(
                 if let Some(remap) = mapper.name_remap {
                     stack.push(remap);
                 }
+                stack.extend(mapper.modifiers_type);
             }
             SemanticNodeData::TemplateLiteral { expressions, .. } => {
                 for &expr in expressions.iter() {

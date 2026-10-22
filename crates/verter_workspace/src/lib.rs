@@ -196,6 +196,7 @@ pub use resolution_currency::{
     AdmittedResolution, CapturedResolutionWorld, ContentRevision, ResolutionEpoch,
     ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome, ResolutionOverlaySnapshot,
     ResolutionPublication, ResolutionPublicationRefusal, ResolutionQueryKey, ResolveContextId,
+    UnretainedResolution,
 };
 pub use resolver::ide_project_config;
 pub use snapshot_builder::build_workspace_snapshot_simple;

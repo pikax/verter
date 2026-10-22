@@ -159,8 +159,8 @@ pub(crate) enum PayloadSurfaceScope {
 ///
 /// Every alias body the walk resolves is handed to `builder`, which keeps the
 /// returned root live for as long as the caller holds it open.
-pub(crate) fn resolve_emit_payload_to_conditional_root(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn resolve_emit_payload_to_conditional_root<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     node: SemanticNodeId,
     depth: u16,
@@ -245,8 +245,8 @@ pub(crate) const EMIT_CARRIER_WALK_FUSE: usize = 1024;
 /// `args` is empty — a bare named-decl demand carries no explicit type
 /// arguments. The body node arrives in the carrier that owns it, which the
 /// walk holds while it descends from it.
-fn lower_decl_body_to_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn lower_decl_body_to_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
@@ -266,8 +266,8 @@ fn lower_decl_body_to_node(
 }
 
 #[allow(dead_code)]
-pub(crate) fn resolve_payload_surface_with_scope(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn resolve_payload_surface_with_scope<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     payload_node: SemanticNodeId,
     macro_index: usize,
     expansion_kind: MacroExpansionKind,

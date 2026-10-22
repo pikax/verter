@@ -125,6 +125,17 @@ pub trait RequestContextLike: Send + Sync + 'static {
         false
     }
 
+    /// Whether this request's root entry selected captured execution. A
+    /// scheduler job carries its submitting request's context, so a worker
+    /// reads the job's selection from the context it was handed, never from
+    /// a thread-local slot.
+    ///
+    /// Optional capture: compiled only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
+    fn captured(&self) -> bool {
+        false
+    }
+
     /// Whether per-file timing capture is enabled for this request.
     /// Producers gate `Instant::now()` calls and other timing-only
     /// instrumentation behind this flag. Default is `false` so adapters
@@ -231,21 +242,6 @@ thread_local! {
 #[must_use]
 pub fn current_request_id() -> Option<u64> {
     CURRENT_OPAQUE_CONTEXT.with(|slot| slot.borrow().as_ref().map(|c| c.0.request_id()))
-}
-
-/// Return the per-file timing-capture flag for the context currently
-/// active on this worker thread, or `false` when no request context
-/// is installed. Called from VFS / workspace code that wants to gate
-/// `Instant::now()` instrumentation on the host's
-/// `audit_timing_capture` flag without pulling in `verter_session`.
-///
-/// Optional capture: compiled only with `semantic-observe`.
-#[cfg(feature = "semantic-observe")]
-#[must_use]
-pub fn current_timing_enabled() -> bool {
-    CURRENT_OPAQUE_CONTEXT
-        .with(|slot| slot.borrow().as_ref().map(|c| c.0.timing_enabled()))
-        .unwrap_or(false)
 }
 
 /// Return a clone of the currently installed `OpaqueRequestContext`,

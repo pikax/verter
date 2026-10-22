@@ -8,7 +8,9 @@
 //! - a pattern that repeats an `infer` distributes over a 1,000-member union
 //!   of distinct object aliases;
 //! - a tuple of 1,000 distinct aliases of one generic infers through each
-//!   alias once.
+//!   alias once;
+//! - an `infer` through a chain of generic aliases, each naming the one
+//!   before, reads each alias of the chain a bounded number of times.
 //!
 //! Each demand is the named demand the semantic benchmark makes (`__Probe`
 //! resolved by name and projected to its wire answer). Every expected answer
@@ -37,6 +39,9 @@ use std::sync::Arc;
 
 use verter_type_engine::project_semantic_dispatch::raise::{
     enable_dispatch_trace_for_test, keys_built_cold_more_than_once, DISPATCH_TRACE,
+};
+use verter_type_engine::project_semantic_dispatch::{
+    seam_need_probes_for_tests, seam_need_questions_for_tests,
 };
 use verter_type_expr::{LiteralValue, TypeExpr};
 
@@ -119,6 +124,20 @@ fn distinct_aliases(members: usize) -> (String, String) {
     )
 }
 
+/// A chain of `depth` generic aliases over one interface, each naming the
+/// one before, and the inference through its last alias: the semantic
+/// benchmark's `reference-infer-depth` shape.
+fn alias_chain(depth: usize) -> (String, String) {
+    let mut source = String::from("interface Box<T> { v: T }\ntype N0<T> = Box<T>;\n");
+    for i in 0..depth {
+        source.push_str(&format!("type N{}<T> = N{i}<T>;\n", i + 1));
+    }
+    (
+        source,
+        format!("N{depth}<\"x\"> extends Box<infer P> ? P : never"),
+    )
+}
+
 fn numbers(members: usize) -> BTreeSet<Literal> {
     (0..members).map(|i| Literal::Number(i as u64)).collect()
 }
@@ -151,15 +170,26 @@ enum Literal {
 }
 
 /// The work a demand did, by the counters a growth test compares.
-type Work = [(&'static str, u64); 6];
+type Work = [(&'static str, u64); 7];
 
 /// Resolve `__Probe = probe` in a fresh project holding `source`, as the
 /// benchmark's probe does, and return its literal members and its work. An
-/// answer that is not a union of literals (an unevaluated conditional, the
+/// answer that is neither a literal nor a union of literals (an unevaluated conditional, the
 /// probe expression itself, a template not built into its string) fails.
 ///
 /// The request's operation fuse is `operations`.
 fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Literal>, Work) {
+    let (answer, work, _) = named_probe_on_host(source, probe, operations);
+    (answer, work)
+}
+
+/// [`named_probe`], returning the host the probe ran on as well, for what
+/// it retains after the request.
+fn named_probe_on_host(
+    source: &str,
+    probe: &str,
+    operations: usize,
+) -> (BTreeSet<Literal>, Work, crate::VerterHost) {
     let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
         crate::HostConfig {
             projection_op_budget: operations,
@@ -177,6 +207,8 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         })
         .expect("fixture admitted");
     let _trace = enable_dispatch_trace_for_test();
+    let probes_before = seam_need_probes_for_tests();
+    let questions_before = seam_need_questions_for_tests();
     let ((outcome, _), usage) =
         verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
             || {
@@ -189,12 +221,23 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         .expect("the probe exists");
     let stats = host.project_type_store().semantic_graph().stats_snapshot();
     let dispatches = DISPATCH_TRACE.with(|trace| trace.borrow().len()) as u64;
+    let seam_need_probes = seam_need_probes_for_tests() - probes_before;
+    let seam_need_questions = seam_need_questions_for_tests() - questions_before;
+    // Asking whether a read is already one of a decision's needs compares
+    // it with the need that shares its demand's hash: on average at most one
+    // stored need per question, whatever the number of needs. Comparing the
+    // read with every need reached before it is quadratic in the members.
+    assert!(
+        seam_need_probes <= seam_need_questions,
+        "{seam_need_probes} stored needs compared over {seam_need_questions} need questions"
+    );
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
         .expect("the answer projects");
     let answer: TypeExpr = serde_json::from_slice(&bytes).expect("a wire answer");
-    let TypeExpr::Union(arms) = &answer else {
-        panic!("`{}` is not a union of literals", short(&answer));
+    let arms = match &answer {
+        TypeExpr::Union(arms) => &arms[..],
+        single => std::slice::from_ref(single),
     };
     let literals = arms
         .iter()
@@ -213,8 +256,9 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         ("decided conditionals", stats.conditional_decided_count),
         ("relation checks", stats.relation_check_count),
         ("substitutions", stats.substitute_memo_misses),
+        ("decision need questions", seam_need_questions),
     ];
-    (literals, work)
+    (literals, work, host)
 }
 
 fn short(expr: &TypeExpr) -> String {
@@ -360,6 +404,72 @@ fn repeated_infer_answers_at_every_size_with_linear_work() {
     assert_linear_growth("Pat", work[0], work[1]);
 }
 
+/// The decision over a wide union reaches a read per member, two per member
+/// over its operand passes, and asks for each whether it is already one of
+/// its needs. Comparing a read with every need reached before it made that
+/// question quadratic in the members, which was most of the work at 6,000
+/// members; each question compares at most one stored need on average
+/// ([`named_probe`] checks it on every probe), and the questions grow with
+/// the members. Measured: the numbers `0` to `n - 1`.
+#[test]
+fn repeated_infer_decision_needs_grow_linearly_across_three_sizes() {
+    let work = [30, 100, 300].map(|members| {
+        let (source, probe) = repeated_infer(members);
+        let (answer, work) = named_probe(
+            &source,
+            &probe,
+            checker_instantiations_repeated_infer(members),
+        );
+        assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
+        let questions = work
+            .iter()
+            .find(|(what, _)| *what == "decision need questions")
+            .map(|(_, value)| *value);
+        assert!(
+            questions.is_some_and(|questions| questions > 0),
+            "Pat over {members}: the decision asked no need question"
+        );
+        (members, work)
+    });
+    assert_linear_growth("Pat", work[0], work[1]);
+    assert_linear_growth("Pat", work[1], work[2]);
+}
+
+/// Distributing the repeated-infer pattern relates each member to the
+/// pattern and reads the signatures of both callable positions: work for
+/// that member alone, read by the decision that distributes over it, which
+/// the family memo retains as the answer. Those per-member relations and
+/// signature reads complete for the request and leave no family-memo entry
+/// behind; what the memo keeps per member is the member's own declaration —
+/// its resolution, its lowering and its instantiation — which any later
+/// request naming the member reads again. Measured: the numbers `0` to
+/// `n - 1`.
+#[test]
+fn repeated_infer_retains_its_declarations_not_its_per_member_work() {
+    for members in [10, 30, 100] {
+        let (source, probe) = repeated_infer(members);
+        let (answer, _, host) = named_probe_on_host(
+            &source,
+            &probe,
+            checker_instantiations_repeated_infer(members),
+        );
+        assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
+        let graph = host.project_type_store().semantic_graph();
+        let families = graph.memo_entry_counts_by_family();
+        for family in ["Relate", "SignaturesOfType"] {
+            assert!(
+                families.iter().all(|(name, _)| *name != family),
+                "Pat over {members}: the family memo retains {family} entries: {families:?}"
+            );
+        }
+        let entries = graph.stats_snapshot().memo_entry_count;
+        assert!(
+            entries <= 6 * members as u64 + 16,
+            "Pat over {members}: {entries} family-memo entries retained: {families:?}"
+        );
+    }
+}
+
 /// The distinct aliases answer at both listed sizes, with work linear from
 /// one to the other. Measured: the numbers `0` to `n - 1`.
 #[test]
@@ -375,6 +485,28 @@ fn distinct_aliases_answer_at_every_size_with_linear_work() {
         (members, work)
     });
     assert_linear_growth("aliases", work[0], work[1]);
+}
+
+/// An `infer` through a chain of aliases answers at three depths, with work
+/// linear from each to the next. The decision waits on the chain one alias
+/// at a time; each run after a delivery resumes the chain where the last
+/// one stopped instead of reading every answered alias again, which would
+/// cost the square of the depth. Measured on TypeScript 7.0.2: `"x"`.
+#[test]
+fn an_infer_through_an_alias_chain_answers_with_linear_work() {
+    let work = [50, 100, 200].map(|depth| {
+        let (source, probe) = alias_chain(depth);
+        let (answer, work) = named_probe(
+            &source,
+            &probe,
+            verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
+        );
+        let expected = [Literal::String("x".into())].into();
+        assert_answer(&format!("the chain of {depth}"), &answer, &expected);
+        (depth, work)
+    });
+    assert_linear_growth("chain", work[0], work[1]);
+    assert_linear_growth("chain", work[1], work[2]);
 }
 
 /// One request builds each query once: a later read of the same key is

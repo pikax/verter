@@ -137,7 +137,10 @@ where
 /// deadline.
 ///
 /// `method`, `target_identity`, and `position` are used to construct the audit
-/// session and the position-bound payload base. `method` also selects the
+/// session and the position-bound payload base. `target_identity` is a
+/// closure: it runs only for an audited request, so an unaudited one (every
+/// request in a build without `semantic-observe`) resolves and allocates no
+/// audit-only identity. `method` also selects the
 /// observational audit SLO and the explicit diagnostic/test deadline from
 /// [`verter_session::types::LspMethodTimeoutsConfig`]. `body` is the handler
 /// future; `populate` merges the handler's result into the payload.
@@ -156,17 +159,18 @@ where
 /// state machine, which unoptimized builds otherwise copy into each enclosing
 /// layer and each enclosing poll frame — enough to overflow a 2 MiB thread
 /// stack on a deep request.
-pub fn run_with_audit<'a, T, F, P>(
+pub fn run_with_audit<'a, T, F, P, I>(
     host: &'a SharedHost,
     method: LspMethodTag,
-    target_identity: RequestTargetIdentity,
+    target_identity: I,
     position: Option<Position>,
     body: F,
     populate: P,
-) -> impl std::future::Future<Output = tower_lsp_server::jsonrpc::Result<T>> + use<'a, T, F, P>
+) -> impl std::future::Future<Output = tower_lsp_server::jsonrpc::Result<T>> + use<'a, T, F, P, I>
 where
     F: std::future::Future<Output = tower_lsp_server::jsonrpc::Result<T>>,
     P: FnOnce(&mut LspRequestPayload, &T),
+    I: FnOnce() -> RequestTargetIdentity,
 {
     run_boxed_with_audit(
         host,
@@ -178,10 +182,10 @@ where
     )
 }
 
-async fn run_boxed_with_audit<T, F, P>(
+async fn run_boxed_with_audit<T, F, P, I>(
     host: &SharedHost,
     method: LspMethodTag,
-    target_identity: RequestTargetIdentity,
+    target_identity: I,
     position: Option<Position>,
     body: std::pin::Pin<Box<F>>,
     populate: P,
@@ -189,6 +193,7 @@ async fn run_boxed_with_audit<T, F, P>(
 where
     F: std::future::Future<Output = tower_lsp_server::jsonrpc::Result<T>>,
     P: FnOnce(&mut LspRequestPayload, &T),
+    I: FnOnce() -> RequestTargetIdentity,
 {
     let (deadline, budget, audit_enabled) = {
         let host = host.as_ref();
@@ -206,6 +211,7 @@ where
         return run_with_deadline(deadline, body).await;
     }
 
+    let target_identity = target_identity();
     let mut base_payload = match position.as_ref() {
         Some(pos) => payload_with_position(method.clone(), &target_identity, pos),
         None => LspRequestPayload {

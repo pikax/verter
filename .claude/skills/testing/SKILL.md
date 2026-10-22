@@ -89,6 +89,18 @@ it("type is correctly inferred", () => {
 
 ## Rust Test Patterns
 
+The differential harness gives each semantic row worker an 8 MiB stack, matching
+the host CPU workers. A platform-default 2 MiB thread can hit the native stack
+guard before the checker's logical relation-depth refusal in debug builds. Keep
+row CPU and no-progress deadlines independent of this stack reservation.
+
+The differential harness's `Matrix::installed_packages()` resolves installed packages but does not implicitly register SDK globals. Use `.installed_typescript_libs(&["es2020"])` when a fixture needs the pinned SDK's real declarations. The names set the project's explicit TypeScript `lib` option. Registration follows that selection and its reference closure, read from shared cached parser inventories; it does not upsert or register the whole SDK. Keep the native oracle's library selection identical. Missing SDK files fail the fixture; they are never a silent skip.
+
+Group demands over the same installed-package fixture and compiler setting in
+one matrix so they reuse SDK registration, package discovery and indexed files.
+Keep each setting's installed-package host isolated when shared dependencies
+would otherwise belong to multiple projects with different ambient identities.
+
 Unit-test hosts without explicit project authority use a tsconfig-less
 in-memory project context. Do not fabricate a tsconfig path for that context:
 configured program discovery treats its membership as authored roots and can

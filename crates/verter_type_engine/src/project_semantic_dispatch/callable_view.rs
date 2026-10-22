@@ -182,7 +182,7 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
     }
 
     fn data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
-        node_data_for(self.dispatch.graph(), node)
+        node_data_for(self.dispatch.graph().store(), node)
     }
 
     /// Normalize a node to its concrete structural body at a GENUINE node-domain
@@ -1051,7 +1051,7 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
 
 impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C> {
     fn data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
-        node_data_for(self.dispatch.graph(), node)
+        node_data_for(self.dispatch.graph().store(), node)
     }
 
     construction_ordinal_seam! {
@@ -1374,7 +1374,9 @@ fn realize_callable_member_at<C: crate::resolver_core::ResolverCapabilities>(
     // root shell resolved only on demand would be replayed as its resolved
     // carrier and no longer match the recorded occurrence. A shell behind a
     // local alias publishes the alias node instead and normalizes below.
-    if let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) {
+    if let Some(data) =
+        crate::project_semantic_dispatch::node_data_for(dispatch.graph().store(), node)
+    {
         if let SemanticNodeData::ImportType(_) = data.as_ref() {
             return match crate::semantic_query::surface_resolution::stable_member_carrier_partiality(
                 dispatch.ctx,
@@ -1395,7 +1397,8 @@ fn realize_callable_member_at<C: crate::resolver_core::ResolverCapabilities>(
             );
         }
     };
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), normalized)
+    let Some(data) =
+        crate::project_semantic_dispatch::node_data_for(dispatch.graph().store(), normalized)
     else {
         return SurfaceResolution::incomplete(NonEmptyReasons::of(
             PartialReason::MissingSemanticNodeData,

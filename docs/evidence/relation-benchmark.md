@@ -161,6 +161,15 @@ and logical work/bytes without a semantic miss. Each case prints fresh work
 observations; run logs belong with the candidate report, not this historical
 table.
 
+The working state a related pair holds is attributed by the allocator, not
+the ledger: `a_relation_holds_no_more_than_it_charges`
+(`crates/verter_session/tests/allocation_cases/construction_bytes.rs`)
+reports the active (peak live) and resident bytes per pair of reversed
+unions and fails when they exceed the construction bytes the demand charged,
+when the bytes per pair grow with the pairs, or when the relation leaves a
+per-pair record resident. Larger sizes are measured on request with
+`VERTER_RELATION_PAIR_ARMS`; their readings belong with the candidate report.
+
 The connected construction allowance includes the full checker comparison
 mapping plus operand/projection headroom. Refusal summaries retain operation
 identity independently of ordinary relation verdicts. The small-row controls

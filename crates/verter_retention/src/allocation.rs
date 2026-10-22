@@ -58,25 +58,34 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use super::word_set::WordSet;
 
 /// Allocator bookkeeping one heap block costs beside its payload.
 pub const ALLOCATION_HEADER_BYTES: usize = 16;
 /// Allocator size-class granularity a heap block's payload rounds up to.
 pub const ALLOCATION_GRANULE_BYTES: usize = 16;
+// [`heap_block_bytes`] rounds up by masking.
+const _: () = assert!(ALLOCATION_GRANULE_BYTES.is_power_of_two());
 
 /// Bytes one heap block holding `payload` bytes costs.
+///
+/// Written with plain integer operators: every retained charge measures
+/// through it, and a debug build calls out to no helper for them.
 #[must_use]
+#[inline(always)]
 pub const fn heap_block_bytes(payload: usize) -> usize {
     if payload == 0 {
         return 0;
     }
-    payload.div_ceil(ALLOCATION_GRANULE_BYTES) * ALLOCATION_GRANULE_BYTES + ALLOCATION_HEADER_BYTES
+    // The granule is a power of two, so rounding up is a mask.
+    ((payload + (ALLOCATION_GRANULE_BYTES - 1)) & !(ALLOCATION_GRANULE_BYTES - 1))
+        + ALLOCATION_HEADER_BYTES
 }
 
 /// Bytes one `Arc` block holding `payload` bytes beside its two counters
 /// costs.
 #[must_use]
+#[inline(always)]
 pub const fn arc_block_bytes(payload: usize) -> usize {
     heap_block_bytes(2 * std::mem::size_of::<usize>() + payload)
 }
@@ -116,15 +125,18 @@ pub const fn box_bytes<T>() -> usize {
 /// debug build. Only a figure that charges nothing — an expectation in a
 /// test, a bound — counts handles in full ([`Self::estimating`]).
 pub struct AliasSet {
-    inline: smallvec::SmallVec<[usize; ALIAS_INLINE]>,
-    spilled: Option<FxHashSet<usize>>,
+    /// The first [`ALIAS_INLINE`] keys, `inline[..inline_len]`; a plain
+    /// array scanned by index, which costs a debug build no call per key.
+    inline: [u64; ALIAS_INLINE],
+    inline_len: usize,
+    spilled: Option<WordSet>,
     /// When collecting leaves, the distinct leaf names the measurement
     /// reached, which it then does not count.
     leaves: Option<Vec<Arc<str>>>,
     /// The distinct owned allocations the measurement reached, each charged
     /// by its own cell and not counted here; `None` when they are counted
     /// in full instead.
-    children: Option<Vec<Arc<dyn super::owned::Node>>>,
+    children: Option<Children>,
     /// Whether this measures an owned cell's value, which reaches no raw
     /// `Arc`: each allocation it keeps is exclusively its own or an owned
     /// handle charged by itself.
@@ -134,20 +146,25 @@ pub struct AliasSet {
 /// Allocations an [`AliasSet`] tracks before it spills to a hash set.
 const ALIAS_INLINE: usize = 8;
 
+/// Owned children an [`AliasSet`] collects inline before it spills.
+const CHILDREN_INLINE: usize = 2;
+
+/// The owned children a measurement reached: inline up to
+/// [`CHILDREN_INLINE`], so handing a small set to its owner allocates
+/// nothing until the owner stores it.
+pub(crate) type Children = smallvec::SmallVec<[Arc<dyn super::owned::Node>; CHILDREN_INLINE]>;
+
 impl Default for AliasSet {
     fn default() -> Self {
-        Self::with(None, Some(Vec::new()), false)
+        Self::with(None, Some(Children::new()), false)
     }
 }
 
 impl AliasSet {
-    fn with(
-        leaves: Option<Vec<Arc<str>>>,
-        children: Option<Vec<Arc<dyn super::owned::Node>>>,
-        in_cell: bool,
-    ) -> Self {
+    fn with(leaves: Option<Vec<Arc<str>>>, children: Option<Children>, in_cell: bool) -> Self {
         Self {
-            inline: smallvec::SmallVec::new(),
+            inline: [0; ALIAS_INLINE],
+            inline_len: 0,
             spilled: None,
             leaves,
             children,
@@ -166,12 +183,12 @@ impl AliasSet {
     /// leaves are charged as allocations of their own.
     #[must_use]
     pub fn collecting() -> Self {
-        Self::with(Some(Vec::new()), Some(Vec::new()), false)
+        Self::with(Some(Vec::new()), Some(Children::new()), false)
     }
 
     /// An empty set measuring an owned cell's value.
     pub(crate) fn for_cell() -> Self {
-        Self::with(None, Some(Vec::new()), true)
+        Self::with(None, Some(Children::new()), true)
     }
 
     /// Whether this measures an owned cell's value, which reaches no raw
@@ -209,7 +226,7 @@ impl AliasSet {
     /// cell owns — hands that part's owned handles to the cell's set.
     pub fn absorb(&mut self, inner: &mut AliasSet) -> usize {
         let mut counted = 0;
-        for child in inner.take_children().into_vec() {
+        for child in inner.take_children() {
             if !self.first_allocation(&child) {
                 continue;
             }
@@ -221,12 +238,11 @@ impl AliasSet {
     }
 
     /// The owned children the measurement reached, each once.
-    pub(crate) fn take_children(&mut self) -> Box<[Arc<dyn super::owned::Node>]> {
+    pub(crate) fn take_children(&mut self) -> Children {
         self.children
             .as_mut()
             .map(std::mem::take)
             .unwrap_or_default()
-            .into_boxed_slice()
     }
 
     /// The owned allocations the measurement reached, each once, for the
@@ -257,18 +273,24 @@ impl AliasSet {
 
     /// [`Self::first`] for an owned cell's own allocation.
     pub(crate) fn first_allocation<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
-        let key = Arc::as_ptr(arc).cast::<()>() as usize;
+        let key = Arc::as_ptr(arc).cast::<()>() as u64;
         if let Some(spilled) = self.spilled.as_mut() {
             return spilled.insert(key);
         }
-        if self.inline.contains(&key) {
-            return false;
+        let mut index = 0;
+        while index < self.inline_len {
+            if self.inline[index] == key {
+                return false;
+            }
+            index += 1;
         }
-        if self.inline.len() < ALIAS_INLINE {
-            self.inline.push(key);
+        if self.inline_len < ALIAS_INLINE {
+            self.inline[self.inline_len] = key;
+            self.inline_len += 1;
             return true;
         }
-        let mut spilled: FxHashSet<usize> = self.inline.drain(..).collect();
+        let mut spilled: WordSet = self.inline.iter().copied().collect();
+        self.inline_len = 0;
         spilled.insert(key);
         self.spilled = Some(spilled);
         true
@@ -277,9 +299,7 @@ impl AliasSet {
     /// Distinct allocations counted so far.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.spilled
-            .as_ref()
-            .map_or(self.inline.len(), FxHashSet::len)
+        self.spilled.as_ref().map_or(self.inline_len, WordSet::len)
     }
 
     /// Whether nothing has been counted.
@@ -293,7 +313,7 @@ impl Drop for AliasSet {
     fn drop(&mut self) {
         if !std::thread::panicking() {
             verter_debug_assert::verter_debug_assert!(
-                self.children.as_ref().is_none_or(Vec::is_empty),
+                self.children.as_ref().is_none_or(Children::is_empty),
                 "a measurement reached owned allocations its owner never charged: take them \
                  with `AliasSet::take_handles` and pin or hold them"
             );

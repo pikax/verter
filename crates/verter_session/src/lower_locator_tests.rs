@@ -252,7 +252,10 @@ fn cold_lower_locator_dispatches_zero_reduction_queries() {
     let ctx = RequestContext::new(1, Arc::from(OWNER_ID), false, None);
     let _guard = RequestContextGuard::install(Arc::clone(&ctx));
 
-    let dispatch = ProjectSemanticDispatch::new(&host);
+    // Captured execution: only it records into the request counters read below.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch = ProjectSemanticDispatch::new(&captured);
     let node = match dispatch.lower_locator(decl_body_locator(OWNER_ID, "Deferred")) {
         QueryResult::Value(id) => id,
         other => panic!("cold lower_locator must produce a value, got {other:?}"),
@@ -375,6 +378,7 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key(
                 "a".to_string().into(),
@@ -681,6 +685,7 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
     };
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "left".to_string().into(),
@@ -689,6 +694,7 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
                 false,
             )),
             ObjectMember::Spread(SpreadMember::new(TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: Vec::new(),
             })))),
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
@@ -782,6 +788,7 @@ fn locator_predeclares_carrier_template_and_signature_bound_infers() {
         }],
     )));
     let true_type = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "carrier".to_string().into(),
@@ -936,6 +943,7 @@ fn locator_spread_shape_is_one_ordered_program() {
         ))
     };
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             property("a"),
             ObjectMember::Spread(SpreadMember::new(TypeExpr::Ref {

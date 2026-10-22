@@ -69,7 +69,7 @@ use crate::typeinfo::framework_surface::results::{
 };
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::VerterHost;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 use verter_type_engine::semantic_query::ProjectionMode;
 
 /// The audit operation tag the framework-surface executor registers under.
@@ -105,14 +105,15 @@ impl VerterHost {
         // no selector or an empty selector canonical has no applicable
         // document target.
         let (canonical_for_audit, target_identity) = framework_selector_target(&envelope);
-        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::<str>::from(canonical_for_audit.as_str()),
-            RequestKind::TypeInfoGraph,
+            || RequestKind::TypeInfoGraph,
             footprint_capture,
             timing_capture,
             None,
-            self.config.projection_op_budget,
+            verter_execution::cancellation::CancellationToken::new(),
         );
         #[cfg(feature = "semantic-observe")]
         let registration = {
@@ -121,7 +122,7 @@ impl VerterHost {
             registration
         };
 
-        let request_clock = verter_audit::observe::Stopwatch::start();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let (response, payload) = {
             // The request runs under its context whether or not it captures:
             // the context carries its budget and cancellation.
@@ -373,21 +374,23 @@ impl VerterHost {
                     Some(current_view) => {
                         let overlay =
                             Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                        let host_ctx = crate::resolver_core::HostResolverContext::from_current(
-                            self,
-                            &current_view,
-                            overlay,
-                        );
-                        let dispatch =
-                            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                &host_ctx,
+                        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+                            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
+                                self,
+                                &current_view,
+                                overlay,
                             );
-                        let resolve_ctx = ExecutorResolveCtx {
-                            ctx: &host_ctx,
-                            dispatch: &dispatch,
-                        };
-                        let resolved = resolve_ctx.resolve_plan(&resolved_selector, plan);
-                        adapter.normalize(&ctx, resolved)
+                            let dispatch =
+                                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                    &host_ctx,
+                                );
+                            let resolve_ctx = ExecutorResolveCtx {
+                                ctx: &host_ctx,
+                                dispatch: &dispatch,
+                            };
+                            let resolved = resolve_ctx.resolve_plan(&resolved_selector, plan);
+                            adapter.normalize(&ctx, resolved)
+                        })
                     }
                     None => NormalizedSurfaces::default(),
                 }
@@ -458,17 +461,20 @@ impl VerterHost {
 /// relocated Vue delegates and the shared shallow-surface / path-projection
 /// dispatch). It is not a second resolver: every arm dispatches to existing
 /// shared resolution.
-struct ExecutorResolveCtx<'a> {
+struct ExecutorResolveCtx<
+    'a,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
     /// The ONE proven-current request view every demand resolves against, so a
     /// single response never mixes owner versions under churn.
-    ctx: &'a dyn crate::resolver_core::HostRequestContext,
+    ctx: &'a dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         'a,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
 }
 
-impl ExecutorResolveCtx<'_> {
+impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
     /// Resolve every planned demand into a [`ResolvedSurfaces`] set.
     fn resolve_plan(
         &self,

@@ -20,7 +20,6 @@ use std::sync::Arc;
 use verter_audit::{RequestAuditRecord, RequestKind, WorkspaceOp};
 
 use crate::VerterHost;
-use verter_type_engine::request_context::RequestContext;
 #[cfg(feature = "semantic-observe")]
 use verter_type_engine::request_context::RequestContextGuard;
 
@@ -63,12 +62,15 @@ impl VerterHost {
             WorkspaceOp::ResolverWalk { .. } => String::new(),
         };
 
-        let ctx = RequestContext::with_kind(
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::<str>::from(canonical_id_str.as_str()),
-            RequestKind::Workspace { op: op.clone() },
+            || RequestKind::Workspace { op: op.clone() },
+            false,
             false,
             None,
+            verter_execution::cancellation::CancellationToken::new(),
         );
 
         // Construct the registration BEFORE the TLS guard so the

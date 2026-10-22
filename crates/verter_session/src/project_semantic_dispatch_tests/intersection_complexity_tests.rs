@@ -337,3 +337,207 @@ fn the_limit_answers_the_same_cold_warm_and_reordered() {
     ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A member read through an intersection intersects the members' types the
+/// way the checker's own intersection does, so unions of primitives
+/// intersect member-wise before any product is weighed: two thousand-member
+/// number unions read as the five hundred numbers they share, never refused
+/// on their million-wide written product. A union that also holds an object
+/// is not a union of primitives, and its cross product is weighed.
+///
+/// Measured: `IsAny<O["m"]>` is `"not-any"`, `[O["m"]] extends [500 | 501]
+/// ? 1 : 2` is `2` and `O["m"] extends number ? 1 : 2` is `1`, with no
+/// diagnostic; `IsAny<M["m"]>` (401 × 401 = 160,801) is `any` under TS2590.
+#[test]
+fn a_member_read_over_unions_of_primitives_intersects_them_member_wise() {
+    let numbers = |from: usize, count: usize| {
+        (from..from + count)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let source = format!(
+        "{IS_ANY}{}type B = {};\ntype O = {{ m: A }} & {{ m: B }};\n\
+         type M = {{ m: {} | {{ x: 1 }} }} & {{ m: {} | {{ y: 1 }} }};\n",
+        literal_union("A", 1000, false, ""),
+        numbers(500, 1000),
+        numbers(0, 400),
+        numbers(0, 400),
+    );
+    let failures = mismatches(
+        &source,
+        &[
+            ("IsAny<O[\"m\"]>", "\"not-any\""),
+            ("[O[\"m\"]] extends [500 | 501] ? 1 : 2", "2"),
+            ("O[\"m\"] extends number ? 1 : 2", "1"),
+            ("IsAny<M[\"m\"]>", "any"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The factors a member read distributes `probe`'s tuple elements as (each
+/// element's union members, or the element alone), and the elements as
+/// the written intersection.
+fn tuple_factors(
+    dispatch: &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+) -> (
+    Vec<Vec<verter_type_engine::semantic_query::SemanticNodeId>>,
+    Vec<verter_type_engine::semantic_query::SemanticNodeId>,
+) {
+    let graph = dispatch.graph_arc();
+    let elements: Vec<_> = match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, .. }) => {
+            elements.iter().map(|element| element.value).collect()
+        }
+        other => panic!("the probe reads a tuple, got {other:?}"),
+    };
+    let factors = elements
+        .iter()
+        .map(|element| match graph.node_data(*element).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![*element],
+        })
+        .collect();
+    (factors, elements)
+}
+
+/// The work units a member read's distribution of `probe`'s tuple
+/// elements charges its connected demand, under `strictNullChecks`.
+fn distribution_work(probe: &str) -> usize {
+    use verter_session_query::flow::policy::NullabilityPolicy;
+    with_probe("", probe, |dispatch, node| {
+        let (factors, origin) = tuple_factors(dispatch, node);
+        let (_demand, trip) = dispatch.enter_connected_demand(false);
+        assert!(trip.is_none(), "a fresh demand has not tripped");
+        let before = dispatch.connected_demand().work_used_for_tests();
+        dispatch
+            .distribute_intersection_for_tests(&factors, &origin, NullabilityPolicy::Strict)
+            .expect("the intersection distributes");
+        dispatch.connected_demand().work_used_for_tests() - before
+    })
+}
+
+/// A member read divides `X & (A | B | undefined) & (C | D | undefined)`
+/// as the checker does, into `X` and a half, and intersects that half the
+/// way the checker's own intersection does: its factors all hold
+/// `undefined`, so it intersects without it — four combinations, not the
+/// nine its written width multiplies to — and adds it back. Beside the same
+/// read without `undefined`, the half pays for no combination more: the
+/// read pays only for the `undefined` part the half adds back and the one
+/// `X & undefined` combination of the halves' product. Weighed at its
+/// written width, the half would pay for five combinations more.
+#[test]
+fn a_divided_half_intersects_without_the_nullish_member_its_factors_share() {
+    let nullish = distribution_work(
+        "[{ x: 1 }, { a: 1 } | { b: 1 } | undefined, { c: 1 } | { d: 1 } | undefined]",
+    );
+    let plain = distribution_work("[{ x: 1 }, { a: 1 } | { b: 1 }, { c: 1 } | { d: 1 }]");
+    assert_eq!(
+        nullish - plain,
+        2,
+        "the shared `undefined` costs its part and one combination, not the half's \
+         five more: {nullish} against {plain}"
+    );
+}
+
+/// A distribution outside any connected demand is weighed against the
+/// checker's limit and charged to no ledger: an earlier demand's trip,
+/// which the ledger still holds once that demand ends, is never inherited
+/// as the distribution's own refusal.
+#[test]
+fn a_distribution_outside_a_demand_never_inherits_an_earlier_trip() {
+    use verter_session_query::flow::policy::NullabilityPolicy;
+    with_probe(
+        "",
+        "[{ x: 1 } | { y: 1 }, { a: 1 } | { b: 1 }]",
+        |dispatch, node| {
+            let (factors, origin) = tuple_factors(dispatch, node);
+            dispatch.set_connected_limits_for_tests(1, 24);
+            {
+                let (_demand, _) = dispatch.enter_connected_demand(false);
+                assert!(
+                    dispatch.connected_demand().charge_units(2).is_err(),
+                    "the earlier demand trips"
+                );
+            }
+            assert!(
+                dispatch
+                    .distribute_intersection_for_tests(&factors, &origin, NullabilityPolicy::Strict)
+                    .is_some(),
+                "the intersection distributes outside the demand, never stopped by the \
+                 earlier demand's trip"
+            );
+        },
+    );
+}
+
+/// A constituent's footprint is sized by the members it holds once its
+/// nested intersections flatten, each intersection spliced once as the
+/// constituent builder splices it: a shared DAG `I0 = p & q`,
+/// `I(n + 1) = I(n) & I(n)` flattens to `p` and `q` however deep, so
+/// distributing `(I8 | r) & (s | t)` pays exactly what `(I0 | r) & (s | t)`
+/// pays, and fits the byte allowance the shallow form needs.
+#[test]
+fn a_shared_intersection_dag_is_charged_for_its_flattened_members() {
+    use std::sync::Arc;
+    use verter_session_query::flow::policy::NullabilityPolicy;
+    use verter_type_engine::project_semantic_dispatch::canonical_algebra::{
+        intern_ordered_intersection_paying_for_tests, intern_ordered_union,
+    };
+    use verter_type_engine::semantic_query::composite::CompositeList;
+    use verter_type_engine::semantic_query::{DeclIdentity, PartialReasonSet, SemanticNodeId};
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
+
+    let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
+    let param = |name: &str| {
+        graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic(name),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: verter_type_expr::OwnedStr::from(name),
+        })
+    };
+    let carrier = |members: [SemanticNodeId; 2]| {
+        graph.intern_node(SemanticNodeData::Intersection(
+            CompositeList::ordered_carrier_for_tests(Arc::from(members)),
+        ))
+    };
+    let [p, q, r, s, t] = ["P", "Q", "R", "S", "T"].map(param);
+    let shallow = carrier([p, q]);
+    let deep = (0..8).fold(shallow, |inner, _| carrier([inner, inner]));
+    let right = intern_ordered_union(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
+        &[s, t],
+        NullabilityPolicy::Strict,
+    )
+    .node;
+    let arms = |nested: SemanticNodeId| {
+        [
+            intern_ordered_union(verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph), &[nested, r], NullabilityPolicy::Strict).node,
+            right,
+        ]
+    };
+    let paying = |nested: SemanticNodeId, bytes: usize| {
+        intern_ordered_intersection_paying_for_tests(&graph, &arms(nested), usize::MAX, bytes)
+    };
+    let control = paying(shallow, usize::MAX);
+    assert_eq!(control.exhausted, PartialReasonSet::empty(), "{control:?}");
+    assert_eq!(control.work, 4, "two by two constituents");
+    let nested = paying(deep, usize::MAX);
+    assert_eq!(
+        (nested.work, nested.bytes),
+        (control.work, control.bytes),
+        "the shared DAG flattens to the members the shallow form holds"
+    );
+    assert_eq!(
+        paying(deep, control.bytes).exhausted,
+        PartialReasonSet::empty(),
+        "the shallow form's allowance pays for the shared DAG"
+    );
+}

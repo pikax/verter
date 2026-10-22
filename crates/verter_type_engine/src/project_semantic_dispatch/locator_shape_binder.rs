@@ -369,9 +369,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // import shadowing. Absence (no prepared declaration for the
         // anchor) degrades to the payload-aware in-scope resolver.
         let bundle = self.ctx.prepared_decl_bundle(canonical.as_ref());
-        let scope_payload = bundle
-            .as_ref()
-            .map(|bundle| DeclarationScopePayload::from_bundle(bundle, anchor.owner));
+        let scope_payload = bundle.as_ref().map(|bundle| match key.locator() {
+            AuthoredBodyLocator::DeclBody(_) => self.declaration_scope_payload(
+                bundle,
+                canonical.as_ref(),
+                anchor.owner,
+                anchor_symbol.as_ref(),
+            ),
+            _ => DeclarationScopePayload::from_bundle(bundle, anchor.owner),
+        });
         let prepared_anchor: Option<AnchorPreparedDecl> = match key.locator() {
             AuthoredBodyLocator::DeclBody(slot) => match slot.anchor.space {
                 verter_type_expr::locators::LocatorSymbolSpace::Type => bundle

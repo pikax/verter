@@ -277,7 +277,12 @@ pub(super) fn with_probe_outcome_on_host<R>(
         .unwrap_or_else(|| panic!("the probe `{probe}` produced no flow-return result"));
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     // A read of a global the ambient library declares is scoped by the
@@ -494,15 +499,44 @@ pub(super) fn mismatches_in(
             let expected = checker_syntax::parse(checker)
                 .unwrap_or_else(|err| panic!("the checker print `{checker}` must parse: {err}"));
             with_probe_in(project, source, probe, |dispatch, node| {
-                (!checker_syntax::matches_node(dispatch, node, &expected, 0)).then(|| {
-                    format!(
-                        "`{probe}`: the checker answers `{checker}`, the lane measured `{}`",
-                        render_node(dispatch, node, 0)
-                    )
-                })
+                row_mismatch(dispatch, node, probe, checker, &expected)
             })
         })
         .collect()
+}
+
+/// [`mismatches_in`] with every row read on `host`, a host of `project`
+/// the caller configured.
+pub(super) fn mismatches_on_host(
+    host: &Arc<crate::VerterHost>,
+    project: ProbeProject<'_>,
+    source: &str,
+    rows: &[(&str, &str)],
+) -> Vec<String> {
+    rows.iter()
+        .filter_map(|(probe, checker)| {
+            let expected = checker_syntax::parse(checker)
+                .unwrap_or_else(|err| panic!("the checker print `{checker}` must parse: {err}"));
+            with_probe_on_host(host, project, source, probe, |dispatch, node| {
+                row_mismatch(dispatch, node, probe, checker, &expected)
+            })
+        })
+        .collect()
+}
+
+fn row_mismatch(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+    probe: &str,
+    checker: &str,
+    expected: &checker_syntax::CheckerType,
+) -> Option<String> {
+    (!checker_syntax::matches_node(dispatch, node, expected, 0)).then(|| {
+        format!(
+            "`{probe}`: the checker answers `{checker}`, the lane measured `{}`",
+            render_node(dispatch, node, 0)
+        )
+    })
 }
 
 /// Every `(probe, checker type)` pair whose EVALUATED value does not match
@@ -532,6 +566,69 @@ pub(super) fn evaluated_mismatches(source: &str, rows: &[(&str, &str)]) -> Vec<S
             })
         })
         .collect()
+}
+
+/// Per member of the object `probe` evaluates to under the publication
+/// demand [`evaluated_mismatches`] makes: whether it is `readonly`, and
+/// whether its value matches the checker type `value`.
+pub(super) fn evaluated_member_modifiers(
+    source: &str,
+    probe: &str,
+    value: &str,
+) -> Vec<(bool, bool)> {
+    let expected = checker_syntax::parse(value)
+        .unwrap_or_else(|err| panic!("the checker type `{value}` must parse: {err}"));
+    with_probe(source, probe, |dispatch, node| {
+        let evaluated = dispatch
+            .normalize_node_for_structural_fact_demand(
+                node,
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            )
+            .into_usable_node()
+            .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
+        let data = dispatch.graph().node_data(evaluated);
+        let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
+            panic!(
+                "`{probe}` must evaluate to an object, measured `{}`",
+                render_node(dispatch, evaluated, 0)
+            );
+        };
+        surface
+            .positive_members()
+            .iter()
+            .map(|member| {
+                (
+                    member.readonly,
+                    checker_syntax::matches_node(dispatch, member.value, &expected, 0),
+                )
+            })
+            .collect()
+    })
+}
+
+/// What `probe` evaluates to on `host` under a publication demand, rendered:
+/// a probe after another reads what the earlier one left in the host.
+pub(super) fn evaluated_render_on_host(
+    host: &Arc<crate::VerterHost>,
+    source: &str,
+    probe: &str,
+) -> String {
+    with_probe_on_host(
+        host,
+        ProbeProject::default(),
+        source,
+        probe,
+        |dispatch, node| {
+            let value = dispatch
+                .normalize_node_for_structural_fact_demand(
+                    node,
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                )
+                .into_usable_node()
+                .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
+            render_node(dispatch, value, 0)
+        },
+    )
 }
 
 /// The label of each element of the tuple `probe` settles on — the
@@ -603,7 +700,12 @@ pub(super) fn return_failures_in_one_host(
     }
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _demand_scope = project.ambient_lib.map(|_| {
         super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(PROBE_FILE))
@@ -668,8 +770,10 @@ pub(super) fn mismatches_in_one_host_observing(
                 .unwrap_or_else(|| panic!("the probe `{probe}` produced no flow-return result"));
             let store_view = host.resolver_store_view_read().into_owned_view();
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+            let host_ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::new(&host, &store_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let _builder = dispatch.enter_construction_scope();
             let node = dispatch

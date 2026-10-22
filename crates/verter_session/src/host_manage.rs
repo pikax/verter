@@ -437,17 +437,19 @@ impl FallthroughRequestHost for VerterHost {
             base_is_current,
         )
         .into_cold_seed_view();
-        let host_ctx =
-            crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
-        let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
-        VerterHost::compute_fallthrough_surface_uncached(
-            self,
-            canonical_id,
-            prop_type_overrides,
-            visiting,
-            ctx,
-            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx),
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(self, &cold_seed, overlay);
+            let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &host_ctx;
+            VerterHost::compute_fallthrough_surface_uncached(
+                self,
+                canonical_id,
+                prop_type_overrides,
+                visiting,
+                ctx,
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx),
+            )
+        })
     }
 
     fn store_fallthrough_result<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
@@ -461,7 +463,10 @@ impl FallthroughRequestHost for VerterHost {
     }
 }
 
-pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
+pub(in crate::host_manage) struct HostFallthroughResolver<
+    'a,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
     pub(in crate::host_manage) host: &'a VerterHost,
     pub(in crate::host_manage) parent_canonical_id: &'a str,
     pub(in crate::host_manage) parent_snapshot: &'a FileAnalysisSnapshot,
@@ -492,12 +497,12 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// off-path callers go through `with_bare_host_ctx_for_test`.
     pub(in crate::host_manage) ctx:
         &'a dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
     pub(in crate::host_manage) dispatch:
         &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             'a,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
 }
 
@@ -543,7 +548,9 @@ fn fire_intrinsic_retirement_pause(
     }
 }
 
-impl FallthroughResolverHost for HostFallthroughResolver<'_> {
+impl<M: verter_audit::observe::ObserveExec> FallthroughResolverHost
+    for HostFallthroughResolver<'_, M>
+{
     type ChildResolution = crate::types::FallthroughResolution;
 
     fn intrinsic_members_for_tag(
@@ -655,15 +662,13 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             import_source,
             verter_session_query::resolution::ResolveRequestKind::EsmImport,
         ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                admitted.into_result()?
-            }
             verter_workspace::ResolutionPublication::Refused(_) => {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
             }
+            publication => publication.into_delivered().flatten()?,
         };
 
         let derived_import_binding = self
@@ -781,7 +786,9 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     }
 }
 
-impl FallthroughComputeHost for HostFallthroughResolver<'_> {
+impl<M: verter_audit::observe::ObserveExec> FallthroughComputeHost
+    for HostFallthroughResolver<'_, M>
+{
     type Snapshot = FileAnalysisSnapshot;
     // Arc-shared: the no-hydration fallthrough env is the memo-owned
     // whole-env handle itself; every consumer reads it immutably.
@@ -1005,29 +1012,29 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
             source,
             verter_session_query::resolution::ResolveRequestKind::EsmImport,
         ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                if let Some(resolved) = admitted.into_result() {
-                    return Some(resolved);
-                }
-            }
             verter_workspace::ResolutionPublication::Refused(_) => {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
             }
+            publication => {
+                if let Some(resolved) = publication.into_delivered().flatten() {
+                    return Some(resolved);
+                }
+            }
         }
         match self
             .host
             .resolve_type_dependency_canonical(canonical_id, source)
         {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
             verter_workspace::ResolutionPublication::Refused(_) => {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 None
             }
+            publication => publication.into_delivered().flatten(),
         }
     }
 }

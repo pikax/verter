@@ -52,11 +52,14 @@ use verter_type_engine::resolver_core::RequestBoundResolverContext;
 /// is equally return-only — so the completion fence survives the query
 /// boundary instead of stopping at the request-sticky / traced-scope
 /// suppression rails inside the bridge.
-pub struct SessionQueryHostPort<'ctx> {
-    ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
+pub struct SessionQueryHostPort<
+    'ctx,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
+    ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities<M>>,
 }
 
-impl<'ctx> SessionQueryHostPort<'ctx> {
+impl<'ctx, M: verter_audit::observe::ObserveExec> SessionQueryHostPort<'ctx, M> {
     /// Bind the query host port to a [`RequestBoundResolverContext`] so
     /// every artifact serve is overlay-correct for the requesting view
     /// (a `HostResolverContext` for a base query, a
@@ -70,7 +73,7 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
     /// retained so a hypothetical future marker misuse trips loudly in dev
     /// builds.
     pub(crate) fn new(
-        ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities<M>>,
     ) -> Self {
         verter_debug_assert!(
             ctx.is_request_bound(),
@@ -102,22 +105,22 @@ const _: () = {
     // port's `&dyn RequestBoundResolverContext` binding and construct the
     // port. If either context's marker impl regressed, these would fail to
     // compile.
-    fn host_ctx_constructs_port<'a>(
-        ctx: &'a crate::resolver_core::HostResolverContext<'a>,
-    ) -> SessionQueryHostPort<'a> {
+    fn host_ctx_constructs_port<'a, M: verter_audit::observe::ObserveExec>(
+        ctx: &'a crate::resolver_core::HostResolverContext<'a, M>,
+    ) -> SessionQueryHostPort<'a, M> {
         SessionQueryHostPort::new(ctx)
     }
-    fn session_ctx_constructs_port<'a>(
-        ctx: &'a crate::resolver_core::SessionResolverContext<'a>,
-    ) -> SessionQueryHostPort<'a> {
+    fn session_ctx_constructs_port<'a, M: verter_audit::observe::ObserveExec>(
+        ctx: &'a crate::resolver_core::SessionResolverContext<'a, M>,
+    ) -> SessionQueryHostPort<'a, M> {
         SessionQueryHostPort::new(ctx)
     }
     // Reference both so the compile-time proofs are not dead code.
-    let _ = host_ctx_constructs_port;
-    let _ = session_ctx_constructs_port;
+    let _ = host_ctx_constructs_port::<verter_audit::observe::Uncaptured>;
+    let _ = session_ctx_constructs_port::<verter_audit::observe::Uncaptured>;
 };
 
-impl QueryHostPort for SessionQueryHostPort<'_> {
+impl<M: verter_audit::observe::ObserveExec> QueryHostPort for SessionQueryHostPort<'_, M> {
     fn lower_authored_body(&self, locator: &AuthoredBodyLocator) -> QueryHostServe {
         self.ctx.lower_authored_body(locator)
     }

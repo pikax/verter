@@ -1054,7 +1054,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         ordered.sort_by_key(|&node| {
-            crate::semantic_query::display::checker_relation_order_rank(graph, node)
+            crate::semantic_query::display::checker_relation_order_rank(graph.store(), node)
         });
         ordered
     }
@@ -1086,17 +1086,30 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 crate::semantic_query::ProjectionMode::Navigate,
             );
         match self.normalize_node_for_structural_fact_demand(node, transit) {
-            super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
-                self.graph().node_data(node)
-            }
+            super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => self
+                .graph()
+                .node_data(self.regularized_empty_object_program(node)),
             _ => None,
         }
     }
 
-    /// `node`'s object surface, when it is one.
+    /// `node`'s object surface, when it is one. A mapped type over a closed
+    /// key domain is the object its keys map to, the object the relation
+    /// decides against.
     fn object_view(&self, node: SemanticNodeId) -> Option<SurfaceView> {
         match self.structural_data(node)?.as_ref() {
             SemanticNodeData::Object(view) => Some(view.clone()),
+            SemanticNodeData::Mapped { source, mapper } => {
+                let object = self.mapped_object_for_relation(
+                    *source,
+                    mapper,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )?;
+                match self.graph().node_data(object)?.as_ref() {
+                    SemanticNodeData::Object(view) => Some(view.clone()),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

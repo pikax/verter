@@ -267,7 +267,60 @@ pub(crate) struct ProviderProjectionContext {
 pub(crate) struct PreparedNonCarrierProviderSync {
     pub(crate) provider_path: String,
     pub(crate) rewritten: String,
-    pub(crate) resolved_dependencies: Vec<verter_session_query::resolution::ResolveResult>,
+    pub(crate) resolved_dependencies: ResolvedProviderDependencies,
+}
+
+/// The provider dependencies one importer's module references resolve to.
+///
+/// Every delivered resolution drives provider synchronization and the
+/// dependency traversal. Only the resolutions the workspace RETAINED become
+/// the host's caller-supplied route snapshot: a resolution the retention
+/// account declined to keep is a complete answer for this sync, and the
+/// host's route table must not hold what the workspace refused to.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ResolvedProviderDependencies {
+    entries: Vec<(verter_session_query::resolution::ResolveResult, bool)>,
+}
+
+impl ResolvedProviderDependencies {
+    /// Record one delivered resolution and whether the workspace retained it.
+    pub(crate) fn push(
+        &mut self,
+        result: verter_session_query::resolution::ResolveResult,
+        retained: bool,
+    ) {
+        self.entries.push((result, retained));
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Every delivered resolution, retained or not, in reference order.
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = &verter_session_query::resolution::ResolveResult> {
+        self.entries.iter().map(|(result, _)| result)
+    }
+
+    /// Every delivered resolution, retained or not, in reference order.
+    pub(crate) fn into_results(self) -> Vec<verter_session_query::resolution::ResolveResult> {
+        self.entries.into_iter().map(|(result, _)| result).collect()
+    }
+
+    /// The route snapshot for `VerterHost::set_import_dependencies`: the
+    /// retained resolutions only.
+    pub(crate) fn route_snapshot(&self) -> Vec<verter_session::DependencyResolution> {
+        self.entries
+            .iter()
+            .filter(|(_, retained)| *retained)
+            .map(|(entry, _)| verter_session::DependencyResolution {
+                specifier: entry.provider_specifier.clone(),
+                resolved_canonical_id: Some(entry.source_id.clone()),
+                possible_canonical_ids: Vec::new(),
+            })
+            .collect()
+    }
 }
 
 pub(crate) struct ResolvedComponentDocument {

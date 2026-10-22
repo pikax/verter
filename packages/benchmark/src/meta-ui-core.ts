@@ -645,8 +645,8 @@ export interface MetaUiProfileAuditArtifact {
 }
 
 export const MEMORY_AUDIT_BUILD_HINT =
-  "rebuild @verter/native (pnpm --filter @verter/native run build) — " +
-  "the loaded binary predates the runtime memory-audit surface";
+  "build the instrumented binding (pnpm --filter @verter/native run build:observe) — " +
+  "the memory audit is compiled only with semantic-observe";
 
 /**
  * Loud-failure setup gate for --profile-audit: validate that the loaded
@@ -674,7 +674,9 @@ export function ensureMemoryAuditCapable(binding: MemoryAuditBinding): MemoryAud
   // Runtime enable handshake: flip the allocator gate on (fresh counter
   // epoch). Sampling arming rides the env (`VERTER_MEMORY_AUDIT_SAMPLE`,
   // read once by the native side).
-  binding.memoryAuditEnable!();
+  if (binding.memoryAuditEnable!() === false) {
+    fail("memoryAuditEnable() reported the audit unavailable in this binding");
+  }
   const probe = binding.memoryAuditSnapshot!();
   if (probe === null) {
     fail("memoryAuditSnapshot() stayed null after memoryAuditEnable()");

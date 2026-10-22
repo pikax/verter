@@ -96,7 +96,7 @@ pub use footprint::{
     TruncationCounters, VfsReadRecord,
 };
 pub use memory::{current_process_rss, RequestMemoryAudit};
-pub use observe::{CaptureAvailability, ObserveMode};
+pub use observe::{CaptureAvailability, Captured, ObserveExec, ObserveMode, Uncaptured};
 #[cfg(feature = "semantic-observe")]
 pub use observer::{clear_observer, current_observer, install_observer, ObserverGuard};
 pub use observer::{AuditEvent, AuditObserver};

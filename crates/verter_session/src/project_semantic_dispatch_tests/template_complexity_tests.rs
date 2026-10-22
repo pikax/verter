@@ -298,7 +298,7 @@ fn a_template_past_its_byte_allowance_is_a_memory_partial() {
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = super::ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let union = |prefix: &str| {
         let members: Vec<verter_type_engine::semantic_query::SemanticNodeId> = (0..40)
             .map(|i| {

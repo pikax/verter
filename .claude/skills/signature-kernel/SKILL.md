@@ -28,10 +28,10 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 | `storage.rs` | `AppendInterner<T>` — the private append-only interner over `boxcar::Vec` with `DEDUP_SHARDS` (16) hash shards. Hash is computed outside the shard lock; equality decides collisions. A record is fully initialised before its handle is published, so `boxcar`'s `count()` is never a published-handle range. |
 | `lifetime.rs` | `SignatureStore`: interning entry points, `replace_epoch()`, `retain_result`/`drain_retained`/`retained_len`, `live_reader_count()`, `StoreError`. |
 | `read_view.rs` | `SemanticReadView::pin(&SignatureStore)` — the request-pinned borrowed read. `BorrowedSet::{Empty, One, Many}`, `ReadError`, plus the `descriptor_chain_walks` / `shard_lock_acquires` probes the performance gates assert on. |
-| `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. |
+| `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. It also owns the one tuple-inference plan, `tuple_inference_plan` over `TupleElementKind` (`Required`/`Optional`/`Rest`/`Variadic`) with `VariadicArityFacts` (a variadic's implied arity and fixed constraint arity), returning `TupleInferenceStep`s — see "Tuple inference plan" below. |
 | `provenance.rs` | `SignatureProvenance`, `OverloadOrder`, `ArmIdentity`, `ConstituentSequence`, `DeclarationGroupId`, `MappedConstituent`, `OriginRelation`, `SourceLocatorId` — where a candidate came from and in what authored order. |
 | `substitution.rs` | `CallSubstitution`, `SubstTerm`, `compose_canonical`, `MAX_SUBSTITUTION_CHAIN_DEPTH`. The two substitution stages (declared/outer map and frozen call-site map) compose canonically; a hand-built chain past the bound flattens rather than growing. |
-| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. |
+| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. Exact identity compares binders positionally with constraint/default identity. Assignability instead instantiates generic signatures through contextual inference, including corresponding operands of deferred conditional returns. |
 | `result.rs` | Demand-driven results: `ResultDemand`, `ReadSignatureResultKey`, `SignatureSetValue`, `SignatureResultValue`, `SignatureCandidateNodes`. |
 
 Ordering and composite reduction live beside the kernel, in the dispatch crate:
@@ -39,9 +39,59 @@ Ordering and composite reduction live beside the kernel, in the dispatch crate:
 | Path | Owns |
 |---|---|
 | `semantic_query/stable_key.rs` | `VerterStableV1` encoding and `StableKey::cmp`. |
-| `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union` / `intern_ordered_intersection` — the two crate-private canonical builders, plus `compare_structural` and `CanonicalEvidence`. |
+| `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union_charged` / `intern_ordered_intersection_charged` — the two crate-private canonical builders production constructions call, each paying a `ConstructionMeter`; `admit_cross_product`, the one cross-product admission; plus `compare_structural` and `CanonicalEvidence`. |
 | `project_semantic_dispatch/build.rs` | `build_reduce_union` / `build_reduce_intersection` — the query builders behind `SemanticQueryKey::ReduceUnion` / `ReduceIntersection`. |
 | `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. |
+
+---
+
+### Tuple inference plan
+
+A concrete array or tuple inferring to a generic tuple — a conditional's
+`[infer H, ...infer R]` pattern and a call's `[unknown, ...T]` parameter alike —
+pairs its positions through `positional::tuple_inference_plan`, the checker's
+tuple arm of `inferFromObjectTypes`. The plan is pure: it reads only element
+kinds and a variadic's arity facts, never types.
+
+- Same structure (equal arity, every position's rest/variadic kind matching):
+  elementwise.
+- Otherwise the shared fixed prefix pairs from the front and the shared fixed
+  suffix (only when the target has a variable element) from the back.
+- An array source, or a source whose middle is one rest element, infers its
+  element type to every middle target position — an array of it to a
+  variadic one.
+- The middle of the target infers whole: a lone variadic takes the slice
+  (speculatively, `SpeculativeTuple`, when the target ends in an optional
+  element), a lone rest the union of the slice, two variadics split at the
+  first's implied arity only, and a variadic beside a rest splits at the
+  variadic's fixed constraint arity. Any other middle infers nothing.
+- Each slice is the checker's `sliceTupleType`: its bounds clamp as a
+  JavaScript `slice` does (a negative end counts from the back, an overlong
+  one stops at the length), so an implied arity overrunning the fixed ends
+  yields a shorter or empty slice rather than none, both halves of a split
+  infer independently, and a slice beginning past the source's fixed prefix
+  is the source's rest array (`TupleInferenceStep::RestArray`).
+
+The executor is `RelationCx::relate_generic_tuple` (in
+`project_semantic_dispatch/relation.rs`), entered when the active session
+infers one of the generic tuple's variadic elements
+(`ProjectSemanticDispatch::inferable_variadics`, `inference/tuple.rs`). It
+deposits each slice the plan assigns an inferable variadic
+(`relation_deposit_slice`: a mutable tuple keeping labels, optionality and
+rest; under a call's widening literal mode each element widens while the
+slice stays a tuple), then relates the concrete side to the generic tuple with
+each such element replaced by its slice — or, when the plan infers nothing to
+it or the slice cannot satisfy its fixed tuple constraint, by its constraint,
+else `unknown[]` — through the ordinary `tuple_position_pairs` arity rules. A
+matching structure's variadic deposits the source variadic it faces and keeps
+it in the instantiated tuple (`tail(x)` with `x: [0, ...U]` infers `U`). A
+split whose clamped halves do not tile the concrete middle deposits both and
+relates `Unknown`: the call's post-fixation pass decides the argument against
+the fixed inferences. In a contravariant position (a parameter
+list) the generic tuple is the relation's source. A call's implied arity for
+a bare rest type parameter is set on the session before inference
+(`InferenceSession::set_implied_arity`); there is no separate two-variadic
+split.
 
 ---
 
@@ -54,8 +104,21 @@ and **exactly two** crate-private builders:
 SemanticQueryKey::ReduceUnion { members, nullability }      → build_reduce_union
 SemanticQueryKey::ReduceIntersection { input, purpose, ctx } → build_reduce_intersection
         ↓                                                           ↓
-canonical_algebra::intern_ordered_union          canonical_algebra::intern_ordered_intersection
+canonical_algebra::intern_ordered_union_charged  canonical_algebra::intern_ordered_intersection_charged
+        └──────────── admit_cross_product(meter) ──────────────────┘
 ```
+
+The builders called inside a connected demand take the demand's
+`ConstructionMeter` (`ConstructionMeter::charged(ledger)`): every
+distribution a construction runs is weighed by `admit_cross_product` against
+the checker's cross-product limit from the counts alone, then paid to the
+ledger before its first constituent is built, so a refusal stops it before it
+allocates. The unmetered forms are not production seams for a demand:
+`intern_ordered_union` (`ConstructionMeter::UNMETERED`) serves a construction
+outside any connected demand — its distributions are still weighed, but
+charged to no ledger — and `intern_ordered_intersection` /
+`intern_ordered_intersection_paying_for_tests` exist only under `test` /
+`test-support`.
 
 Both builders perform recursive same-kind flattening, the lattice absorption
 laws, literal subsumption on unions, structural `T | T = T` / `T & T = T`
@@ -71,13 +134,33 @@ nullable-only list becomes `null` if it names `null`, else `undefined`. The
 policy is family identity on `ReduceUnion` and is recorded on the canonical
 stamp (`CompositeOriginCategory::Canonical(NullabilityPolicy)`), so the two
 settings never share a memo entry, a node, or the pre-seal skip.
-Intersections run the strict algebra.
+Intersections run the strict algebra under the default
+`IntersectionPurpose::CheckerReduction` (a derived intersection: every
+redundant supertype drops). `IntersectionPurpose::WrittenTypeNode(nullability)`
+is the checker's construction of a WRITTEN intersection type node
+(`getTypeFromIntersectionTypeNode`, `intern_written_intersection_charged`):
+the same reduction, except the written `string & {}` pair (`number`,
+`bigint`, a pattern template literal, either order —
+`is_kept_primitive_over_empty_object`) stays as written, and with
+`strictNullChecks` off a union arm is first erased of `null` / `undefined`.
+The typeinfo materializer (`materialize_through_aliases`) reduces an
+intersection written at an alias root through it, so a named demand answers
+`never` for conflicting discriminants, distributes over a union, and absorbs
+`(A & B) & (A | B)` to `A & B`. The raise fold keeps the `{}` arm of that
+written pair instead of dropping it as `{} & X ≡ X`.
 
 `ProjectSemanticDispatch::intern_normalized_union_or_intersection` is the
 dispatch-level funnel every flow/meta-resolve/locator producer reaches these
 through; its unions run the strict algebra. The flow-return evaluator, which
 answers under its function's own project policy, constructs through
-`intern_normalized_union` with the frame's policy instead. Two composite
+`intern_normalized_union` with the frame's policy instead. Conditional branch
+unions use that same builder with the request project's nullability policy.
+Published Expanded
+locator projections also use this explicit-policy builder with the declaring
+file's `strictNullChecks`; structural-transit and shallow carrier projections
+keep the strict carrier algebra. An unchanged authored arm list containing
+nullish arms still reduces when published under erased nullability; unchanged
+non-null unions retain their existing identity and alias origin. Two composite
 constructions are deliberately outside the funnel, both
 `CompositeList::ordered_carrier` mints, and both for the same reason — an
 ordered carrier is an authored sequence, not a commutative intersection, and
@@ -97,6 +180,31 @@ node identity:
 An interface/class declaration body with heritage is a third construction
 outside the funnel, the `CompositeList::heritage` mint (§6, rule 8): it is a
 declaration, not a commutative intersection, and is never re-decided.
+
+A written union or intersection stays as written through lowering — its
+`AuthoredShell`, or a declaration body's order-preserving `PreservingRebuild`
+view. Where a named type is PUBLISHED (the typeinfo materializer
+`materialize_through_aliases`, both the named-resolve and evaluate entries),
+a written intersection at the alias root is reduced by `ReduceIntersection`
+for a written type node (under the root file's `strictNullChecks`), and a
+union by `ProjectSemanticDispatch::reduced_written_union`, which asks
+`ReduceUnion` (under the same root-file `strictNullChecks`) for the type the
+checker constructs from it when that construction absorbs a literal: `"a" | string` is `string`, a pattern
+template absorbs the literals it matches. An alias is transparent to that
+construction, so a named arm (a declaration reference or placeholder) is
+resolved first, through the whole alias chain (a chain that revisits a node
+is recursive and stays by its name): it stands for its literal, primitive or
+pattern-template resolution, or contributes its resolved union's arms
+(`type A = "a"`: `A | string` is `string`); any other named arm stays by its
+name. Only a union holding a literal beside a primitive or pattern template is
+offered, decided in one pass over the arms (each arm classified once, so a
+large literal union with no absorber costs linear work, warm or cold); every
+other union (and one whose reduction absorbs nothing, `A | "b"`) stays as it
+was published. The reducer's outcome, or a named arm's failed resolution,
+returns typed, so a fault fails the publication through the materializer's
+fault/miss split while a miss keeps the union. Only the published alias body
+is reduced; a composite nested in a member or element stays shallow until the
+consumer walks to it.
 
 **Retired spellings.** `NormalizeUnion`, `NormalizeIntersection`,
 `SemanticMeet`, `canonical_intersection`,

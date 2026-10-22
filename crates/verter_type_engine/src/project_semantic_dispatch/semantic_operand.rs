@@ -237,7 +237,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let substitution_runtime =
             (!substitution.is_empty()).then_some((store_identity, generation));
         Ok(SemanticOperand::from_authored_authority(
-            Some(self.graph()),
+            Some(self.graph().store()),
             locator,
             substitution,
             split_env,
@@ -968,6 +968,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     stack.push(mapper.key_space);
                     stack.push(mapper.value_expr);
                     stack.extend(mapper.name_remap);
+                    stack.extend(mapper.modifiers_type);
                 }
                 SemanticNodeData::Conditional {
                     check,

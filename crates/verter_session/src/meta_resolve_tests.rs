@@ -6982,6 +6982,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![
             verter_type_expr::ObjectMember::Property(
                 verter_type_expr::ObjectProperty::synthetic_public_key(
@@ -7194,6 +7195,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     let _builder = dispatch.enter_construction_scope();
 
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![
             verter_type_expr::ObjectMember::Property(
                 verter_type_expr::ObjectProperty::synthetic_public_key(
@@ -8361,6 +8363,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     });
     let open_branch = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -8862,12 +8865,13 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        &host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     // The overlay session's own whole-hash hint (resolved through the session
     // ctx) keys the overlay DTO slot; the core re-derives + validates it.
@@ -9004,12 +9008,13 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        &host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     let overlay_hash =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::get_whole_hash(
@@ -9159,12 +9164,13 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        &host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     // The SFC's own whole-hash is UNCHANGED (only the carrier `/slots.ts` was
     // overlaid), so the overlay read keys on the same SFC hash — the binding

@@ -236,7 +236,12 @@ The matching scheduler-side invariant is guarded in Rust by `SchedulerCounters::
 
 For component-meta optimization work, use the trace runner directly instead of guessing from ad-hoc requests.
 
+The runner's worker reads `getComponentMetaWithAudit` records, which exist only in the **instrumented** native binding (`semantic-observe`). The default `pnpm build` / `build:native` binding reports `captureAvailability() === "Unavailable"`, and the worker exits with code 4 naming the fix. Build the instrumented binding first:
+
 ```bash
+# Instrumented native binding (audit records, footprints, memory audit)
+pnpm --filter @verter/native run build:observe
+
 # Ground-truth request timing for one real component
 node scripts/benchmark/trace-component-corpus.mjs \
   --output-dir=tmp/cm-notrace \

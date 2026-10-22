@@ -178,6 +178,9 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     admitted.into_result().map(Arc::from)
                 }
+                verter_workspace::ResolutionPublication::Unretained(_) => {
+                    panic!("fixture dependency resolution was not retained")
+                }
                 verter_workspace::ResolutionPublication::Refused(refusal) => {
                     panic!(
                         "fixture dependency resolution was refused: {:?}",
@@ -688,7 +691,10 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
     let view = host.resolver_store_view_read().into_owned_view();
     let demand = |view: &crate::resolver_store::HostStoreView| {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                &host, view, overlay,
+            );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
@@ -917,7 +923,12 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
     // Hoist the parent key once under the baseline env.
     let key = {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                &host,
+                &baseline_view,
+                overlay,
+            );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
@@ -936,7 +947,10 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
     };
     let demand = |view: &crate::resolver_store::HostStoreView| {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                &host, view, overlay,
+            );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         match dispatch.execute_type_node(key.clone()) {
             QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
@@ -1050,7 +1064,10 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
     ) {
         let view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                host, &view, overlay,
+            );
         let preparation =
             verter_type_engine::resolver_core::request_ports::OwnedLowering::prepared_type_for_projection(
                 &ctx,
@@ -1186,7 +1203,12 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
     // closure that drives THAT key under any view.
     let key = {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                &host,
+                &baseline_view,
+                overlay,
+            );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
@@ -1205,7 +1227,10 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
     };
     let demand = |view: &crate::resolver_store::HostStoreView| {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                &host, view, overlay,
+            );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         match dispatch.execute_type_node(key.clone()) {
             QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
@@ -1347,7 +1372,10 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
     // the external fold.
     let suppress_of = |view: &crate::resolver_store::HostStoreView| -> bool {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                &host, view, overlay,
+            );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
@@ -1462,7 +1490,10 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(host),
             || {
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
+                let ctx = crate::resolver_core::HostResolverContext::<
+                    '_,
+                    verter_audit::observe::Uncaptured,
+                >::new(host, &view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&ctx);
                 let key = SemanticQueryKey::Instantiate(
                     verter_type_engine::semantic_query::InstantiateKey::new(
@@ -1608,7 +1639,10 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
 
     let suppress_of = |view: &crate::resolver_store::HostStoreView| -> bool {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                &host, view, overlay,
+            );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
@@ -1804,6 +1838,9 @@ fn live_augmenter_canonicals_for_types(host: &VerterHost) -> Vec<String> {
             {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     admitted.into_result().map(Arc::from)
+                }
+                verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                    unretained.into_result().map(Arc::from)
                 }
                 verter_workspace::ResolutionPublication::Refused(_) => None,
             },

@@ -112,34 +112,86 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             args: &[SemanticNodeId],
             canonical: &str,
         ) -> GlobalWrapper {
-            if self.project_stable_key_for_canonical(canonical).is_none() {
-                return GlobalWrapper::Unsettled;
-            }
-            let Some(declaration) = self.first_global_declaration(canonical, name) else {
-                return GlobalWrapper::Absent;
-            };
-            let slot = self.type_slot_for(
-                declaration.canonical_id.clone(),
-                declaration.owner,
-                Arc::from(name),
-            );
-            match self
-                .execute_read(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(
-                        slot,
-                        Arc::from(args.to_vec().into_boxed_slice()),
-                        self.instantiate_context_for(
-                            declaration.canonical_id.as_ref(),
-                            ProjectionReductionContext::published(ProjectionMode::Expanded),
-                        ),
-                    ),
-                ))
-                .value
-            {
-                QueryResult::Value(surface) => GlobalWrapper::Surface(surface),
-                _ => GlobalWrapper::Unsettled,
-            }
+            self.global_wrapper_surface_in(
+                name,
+                args,
+                canonical,
+                // The apparent surface supplies members and signature
+                // carriers. Their interiors are demanded only by a
+                // selected member or signature read.
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+            )
         }
+    }
+
+    /// [`Self::global_wrapper_surface`] instantiated under `context`. A read
+    /// that needs only the wrapper's member keys (`keyof T[]`) takes
+    /// structural transit, which keeps member values carriers: `Array`'s
+    /// `[Symbol.unscopables]` member maps over `keyof any[]`, the keys being
+    /// read.
+    pub(super) fn global_wrapper_surface_in(
+        &self,
+        name: &str,
+        args: &[SemanticNodeId],
+        canonical: &str,
+        context: ProjectionReductionContext,
+    ) -> GlobalWrapper {
+        if self.project_stable_key_for_canonical(canonical).is_none() {
+            return GlobalWrapper::Unsettled;
+        }
+        let Some(declaration) = self.first_global_declaration(canonical, name) else {
+            return GlobalWrapper::Absent;
+        };
+        let slot = self.type_slot_for(
+            declaration.canonical_id.clone(),
+            declaration.owner,
+            Arc::from(name),
+        );
+        match self
+            .execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    slot,
+                    Arc::from(args.to_vec().into_boxed_slice()),
+                    self.instantiate_context_for(declaration.canonical_id.as_ref(), context),
+                ),
+            ))
+            .value
+        {
+            QueryResult::Value(surface) => GlobalWrapper::Surface(surface),
+            _ => GlobalWrapper::Unsettled,
+        }
+    }
+
+    /// The global interface declaration a runtime nominal's builtin
+    /// carrier identity (`Promise`, `Map`, `Set`, `Date`, …) stands for, as
+    /// `canonical`'s project declares it, through the one global lookup
+    /// ([`Self::first_global_declaration`]): the checker's `Promise<T>` IS
+    /// that interface applied to `T`, the interface a member read of the
+    /// carrier already takes its members from. `None` for any other
+    /// identity, for the global `Function` (relations decide it by tag),
+    /// and when the project declares no such interface.
+    pub(super) fn runtime_nominal_global_declaration(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        canonical: &str,
+    ) -> Option<crate::semantic_query::DeclIdentity> {
+        let nominal = self.runtime_nominal_identity(identity)?;
+        if nominal == crate::intrinsic_registry::RuntimeNominal::Function {
+            return None;
+        }
+        let declaration = self.first_global_declaration(canonical, nominal.global_name())?;
+        let whole_hash = self
+            .ctx
+            .shallow_file_state(declaration.canonical_id.as_ref())
+            .map_or(crate::semantic_query::HashValue::default(), |state| {
+                state.whole_hash
+            });
+        Some(crate::semantic_query::DeclIdentity {
+            canonical_id: declaration.canonical_id,
+            owner: declaration.owner,
+            whole_hash,
+            decl_name: declaration.symbol_name,
+        })
     }
 
     /// The file a wrapper read that names no declaration of its own is
@@ -409,15 +461,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// CHEAP probe: is `key` a path whose first step reads a scope-less
-    /// subject's apparent wrapper ([`Self::scope_apparent_wrapper_subject`])?
+    /// subject's apparent wrapper, or a reducing `keyof` of a scope-less
+    /// array ([`Self::scope_apparent_wrapper_subject`])?
     pub(super) fn key_reads_apparent_wrapper(&self, key: &SemanticQueryKey) -> bool {
+        let scope_less = |base: SemanticNodeId| {
+            self.graph()
+                .node_scope(base)
+                .is_none_or(|scope| scope.canonical_file().is_none())
+        };
         match key {
             SemanticQueryKey::ProjectPath { base, path, .. } => path.first().is_some_and(|first| {
-                self.graph()
-                    .node_scope(*base)
-                    .is_none_or(|scope| scope.canonical_file().is_none())
-                    && self.segment_reads_apparent_wrapper(*base, first)
+                scope_less(*base) && self.segment_reads_apparent_wrapper(*base, first)
             }),
+            SemanticQueryKey::KeyOf { base, context } => {
+                crate::semantic_query::may_reduce_operator(*context)
+                    && scope_less(*base)
+                    && matches!(
+                        self.graph().node_data(*base).as_deref(),
+                        Some(SemanticNodeData::Array { .. })
+                    )
+            }
             _ => false,
         }
     }
@@ -428,37 +491,101 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// declares, BEFORE memo admission: `string.length` read for a file of a
     /// project whose `String` declares it is `String.length` over THAT
     /// surface, so the admitted entry is that project's and a warm repeat is
-    /// served from it. A project that declares no such wrapper reads the
-    /// path over the `Miss` subject, the answer every such project shares.
-    /// With no demand site and no request the key stays as it is, and the
-    /// path walker keeps that read out of the shared memo.
+    /// served from it. A reducing `keyof` of a scope-less array is the
+    /// `keyof` of that wrapper likewise: `keyof T[]` IS `keyof Array<T>`. A
+    /// project that declares no such wrapper reads the path over the `Miss`
+    /// subject, the answer every such project shares. With no demand site
+    /// and no request the key stays as it is, and the path walker and the
+    /// `keyof` builder keep that read out of the shared memo.
     pub(super) fn scope_apparent_wrapper_subject(&self, key: SemanticQueryKey) -> SemanticQueryKey {
         if !self.key_reads_apparent_wrapper(&key) {
             return key;
         }
-        let SemanticQueryKey::ProjectPath {
-            base,
-            path,
-            context,
-        } = key
-        else {
-            unreachable!("only a ProjectPath reads an apparent wrapper");
+        let scoped = |base: SemanticNodeId, context: ProjectionReductionContext| {
+            self.apparent_wrapper_of(base)
+                .zip(self.wrapper_demand_canonical())
+                .and_then(|((name, args), canonical)| {
+                    match self.global_wrapper_surface_in(name, &args, canonical.as_ref(), context) {
+                        GlobalWrapper::Surface(surface) => Some(surface),
+                        GlobalWrapper::Absent => Some(self.opaque(QueryError::Miss)),
+                        GlobalWrapper::Unsettled => None,
+                    }
+                })
+                .unwrap_or(base)
         };
-        let scoped = self
-            .apparent_wrapper_of(base)
-            .zip(self.wrapper_demand_canonical())
-            .and_then(|((name, args), canonical)| {
-                match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
-                    GlobalWrapper::Surface(surface) => Some(surface),
-                    GlobalWrapper::Absent => Some(self.opaque(QueryError::Miss)),
-                    GlobalWrapper::Unsettled => None,
-                }
-            });
-        SemanticQueryKey::ProjectPath {
-            base: scoped.unwrap_or(base),
-            path,
-            context,
+        match key {
+            SemanticQueryKey::ProjectPath {
+                base,
+                path,
+                context,
+            } => SemanticQueryKey::ProjectPath {
+                base: scoped(
+                    base,
+                    ProjectionReductionContext::published(ProjectionMode::Shallow),
+                ),
+                path,
+                context,
+            },
+            SemanticQueryKey::KeyOf { base, context } => SemanticQueryKey::KeyOf {
+                base: scoped(base, ProjectionReductionContext::structural_transit()),
+                context,
+            },
+            _ => unreachable!("only a ProjectPath or a KeyOf reads an apparent wrapper"),
         }
+    }
+
+    /// `keyof` of an array or readonly array that kept its own key — one
+    /// declared in a file, whose project its scope names, or a scope-less
+    /// one read with no demand site
+    /// ([`Self::scope_apparent_wrapper_subject`] rewrites every other):
+    /// the keys of its apparent wrapper (`keyof T[]` IS `keyof Array<T>`),
+    /// the `number` the wrapper's index signature contributes beside its
+    /// member names, so a numeric-string literal is no key of it. A
+    /// scope-less array's read depends on the demand's project, which the
+    /// key does not name, so it stays out of the shared memo. `Miss` when
+    /// the project declares no such wrapper, and the deferred `keyof` when
+    /// the wrapper does not settle.
+    pub(super) fn build_array_key_of(
+        &self,
+        base: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let fence = self.project_generation_signature();
+        let declaring_file = self
+            .graph()
+            .node_scope(base)
+            .and_then(|scope| scope.canonical_file());
+        let canonical = declaring_file.or_else(|| {
+            self.fold_into_top_build_local_taint(false, true);
+            self.wrapper_demand_canonical()
+        });
+        let wrapper =
+            self.apparent_wrapper_of(base)
+                .zip(canonical)
+                .map(|((name, args), canonical)| {
+                    self.global_wrapper_surface_in(
+                        name,
+                        &args,
+                        canonical.as_ref(),
+                        ProjectionReductionContext::structural_transit(),
+                    )
+                });
+        let node = match wrapper {
+            Some(GlobalWrapper::Surface(surface)) if surface != base => {
+                let observed_self_roots = self.observed_self_roots_from_nodes([base, surface]);
+                return self
+                    .build_key_of(surface, context)
+                    .with_observed_self_roots(observed_self_roots);
+            }
+            Some(GlobalWrapper::Absent) => self.opaque(QueryError::Miss),
+            _ => self.graph().intern_node(SemanticNodeData::KeyOf { base }),
+        };
+        let observed_self_roots = self.observed_self_roots_from_nodes([base]);
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(node),
+            fence,
+        ))
+        .with_observed_self_roots(observed_self_roots)
     }
 
     /// Build the `ApparentType` value for `base`.

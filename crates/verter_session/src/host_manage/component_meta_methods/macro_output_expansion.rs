@@ -114,10 +114,10 @@ impl AdmittedExpansionNode {
 /// node-domain "whole-raise miss": no faithful output exists, the caller
 /// preserves symbolically instead of publishing a fabricated value).
 #[must_use]
-fn materialize_admitted_expansion_node(
+fn materialize_admitted_expansion_node<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     artifact: &AdmittedExpansionNode,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
@@ -208,10 +208,10 @@ pub(crate) enum MacroPathOutputExpansion {
 /// CLOSED-INPUT: the resolver ctx + owner canonical + macro index + mode. No node
 /// crosses in. The hot-ref producer is the ONE mode-neutral carrier producer; a
 /// different DEMAND on its handle, never a second lowering of the macro argument.
-fn lower_macro_arg_carrier_head(
+fn lower_macro_arg_carrier_head<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     macro_index: usize,
@@ -239,10 +239,10 @@ fn lower_macro_arg_carrier_head(
 /// returning a [`DefineModelOutputExpansion`] that lets the caller reproduce the
 /// former branch (produced-node-id audit parity + the `parsed` fallback) EXACTLY.
 #[must_use]
-pub(crate) fn expand_define_model_output(
+pub(crate) fn expand_define_model_output<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     macro_index: usize,
@@ -289,10 +289,10 @@ pub(crate) fn expand_define_model_output(
 /// `Expanded`, mints the cap, and materialises at the sealed sink — never
 /// accepting a raw node or a forgeable wrapper.
 #[must_use]
-pub(crate) fn expand_generic_project_path_output(
+pub(crate) fn expand_generic_project_path_output<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     macro_index: usize,
@@ -356,10 +356,10 @@ pub(crate) fn expand_generic_project_path_output(
 /// materialises at the sealed sink — never accepting a raw node or a forgeable
 /// wrapper.
 #[must_use]
-pub(crate) fn expand_slot_binding_output(
+pub(crate) fn expand_slot_binding_output<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     macro_index: usize,

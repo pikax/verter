@@ -2150,7 +2150,12 @@ fn observe_at_checker_altitude(host: &VerterHost, canonical: &str, symbol: &str)
     };
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let demand = dispatch.normalize_node_keeping_declaration_refs_for_tests(
         result.return_type(),
@@ -4659,9 +4664,14 @@ export function twinTernary(c: boolean) { return c ? twin(c) : { a: 1 }; }
     let single = node_of("single");
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let Some(SemanticNodeData::Object(view)) = graph
         .node_data(twin)
         .as_deref()
@@ -5794,13 +5804,13 @@ const OBJECT_LITERAL_NORMALIZATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "{ o: { a: number; b: number; z?: undefined } | { a: number; z?: undefined; b?: undefined } } | { o: { z: number; a?: undefined; b?: undefined } }",
         "{ o: { a: number; b: number; z?: undefined } | { a: number; z?: undefined; b?: undefined } } | { o: { z: number; a?: undefined; b?: undefined } }",
     ),
-    // { o: { p: { a: number; } | { a: number; b: number; }; }; }
+    // { o: { p: { a: number; b?: undefined; } | { a: number; b: number; }; }; }
     (
         "depthTwo",
-        "{ o: { p: { a: number } | { a: number; b: number } } }",
-        "{ o: { p: { a: number } | { a: number; b: number } } }",
-        "{ o: { p: { a: number } | { a: number; b: number } } }",
-        "{ o: { p: { a: number } | { a: number; b: number } } }",
+        "{ o: { p: { a: number; b: number } | { a: number; b?: undefined } } }",
+        "{ o: { p: { a: number; b: number } | { a: number; b?: undefined } } }",
+        "{ o: { p: { a: number; b: number } | { a: number; b?: undefined } } }",
+        "{ o: { p: { a: number; b: number } | { a: number; b?: undefined } } }",
     ),
     // { o: ({ b?: undefined; a: number; } | { a: number; b: number; })[]; }
     (
@@ -5853,8 +5863,8 @@ const OBJECT_LITERAL_NORMALIZATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 /// property in the context of the same property of its siblings, so the
 /// normalisation reaches nested literals (`nestedDeep`, `deep3`,
 /// `mixedDeep`, `arrDeep`, `joinSibling`); a lone literal normalises a
-/// union-valued property (`nested`, `joinNested`) but, on TypeScript
-/// 7.0.2, not a union two literal properties down (`depthTwo`), and an
+/// union-valued property (`nested`, `joinNested`), including a union two
+/// literal properties down (`depthTwo`) on TypeScript 7.0.2, and an
 /// array widens its element as a whole (`arrayResets`). A declared object
 /// type neither names nor receives a property (`vsDecl`), and the added
 /// member is `undefined` without `strictNullChecks` too (`nullArm`). The
@@ -5917,7 +5927,10 @@ export function spreadArm(c: boolean, s: { z: number }) { return c ? { a: 1, q: 
         let spread = node_of("spreadArm");
         let store_view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         for (source, target) in [(join, declared), (declared, join)] {
             assert!(
@@ -5929,7 +5942,7 @@ export function spreadArm(c: boolean, s: { z: number }) { return c ? { a: 1, q: 
                  each to the other"
             );
         }
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let Some(SemanticNodeData::Union(arms)) = graph
             .node_data(spread)
             .as_deref()

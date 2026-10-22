@@ -181,7 +181,7 @@ fn structural_carrier_producers_use_no_permissive_get_any() {
         },
         Scanned {
             file: "host_resolve/frontier_engine.rs",
-            signature: "fn append_route_participant_fact_versions_with_context(",
+            signature: "fn append_route_participant_fact_versions_with_context<",
         },
     ];
 

@@ -96,8 +96,8 @@ crate::output_sinks::define_output_capability! {
 /// `TypeExpr`. The carrier `node_id` is the producing `node`, so a downstream
 /// consumer reads node facts off it (e.g. the root-sentinel gate) instead of
 /// re-materialising.
-fn raise_node_to_sealed_carrier(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn raise_node_to_sealed_carrier<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
     dep_signature: verter_type_engine::semantic_query::DepSignature,
 ) -> MaterializedOutputTypeExpr {
@@ -141,13 +141,13 @@ fn raise_node_to_sealed_carrier(
 ///
 /// Typed-domain only: the owner's analyzed import bindings + the shared
 /// shallow export-target resolver — no raw-text recovery.
-fn authored_package_alias_for_carrier(
+fn authored_package_alias_for_carrier<M: verter_audit::observe::ObserveExec>(
     ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     node: SemanticNodeId,
@@ -196,8 +196,8 @@ fn authored_package_alias_for_carrier(
 ///    whole-tree miss fact read off the SAME input node the caller raised —
 ///    one observed lowering, no second live lower), the input carrier IS the
 ///    published shape.
-fn reduce_field_value_node(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+fn reduce_field_value_node<M: verter_audit::observe::ObserveExec>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     scope_canonical_id: &str,
     input_node: SemanticNodeId,
     publish_mode: ProjectionMode,
@@ -306,8 +306,8 @@ const DEFAULT_MODEL_NAME: &str = "modelValue";
 ///     `RouteGeneration`-tagged dep), admission is refused but the
 ///     pre-computed value is still returned to the caller — no second
 ///     reducer call.
-fn member_shape_peek_or_compute(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+fn member_shape_peek_or_compute<M: verter_audit::observe::ObserveExec>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     scope_canonical_id: &str,
     admitted: &super::publication_authority::AdmittedPublishedMember<'_>,
     mode: ProjectionMode,
@@ -326,7 +326,7 @@ fn member_shape_peek_or_compute(
         // arbitrary / unadmitted `SemanticNodeId` cannot be routed through the
         // sealed shape subject.
         let member_value = admitted.member().value;
-        let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
+        let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> = query_engine.ctx;
         // Publication sink: one dispatch for the cold-path raise and every
         // sealed-carrier assembly below. The capability mint + unwrap are the
         // module-private primitives of this terminal `output_sink` sink — they
@@ -648,14 +648,15 @@ fn merge_gate_fence_into_materialized(
 /// In all refusal cases the caller receives the same
 /// `MaterializedOutputTypeExpr` it computed — admission is best-effort. Refusal
 /// is CACHE-ONLY: the shape stays `Complete` and is never marked `Partial`.
-fn admit_member_shape_if_possible(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn admit_member_shape_if_possible<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     key: &verter_type_engine::component_meta_caches::ShapeCacheKey,
     value: verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
     owner_scope: &verter_type_engine::project_semantic_dispatch::memo::ShapeCacheOwnerScope<
         '_,
         '_,
         crate::resolver_store::WorkspaceSlotClocks,
+        M,
     >,
 ) -> verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
     // The producing compute consumed a non-cacheable read (or overflowed its
@@ -731,8 +732,8 @@ fn admit_member_shape_if_possible(
 /// `MacroExpansionDiagnostics` flow through the same accumulator
 /// the projector's other dispatches use.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn surface_member_to_expanded_field(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+pub(crate) fn surface_member_to_expanded_field<M: verter_audit::observe::ObserveExec>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     scope_canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     admitted: &super::publication_authority::AdmittedPublishedMember<'_>,
@@ -971,8 +972,8 @@ pub(crate) fn surface_member_to_expanded_field(
 /// Dep-signature is fanned into every active fact tracer
 /// unconditionally so the final-result cache observes the same
 /// revalidation surface as the projector's other dispatches.
-fn resolve_member_value_for_classification(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn resolve_member_value_for_classification<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     value: SemanticNodeId,
     carrier_mode: bool,
@@ -1028,8 +1029,8 @@ fn resolve_member_value_for_classification(
     }
 }
 
-pub(crate) fn project_model(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+pub(crate) fn project_model<M: verter_audit::observe::ObserveExec>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -1234,9 +1235,9 @@ fn missing_source_output_type_expr() -> TypeExpr {
 ///   position can render `unknown` only when the schema itself proves that
 ///   position absent; an opaque failure inside a dereferenced body carries
 ///   no equivalent proof.
-fn materialize_output_source(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
+fn materialize_output_source<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities<M>>,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     source: &verter_type_expr::facts::SemanticTypeSource,
@@ -1305,6 +1306,7 @@ fn materialize_output_source(
                             | QueryErrorDisposition::UnsupportedSurface
                             | QueryErrorDisposition::UnsupportedPosition
                             | QueryErrorDisposition::Partial
+                            | QueryErrorDisposition::PermissiveWildcard
                             | QueryErrorDisposition::Failure => {
                                 crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior {
                                     path: std::sync::Arc::from(Vec::new().into_boxed_slice()),

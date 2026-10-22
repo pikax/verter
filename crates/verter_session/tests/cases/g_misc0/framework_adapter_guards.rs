@@ -315,8 +315,11 @@ fn script_fact_providers_zero_cost_on_miss() {
 /// Extract a free function's body via a brace-balanced scan from its
 /// `fn <name>(` declaration.
 fn extract_fn_body(src: &str, name: &str) -> String {
-    let needle = format!("fn {name}(");
-    let Some(start) = src.find(&needle) else {
+    // A definition head is plain or generic over its execution mode.
+    let Some(start) = [format!("fn {name}("), format!("fn {name}<")]
+        .iter()
+        .find_map(|head| src.find(head.as_str()))
+    else {
         panic!("fn `{name}` not found");
     };
     let after = &src[start..];

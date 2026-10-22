@@ -840,6 +840,35 @@ fn compile_inner(
     allocator: &Allocator,
     parse_duration_ms: f64,
 ) -> Result<VerterCompileResult, crate::compile_request::CompileRequestError> {
+    #[cfg(feature = "semantic-observe")]
+    let observer = verter_audit::observer::current_observer();
+    #[cfg(feature = "semantic-observe")]
+    let mode = verter_audit::observe::ObserveMode::select(observer.is_some());
+    #[cfg(not(feature = "semantic-observe"))]
+    let mode = verter_audit::observe::ObserveMode::Uncaptured;
+    verter_audit::specialise!(mode => M, {
+        compile_inner_in::<M>(
+            #[cfg(feature = "semantic-observe")]
+            observer.as_deref(),
+            input, parsed, options, verter_options, macro_semantics, allocator, parse_duration_ms,
+        )
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the compile pass borrows its capture receiver beside its existing inputs"
+)]
+fn compile_inner_in<M: verter_audit::observe::ObserveExec>(
+    #[cfg(feature = "semantic-observe")] observer: Option<&dyn verter_audit::AuditObserver>,
+    input: &str,
+    parsed: &ParsedSfc,
+    options: &CodegenOptions,
+    verter_options: &ResolvedVueCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
+    allocator: &Allocator,
+    parse_duration_ms: f64,
+) -> Result<VerterCompileResult, crate::compile_request::CompileRequestError> {
     let total_start = Instant::now();
 
     // Prepare the setup + companion script blocks once. This single parse backs
@@ -1104,7 +1133,7 @@ fn compile_inner(
         // `audit_no_hot_loop_instrumentation`) keeps instrumentation
         // out of the per-block loop.
         if !parsed.style_nodes().is_empty() {
-            verter_audit::observe!(|observer| observer
+            verter_audit::observe!(M => on observer => |observer| observer
                 .record_phase_timing("compile.css_analysis", total_style_duration_ms));
         }
     } // end if needs_style
@@ -1185,7 +1214,7 @@ fn compile_inner(
     if options.target.needs_script() && !use_transferred_script_semantics {
         let script_start = Instant::now();
 
-        let mut ct = CodeTransform::new(input, allocator);
+        let mut ct = CodeTransform::<M>::new_in(input, allocator);
 
         // Parse template expressions early so we can collect the set of identifiers
         // actually used in the template (for import elision in script codegen).
@@ -1461,7 +1490,7 @@ fn compile_inner(
         } else {
             script_result.imports.clone()
         };
-        let emit_import_line = |ct: &mut CodeTransform<'_>, names: &[&'static str]| {
+        let emit_import_line = |ct: &mut CodeTransform<'_, M>, names: &[&'static str]| {
             if names.is_empty() {
                 return;
             }
@@ -1524,7 +1553,7 @@ fn compile_inner(
                     export_statement_range: sfc_export_statement_range,
                 })
             };
-        let sourcemap_clock = verter_audit::observe::Stopwatch::start();
+        let sourcemap_clock = verter_audit::observe::Stopwatch::start_in::<M>();
         let script_source_map = if verter_options.source_map {
             let sm_opts = SourceMapOptions {
                 source: options.filename.as_deref(),
@@ -1540,7 +1569,7 @@ fn compile_inner(
         // sourcemap chunk so timings stay disjoint and the audit
         // payload's `transform_ms` / `sourcemap_ms` add up to roughly
         // the wall-clock cost of this block.
-        verter_audit::observe!(|observer| {
+        verter_audit::observe!(M => on observer => |observer| {
             let sourcemap_duration_ms = sourcemap_clock.elapsed_ms();
             let transform_only_ms = (script_duration_ms - sourcemap_duration_ms).max(0.0);
             observer.record_phase_timing("compile.transform", transform_only_ms);
@@ -1732,7 +1761,7 @@ fn compile_inner(
                 // align. Remove the prefix (before <template>) and suffix
                 // (after </template>) within the CT so build_string() produces
                 // only the template region with correct sourcemap offsets.
-                let mut tpl_ct = CodeTransform::new(input, &tpl_alloc);
+                let mut tpl_ct = CodeTransform::<M>::new_in(input, &tpl_alloc);
                 let tpl_tag_start = template_ast.root.tag_open.start as usize;
                 let tpl_tag_end = template_ast
                     .root
@@ -1833,7 +1862,7 @@ fn compile_inner(
                 // Prefix and suffix were removed via CT operations above,
                 // so build_string() produces only the template region.
                 let tpl_code = tpl_ct.build_string();
-                let tpl_sourcemap_clock = verter_audit::observe::Stopwatch::start();
+                let tpl_sourcemap_clock = verter_audit::observe::Stopwatch::start_in::<M>();
                 let tpl_source_map = if verter_options.source_map {
                     let sm_opts = SourceMapOptions {
                         source: options.filename.as_deref(),
@@ -1845,7 +1874,7 @@ fn compile_inner(
                     String::new()
                 };
                 let tpl_duration_ms = tpl_start.elapsed().as_secs_f64() * 1000.0;
-                verter_audit::observe!(|observer| {
+                verter_audit::observe!(M => on observer => |observer| {
                     let tpl_sourcemap_ms = tpl_sourcemap_clock.elapsed_ms();
                     let codegen_only_ms = (tpl_duration_ms - tpl_sourcemap_ms).max(0.0);
                     observer.record_phase_timing("compile.codegen", codegen_only_ms);
@@ -2022,7 +2051,7 @@ fn compile_inner(
         // Unified single CodeTransform for both script and template.
         // One CT → one source map → template diagnostics map correctly.
         let tsx_alloc = Allocator::new();
-        let mut tsx_ct = CodeTransform::new(input, &tsx_alloc);
+        let mut tsx_ct = CodeTransform::<M>::new_in(input, &tsx_alloc);
         // Authored JavaScript file-check directives must remain header pragmas in
         // the generated companion. Put them before the JSX authority: current
         // TSGO recognizes the file-check override only from the leading pragma
@@ -2160,7 +2189,7 @@ fn compile_inner(
                         &tsx_script_result.template_component_bindings,
                     );
                     if options.ide_chunk_boundaries {
-                        let mut chunk_ct = CodeTransform::new(input, &tsx_alloc);
+                        let mut chunk_ct = CodeTransform::<M>::new_in(input, &tsx_alloc);
                         tsx_out.clone().apply_to(&mut chunk_ct);
                         let code = chunk_ct.build_string();
                         let source_map = chunk_ct.generate_map_json(SourceMapOptions {
@@ -2265,7 +2294,7 @@ fn compile_inner(
 
         // Build output and source map from the single unified CT
         let tsx_code = tsx_ct.build_string();
-        let tsx_sourcemap_clock = verter_audit::observe::Stopwatch::start();
+        let tsx_sourcemap_clock = verter_audit::observe::Stopwatch::start_in::<M>();
         let tsx_sm = if verter_options.ide_source_map {
             let sm_opts = SourceMapOptions {
                 source: options.filename.as_deref(),
@@ -2280,7 +2309,7 @@ fn compile_inner(
             String::new()
         };
         let tsx_dur = tsx_start.elapsed().as_secs_f64() * 1000.0;
-        verter_audit::observe!(|observer| {
+        verter_audit::observe!(M => on observer => |observer| {
             let tsx_sourcemap_ms = tsx_sourcemap_clock.elapsed_ms();
             let codegen_only_ms = (tsx_dur - tsx_sourcemap_ms).max(0.0);
             observer.record_phase_timing("compile.codegen", codegen_only_ms);
@@ -2355,7 +2384,7 @@ fn compile_inner(
             &tsc::FallthroughPropsProjection::none(),
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;
-        verter_audit::observe!(|observer| observer.record_phase_timing("compile.codegen", tsc_dur));
+        verter_audit::observe!(M => on observer => |observer| observer.record_phase_timing("compile.codegen", tsc_dur));
         match tsc_out {
             Ok(tsc_out) => Some(VerterTsxBlock {
                 code: tsc_out.code,

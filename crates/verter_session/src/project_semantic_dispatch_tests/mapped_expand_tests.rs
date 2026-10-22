@@ -8,7 +8,9 @@
 //! - over an interface's keys remapped by a recursive template conditional,
 //!   every key renamed;
 //! - over a generic interface heritage chain, every level's member at the
-//!   type argument it inherits.
+//!   type argument it inherits;
+//! - over a Redux Toolkit slice's case reducers, every reducer's action
+//!   creator, whose action is the reducer's payload action.
 //!
 //! Each demand is the named demand the semantic benchmark makes (`__Probe`
 //! resolved by name and projected to its wire answer, the
@@ -35,9 +37,9 @@ const SCENARIO: &str = "/expand/scenario.ts";
 type Work<const N: usize = 3> = [(&'static str, u64); N];
 
 /// A named demand's wire answer and the work it took.
-struct Answer {
+pub(super) struct Answer {
     wire: Vec<u8>,
-    answer: TypeExpr,
+    pub(super) answer: TypeExpr,
     work: Work,
     flow_obligations: u64,
     name_remaps: u64,
@@ -48,7 +50,7 @@ struct Answer {
 /// decodes it: with no depth limit, since a deep answer (a heritage chain's
 /// tuple nested a hundred levels) nests deeper than a default decoder
 /// allows.
-fn named_answer(source: &str, probe: &str) -> Answer {
+pub(super) fn named_answer(source: &str, probe: &str) -> Answer {
     named_answer_in_mode(source, probe, None)
 }
 
@@ -60,11 +62,24 @@ fn named_answer_in_mode(
     named_answer_with_library(source, probe, mode, false)
 }
 
-fn named_answer_with_library(
+pub(super) fn named_answer_with_library(
     source: &str,
     probe: &str,
     mode: Option<verter_type_engine::semantic_query::ProjectionMode>,
     benchmark_library: bool,
+) -> Answer {
+    named_answer_in_union_order(source, probe, mode, benchmark_library, false)
+}
+
+/// [`named_answer_with_library`], on a host whose store orders union
+/// members by the reversed stable key when `reverse_union_order`: the
+/// order-only counterfactual, in a cache namespace of its own.
+fn named_answer_in_union_order(
+    source: &str,
+    probe: &str,
+    mode: Option<verter_type_engine::semantic_query::ProjectionMode>,
+    benchmark_library: bool,
+    reverse_union_order: bool,
 ) -> Answer {
     let config = if benchmark_library {
         r#"{ "compilerOptions": { "strict": true, "noLib": true }, "files": ["lib.bench.d.ts", "scenario.ts"] }"#
@@ -75,6 +90,11 @@ fn named_answer_with_library(
         crate::HostConfig::default(),
         &[("/expand", config)],
     );
+    if reverse_union_order {
+        host.project_type_store()
+            .semantic_graph()
+            .reverse_union_order_for_tests();
+    }
     if benchmark_library {
         let library = "/expand/lib.bench.d.ts";
         let _ = host
@@ -142,7 +162,7 @@ fn named_answer_with_library(
     }
 }
 
-fn display(expr: &TypeExpr) -> String {
+pub(super) fn display(expr: &TypeExpr) -> String {
     verter_type_expr::render_type_expr_display(expr)
         .expect("the answer renders")
         .text
@@ -733,4 +753,147 @@ fn a_deferred_recursive_conditional_names_its_binders_and_arguments() {
         printed,
         "<S extends string>(s: S) => S extends `${infer A}_${infer B}` ? `${A}-${Kebab<B>}` : S"
     );
+}
+
+/// Redux Toolkit's `createSlice` declarations (2.x), trimmed to the members
+/// its action creators read, and a slice of `count` case reducers whose
+/// payloads alternate a literal and `number`; `arrow` writes each reducer
+/// as an arrow-valued property instead of a method. Neither form annotates
+/// the reducer's `state`, which the slice's own state types.
+fn rtk_slice(count: usize, arrow: bool) -> String {
+    let mut source = String::from(include_str!("fixtures/rtk_slice.ts"));
+    source.push_str("const slice = createSlice({ name: 's', initialState: { n: 0 }, reducers: {\n");
+    for i in 0..count {
+        let payload = if i % 2 == 0 {
+            format!("{{ v{i}: 'l{i}' }}")
+        } else {
+            format!("{{ v{i}: number }}")
+        };
+        if arrow {
+            source.push_str(&format!(
+                "r{i}: (state, action: PayloadAction<{payload}>) => {{}},\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "r{i}(state, action: PayloadAction<{payload}>) {{}},\n"
+            ));
+        }
+    }
+    source.push_str("} });\ntype Actions = typeof slice.actions;\n");
+    source
+}
+
+/// The actions of [`rtk_slice`]'s action creators, as the checker prints
+/// each member of their union: `PayloadAction<payload, "s/r{i}">` resolved.
+fn rtk_actions(count: usize) -> std::collections::BTreeSet<String> {
+    (0..count)
+        .map(|i| {
+            let payload = if i % 2 == 0 {
+                format!("'l{i}'")
+            } else {
+                "number".to_string()
+            };
+            format!("{{ payload: {{ v{i}: {payload} }}; type: 's/r{i}' }}")
+        })
+        .collect()
+}
+
+/// The action every action creator of a Redux Toolkit slice returns is the
+/// complete union of each reducer's payload action, and the work it takes
+/// grows with the reducer count, not faster.
+fn assert_rtk_slice_actions_grow_linearly(arrow: bool) {
+    let label = if arrow {
+        "arrow reducers"
+    } else {
+        "method reducers"
+    };
+    let work = [3, 6, 12].map(|count| {
+        let answer = named_answer_with_library(
+            &rtk_slice(count, arrow),
+            "ReturnType<Actions[keyof Actions]>",
+            None,
+            true,
+        );
+        let TypeExpr::Union(members) = &answer.answer else {
+            panic!(
+                "{label} {count}: `{}` is not a union",
+                short(&answer.answer)
+            );
+        };
+        let got: std::collections::BTreeSet<String> = members.iter().map(display).collect();
+        assert_eq!(got, rtk_actions(count), "{label} {count}");
+        let work = [
+            answer.work[0],
+            answer.work[1],
+            answer.work[2],
+            ("flow obligations", answer.flow_obligations),
+        ];
+        (count, work)
+    });
+    assert_linear_growth(label, work[0], work[1]);
+    assert_linear_growth(label, work[1], work[2]);
+}
+
+#[test]
+fn rtk_slice_method_reducer_actions_answer_completely_and_grow_linearly() {
+    assert_rtk_slice_actions_grow_linearly(false);
+}
+
+#[test]
+fn rtk_slice_arrow_reducer_actions_answer_completely_and_grow_linearly() {
+    assert_rtk_slice_actions_grow_linearly(true);
+}
+
+/// The action union of a ten-reducer slice differs from the checker's only
+/// in its member order (semantic-difference ledger, `VerterStableV1`
+/// order-induced). The checker prints the members in reducer order, `"s/r0"`
+/// to `"s/r9"`; the live answer holds the same members in the stable-key
+/// order. On a fresh host whose store reverses ONLY the union order, the
+/// members are unchanged and their order is exactly reversed, so no member
+/// depends on the order; a fresh host under the stable order answers the
+/// stable order again.
+#[test]
+fn rtk_slice_actions_differ_from_the_checker_only_in_union_order() {
+    const COUNT: usize = 10;
+    let members = |reverse_union_order: bool| -> Vec<String> {
+        let answer = named_answer_in_union_order(
+            &rtk_slice(COUNT, false),
+            "ReturnType<Actions[keyof Actions]>",
+            None,
+            true,
+            reverse_union_order,
+        );
+        let TypeExpr::Union(members) = &answer.answer else {
+            panic!("`{}` is not a union", short(&answer.answer));
+        };
+        members.iter().map(display).collect()
+    };
+    let checker: Vec<String> = (0..COUNT)
+        .map(|i| {
+            let payload = if i % 2 == 0 {
+                format!("'l{i}'")
+            } else {
+                "number".to_string()
+            };
+            format!("{{ payload: {{ v{i}: {payload} }}; type: 's/r{i}' }}")
+        })
+        .collect();
+    let stable = members(false);
+    let sorted = |members: &[String]| {
+        members
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(sorted(&stable), sorted(&checker), "the checker's members");
+    assert_eq!(sorted(&stable), rtk_actions(COUNT), "the checker's members");
+    assert_ne!(stable, checker, "the stable order is not the checker's");
+    let reversed = members(true);
+    let mut expected_reversed = stable.clone();
+    expected_reversed.reverse();
+    assert_eq!(
+        reversed, expected_reversed,
+        "with only the union order reversed, the same members in the reversed order"
+    );
+    assert_eq!(members(false), stable, "the stable order again");
 }

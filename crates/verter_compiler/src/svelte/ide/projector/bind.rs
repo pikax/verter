@@ -9,7 +9,7 @@
 
 use super::*;
 
-impl TemplateProjector<'_, '_> {
+impl<M: verter_audit::observe::ObserveExec> TemplateProjector<'_, '_, M> {
     /// The bind-TARGET local text for a `bind:this` / `bind:group` / table-bind
     /// target, with any F11 store auto-subscription rewritten to its READ-helper
     /// form (`$store` → `__verter_store_get(store)`), plus whether a store-sub was

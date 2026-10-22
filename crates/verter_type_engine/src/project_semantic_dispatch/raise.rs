@@ -150,10 +150,10 @@ pub fn enable_dispatch_trace_for_test() -> DispatchTraceGuard {
 }
 
 // =====================================================================
-// Per-key dispatch traffic counter (diagnostic only).
+// Per-key cold and warm dispatch counters (diagnostic only).
 //
-// Counts how many times `execute_read` is invoked with each
-// `SemanticQueryKey`, keyed by a (variant_discriminant, content_hash)
+// Count how many times each `SemanticQueryKey` is built cold and served
+// warm, keyed by a (variant_discriminant, content_hash)
 // digest. Diagnostic-only, `#[cfg(test)]`-gated, zero footprint outside
 // test builds.
 //
@@ -225,9 +225,6 @@ fn canonicalise_for_digest(
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static DISPATCH_KEY_COUNTS:
-        std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
-        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
     /// Supplement §5.D.0 r17 — per-key COLD dispatch count.
     /// Incremented when `execute_read` enters with no warm cache entry
     /// for the key (cache miss; `build` is invoked).
@@ -240,14 +237,6 @@ thread_local! {
     pub(crate) static DISPATCH_KEY_WARM_COUNTS:
         std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn record_dispatch_key(key: &crate::semantic_query::SemanticQueryKey) {
-    let digest = SemanticQueryKeyDigest::from_key(key);
-    DISPATCH_KEY_COUNTS.with(|c| {
-        *c.borrow_mut().entry(digest).or_insert(0) += 1;
-    });
 }
 
 /// Supplement §5.D.0 r17 — record a COLD dispatch entry for
@@ -429,12 +418,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         #[cfg(any(test, feature = "test-support"))]
         DISPATCH_TRACE.with(|t| t.borrow_mut().push(query_key_discriminant(&key)));
 
-        // Per-key dispatch traffic counter. Records a
-        // (variant_discriminant, content_hash) digest so diagnostic
-        // tests can dump the top-N most-dispatched keys.
-        #[cfg(any(test, feature = "test-support"))]
-        record_dispatch_key(&key);
-
         // Delegate to the shared cold-build helper. The helper handles
         // canonicalisation, sentinel construction, the tracer-wrapped
         // build closure, and the warm-hit fast path inside
@@ -456,8 +439,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) {
         #[cfg(any(test, feature = "test-support"))]
         DISPATCH_TRACE.with(|t| t.borrow_mut().push(query_key_discriminant(&key)));
-        #[cfg(any(test, feature = "test-support"))]
-        record_dispatch_key(&key);
 
         let mut evidence = None;
         let read = super::narrow_value_cache_read(
@@ -517,7 +498,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result_is_partial = state.result_is_partial;
         ReducedOutputNode {
             _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
-                self.graph(),
+                self.graph().store(),
                 [node_id],
             ),
             node_id,
@@ -635,16 +616,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // entry. One `raise_and_reduce_with_context` produces exactly one of
         // these.
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::RAISE_REDUCE_GRAPH_NODE_ITERATIVE_CALLS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support"))
+            || <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
+        {
+            crate::loop5_instrumentation::RAISE_REDUCE_GRAPH_NODE_ITERATIVE_CALLS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Loop-8 instrumentation — wall-clock attribution for the
         // iterative-reduction body. Calls counter already bumped
         // above (Loop 5); this guard adds NS-only on drop.
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new_ns_only(
-            &crate::loop5_instrumentation::REDUCE_GRAPH_NODE_ITERATIVE_NS,
-        );
+        let _loop8_timer =
+            <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED.then(|| {
+                crate::loop5_instrumentation::TimerGuard::new_ns_only(
+                    &crate::loop5_instrumentation::REDUCE_GRAPH_NODE_ITERATIVE_NS,
+                )
+            });
 
         self.reduce_subtree(root, root_context, state)
     }
@@ -683,7 +671,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // node via the rebuild_* fall-through.
                         continue;
                     }
-                    let Some(data) = super::node_data_for(self.graph(), frame.node) else {
+                    let Some(data) = super::node_data_for(self.graph().store(), frame.node) else {
                         // No graph data — record a self-identity
                         // reduction so callers reading `mapping`
                         // get the raw node.
@@ -1027,7 +1015,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
-        let Some(data) = super::node_data_for(self.graph(), node) else {
+        let Some(data) = super::node_data_for(self.graph().store(), node) else {
             return node;
         };
         let mode = context.mode;
@@ -1688,8 +1676,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Loop-5 instrumentation — every operator-node dispatch issues
         // one `execute_read` (which routes through `execute_cooperative`).
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::DISPATCH_OPERATOR_WITH_RECURSE_CALLS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support"))
+            || <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
+        {
+            crate::loop5_instrumentation::DISPATCH_OPERATOR_WITH_RECURSE_CALLS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let kind_idx = crate::loop5_instrumentation::kind_index_for_key(&key);
+            crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_CALLS[kind_idx]
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Loop-7 instrumentation — per-`SemanticQueryKey`-variant
         // wall-clock attribution. The kind index is captured BEFORE
@@ -1699,12 +1694,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // dispatch triggers — i.e. the entire wall-clock cost
         // attributable to this single operator-node dispatch.
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        let kind_idx = crate::loop5_instrumentation::kind_index_for_key(&key);
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_CALLS[kind_idx]
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        let dispatch_started = Instant::now();
+        let dispatch_timing =
+            <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED.then(|| {
+                (
+                    crate::loop5_instrumentation::kind_index_for_key(&key),
+                    Instant::now(),
+                )
+            });
 
         let read = self.execute_read(key);
         state.merge_dep_signature(&read.dep_signature);
@@ -1754,13 +1750,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
 
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        let elapsed_ns = dispatch_started.elapsed().as_nanos() as u64;
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_NS[kind_idx]
-            .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::DISPATCH_OPERATOR_TOTAL_NS
-            .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
+        if let Some((kind_idx, dispatch_started)) = dispatch_timing {
+            let elapsed_ns = dispatch_started.elapsed().as_nanos() as u64;
+            crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_NS[kind_idx]
+                .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
+            crate::loop5_instrumentation::DISPATCH_OPERATOR_TOTAL_NS
+                .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
+        }
         result
     }
 
@@ -1900,7 +1896,7 @@ fn rebuild_object<C: crate::resolver_core::ResolverCapabilities>(
     mapping: &MappingMap,
     context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
-    let data = super::node_data_for(dispatch.graph(), node)?;
+    let data = super::node_data_for(dispatch.graph().store(), node)?;
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return None;
     };

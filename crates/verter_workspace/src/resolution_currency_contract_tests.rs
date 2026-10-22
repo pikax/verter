@@ -497,7 +497,7 @@ fn filesystem_live_os_resolution_is_typed_return_only() {
             verter_audit::NonAdmissionReason::ResolutionUntrackedBackend,
             "the sink refusal must retain the exact transaction admission reason"
         ),
-        crate::ResolutionPublication::Admitted(_) => {
+        crate::ResolutionPublication::Admitted(_) | crate::ResolutionPublication::Unretained(_) => {
             panic!("the persistent-sink projection must reject every ReturnOnly target")
         }
     }
@@ -527,7 +527,7 @@ fn bridge_loss_after_resolution_refuses_the_durable_publication() {
             verter_audit::NonAdmissionReason::ResolutionUntrackedBackend,
             "the final bridge fence must refuse a world that became untracked mid-flight"
         ),
-        crate::ResolutionPublication::Admitted(_) => {
+        crate::ResolutionPublication::Admitted(_) | crate::ResolutionPublication::Unretained(_) => {
             panic!("a mid-flight bridge loss must never reach a durable sink")
         }
     }

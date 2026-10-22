@@ -3330,7 +3330,7 @@ fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
     let value = SemanticQueryValue::TypeNode(number);
     let union = |store: &SemanticGraphStore| {
         crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_in_scope(
-            store,
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(store),
             &[number, string],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         )

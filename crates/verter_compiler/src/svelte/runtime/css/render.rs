@@ -71,10 +71,11 @@ pub(crate) fn render_stylesheet(
     filename: Option<&str>,
     want_source_map: bool,
 ) -> Result<ScopedCssRender, RenderError> {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let allocator = Allocator::default();
     let body_span = Span::new(tree.source().origin(), tree.source().end());
     let mut renderer = Renderer {
-        code: CodeTransform::new(source, &allocator),
+        code: CodeTransform::<M>::new_in(source, &allocator),
         source,
         tree,
         analysis,
@@ -128,6 +129,8 @@ pub(crate) fn render_stylesheet(
             })
         }),
     })
+
+    })
 }
 
 fn map_basename(filename: &str) -> &str {
@@ -151,8 +154,8 @@ enum ListParent<'a> {
     PseudoArgs,
 }
 
-struct Renderer<'a> {
-    code: CodeTransform<'a>,
+struct Renderer<'a, M: verter_audit::observe::ObserveExec> {
+    code: CodeTransform<'a, M>,
     source: &'a str,
     tree: &'a StyleSyntaxIr,
     analysis: &'a CssAnalysis,
@@ -169,7 +172,7 @@ struct Renderer<'a> {
     edit_failure: Option<CodeTransformError>,
 }
 
-impl<'a> Renderer<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> Renderer<'a, M> {
     fn fail(&mut self, span: Span) {
         if self.failure.is_none() {
             self.failure = Some(span);

@@ -89,6 +89,12 @@ fn peak_live_bytes() -> i64 {
     PEAK_LIVE_BYTES.with(Cell::get)
 }
 
+/// The bytes allocated on this thread since the last reset and not freed
+/// since.
+fn live_bytes() -> i64 {
+    LIVE_BYTES.with(Cell::get)
+}
+
 fn reset_alloc_counter() {
     ALLOC_COUNTER.with(|counter| counter.set(0));
     ALLOC_BYTES.with(|bytes| bytes.set(0));
@@ -782,3 +788,9 @@ mod reverse_index_backing;
 
 #[path = "allocation_cases/recursive_growth.rs"]
 mod recursive_growth_allocation;
+
+#[path = "allocation_cases/intersection_distribution.rs"]
+mod intersection_distribution_allocation;
+
+#[path = "allocation_cases/key_remap.rs"]
+mod key_remap_allocation;

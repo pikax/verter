@@ -368,7 +368,10 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
         .semantic_graph()
         .enter_node_root_scope();
     let view = crate::typeinfo::current_store_view_for_query(&host).unwrap();
-    let host_context = crate::resolver_core::HostResolverContext::from_current(
+    let host_context = crate::resolver_core::HostResolverContext::<
+        '_,
+        verter_audit::observe::Uncaptured,
+    >::from_current(
         &host,
         &view,
         Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
@@ -527,7 +530,10 @@ fn recursive_paths_admissions(count: usize, groups: usize) -> (u64, usize) {
 
     let host = recursive_paths_host(count, groups, 50_000);
     let view = crate::typeinfo::current_store_view_for_query(&host).unwrap();
-    let host_context = crate::resolver_core::HostResolverContext::from_current(
+    let host_context = crate::resolver_core::HostResolverContext::<
+        '_,
+        verter_audit::observe::Uncaptured,
+    >::from_current(
         &host,
         &view,
         Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),

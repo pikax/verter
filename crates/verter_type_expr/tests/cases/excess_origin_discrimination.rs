@@ -38,8 +38,34 @@ fn string_ty() -> TypeExpr {
 
 fn object_of(members: Vec<ObjectMember>) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: members,
     }))
+}
+
+#[test]
+fn empty_literal_origin_survives_identity_and_wire_roundtrips() {
+    let declared = ObjectExpr {
+        empty_literal: false,
+        properties: Vec::new(),
+    };
+    let literal = ObjectExpr {
+        empty_literal: true,
+        properties: Vec::new(),
+    };
+    assert_ne!(declared, literal);
+    assert_ne!(hash_one(&declared), hash_one(&literal));
+    let declared = TypeExpr::Object(Arc::new(declared));
+    let literal = TypeExpr::Object(Arc::new(literal));
+    assert_ne!(hash_one(&declared), hash_one(&literal));
+    for ty in [declared, literal] {
+        assert_eq!(type_expr_from_json(&ty.to_json_value()), Some(ty.clone()));
+        let encoded = serde_json::to_vec(&ty).expect("serialize the type");
+        assert_eq!(
+            serde_json::from_slice::<TypeExpr>(&encoded).expect("deserialize the type"),
+            ty
+        );
+    }
 }
 
 fn prop_with(origin: ExcessPropertyOrigin) -> ObjectProperty {
