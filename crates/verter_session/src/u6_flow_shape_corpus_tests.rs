@@ -2575,23 +2575,26 @@ mod corpus_suite {
             );
         }
 
-        let locked_ids: Vec<_> = locked.keys().copied().collect();
-        let current_ids: Vec<_> = current.keys().copied().collect();
-        assert_eq!(
-            locked_ids, current_ids,
-            "locked baseline clean checker-match cohort changed; locked={locked_ids:?}, current={current:?}"
-        );
-
         for (id, locked_fingerprint) in locked {
-            let row = CORPUS
-                .iter()
-                .find(|row| row.id == id)
-                .unwrap_or_else(|| panic!("locked baseline row `{id}` is missing"));
             assert_eq!(
                 current.get(id).map(String::as_str),
                 Some(locked_fingerprint),
-                "locked row `{id}` changed script, probe, or checker fingerprint"
+                "preserved row `{id}` is missing, no longer clean, or changed script, probe, or checker fingerprint"
             );
+        }
+
+        // Preserve every pinned fixture and measure every currently clean
+        // row, including newly supported cases. A fixed population ceiling
+        // would reject coverage growth before any semantic checks can run.
+        assert!(
+            !current.is_empty(),
+            "the clean checker-match population must run"
+        );
+        for id in current.keys().copied() {
+            let row = CORPUS
+                .iter()
+                .find(|row| row.id == id)
+                .expect("current row came from the corpus");
             let (function, expected_node, expected_members) = match row.flow {
                 Flow::Result {
                     function,

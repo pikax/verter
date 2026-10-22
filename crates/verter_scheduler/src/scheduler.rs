@@ -94,6 +94,7 @@ use cancellation::*;
 use completion::*;
 use dag_lock::*;
 use dependencies::*;
+#[cfg(not(target_arch = "wasm32"))]
 use driver::*;
 use identity::*;
 // `lifecycle`'s only free export is `num_cpus`, which is native-only; gating
