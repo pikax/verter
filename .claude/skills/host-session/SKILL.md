@@ -77,8 +77,11 @@ back into the host for a service it was not given.
 - The root mints the one `verter_execution::TaskRegistry` and composes the
   project store over it (`ProjectTypeStore::compose`). The store returns the
   engine grants, the `OutputLease` and the `SurfaceClaimAuthority`, and keeps
-  neither. The root hands both to `SessionAttachment` alone. Scheduler adoption
-  of the same registry belongs to the parallel-execution work.
+  neither. The root hands both to `SessionAttachment` alone. It also injects
+  that registry into the scheduler's scoped cache-node handoffs, so their
+  producers and semantic producers share task identity and wait-cycle
+  detection. Final CPU-service integration remains separate; see
+  [`root-continuations.md`](../../../docs/arch/root-continuations.md).
 - `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
   is the only route by which a workspace receives it, both at construction and on
   `set_workspace`. Resident resolution state needs no service: every workspace

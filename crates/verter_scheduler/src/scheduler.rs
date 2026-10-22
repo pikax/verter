@@ -63,6 +63,7 @@ use crate::job::{
 use crate::node::{AnalysisSnapshot, ArtifactSnapshot, FileNode, SourceSnapshot};
 use crate::overlay::OverlayMap;
 use verter_execution::cancellation::{CancellationOwner, CancellationToken};
+use verter_execution::tasks::{ExecutionScope, ExecutionTask, TaskRegistry};
 use verter_language::FileLanguage;
 
 use crate::source_loader::SourceLoader;
@@ -237,7 +238,7 @@ pub enum ScopedCacheNodeError {
     Panicked,
     /// The same typed identity was used concurrently for different value types.
     TypeMismatch,
-    /// A producer synchronously requested its own active cache-node identity.
+    /// A request would wait on its own producer or close a task wait cycle.
     Reentrant,
 }
 
@@ -320,6 +321,9 @@ impl BatchHandle {
 /// Manages per-file nodes, a priority queue, and a driver thread that
 /// processes submissions and dispatches work to CPU/IO pools.
 pub struct Scheduler {
+    /// Shared with semantic producers by the host composition root. Standalone
+    /// schedulers create one registry for their own producers.
+    task_registry: TaskRegistry,
     /// Per-file nodes (concurrent access via DashMap).
     ///
     /// EXECUTION state: each [`FileNode`] holds only its CURRENT
@@ -584,7 +588,30 @@ impl Scheduler {
         cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
         io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
+        Self::with_executor_and_task_registry(
+            config,
+            source_loader,
+            executor,
+            cpu_pool,
+            io_pool,
+            TaskRegistry::default(),
+        )
+    }
+
+    /// Create a threaded scheduler whose scoped producers share the caller's
+    /// wait-cycle authority. A host passes this same registry to its semantic
+    /// store; nested producers then join one execution task across both layers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_executor_and_task_registry(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+        cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+        task_registry: TaskRegistry,
+    ) -> Arc<Self> {
         let scheduler = Arc::new(Self {
+            task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
@@ -682,7 +709,31 @@ impl Scheduler {
         #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
         #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
+        Self::new_sync_with_executor_and_task_registry(
+            config,
+            source_loader,
+            executor,
+            #[cfg(not(target_arch = "wasm32"))]
+            cpu_pool,
+            #[cfg(not(target_arch = "wasm32"))]
+            io_pool,
+            TaskRegistry::default(),
+        )
+    }
+
+    /// Create an inline scheduler sharing the supplied execution-task registry.
+    /// On WASM, the embedding driver polls handoffs and runs dependencies on
+    /// the same thread; task ownership and wait-cycle detection are unchanged.
+    pub fn new_sync_with_executor_and_task_registry(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+        task_registry: TaskRegistry,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),

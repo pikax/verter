@@ -133,6 +133,21 @@ producer on the existing CPU pool.
   without running settles the flight as cancelled. A later poll of the
   handoff receives the terminal `Value(Arc<T>)`; every surviving follower
   receives that same value. Producers can borrow the external caller's data.
+- **Task ownership and cycles:** the host injects its single `TaskRegistry`
+  into both the scheduler and semantic store. The explicit scheduler
+  constructors are `with_executor_and_task_registry` (threaded native) and
+  `new_sync_with_executor_and_task_registry` (inline native/WASM); standalone
+  constructors create a registry for their scheduler. A handoff captures the
+  installed task at construction, or registers a new external-root task. Its
+  producer retains and installs that task wherever `run` executes, restoring
+  the destination thread's prior task afterwards. A follower holds one RAII
+  edge to the elected producer in that same registry. Same-task recursion or
+  a cross-task cycle returns the existing `Reentrant` refusal to that follower;
+  surviving owners keep the producer. Observing completion/refusal or dropping
+  the handoff releases its edge. Election wakes earlier subscribers to register their
+  edges now that the producer is known. The handoff that transferred the
+  producer may await its external execution without a self-edge. Wakes still
+  schedule later polls and run beyond the flight/lifecycle holds.
 - **Backpressure and lifetime:** admission retains the unsubmitted item and
   separate capacity and flight registrations. A sibling's settlement
   can bypass that item's capacity wait; a retired flight resolves
@@ -142,8 +157,8 @@ producer on the existing CPU pool.
   its owner; a surviving sibling keeps shared work live.
 - **Errors:** cancellation, shutdown/reset, panic, mismatched result type and
   same-path re-entry retain the existing typed outcomes. Cancellation is
-  checked at each poll; cancellation-only wake delivery and shared-registry
-  wait edges remain unfinished. Executors must re-poll or drop on request
+  checked at each poll; cancellation-only wake delivery remains unfinished.
+  Executors must re-poll or drop on request
   cancellation. Polling after a terminal result is a contract violation.
 - **Wake ordering:** dispatch and settlement take registrations under the
   flight lock. Delivery uses the scheduler's deferral rail, after flight,
@@ -156,6 +171,9 @@ producer on the existing CPU pool.
   `scoped_handoff_no_blocking_scheduler` denies recovering the blocking
   scheduler from the handoff. These are boundary tests; complete production
   component-meta/compile roots are still synchronous.
+  `scoped_cache_handoffs_share_the_semantic_wait_graph` holds real semantic
+  and scoped producers, closes a cycle in both dependency orders, and runs
+  the surviving producer on another thread under its original task.
 
 ### Declaration-lowering owner-shard handoffs
 
@@ -204,9 +222,9 @@ All of these are in `crates/verter_semantic_source/src/decl_lowering.rs`.
 
 These are the production waits a component-meta or compile root can reach
 in the current tree. Each one parks the polling thread inside whatever poll
-reaches it, so a root that reaches one is not yet pollable. None of them
-registers a wait-for edge with the shared `TaskRegistry`; only the semantic
-memo's flights do (`verter_type_engine::semantic_query_memo`).
+reaches it, so a root that reaches one is not yet pollable. Semantic memo
+flights and scoped cache-node followers share `TaskRegistry` wait edges;
+the remaining families do not yet register their waits there.
 
 | Wait | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- |

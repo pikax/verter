@@ -87,6 +87,145 @@ impl std::task::Wake for CountingWaker {
 
 fn assert_send<T: Send>(_: &T) {}
 
+/// A semantic producer and a scoped cache producer must use the same cycle
+/// authority, whichever dependency is registered first. Neither wait leaves
+/// a native stack active: the test holds both owned producers explicitly.
+#[test]
+fn scoped_cache_handoffs_share_the_semantic_wait_graph() {
+    use verter_execution::tasks::ExecutionScope;
+    use verter_scheduler::scheduler::{
+        ScopedCacheNodeError, ScopedCacheNodeRequest, ScopedCacheNodeStep,
+    };
+    use verter_type_engine::semantic_query_memo::{Joined, Recursion};
+
+    for semantic_waits_first in [false, true] {
+        let host = chain_host();
+        let graph = host.project_type_store().semantic_graph();
+        let registry = graph.task_registry_for_tests();
+        let cache_task = registry.register_task();
+        let semantic_task = registry.register_task();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let key = typeof_key(&dispatch, "x2");
+        let mut capture = ReadCapture::default();
+        let mut semantic_claim = graph
+            .begin_query_claim(&*host, host.request_flags(), key.clone(), &mut capture)
+            .unwrap_or_else(|_| panic!("the semantic producer is cold"));
+        let Claim::Produce(semantic_producer) = graph.claim_query(
+            &*host,
+            host.request_flags(),
+            &mut semantic_claim,
+            &semantic_task,
+            &mut capture,
+        ) else {
+            panic!("one task owns the semantic producer");
+        };
+        let request = ScopedCacheNodeRequest {
+            cache_id: verter_scheduler::cache_id::SchedulerCacheId(0xC1C1E),
+            key_hash: [7; 16],
+            view_epoch: 0,
+            snapshot_pin_id: verter_scheduler::dag::PinId(1),
+            priority: verter_scheduler::stage::Priority::Interactive,
+            request_context: None,
+        };
+        let mut cache_root = {
+            let _task = ExecutionScope::install(registry, &cache_task);
+            host.scheduler
+                .begin_scoped_cache_node::<u64>(request.clone())
+                .unwrap()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let granted = verter_execution::blocking::block_on(
+            Some(std::time::Duration::from_millis(1)),
+            |waker| {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cache dispatch stalled"
+                );
+                cache_root.poll(waker)
+            },
+        );
+        let Ok(ScopedCacheNodeStep::Produce(cache_producer)) = granted else {
+            panic!("the cache task receives the sole owned producer");
+        };
+        assert_send(&cache_producer);
+        let mut cache_follower = {
+            let _task = ExecutionScope::install(registry, &semantic_task);
+            host.scheduler
+                .begin_scoped_cache_node::<u64>(request)
+                .unwrap()
+        };
+        let mut dependent_claim = graph
+            .begin_query_claim(&*host, host.request_flags(), key, &mut capture)
+            .unwrap_or_else(|_| panic!("the semantic producer is still held"));
+
+        let Claim::Subscribed(mut semantic_follower) = graph.claim_query(
+            &*host,
+            host.request_flags(),
+            &mut dependent_claim,
+            &cache_task,
+            &mut capture,
+        ) else {
+            panic!("the cache task subscribes to the held semantic producer");
+        };
+        if semantic_waits_first {
+            assert!(semantic_follower
+                .poll(
+                    &*host,
+                    host.request_flags(),
+                    &mut dependent_claim,
+                    &mut capture,
+                    Waker::noop(),
+                )
+                .is_pending());
+            assert_eq!(registry.wait_count_for_tests(), 1);
+            assert!(matches!(
+                cache_follower.poll(Waker::noop()),
+                Poll::Ready(Err(ScopedCacheNodeError::Reentrant))
+            ));
+        } else {
+            assert!(cache_follower.poll(Waker::noop()).is_pending());
+            assert_eq!(registry.wait_count_for_tests(), 1);
+            assert!(matches!(
+                semantic_follower.poll(
+                    &*host,
+                    host.request_flags(),
+                    &mut dependent_claim,
+                    &mut capture,
+                    Waker::noop(),
+                ),
+                Poll::Ready(Joined::Recursive(Recursion::WaitCycle))
+            ));
+        }
+        drop(semantic_follower);
+        drop(cache_follower);
+        assert_eq!(registry.wait_count_for_tests(), 0);
+        // Resolving either cycle affects only its dependent subscriber. The
+        // surviving cache owner still receives its producer's actual value.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    cache_producer.run(|_| {
+                        let current = ExecutionScope::current(registry).expect("producer task");
+                        assert_eq!(current.id(), cache_task.id());
+                        41
+                    });
+                    assert!(ExecutionScope::current(registry).is_none());
+                })
+                .join()
+                .unwrap();
+        });
+        assert!(matches!(
+            cache_root.poll(Waker::noop()),
+            Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 41
+        ));
+        drop(semantic_producer);
+        drop(cache_root);
+        drop(cache_task);
+        drop(semantic_task);
+        assert_eq!(graph.wait_graph_counts_for_tests(), (0, 0));
+    }
+}
+
 #[test]
 fn semantic_task_partiality_returns_to_its_lender_without_tainting_the_poller() {
     use verter_type_engine::request_context::{

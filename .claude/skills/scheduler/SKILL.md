@@ -29,8 +29,15 @@ resuming the handoff. `execute_scoped_cache_node` is the synchronous driver over
 the same state, using the existing CPU pool. Scoped-flight dispatch/settlement
 wakes use the lifecycle deferral rail through flight and incarnation holds.
 Dropping a producer settles cancellation; dropping a subscriber detaches only
-its own owner. Cancellation-only wake subscriptions and shared wait-graph edges
-are still missing. See the root-continuations reference for the full contract.
+its own owner. The host supplies its existing `TaskRegistry` through
+`with_executor_and_task_registry` / `new_sync_with_executor_and_task_registry`,
+sharing the semantic store's cycle authority. Handoffs capture their execution
+task, transferred producers install it on their running thread, and followers
+hold RAII wait edges until terminal/drop. Election wakes pre-existing followers
+to register their edges; self-dependency and mixed semantic/cache task cycles
+take the existing `Reentrant` refusal without cancelling siblings.
+Cancellation-only wake subscriptions are still missing. See the
+root-continuations reference for the full contract.
 
 Each `FileNode` keeps four shards for its small per-profile artifact map,
 independent of the host CPU count. Source-only scripts still allocate that
