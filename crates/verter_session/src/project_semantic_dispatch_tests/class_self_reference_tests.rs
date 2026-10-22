@@ -315,19 +315,29 @@ export function obj() { return { shadow: { n: 4 as const }, m() { return this.sh
 /// `declare global` contribution is still a declaration of the global, and
 /// a reader in another module names the marker through it, cold and warm.
 /// The same holds for any global so declared: the reader's `Box` merges
-/// every module's `declare global` members, each naming types in its own
-/// module's scope. An importer of a namesake reads an ordinary type.
-/// TypeScript answers the receiver `3`, `Box['first']` `2` and
-/// `Box['loc']` `5` (`Box['second']` `3`) for the global reader, and the
-/// receiver `4` and `LocalBox['local']` `1` for the importer, in every row.
+/// every module's `declare global` members, each naming types and values
+/// in its own module's scope: its local types and values, the types and
+/// values it imports, and the values its own `declare global` declares. An
+/// importer of a namesake reads an ordinary type. TypeScript answers the
+/// receiver `3`, `Box['first']` `2`, `Box['loc']` `5`, `Box['lv']` `6`,
+/// `Box['iv']` `8`, `Box['ix']` `7`, `Box['wr']['w']` `5` and `Box['gv']`
+/// `9` (`Box['second']` `3`) for the global reader, and the receiver `4`
+/// and `LocalBox['local']` `1` for the importer, in every row.
 #[test]
 fn a_global_declared_only_beside_module_local_namesakes_keeps_the_marker() {
     use super::checker_probe_lane_tests::{mismatches_on_host, probe_host, ProbeProject};
-    let shadowing = "export interface ThisType<T> { shadow: T }
+    let imported = "export type X = 7;
+export const importedVal = 8 as const;";
+    let shadowing = "import type { X } from './x';
+import { importedVal } from './x';
+export interface ThisType<T> { shadow: T }
 declare global { interface ThisType<T> {} }
 export interface Box { local: 1 }
 type Local = 5;
-declare global { interface Box { first: 2; loc: Local } }";
+type Wrap<T> = { w: T };
+const localVal = 6 as const;
+declare global { const globalVal: 9; }
+declare global { interface Box { first: 2; loc: Local; lv: typeof localVal; iv: typeof importedVal; ix: X; wr: Wrap<Local>; gv: typeof globalVal } }";
     let second = "export interface ThisType<T> { other: T }
 declare global { interface ThisType<T> {} }
 export interface Box { other: 1 }
@@ -344,29 +354,32 @@ export type First = LocalBox['local'];";
     // contributes to; the importer's is the module-scope one.
     let local_rows = [(probe, "4"), ("First", "1"), (probe, "4"), ("First", "1")];
     let mut failures = Vec::new();
-    let one = [
+    let shared = [
         (probe, "3"),
         ("First", "2"),
         ("Box['loc']", "5"),
-        (probe, "3"),
-        ("First", "2"),
-        ("Box['loc']", "5"),
+        ("Box['lv']", "6"),
+        ("Box['iv']", "8"),
+        ("Box['ix']", "7"),
+        ("Box['wr']['w']", "5"),
+        ("Box['gv']", "9"),
     ];
-    let two = [
-        (probe, "3"),
-        ("First", "2"),
-        ("Box['loc']", "5"),
-        ("Box['second']", "3"),
-        (probe, "3"),
-        ("First", "2"),
-        ("Box['loc']", "5"),
-        ("Box['second']", "3"),
-    ];
+    let one: Vec<_> = shared.iter().chain(&shared).copied().collect();
+    let with_second: Vec<_> = shared
+        .iter()
+        .copied()
+        .chain([("Box['second']", "3")])
+        .collect();
+    let two: Vec<_> = with_second.iter().chain(&with_second).copied().collect();
     for (label, files, global_rows) in [
-        ("one shadowing module", &[("a.ts", shadowing)][..], &one[..]),
+        (
+            "one shadowing module",
+            &[("x.ts", imported), ("a.ts", shadowing)][..],
+            &one[..],
+        ),
         (
             "two shadowing modules",
-            &[("a.ts", shadowing), ("c.ts", second)][..],
+            &[("x.ts", imported), ("a.ts", shadowing), ("c.ts", second)][..],
             &two[..],
         ),
     ] {
