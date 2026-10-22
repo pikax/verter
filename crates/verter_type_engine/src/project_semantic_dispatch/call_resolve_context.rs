@@ -1707,10 +1707,6 @@ pub(super) fn checker_property_name(key: &AuthoredPropertyKey) -> Option<String>
     }
 }
 
-/// The length past which the checker abbreviates a type in a message
-/// (`defaultMaximumTruncationLength`).
-const DIAGNOSTIC_TYPE_TRUNCATION_LENGTH: usize = 160;
-
 /// How many levels of unions, intersections and constraints a relation's
 /// target is read through to decide whether it could hold a literal.
 const SINGLETON_SCAN_DEPTH: u32 = 16;
@@ -1893,39 +1889,49 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some((canonical, span))
     }
 
-    /// One type as a message prints it, never withheld: past the string
-    /// length `typeToString` itself clips at (twice the truncation length)
-    /// the text is cut to that length with a trailing `...`. The node
-    /// builder's own abbreviation of a wide union or object (`... N more
-    /// ...`) runs on a running length count this printer does not model,
-    /// so a type between the two lengths prints whole. For a message with
-    /// no occurrence to withhold (a refused relation's two types).
+    /// One type as a message prints it, never withheld. For a message with
+    /// no occurrence to withhold (a refused relation's two types): where
+    /// the checker's abbreviation is not known exactly
+    /// ([`Self::print_diagnostic_type`] is `None`) the type prints every
+    /// part, clipped where `typeToString` clips.
     fn print_diagnostic_type_clipped(&self, node: SemanticNodeId) -> String {
-        let printed = self.print_diagnostic_type_text(node);
-        let clip = DIAGNOSTIC_TYPE_TRUNCATION_LENGTH * 2;
-        if printed.chars().count() >= clip {
-            let kept: String = printed.chars().take(clip - 3).collect();
-            format!("{kept}...")
-        } else {
-            printed
-        }
+        self.print_diagnostic_type(node).unwrap_or_else(|| {
+            let context = crate::semantic_query::display::DisplayContext::for_checker(
+                self.relation_strict_config().strict_null_checks,
+            )
+            .unabbreviated();
+            crate::semantic_query::display::clip_checker_text(
+                self.print_diagnostic_type_text(node, context).0,
+            )
+        })
     }
 
-    /// One type as a diagnostic message prints it. `None` past the
-    /// checker's truncation length: `typeToString` abbreviates such a type
-    /// by a running length count this printer does not model, so no text
-    /// is claimed for it (`defaultMaximumTruncationLength`, TypeScript
-    /// 7.0.2).
+    /// One type as a diagnostic message prints it (`typeToString`),
+    /// abbreviated as the checker's node builder abbreviates it: past the
+    /// truncation length a union's or an intersection's remaining members
+    /// print as `... N more ...` before its last, an object's remaining
+    /// properties likewise, a type-argument or tuple list as `...`, and the
+    /// whole text is clipped at twice that length (TypeScript 7.0.2).
+    /// `None` when the print cannot be the checker's: a part whose
+    /// node-builder count is not modelled could move where it abbreviates,
+    /// or the display depth cap cut a part the message keeps.
     pub(in crate::project_semantic_dispatch) fn print_diagnostic_type(
         &self,
         node: SemanticNodeId,
     ) -> Option<String> {
-        let printed = self.print_diagnostic_type_text(node);
-        (printed.chars().count() <= DIAGNOSTIC_TYPE_TRUNCATION_LENGTH).then_some(printed)
+        let context = crate::semantic_query::display::DisplayContext::for_checker(
+            self.relation_strict_config().strict_null_checks,
+        );
+        let (printed, context) = self.print_diagnostic_type_text(node, context);
+        context.checker_text(printed)
     }
 
-    fn print_diagnostic_type_text(&self, node: SemanticNodeId) -> String {
-        crate::semantic_query::display::display_type_node(
+    fn print_diagnostic_type_text(
+        &self,
+        node: SemanticNodeId,
+        mut context: crate::semantic_query::display::DisplayContext,
+    ) -> (String, crate::semantic_query::display::DisplayContext) {
+        let printed = crate::semantic_query::display::display_type_node(
             self.graph().store(),
             node,
             crate::semantic_query::DisplayNeeds::single(
@@ -1935,11 +1941,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 crate::semantic_query::DisplayFacet::IncludeReadonlyModifier,
             )),
             crate::semantic_query::display::MAX_DISPLAY_DEPTH,
-            &mut crate::semantic_query::display::DisplayContext::for_checker(
-                self.relation_strict_config().strict_null_checks,
-            ),
+            &mut context,
         )
-        .0
+        .0;
+        (printed, context)
     }
 
     /// The properties `target` requires that `source` lacks, named as the

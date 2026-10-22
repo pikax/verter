@@ -54,7 +54,24 @@ as one path, `The types of 'a.b' …` / `The types returned by 'f()' …`), para
 `reportRelationError` does (`print_relation_operands`). A step this does not model — a non-primitive
 source against a target union (best match), index signatures, generic, optional or rest signature
 parameters, an undecided relation — explains nothing, and the diagnostic is not reported. No relation
-records a history: the explanation runs only when a recipe is bound.
+records a history: the explanation runs only when a recipe is bound. Its depth is the checker's relation
+stack (`checker_policy::RELATION_STACK_DEPTH`, 100): every step into a structured pair's part — a
+property, an array element, a tuple position, a parameter, a return, a predicate — holds the pair open
+on it, a union's or an intersection's member does not; past it the checker reports TS2321 instead,
+which is not modelled, so nothing is reported.
+
+Types print as the checker's `typeToString` prints them (`print_diagnostic_type`,
+`DisplayContext::for_checker`): the display walk keeps the node builder's running `approximateLength`
+(UTF-8 bytes, per node kind as the node is built: a named reference counts its name twice, a property
+its name and colon before its type, an object its braces after its members, each list entry two bytes
+before it) and its truncation latch past `checker_policy::MAXIMUM_TRUNCATION_LENGTH` (160) — a union's
+or an intersection's remaining members then print as `... N more ...` before the last, an object's
+remaining properties likewise, a member it begins past the length as `{ ...; }`, a type-argument or
+tuple list as `...` — and the whole text is clipped to its first 317 bytes and `...` at 320. A node kind
+whose count is not modelled (index signatures, mapped and `typeof` types, predicates, labelled tuple
+elements, …) bounds its count by twice its printed text; a type whose bound could reach the truncation
+length, or whose depth-cap cut lands inside the kept text, is not reported rather than abbreviated where
+the checker's is not.
 
 Decided by the recipe's producer: arity errors from `ArityEvidence` (`getArgumentArityError`) — TS2575
 for a count in a gap between the candidates' arities, else TS2554/TS2555 with `min`, `min-max` or the
@@ -70,9 +87,10 @@ the checker's first failure and records no diagnostic.
   (`lone_declared_signature`), so its applicability — and its diagnostic — is decided; its answer
   is the declared return either way: a refusal, or a route that cannot type the call, falls back to
   the caller's declared read (`callee_is_lone_declared`).
-- With explicit type arguments over overloads, the one candidate whose arity fits the call, when it
-  is also the checker's longest-candidate pick, is the error-recovery candidate
-  (`sole_arity_fitting_candidate`), reporting its argument's TS2345 instead of TS2769.
+- With explicit type arguments over overloads, the one candidate whose arity fits the call reports
+  its argument's TS2345 instead of TS2769, and the call recovers with the checker's longest candidate
+  (`explicit_overload_recovery`, `getLongestCandidateIndex`) — the same one, or another whose
+  instantiated return the call then takes, carrying the fitting candidate's diagnostic.
 
 ## Formatted node and walker diagnostics
 
@@ -86,7 +104,10 @@ the checker's first failure and records no diagnostic.
 
 Coverage: `call_diagnostics_carry_the_checkers_code_message_position_and_order` (TypeScript 7.0.2
 lines with their chains, cold and warm, two call sites),
-`a_diagnostic_the_route_cannot_place_is_not_reported`, the `checker_diagnostic::tests` recipe-binding
+`long_messages_print_as_the_checker_abbreviates_them` (a wide union, a wide object and a 70-level
+property path, cold and warm, two call sites of one body),
+`call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability` (the explicit-overload
+recovery with a differing return), `a_diagnostic_the_route_cannot_place_is_not_reported`, the `checker_diagnostic::tests` recipe-binding
 units, `resolve_symbol_graph_reports_the_checkers_ts2456_at_the_alias_name`,
 `a_relation_refusal_reports_the_checkers_formatted_ts2859`,
 `a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget`.

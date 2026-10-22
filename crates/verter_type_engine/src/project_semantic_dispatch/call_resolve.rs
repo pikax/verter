@@ -1713,54 +1713,74 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        // Every candidate of the bucket was a definite mismatch. A call with
-        // ONE candidate continues with it as the checker's error-recovery
-        // candidate (`getCandidateForOverloadFailure` picks the only one,
-        // re-inferred from the arguments), carrying the diagnostic the
-        // checker reports. It is checked under assignability, the one pass
-        // a single candidate has. Under explicit type arguments the checker
-        // reports the arity-fitting candidate's argument error but recovers
-        // with its longest candidate: when that is another candidate, the
-        // call continues with it, carrying the fitting candidate's
-        // diagnostic.
+        self.recover_call_failure(
+            key,
+            only_candidate,
+            recovered_candidate,
+            arguments,
+            &mut budget,
+            outer_applicability,
+            session_watermark,
+        )
+    }
+
+    /// The answer of a call every candidate of whose bucket was a definite
+    /// mismatch. A call with ONE candidate continues with it as the
+    /// checker's error-recovery candidate (`getCandidateForOverloadFailure`
+    /// picks the only one, re-inferred from the arguments), carrying the
+    /// diagnostic the checker reports. It is checked under assignability,
+    /// the one pass a single candidate has. Under explicit type arguments
+    /// the checker reports the arity-fitting candidate's argument error but
+    /// recovers with its longest candidate: when that is another candidate
+    /// (`recovered`), the call continues with it, carrying the fitting
+    /// candidate's diagnostic. Out of line, so the candidate walk's frame
+    /// holds none of this recovery's verdicts while it recurses.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn recover_call_failure(
+        &self,
+        key: &ResolveCallKey,
+        only_candidate: Option<(&SignatureRef, &SignatureRef)>,
+        recovered: Option<(&SignatureRef, &SignatureRef)>,
+        arguments: &[CallArgument],
+        budget: &mut CallResolutionBudget<'_>,
+        outer_applicability: crate::semantic_query::RelationKind,
+        session_watermark: usize,
+    ) -> CandidateVerdict {
         if let Some((candidate, raw_candidate)) = only_candidate {
             self.dispatch_txn.borrow_mut().call.applicability =
                 crate::semantic_query::RelationKind::Assignable;
-            let verdict = self.check_call_candidate(
+            let mut verdict = self.check_call_candidate(
                 key,
                 candidate,
                 raw_candidate,
                 arguments,
-                &mut budget,
+                budget,
                 true,
                 true,
                 None,
                 None,
             );
-            let verdict = match (verdict, recovered_candidate) {
-                (CandidateVerdict::Selected(reported), Some((recovered, raw_recovered))) => {
-                    match reported.selection.recovery_diagnostic() {
-                        Some(diagnostic) => {
-                            if let Some(session) = reported.staged_session {
-                                self.abandon_session(session);
-                            }
-                            self.check_call_candidate(
-                                key,
-                                recovered,
-                                raw_recovered,
-                                arguments,
-                                &mut budget,
-                                true,
-                                true,
-                                None,
-                                Some(diagnostic),
-                            )
-                        }
-                        None => CandidateVerdict::Selected(reported),
+            if let (CandidateVerdict::Selected(reported), Some((recovered, raw_recovered))) =
+                (&verdict, recovered)
+            {
+                if let Some(diagnostic) = reported.selection.recovery_diagnostic() {
+                    if let Some(session) = reported.staged_session {
+                        self.abandon_session(session);
                     }
+                    verdict = self.check_call_candidate(
+                        key,
+                        recovered,
+                        raw_recovered,
+                        arguments,
+                        budget,
+                        true,
+                        true,
+                        None,
+                        Some(diagnostic),
+                    );
                 }
-                (verdict, _) => verdict,
-            };
+            }
             self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
             match verdict {
                 CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),

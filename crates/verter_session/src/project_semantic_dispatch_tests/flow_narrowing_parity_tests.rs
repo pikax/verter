@@ -1600,16 +1600,23 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
     }
 }
 
-/// A message the printer cannot reproduce is not reported: the checker
-/// abbreviates a type past its truncation length by a running count this
-/// printer does not model, and an explanation chain past the elaboration
-/// budget would be cut where the checker's is not. Each answers without
-/// the diagnostic, never with a wrong one — and a short sibling call in the
-/// same source still reports.
+/// A long message prints as the checker prints it. Past its node builder's
+/// truncation length a union's remaining members elide as `... N more ...`
+/// before its last, a member it begins past that length as `{ ...; }`, and
+/// an object's remaining properties as `... N more ...;` before its last; a
+/// printed type of twice that length is clipped to its first 317 bytes and
+/// `...`; and a failure through a property path of 70 nested object types
+/// is explained on one path line, never cut. Each is reported at its own
+/// call, two calls of one body in source order, cold and warm. Every
+/// expected line is TypeScript 7.0.2's on this fixture, identical with
+/// `strictNullChecks` off.
 #[test]
-fn a_message_beyond_the_printers_reach_is_not_reported() {
+fn long_messages_print_as_the_checker_abbreviates_them() {
     let arms: Vec<String> = (0..40)
         .map(|ordinal| format!("{{ member{ordinal}: {ordinal} }}"))
+        .collect();
+    let properties: Vec<String> = (0..40)
+        .map(|ordinal| format!("p{ordinal}: {ordinal}"))
         .collect();
     let nest = |inner: &str, depth: usize| {
         let mut ty = inner.to_owned();
@@ -1623,26 +1630,68 @@ fn a_message_beyond_the_printers_reach_is_not_reported() {
          declare function nested(x: {}): void;\n\
          declare const wide: {};\n\
          declare const deep: {};\n\
+         declare const wobj: {{ {} }};\n\
          export function wide_union() {{ return one(wide); }}\n\
+         export function wide_object() {{ return one(wobj); }}\n\
          export function deep_chain() {{ return nested(deep); }}\n\
+         export function both() {{ return [one(wobj), one(wide)]; }}\n\
          export function short() {{ return one(1); }}\n",
         nest("number", 70),
         arms.join(" | "),
         nest("string", 70),
+        properties.join("; "),
     );
+    const ARG: &str = "is not assignable to parameter of type 'string'.";
+    let union = format!(
+        "Argument of type '{} | {{ ...; }} | ... 26 more ... | {{ ...; }}' {ARG}\n  \
+         Type '{{ member0: 0; }}' is not assignable to type 'string'.",
+        (0..12)
+            .map(|ordinal| format!("{{ member{ordinal}: {ordinal}; }}"))
+            .collect::<Vec<_>>()
+            .join(" | "),
+    );
+    let object = format!(
+        "Argument of type '{{ {}; ... 8 more ...; p39: 39; }}' {ARG}",
+        properties[..31].join("; "),
+    );
+    let clipped = format!("{}{{ ...", "{ a: ".repeat(63));
+    let deep = format!(
+        "Argument of type '{clipped}' is not assignable to parameter of type '{clipped}'.\n  \
+         The types of '{}' are incompatible between these types.\n    \
+         Type 'string' is not assignable to type 'number'.",
+        vec!["a"; 70].join("."),
+    );
+    let at = |position: &str, message: &str| format!("{position}: error TS2345: {message}");
+    let rows: Vec<(&str, Vec<String>)> = vec![
+        ("wide_union", vec![at("(7,43)", &union)]),
+        ("wide_object", vec![at("(8,44)", &object)]),
+        ("deep_chain", vec![at("(9,46)", &deep)]),
+        ("both", vec![at("(10,38)", &object), at("(10,49)", &union)]),
+        (
+            "short",
+            vec![at(
+                "(11,38)",
+                "Argument of type 'number' is not assignable to parameter of type 'string'.",
+            )],
+        ),
+    ];
     let host = host_with(&source);
-    for root in [STRICT_ROOT, LOOSE_ROOT] {
-        for function in ["wide_union", "deep_chain"] {
-            let reported = super::signature_predicate_inference_tests::checker_report(
-                &host, root, function, &source,
-            );
-            assert!(reported.is_empty(), "`{function}` in {root}: {reported:#?}");
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in &rows {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, &source,
+                );
+                if reported != *expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
         }
-        let short = super::signature_predicate_inference_tests::checker_report(
-            &host, root, "short", &source,
-        );
-        assert_eq!(short.len(), 1, "`short` in {root}: {short:#?}");
     }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 /// A diagnostic whose position the call's route cannot establish is not

@@ -24,14 +24,6 @@ use verter_type_expr::{IndexedElaboratedProperty, IndexedElaborationForm, Indexe
 use super::super::dispatch_txn::RelationStep;
 use super::super::ProjectSemanticDispatch;
 
-/// How many relation steps one diagnostic's chain explains before it gives
-/// up on the explanation (and with it, the diagnostic). This is an
-/// elaboration budget of this surface, not a checker value: the checker
-/// bounds its explanation only through its relation depth limits, so a
-/// chain past the budget fails closed — no diagnostic is reported rather
-/// than a truncated chain the checker would not print.
-const CHAIN_STEP_LIMIT: u32 = 64;
-
 /// The relation step a failed relation's pair fails at: the child pair it
 /// fails through, as the checker relates them.
 enum FailedStep {
@@ -49,9 +41,14 @@ enum FailedStep {
         source: SemanticNodeId,
         target: SemanticNodeId,
     },
-    /// A union source's member, an intersection target's member, or an
-    /// array's element type, reported with its own line.
+    /// A union source's member or an intersection target's member,
+    /// reported with its own line.
     Member {
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    },
+    /// An array's element type, reported with its own line.
+    Element {
         source: SemanticNodeId,
         target: SemanticNodeId,
     },
@@ -505,8 +502,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return Some(occurrence(span, code, arguments, Vec::new()));
         }
         let mut chain = Vec::new();
-        let mut steps = CHAIN_STEP_LIMIT;
-        self.explain_failure(source, target, 1, false, &mut chain, &mut steps)?;
+        self.explain_failure(
+            source,
+            target,
+            1,
+            false,
+            &mut chain,
+            crate::semantic_query::checker_policy::RELATION_STACK_DEPTH,
+        )?;
         let (source, target) = self.print_relation_operands(source, target)?;
         Some(CheckerDiagnosticOccurrence::new(
             span.0,
@@ -559,6 +562,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// Push the chain lines explaining why `source` fails `target`, from
     /// `depth`: the pair's own line when `own_line` (a pair below the
     /// diagnostic's own message), then its failed step's.
+    ///
+    /// `stack` is what is left of the checker's relation stack
+    /// (`RELATION_STACK_DEPTH`): every step into a structured pair's part —
+    /// a property, an element, a position, a parameter, a return or a
+    /// predicate — holds that pair open on it. A failure explained past it
+    /// is one the checker reports as TS2321 instead, which is not modelled,
+    /// so no diagnostic is reported for it.
     fn explain_failure(
         &self,
         source: SemanticNodeId,
@@ -566,9 +576,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         depth: u16,
         own_line: bool,
         chain: &mut Vec<CheckerDiagnosticChainLine>,
-        steps: &mut u32,
+        stack: u32,
     ) -> Option<()> {
-        *steps = steps.checked_sub(1)?;
         if self.weak_target_decides(source, target)? {
             return None;
         }
@@ -595,10 +604,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             depth
         };
         let below = depth.checked_add(1)?;
+        // A step into the pair's part holds the pair on the relation stack;
+        // a union's or an intersection's member does not.
+        let inner = stack.checked_sub(1);
         match step {
             FailedStep::Leaf | FailedStep::Missing { .. } => Some(()),
-            FailedStep::Member { source, target } | FailedStep::Return { source, target, .. } => {
-                self.explain_failure(source, target, depth, true, chain, steps)
+            FailedStep::Member { source, target } => {
+                self.explain_failure(source, target, depth, true, chain, stack)
+            }
+            FailedStep::Element { source, target } | FailedStep::Return { source, target, .. } => {
+                self.explain_failure(source, target, depth, true, chain, inner?)
             }
             FailedStep::Parameter {
                 source_name,
@@ -613,7 +628,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         "Types of parameters '{source_name}' and '{target_name}' are incompatible."
                     ),
                 );
-                self.explain_failure(source, target, below, true, chain, steps)
+                self.explain_failure(source, target, below, true, chain, inner?)
             }
             FailedStep::Predicate {
                 source_text,
@@ -626,7 +641,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     depth,
                     format!("Type predicate '{source_text}' is not assignable to '{target_text}'."),
                 );
-                self.explain_failure(source, target, below, true, chain, steps)
+                self.explain_failure(source, target, below, true, chain, inner?)
             }
             FailedStep::Position {
                 index,
@@ -640,7 +655,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         "Type at position {index} in source is not compatible with type at position {index} in target."
                     ),
                 );
-                self.explain_failure(source, target, below, true, chain, steps)
+                self.explain_failure(source, target, below, true, chain, inner?)
             }
             FailedStep::Property {
                 name,
@@ -652,8 +667,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // line of their own.
                 let mut path = vec![PathHop::Property(name)];
                 let (mut source, mut target) = (source, target);
+                let mut stack = inner?;
                 loop {
-                    *steps = steps.checked_sub(1)?;
                     match self.failed_step(source, target)? {
                         FailedStep::Property {
                             name,
@@ -662,6 +677,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         } => {
                             path.push(PathHop::Property(name));
                             (source, target) = (inner_source, inner_target);
+                            stack = stack.checked_sub(1)?;
                         }
                         FailedStep::Return {
                             source: inner_source,
@@ -670,12 +686,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         } => {
                             path.push(PathHop::Return { arguments });
                             (source, target) = (inner_source, inner_target);
+                            stack = stack.checked_sub(1)?;
                         }
                         _ => break,
                     }
                 }
                 push(chain, depth, incompatible_path_message(&path));
-                self.explain_failure(source, target, below, true, chain, steps)
+                self.explain_failure(source, target, below, true, chain, stack)
             }
         }
     }
@@ -750,7 +767,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 },
             ) => (!(*source_readonly && !*target_readonly)
                 && !self.relation_holds(*source_element, *target_element)?)
-            .then_some(FailedStep::Member {
+            .then_some(FailedStep::Element {
                 source: *source_element,
                 target: *target_element,
             }),

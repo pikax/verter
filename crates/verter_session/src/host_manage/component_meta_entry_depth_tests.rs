@@ -19,7 +19,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::for_tests::{
-    status_has_missing_dependency, status_is_depth_refusal as is_depth_refusal,
+    status_has_depth_limit, status_has_missing_dependency, status_has_operation_refusal,
+    status_is_depth_refusal as is_depth_refusal,
 };
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
@@ -300,18 +301,6 @@ fn non_isolated_and_other_profile_requests_compute_the_depth_refusal() {
     assert_eq!(replay.status(), sealed.status());
 }
 
-/// The status carries `CONNECTED_QUERY_DEPTH_LIMIT` among its partial
-/// reasons, whatever else it carries.
-fn status_has_depth_limit(status: verter_type_engine::semantic_query::FactStatus) -> bool {
-    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet};
-    match status {
-        FactStatus::Complete => false,
-        FactStatus::Approximate(reasons, _) | FactStatus::Unavailable(reasons) => reasons
-            .get()
-            .contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
-    }
-}
-
 /// A real missing dependency beside the depth trip is a competing cause:
 /// both are delivered, on every round, and the outcome is not retained.
 /// Supplying the input heals the missing-dependency cause, after which the
@@ -398,4 +387,52 @@ fn a_missing_input_alone_heals_when_supplied() {
     assert!(healed.is_complete(), "{:?}", healed.status());
     let names: Vec<&str> = healed.props.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["z"]);
+}
+
+/// A depth trip beside an operation refusal has two causes, and neither
+/// class alone describes it: the props intersect the deep chain with a
+/// mapped type wide enough that a small projection allowance trips while
+/// the chain trips its depth. Both reasons are delivered, and a repeat of
+/// the same isolated request, which owns its spend, computes again rather
+/// than replaying either refusal. Some allowance in the scanned range trips
+/// both; the others trip one cause and are not this boundary.
+///
+/// Mutation: retaining an isolated-root refusal whose set also holds an
+/// operation reason in `classify_final_component_retention` fails this
+/// test.
+#[test]
+fn a_depth_trip_beside_an_operation_refusal_is_computed_again() {
+    let keys: Vec<String> = (0..300).map(|key| format!("\"k{key}\"")).collect();
+    let prefix = format!(
+        "type Keys = {};\ntype Heavy = {{ [K in Keys]?: Partial<{{ x: K }}> }};\n",
+        keys.join(" | ")
+    );
+    let source = deep_partial_chain_source(DEEP, &prefix, " & Heavy");
+    let mut mixed = 0;
+    for (ordinal, allowance) in (110..=150).step_by(10).enumerate() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert(&host, OWNER, &source, FileLanguage::vue());
+        for round in 0..2u64 {
+            let _request = request(700 + 2 * ordinal as u64 + round, allowance);
+            let cold = ColdBodyProbe::arm();
+            let meta = host.get_component_meta(OWNER).expect("refusal");
+            let status = meta.status();
+            let both = status_has_depth_limit(status) && status_has_operation_refusal(status);
+            if round == 0 && !both {
+                break;
+            }
+            assert!(
+                both,
+                "both causes are delivered again (allowance {allowance}): {status:?}"
+            );
+            assert!(
+                cold.entered(),
+                "a two-cause refusal is computed again (allowance {allowance}, round {round})"
+            );
+            if round == 0 {
+                mixed += 1;
+            }
+        }
+    }
+    assert!(mixed > 0, "an allowance in the range trips both causes");
 }

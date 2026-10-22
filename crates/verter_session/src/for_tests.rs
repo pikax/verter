@@ -1447,6 +1447,40 @@ pub fn status_is_depth_refusal(status: verter_type_engine::semantic_query::FactS
     }
 }
 
+/// The status carries `CONNECTED_QUERY_DEPTH_LIMIT` among its partial
+/// reasons, whatever else it carries.
+pub fn status_has_depth_limit(status: verter_type_engine::semantic_query::FactStatus) -> bool {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet};
+    match status {
+        FactStatus::Complete => false,
+        FactStatus::Approximate(reasons, _) | FactStatus::Unavailable(reasons) => reasons
+            .get()
+            .contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
+    }
+}
+
+/// The status carries an operation-profile refusal (`BUDGET_EXCEEDED`,
+/// `OPERATION_BUDGET` or `PROJECTION_WORK_LIMIT`) among its partial
+/// reasons, whatever else it carries.
+pub fn status_has_operation_refusal(
+    status: verter_type_engine::semantic_query::FactStatus,
+) -> bool {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet};
+    match status {
+        FactStatus::Complete => false,
+        FactStatus::Approximate(reasons, _) | FactStatus::Unavailable(reasons) => {
+            let reasons = reasons.get();
+            [
+                PartialReasonSet::BUDGET_EXCEEDED,
+                PartialReasonSet::OPERATION_BUDGET,
+                PartialReasonSet::PROJECTION_WORK_LIMIT,
+            ]
+            .into_iter()
+            .any(|operation| reasons.contains(operation))
+        }
+    }
+}
+
 /// The status carries `MISSING_DEPENDENCY` among its partial reasons.
 pub fn status_has_missing_dependency(
     status: verter_type_engine::semantic_query::FactStatus,

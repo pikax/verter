@@ -841,8 +841,10 @@ pub struct BuildLocalTaint {
     pub(super) operation_refusals: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     /// The instantiation this frame builds, when it builds one
     /// ([`FrameProduction::of`]): a same-path claim finds the frame
-    /// producing the claimed instantiation by it.
-    pub(super) produces: Option<FrameProduction>,
+    /// producing the claimed instantiation by it. Boxed: a build frame is
+    /// held by value on every cold build's stack, which the key would
+    /// double.
+    pub(super) produces: Option<Box<FrameProduction>>,
 }
 
 /// The instantiation a build frame produces, in the family memo claim's own
@@ -863,10 +865,12 @@ impl FrameProduction {
     pub(super) fn of(
         key: &SemanticQueryKey,
         site: crate::semantic_query::checker_policy::TupleSplicePosition,
-    ) -> Option<Self> {
-        matches!(key, SemanticQueryKey::Instantiate(_)).then(|| Self {
-            key: key.clone(),
-            site,
+    ) -> Option<Box<Self>> {
+        matches!(key, SemanticQueryKey::Instantiate(_)).then(|| {
+            Box::new(Self {
+                key: key.clone(),
+                site,
+            })
         })
     }
 
