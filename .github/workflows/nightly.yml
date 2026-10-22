@@ -164,21 +164,37 @@ jobs:
       # install at all and leaned on an `npx @typescript/native-preview@latest`
       # step that populated an npx cache nothing ever reads.
       - run: pnpm install --frozen-lockfile
-      # Coverage executes the complete workspace test universe, including the
-      # real-tsserver suites. The workspace install creates the plugin symlink
-      # but not its `dist` entry or the language-shared output it loads.
+      # Coverage executes the real-provider suites too. The workspace install
+      # creates the plugin symlink but not its `dist` entry or the
+      # language-shared output it loads.
       - name: Build real-tsserver test prerequisites
         run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      # The LSP nextest-policy test asks nextest itself which tests the
-      # repository's nextest configuration serializes and times out.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+      # Coverage measures the test partition CI runs, under the runners it
+      # runs them with: the provider-free core under nextest (one process per
+      # test, which the process-wide retention and binding counters rely on)
+      # and each real-provider lane as serial libtest. A single in-process
+      # `cargo llvm-cov --workspace` run is not that universe: it executes the
+      # profile-specific shipped-cfg canaries under the dev profile, skips the
+      # compile-fixture metadata the core suites read, and runs every test of a
+      # binary as concurrent threads of one process. `show-env` instruments the
+      # ordinary cargo commands; `report` merges every lane's profiles.
       - name: Generate coverage
         env:
           VERTER_REQUIRE_TSGO: "1"
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: |
+          source <(cargo llvm-cov show-env --sh)
+          cargo llvm-cov clean --workspace
+          status=0
+          node scripts/compile-fixture-artifacts.mjs prepare --workspace || status=1
+          cargo nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)" || status=1
+          node scripts/provider-ci.mjs run tsgo || status=1
+          node scripts/provider-ci.mjs run tsserver || status=1
+          cargo llvm-cov report --lcov --output-path lcov.info
+          exit "$status"
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v6
         with:
