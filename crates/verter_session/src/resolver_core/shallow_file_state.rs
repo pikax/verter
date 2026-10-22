@@ -158,10 +158,6 @@ pub struct ShallowTypeView<'a> {
 pub struct ResolutionBudgets {
     /// Max local symbols visited during same-file closure.
     pub local_closure_steps: usize,
-    /// Max `(canonical_id, exported_name)` pairs visited by the frontier.
-    pub frontier_symbol_visits: usize,
-    /// Max symbolic expansion steps in the builder.
-    pub builder_expansion_steps: usize,
 }
 
 impl Default for ResolutionBudgets {
@@ -170,25 +166,15 @@ impl Default for ResolutionBudgets {
             // Intentionally high: most files have <50 local types.
             // 500 covers even very large single-file type libraries.
             local_closure_steps: 500,
-            // Intentionally high: real dependency graphs rarely exceed
-            // 200 unique external symbols per query.  The shared external
-            // type step ceiling keeps frontier and external resolution in
-            // sync.
-            frontier_symbol_visits: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
-            // Intentionally high: expansion is the costliest phase but
-            // the frontier already limits how much work reaches here.
-            builder_expansion_steps: 5000,
         }
     }
 }
 
-/// Work the frontier traversal charges against its budget.
-///
-/// Per-request, not a global accumulator: `frontier_symbol_visits` is the
-/// running count the frontier checks against
-/// [`ResolutionBudgets::frontier_symbol_visits`].
+/// Per-request work tally, not a global accumulator.
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionCounters {
+    /// Test-only visit tally; no production path reads it.
+    #[cfg(test)]
     pub frontier_symbol_visits: u64,
 }
 

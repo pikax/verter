@@ -1183,6 +1183,7 @@ impl VerterHost {
                     format!("owner={} dispatch_authority=true", canonical),
                 );
             }
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             if query_engine.has_fuse_tripped() {
                 for trip in query_engine.fuse_trips() {
                     verter_type_engine::component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
@@ -1288,20 +1289,24 @@ impl VerterHost {
         // the two in lock-step.
         let request_result_partial =
             verter_type_engine::request_context::current_request_result_is_partial();
+        let request_reasons = verter_type_engine::request_context::current_request_result_reasons();
+        let propagated_or_named = if request_reasons.is_empty() {
+            verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED
+        } else {
+            request_reasons
+        };
         let completeness = match (synthesis_suppression, request_result_partial) {
             (Some(reasons), true) => {
                 verter_type_engine::semantic_query::ResultCompleteness::partial(
-                    reasons
-                        .get()
-                        .union(verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED),
+                    reasons.get().union(propagated_or_named),
                 )
             }
             (Some(reasons), false) => {
                 verter_type_engine::semantic_query::ResultCompleteness::partial(reasons.get())
             }
-            (None, true) => verter_type_engine::semantic_query::ResultCompleteness::partial(
-                verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
-            ),
+            (None, true) => {
+                verter_type_engine::semantic_query::ResultCompleteness::partial(propagated_or_named)
+            }
             (None, false) => verter_type_engine::semantic_query::ResultCompleteness::Complete,
         };
         let synthesis_should_suppress = completeness.is_partial();

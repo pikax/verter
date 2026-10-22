@@ -2249,3 +2249,86 @@ fn carrier_stopped_pick_publishes_accessors_as_properties() {
         "`w` publishes the setter's parameter type `string`, got {w:?}"
     );
 }
+
+/// `defineProps<Props>()` where `Props` has `count` members, each typed by a distinct
+/// same-file helper interface.
+fn many_helper_interfaces_vue(count: usize) -> String {
+    use std::fmt::Write as _;
+    let mut src = String::from("<script setup lang=\"ts\">\n");
+    for i in 0..count {
+        let _ = writeln!(src, "interface H{i} {{ p{i}?: string }}");
+    }
+    let members: Vec<String> = (0..count).map(|i| format!("m{i}?: H{i}")).collect();
+    let _ = writeln!(
+        src,
+        "interface Props {{ {} }}
+defineProps<Props>()
+</script>
+<template><div /></template>",
+        members.join("; ")
+    );
+    src
+}
+
+/// A registry-deepening fan-out trip publishes the named budget class
+/// (not the generic propagated marker), and the result is refused warm
+/// admission; a below-cap control stays complete.
+#[test]
+fn fanout_fuse_trip_publishes_named_budget_reason_and_is_not_warm() {
+    #[cfg(feature = "semantic-observe")]
+    use std::sync::atomic::Ordering::Relaxed;
+    use verter_type_engine::semantic_query::PartialReason;
+
+    let over = many_helper_interfaces_vue(301);
+    let under = many_helper_interfaces_vue(2);
+    let project = build_hermetic_project(&[
+        ("/workspace/src/Over.vue", over.leak()),
+        ("/workspace/src/Under.vue", under.leak()),
+    ]);
+    let host = project.host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
+
+    let (_meta, control) = host
+        .get_component_meta_with_resolution("/workspace/src/Under.vue")
+        .expect("below-cap control resolves");
+    assert!(
+        !control.completeness.is_partial(),
+        "below-cap control stays complete: {:?}",
+        control.completeness
+    );
+
+    let (_meta, tripped) = host
+        .get_component_meta_with_resolution("/workspace/src/Over.vue")
+        .expect("a fan-out trip still returns partial metadata");
+    assert!(
+        tripped
+            .completeness
+            .reasons()
+            .iter()
+            .any(|r| r == PartialReason::BudgetExceeded),
+        "the fan-out trip must carry BUDGET_EXCEEDED, got {:?}",
+        tripped.completeness
+    );
+
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let hits_before = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        let _ = host
+            .get_component_meta_with_resolution("/workspace/src/Over.vue")
+            .expect("second resolve succeeds");
+        assert_eq!(
+            host.provenance()
+                .component_meta_result_cache_hits
+                .load(Relaxed),
+            hits_before,
+            "a fan-out partial must not be served as a warm final-result hit"
+        );
+    }
+}

@@ -583,24 +583,19 @@ pub struct HostConfig {
     /// promoted to host-owned state per §0.6.5 stack-depth
     /// discipline).
     ///
-    /// The legacy engine carried this as `FuseBudgets::projection_op_count`,
-    /// a per-engine-construction-scoped fuse rail (§1.4) that
-    /// terminates utility-shape recursion (`Partial<T>` / `Pick<T,K>` /
-    /// etc.) before recursion exhausts the call stack.
-    /// Promotes the BUDGET (not the per-request COUNTER — that lives
-    /// in the request-scoped `RequestBudget` accessed via TLS) to a
-    /// constructor-time `HostConfig` field so dispatch consumers
-    /// observe the same cap.
+    /// The BUDGET is host configuration; the per-request COUNTER lives
+    /// in the request-scoped `RequestBudget` accessed via TLS, which is
+    /// the single operation account for a request: semantic dispatch
+    /// charges it per counted query and replays stored receipts into it,
+    /// and the component-meta query engine reads its exhaustion rather
+    /// than keeping a count of its own.
     ///
     /// Constructor-time per §0.6.5: callers may NOT mutate this on
     /// an existing host. Default:
     /// [`verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET`]
-    /// (the `FuseBudgets::projection_op_count` default).
+    /// (the checker's instantiation allowance).
     ///
-    /// When `0`, the legacy `FuseBudgets::default()` value is used as
-    /// a fall-back so existing tests that construct a `HostConfig`
-    /// without setting this field continue to observe the documented
-    /// finite default cap.
+    /// When `0`, that same default applies.
     pub projection_op_budget: usize,
     /// Eviction-policy tunables for the project-global cache cluster.
     ///
@@ -622,22 +617,6 @@ pub struct HostConfig {
     /// match LSP-server hover/completion responsiveness expectations
     /// (see [`LspMethodTimeoutsConfig::default`]).
     pub lsp_method_timeouts: LspMethodTimeoutsConfig,
-    /// Override for the cross-file external-type frontier's
-    /// `frontier_symbol_visits` step budget
-    /// ([`crate::resolver_core::ResolutionBudgets::frontier_symbol_visits`]).
-    ///
-    /// `None` (the default) selects the production ceiling
-    /// [`crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS`] (2000), so
-    /// the frontier built at the single production construction site
-    /// behaves byte-identically to the historical default. `Some(n)`
-    /// caps the frontier at `n` `(canonical_id, exported_name)`
-    /// visits.
-    ///
-    /// Used by the wide-import-graph regression tests to drive the
-    /// hard frontier step-limit on a small hermetic fixture instead
-    /// of a 2005-symbol corpus, without mutating the global default
-    /// budget. Production code leaves this `None`.
-    pub external_resolution_step_budget: Option<usize>,
     /// Override hooks for resolver budgets. Used by tests to drive
     /// the synthesis path into deliberate budget breaches without
     /// mutating the global default budget.
@@ -1197,7 +1176,6 @@ impl Default for HostConfig {
             projection_op_budget: verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
             eviction_policy: EvictionPolicyConfig::default(),
             lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
-            external_resolution_step_budget: None,
             recursion_budget_overrides: RecursionBudgetOverrides::default(),
             typeinfo_scratch_cache_capacity: None,
             host_cpu_threads: None,
@@ -3950,19 +3928,6 @@ pub(crate) struct EffectiveFileState {
     pub(crate) whole_hash: Hash16,
 }
 
-// External type resolution limits
-
-/// Maximum recursion depth for external type resolution.
-///
-/// Safety net for pathological barrel chains. The barrel resolution cache
-/// Maximum distinct `(canonical,type)` external-resolution pairs per request.
-///
-/// This is a hard safety cap for component-meta and macro type resolution.
-/// When a single imported surface fans out into an unexpectedly large graph,
-/// fail explicitly instead of continuing to allocate until the caller runs
-/// out of memory.
-pub(crate) const MAX_EXTERNAL_TYPE_RESOLVE_STEPS: usize = 2_000;
-
 /// Cached host-owned component-meta resolved state.
 ///
 /// The declaration-graph traversal cache remains shared and mode-agnostic.
@@ -4281,7 +4246,6 @@ mod tests {
             projection_op_budget: _,
             eviction_policy: _,
             lsp_method_timeouts: _,
-            external_resolution_step_budget: _,
             recursion_budget_overrides: _,
             typeinfo_scratch_cache_capacity: _,
             host_cpu_threads: _,
@@ -4579,15 +4543,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // HostConfig default tests
     // -----------------------------------------------------------------------
-
-    /// The external-resolution step budget defaults to `None` so the
-    /// production frontier construction site keeps using
-    /// `MAX_EXTERNAL_TYPE_RESOLVE_STEPS`. A non-`None` default would
-    /// silently re-cap every production resolution.
-    #[test]
-    fn host_config_default_external_resolution_step_budget_is_none() {
-        assert_eq!(HostConfig::default().external_resolution_step_budget, None);
-    }
 
     // -----------------------------------------------------------------------
     // PoolSize::resolve totality
