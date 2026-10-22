@@ -1322,6 +1322,11 @@ results retain their node operands. Counted ownership is the sole lifetime
 authority: a node is destroyed by its last owner's release, and a close never
 revokes a held one. There is no canonical sweep, watermark or activity gate.
 
+A consumer observes a delivered flow return through `FlowReturnResult::return_root()`: an owning `NodeRoot` of the return node taken from the
+result's own lease (never from a raw ordinal), fed to the host's bounded `project_node_to_type_expr_json_bytes`. It reuses the delivered
+value and lease, so it runs no second evaluation and keeps no separate accounting; `degradation()` still distinguishes exact from degraded, an
+undelivered result yields `ForeignSemanticOperand`, and another host's graph projects nothing.
+
 `HostRetentionSnapshot::semantic_node_ownership` reports current live nodes,
 root acquisitions, retained child occurrences and permanent nodes. Statistics
 expose `semanticNodeRoots`, `semanticNodeInternalEdges` and

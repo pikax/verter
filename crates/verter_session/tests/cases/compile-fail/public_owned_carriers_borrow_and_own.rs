@@ -10,6 +10,7 @@
 //! is kept, cloned and read after the dispatcher is gone, and a builder that
 //! composes construction ordinals opens its own explicit owner.
 
+use verter_audit::observe::ObserveExec;
 use verter_session_query::flow::policy::NullabilityPolicy;
 use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 use verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface;
@@ -101,14 +102,14 @@ fn read_origin_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> usize 
         + usize::from(graph.node_scope_in_scope(id).is_some())
 }
 
-fn render_and_build_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> bool {
+fn render_and_build_in_lane<M: ObserveExec>(graph: GraphIn<'_, M>, id: SemanticNodeId) -> bool {
     let shown = display::display_in_scope(
-        graph,
+        graph.store(),
         &SemanticQueryValue::TypeNode(id),
         DisplayNeeds::empty(),
     );
     let union =
-        canonical_algebra::intern_ordered_union_in_scope(GraphIn::of(graph), &[id], NullabilityPolicy::Strict);
+        canonical_algebra::intern_ordered_union_in_scope(graph, &[id], NullabilityPolicy::Strict);
     shown.is_some() && union.is_some()
 }
 
