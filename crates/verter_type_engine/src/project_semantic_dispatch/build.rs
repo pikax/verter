@@ -5,6 +5,8 @@
 //! (`graph`, `opaque`, `dep_signature_for`, etc.) without widening their
 //! visibility beyond `pub(super)`.
 
+use crate::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
 use std::sync::Arc;
 use verter_type_expr::OwnedStr;
 
@@ -35,6 +37,69 @@ thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn mapped_name_remap_evaluations_for_tests() -> u64 {
     MAPPED_NAME_REMAP_EVALUATIONS.get()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static WRITTEN_UNION_ARM_CLASSIFICATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Written-union arms classified for literal absorption on this thread, for
+/// growth tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn written_union_arm_classifications_for_tests() -> u64 {
+    WRITTEN_UNION_ARM_CLASSIFICATIONS.get()
+}
+
+/// What a written-union arm can take part in when the checker absorbs
+/// literals into their supertypes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AbsorptionRole {
+    /// A literal no other arm is absorbed into.
+    Literal,
+    /// A pattern template: a literal itself, and a supertype of the literals
+    /// it matches.
+    PatternTemplate,
+    /// A supertype a literal may be absorbed into: its primitive, `any` or
+    /// `unknown`.
+    Supertype,
+    /// Anything else.
+    Inert,
+}
+
+/// Whether some literal arm of `arms` has a supertype arm other than itself
+/// that may absorb it, deciding each arm's `role` once in one pass: a plain
+/// literal beside any supertype, or a pattern template beside a second,
+/// distinct supertype.
+fn may_absorb_a_literal(
+    arms: &[SemanticNodeId],
+    mut role: impl FnMut(SemanticNodeId) -> AbsorptionRole,
+) -> bool {
+    let mut literal = false;
+    let mut template = false;
+    let mut supertype: Option<SemanticNodeId> = None;
+    let mut distinct_supertypes = false;
+    for &arm in arms {
+        #[cfg(any(test, feature = "test-support"))]
+        WRITTEN_UNION_ARM_CLASSIFICATIONS.set(WRITTEN_UNION_ARM_CLASSIFICATIONS.get() + 1);
+        let arm_role = role(arm);
+        match arm_role {
+            AbsorptionRole::Literal => literal = true,
+            AbsorptionRole::PatternTemplate | AbsorptionRole::Supertype => {
+                template |= arm_role == AbsorptionRole::PatternTemplate;
+                match supertype {
+                    None => supertype = Some(arm),
+                    Some(first) if first != arm => distinct_supertypes = true,
+                    Some(_) => {}
+                }
+            }
+            AbsorptionRole::Inert => {}
+        }
+        if supertype.is_some() && (literal || (template && distinct_supertypes)) {
+            return true;
+        }
+    }
+    false
 }
 
 #[path = "tuple_product.rs"]
@@ -170,23 +235,11 @@ pub(crate) struct PlannedContributorBody {
     /// projection is then the shared miss sentinel).
     shape: Option<SemanticNodeId>,
     owner_symbol: verter_type_expr::OwnedStr,
-    kind: verter_session_query::declarations::TypeDeclKind,
-    type_parameters: Arc<[verter_type_expr::facts::NarrowTypeParam]>,
-    name_resolution: verter_session_query::type_solver::prepared::NameResolutionTable,
-    binding: PlannedBinding,
+    prepared: verter_retention::heap_size::OwnedValue<PreparedTypeDecl>,
+    augmentation: Option<verter_session_query::declarations::AugmentationScopeKind>,
     scope: NodeScopeId,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
     shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
-}
-
-/// How a planned body's type parameters bind to the augmented
-/// declaration's arguments.
-enum PlannedBinding {
-    /// An augmenting block's parameters, bound positionally when planned.
-    Bound(FxHashMap<String, SemanticNodeId>),
-    /// A script declaration's: its arguments bind through its declared
-    /// defaults under the projecting context.
-    Declared(verter_retention::heap_size::OwnedValue<PreparedTypeDecl>),
 }
 
 /// A type-body augmentation fold before projection: the ordered planned
@@ -563,6 +616,64 @@ pub(super) struct InferScan {
     pub(super) binder_scope: bool,
 }
 
+/// The dispatcher's witness that every step of the computation it is
+/// building was a complete function of its state: nothing it read was a
+/// partial (a refused child, a recursion carrier, a missing input) or a
+/// result its memo would not keep, and the request was not cancelled. Only
+/// [`ProjectSemanticDispatch::exact_steps`] and
+/// [`ProjectSemanticDispatch::exact_steps_since`] mint one, and a divergence
+/// is certified only with it
+/// ([`CertifiedDivergence`](crate::semantic_query::checker_policy::CertifiedDivergence)).
+pub(crate) struct ExactSteps {
+    _proof: (),
+}
+
+/// The dispatcher's witness that a conditional tail run grows without end:
+/// one argument is wrapped in the same structural constructor at every
+/// step, the others pass through unchanged, and the conditional selects the
+/// recursive branch for EVERY argument that constructor can hold — decided
+/// by the checker's own definitely-true / definitely-false tests over the
+/// wrapped type parameter, not by the steps taken so far. Only
+/// [`ProjectSemanticDispatch::uniform_growth`] mints one
+/// ([`CertifiedDivergence::uniform_growth`](crate::semantic_query::checker_policy::CertifiedDivergence::uniform_growth)).
+pub(crate) struct UniformGrowth {
+    _proof: (),
+}
+
+/// A declaration that grows one of its type parameters uniformly
+/// ([`ProjectSemanticDispatch::read_growth_shape`]): its recursive branch
+/// passes `wrapper` — a structural constructor over `parameter`, the type
+/// parameter at clause position `index` — and the conditional selects
+/// that branch for every instantiation of the wrapper.
+#[derive(Debug, Clone, Copy)]
+struct GrowthShape {
+    index: usize,
+    parameter: SemanticNodeId,
+    wrapper: SemanticNodeId,
+}
+
+/// Whether a build frame's steps so far are exact: it holds no partial and
+/// nothing its memo would refuse to keep.
+fn frame_is_exact(frame: &super::BuildLocalTaint) -> bool {
+    !frame.result_is_partial && !frame.cache_suppress
+}
+
+/// Whether the frame on `frames` producing the instantiation `identity`
+/// and every frame built on top of it are exact. `false` when no frame on
+/// the stack produces it: frames below the producer belong to its callers
+/// and are not consulted.
+fn exact_since_producer(frames: &[super::BuildLocalTaint], identity: u64) -> bool {
+    for frame in frames.iter().rev() {
+        if !frame_is_exact(frame) {
+            return false;
+        }
+        if frame.produces == Some(identity) {
+            return true;
+        }
+    }
+    false
+}
+
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Native Omit key insertions and membership probes on this thread.
     #[cfg(any(test, feature = "test-support"))]
@@ -853,7 +964,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             canonical_id: key.scope.canonical_id.clone(),
             owner: key.scope.owner,
             whole_hash: observed_hash,
-            local_scope: key.scope.local_scope,
+            local_scope: key
+                .scope
+                .local_scope
+                .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
         };
         let signature = self.dep_signature_for(&key.scope.canonical_id, observed_hash);
         // Return a DeclPlaceholder that carries enough identity for
@@ -1126,6 +1240,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &mut substitutions,
                             context,
                         );
+                        let node = self.normalize_widened_object_literals(
+                            node,
+                            self.nullability_for(job.prepared.root_identity.canonical_id.as_ref()),
+                        );
                         signatures.record(node);
                     }
                 }
@@ -1196,17 +1314,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (*root == redirect.declaring && head_path.is_empty()).then(|| identity.clone())
             });
             if let Some(identity) = authored {
-                output.result = QueryResult::Value(self.intern_nominal_typeof(
-                    redirect.authored.clone(),
-                    redirect.path.clone(),
-                    identity,
-                    NodeScopeId::File {
-                        canonical_id: redirect.authored.scope.canonical_id.clone(),
-                        owner: redirect.authored.scope.owner,
-                        whole_hash: redirect.observed_hash,
-                        local_scope: redirect.authored.scope.local_scope,
-                    },
-                ));
+                output.result =
+                    QueryResult::Value(
+                        self.intern_nominal_typeof(
+                            redirect.authored.clone(),
+                            redirect.path.clone(),
+                            identity,
+                            NodeScopeId::File {
+                                canonical_id: redirect.authored.scope.canonical_id.clone(),
+                                owner: redirect.authored.scope.owner,
+                                whole_hash: redirect.observed_hash,
+                                local_scope: redirect.authored.scope.local_scope.map(|ordinal| {
+                                    NodeLocalScopeId::Lexical(LocalScopeId(ordinal))
+                                }),
+                            },
+                        ),
+                    );
             }
         }
         // A member read through an import also depends on this file's
@@ -1254,6 +1377,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
                     ));
                 };
+                let node = self.normalize_inferred_value_type(&build.prepared, node);
                 let output = self.typeof_output(
                     node,
                     false,
@@ -1304,7 +1428,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             let (node, roots, unobservable) = match &mut build.then {
                 TypeofThen::Value => (
-                    self.widen_declared_read_positions(node, &build.prepared),
+                    self.normalize_inferred_value_type(
+                        &build.prepared,
+                        self.widen_declared_read_positions(node, &build.prepared),
+                    ),
                     Vec::new(),
                     false,
                 ),
@@ -1338,6 +1465,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )));
                 }
                 TypeofThen::Signatures(signatures) => {
+                    let node = self.normalize_widened_object_literals(
+                        node,
+                        self.nullability_for(build.prepared.root_identity.canonical_id.as_ref()),
+                    );
                     signatures.record(node);
                     match self.next_value_signature(signatures) {
                         Some(Some(job)) => {
@@ -1448,6 +1579,69 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let shallow = &indexed.shallow_state;
         let observed_hash = indexed.whole_hash;
+        // A value rooted while lowering an ambient namespace body keeps the
+        // exact module scope. Same-named namespaces in other modules and
+        // file declarations cannot replace this inventory entry.
+        let ambient_scope = Self::ambient_value_scope(&value_root.scope, &shallow.headers);
+
+        // An `import X = N.M` alias names what `N.M` names: a path it heads
+        // reads from the entity's qualified path.
+        if value_root.scope.local_scope.is_none() {
+            if let Some(expanded) = shallow
+                .headers
+                .expand_namespace_alias(value_root.scope.owner, value_root.name.as_ref())
+            {
+                let mut segments = expanded.split('.').map(verter_type_expr::OwnedStr::from);
+                let root = segments
+                    .next()
+                    .expect("a qualified name has a first segment");
+                let aliased_path: Vec<verter_type_expr::OwnedStr> =
+                    segments.chain(path.iter().cloned()).collect();
+                let aliased_root = ValueRootKey {
+                    scope: value_root.scope.clone(),
+                    name: root,
+                };
+                return self.build_typeof_suspending(
+                    &aliased_root,
+                    &aliased_path,
+                    context,
+                    suspend,
+                );
+            }
+            // An import of a module's `export import X = N.M` alias reads
+            // what the alias names, in the module that declares it.
+            if let Some(alias) = crate::resolver_core::bare_name_resolve::imported_namespace_alias(
+                self.ctx,
+                value_root.scope.canonical_id.as_ref(),
+                value_root.scope.owner,
+                value_root.name.as_ref(),
+            ) {
+                let declaring = ValueRootKey {
+                    scope: crate::semantic_query::ScopeId {
+                        canonical_id: verter_type_expr::OwnedStr::from(alias.module.as_str()),
+                        owner: alias.owner,
+                        local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            alias.owner,
+                        ),
+                    },
+                    name: verter_type_expr::OwnedStr::from(alias.name.as_str()),
+                };
+                let output =
+                    self.build_typeof_suspending(&declaring, path, context, suspend.as_deref_mut());
+                let redirect = TypeofRedirect {
+                    declaring,
+                    authored: value_root.clone(),
+                    path: verter_type_expr::OwnedSlice::default(),
+                    observed_hash,
+                };
+                if let Some(Some(build)) = suspend {
+                    build.redirects.push(redirect);
+                    return output;
+                }
+                return self.finish_typeof_redirect(output, &redirect);
+            }
+        }
 
         // A namespace member path: a namespace block has no value surface
         // the path could walk, and its members register under their
@@ -1460,12 +1654,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             for (split, segment) in path.iter().enumerate() {
                 joined.push('.');
                 joined.push_str(segment);
-                if matches!(
-                    shallow.visible_value_binding(value_root.scope.owner, &joined),
-                    Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
-                ) && shallow
-                    .headers
-                    .namespace_member_is_exported(value_root.scope.owner, &joined)
+                let declared = match ambient_scope {
+                    Some(augmentation) => shallow
+                        .headers
+                        .augmentation_value_header_in(augmentation, value_root.scope.owner, &joined)
+                        .is_some(),
+                    None => matches!(
+                        shallow.visible_value_binding(value_root.scope.owner, &joined),
+                        Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
+                    ),
+                };
+                if declared
+                    && shallow
+                        .headers
+                        .namespace_member_is_exported(value_root.scope.owner, &joined)
                 {
                     let member_root = ValueRootKey {
                         scope: value_root.scope.clone(),
@@ -1485,22 +1687,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // rune module's ambient `$state`/`$derived`/… value (and the rune
         // namespace types) is seen as locally declared at the `typeof`-rooted
         // dispatch surface. Plain `.ts` is unaffected (rune-module-gated).
-        let visible_value =
-            shallow.visible_value_binding(value_root.scope.owner, value_root.name.as_ref());
+        let visible_value = ambient_scope
+            .is_none()
+            .then(|| {
+                shallow.visible_value_binding(value_root.scope.owner, value_root.name.as_ref())
+            })
+            .flatten();
         // A member of one of the file's `declare module "…"` blocks is a
         // value the root's identity names too (an import of the ambient
         // module reaches it here).
-        let has_value = matches!(
-            visible_value,
-            Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
-        ) || (visible_value.is_none()
-            && matches!(
-                shallow.value_fallback_augmentation_scope(
+        let has_value = match ambient_scope {
+            Some(augmentation) => shallow
+                .headers
+                .augmentation_value_header_in(
+                    augmentation,
                     value_root.scope.owner,
-                    value_root.name.as_ref()
-                ),
-                Some(verter_session_query::declarations::AugmentationScopeKind::Module(_))
-            ));
+                    value_root.name.as_ref(),
+                )
+                .is_some(),
+            None => {
+                matches!(
+                    visible_value,
+                    Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
+                ) || (visible_value.is_none()
+                    && matches!(
+                        shallow.value_fallback_augmentation_scope(
+                            value_root.scope.owner,
+                            value_root.name.as_ref()
+                        ),
+                        Some(verter_session_query::declarations::AugmentationScopeKind::Module(_))
+                    ))
+            }
+        };
         let has_import_local = matches!(
             visible_value,
             Some(verter_session_query::inputs::shallow::LexicalValueBinding::Import(_))
@@ -1523,8 +1741,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // names one reads the rest of the path from it. The namespace a
         // function or class merges with contributes its members this way too.
         let unbound = !(has_value || has_import_local || has_namespace_prefix);
-        if let Some((member_root, consumed)) =
-            self.qualified_value_member_root(value_root, path, shallow, unbound)
+        if let Some((member_root, consumed)) = ambient_scope
+            .is_none()
+            .then(|| self.qualified_value_member_root(value_root, path, shallow, unbound))
+            .flatten()
         {
             let output = self.build_typeof_suspending(
                 &member_root,
@@ -1594,7 +1814,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     canonical_id: value_root.scope.canonical_id.clone(),
                     owner: value_root.scope.owner,
                     whole_hash: observed_hash,
-                    local_scope: value_root.scope.local_scope,
+                    local_scope: value_root
+                        .scope
+                        .local_scope
+                        .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
                 };
                 let carrier = self.graph().intern_node_with_scope(
                     SemanticNodeData::new_typeof(
@@ -1678,15 +1901,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             canonical_id: value_root.scope.canonical_id.clone(),
             owner: value_root.scope.owner,
             whole_hash: observed_hash,
-            local_scope: value_root.scope.local_scope,
+            local_scope: value_root
+                .scope
+                .local_scope
+                .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
         };
         let scope_payload = self
             .ctx
             .prepared_decl_bundle(value_root.scope.canonical_id.as_ref())
             .map(|bundle| {
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                self.declaration_scope_payload(
                     &bundle,
+                    value_root.scope.canonical_id.as_ref(),
                     value_root.scope.owner,
+                    value_root.name.as_ref(),
                 )
             });
         // R15/F11 — capture the scope-shadowing context
@@ -1697,6 +1925,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         let resolved_root = match global_root {
             Some(global) => Some(global),
+            None if ambient_scope.is_some() => Some(ResolvedRootIdentity::new_in_owner(
+                value_root.scope.canonical_id.clone(),
+                value_root.scope.owner,
+                value_root.name.as_ref(),
+            )),
             None => crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                 self.ctx,
                 self,
@@ -1792,12 +2025,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // export-target walk yields the DECLARING decl — every downstream
         // consumer (the class-surface slot in particular) keys and lowers
         // under THAT identity, never the stale re-export root.
-        let Some((effective_canonical, effective_owner, effective_symbol, prepared)) = self
-            .effective_prepared_value_decl(
-                &root_identity.canonical_id,
-                root_identity.owner,
-                &root_identity.symbol_name,
-            )
+        let effective = self.effective_prepared_value_decl_in_augmentation(
+            &root_identity.canonical_id,
+            root_identity.owner,
+            &root_identity.symbol_name,
+            ambient_scope,
+        );
+        let Some((effective_canonical, effective_owner, effective_symbol, prepared)) = effective
         else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
@@ -2148,7 +2382,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             Some(verter_type_expr::facts::SemanticTypeSource::Authored(
                                 locator,
                             )) => locator.clone(),
-                            _ => value_position_locator(&prepared),
+                            _ => value_position_locator(&prepared, ambient_scope),
+                        };
+                        let locator = match &locator {
+                            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => {
+                                scoped_type_body_locator(slot, ambient_scope)
+                            }
+                            _ => locator,
                         };
                         match self.lower_typeof_body_or_suspend(
                             locator,
@@ -2181,7 +2421,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // value position through the located body source (the transient
             // value-part re-borrow serves the object initializer's typed IR).
             match self.lower_typeof_body_or_suspend(
-                value_position_locator(&prepared),
+                value_position_locator(&prepared, ambient_scope),
                 suspend,
                 TypeofBodyScope {
                     prepared: &prepared,
@@ -2211,6 +2451,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &prepared,
                 is_class,
                 std::mem::take(&mut global_peers),
+                ambient_scope,
             );
             match self.lower_value_signatures_or_suspend(
                 signatures,
@@ -2242,12 +2483,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             effective_owner,
             effective_symbol.clone(),
             &prepared,
+            ambient_scope,
         ) {
             // The enum object: every member, a constant one and a computed
             // one alike, as a readonly property of its literal type.
             self.enum_object(&enumeration)
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+        };
+        let node_id = self.normalize_inferred_value_type(&prepared, node_id);
+        // A namespace of a class's name merges into its value: the
+        // namespace's exported values are properties of the class's static
+        // side (a function's join in `finish_value_signatures`).
+        let node_id = if synthesised_default.is_none()
+            && prepared.kind == verter_session_query::declarations::ValueDeclKind::Class
+        {
+            let (object, roots) = self.namespace_merged_into_value(
+                effective_canonical.as_ref(),
+                effective_owner,
+                effective_symbol.as_ref(),
+                context,
+            );
+            augmentation_roots.extend(roots);
+            match object {
+                Some(object) => self.merged_value_and_namespace(
+                    node_id,
+                    object,
+                    NodeScopeId::File {
+                        canonical_id: value_root.scope.canonical_id.clone(),
+                        owner: value_root.scope.owner,
+                        whole_hash: observed_hash,
+                        local_scope: value_root
+                            .scope
+                            .local_scope
+                            .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
+                    },
+                ),
+                None => node_id,
+            }
+        } else {
+            node_id
         };
         let output = self.typeof_output(
             node_id,
@@ -2258,6 +2533,99 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             observed_hash,
         );
         self.with_augmentation_roots(output, augmentation_roots, augmentation_unobservable)
+    }
+
+    /// Inferred declarations widen their object literals in the same context
+    /// as return and yield joins. Authored annotations keep their own types.
+    fn normalize_inferred_value_type(
+        &self,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        if matches!(
+            prepared.type_annotation.annotation,
+            Some(verter_type_expr::facts::SemanticTypeSource::Authored(_))
+        ) {
+            return node;
+        }
+        let nullability = self.nullability_for(prepared.root_identity.canonical_id.as_ref());
+        self.normalize_inferred_initializer_type(node, nullability)
+    }
+
+    fn normalize_inferred_initializer_type(
+        &self,
+        node: SemanticNodeId,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        let normalized = self.normalize_widened_object_literals(node, nullability);
+        self.regularized_source_node_with_policy(normalized, nullability)
+    }
+
+    /// Class surfaces publish each field as an independent initializer. Work
+    /// only on the shape already lowered; reference carriers stay deferred.
+    fn normalize_class_initializers(
+        &self,
+        node: SemanticNodeId,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let Some(data) = graph.node_data(node) else {
+            return node;
+        };
+        let normalized = match data.as_ref() {
+            SemanticNodeData::Object(view) => {
+                let entries = view
+                    .entries
+                    .iter()
+                    .map(|entry| match entry {
+                        SurfaceEntry::Member(member) => SurfaceEntry::Member(SurfaceMember {
+                            value: self
+                                .normalize_inferred_initializer_type(member.value, nullability),
+                            ..member.clone()
+                        }),
+                        SurfaceEntry::ConstructSignature(signature) => {
+                            SurfaceEntry::ConstructSignature(
+                                self.normalize_widened_object_literals(*signature, nullability),
+                            )
+                        }
+                        _ => entry.clone(),
+                    })
+                    .collect();
+                SemanticNodeData::Object(SurfaceView::from_entries(
+                    entries,
+                    view.keyspace,
+                    view.has_known_index_signature(),
+                ))
+            }
+            SemanticNodeData::Intersection(arms) => {
+                let normalized: Arc<[_]> = arms
+                    .iter()
+                    .map(|arm| self.normalize_class_initializers(*arm, nullability))
+                    .collect();
+                if arms.iter().eq(normalized.iter()) {
+                    return node;
+                }
+                SemanticNodeData::Intersection(
+                    crate::semantic_query::composite::CompositeList::rebuilt_from(
+                        arms.origin_category(),
+                        normalized,
+                    ),
+                )
+            }
+            SemanticNodeData::MergedDecl { contributors } => SemanticNodeData::MergedDecl {
+                contributors: contributors
+                    .iter()
+                    .map(|contributor| self.normalize_class_initializers(*contributor, nullability))
+                    .collect::<Vec<_>>()
+                    .into(),
+            },
+            _ => return node,
+        };
+        if normalized == *data {
+            node
+        } else {
+            graph.intern_preserving_scope(node, normalized)
+        }
     }
 
     /// The type of a value whose declared type is its initializer's
@@ -2383,6 +2751,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         prepared: &verter_retention::heap_size::OwnedValue<
             verter_session_query::type_solver::PreparedValueDecl,
         >,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> Vec<SignatureJob> {
         let identity = &prepared.root_identity;
         let by_block = identity.symbol_name.contains('.')
@@ -2419,8 +2788,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(_) => None,
                     })
                     .flatten();
-                let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                    verter_type_expr::locators::TypeBodySlot {
+                let locator = scoped_type_body_locator(
+                    &verter_type_expr::locators::TypeBodySlot {
                         anchor: verter_type_expr::locators::AuthoredAnchor {
                             canonical_id: identity.canonical_id.clone(),
                             owner: identity.owner,
@@ -2436,6 +2805,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .into_boxed_slice(),
                         ),
                     },
+                    augmentation,
                 );
                 SignatureJob {
                     prepared: prepared.clone(),
@@ -2470,7 +2840,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )?;
             signatures
                 .jobs
-                .extend(self.value_signature_jobs(&peer_prepared));
+                .extend(self.value_signature_jobs(&peer_prepared, None));
         }
     }
 
@@ -2509,13 +2879,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 groups.extend(contributions.signature_groups);
             }
         }
-        let node = if !is_class && groups.len() > 1 {
+        let signatures = if !is_class && groups.len() > 1 {
             self.merged_declaration_signatures_node(groups)
         } else {
             let signature_nodes: Vec<SemanticNodeId> = groups.into_iter().flatten().collect();
             self.value_signature_surface(signature_nodes, is_class, scope)
         };
+        // A namespace of the function's name merges into its value, whether
+        // the function is declared once or merged from several declarations:
+        // the namespace's exported values are properties of `typeof f`.
+        let is_function = matches!(
+            own.kind,
+            verter_session_query::declarations::ValueDeclKind::Function
+                | verter_session_query::declarations::ValueDeclKind::AsyncFunction
+        );
+        let node = if is_function {
+            let identity = &own.root_identity;
+            let (object, roots) = self.namespace_merged_into_value(
+                identity.canonical_id.as_ref(),
+                identity.owner,
+                identity.symbol_name.as_ref(),
+                context,
+            );
+            augmentation_roots.extend(roots);
+            match object {
+                Some(object) => self.merged_value_and_namespace(signatures, object, scope.clone()),
+                None => signatures,
+            }
+        } else {
+            signatures
+        };
         (node, augmentation_roots, augmentation_unobservable)
+    }
+
+    /// A function's or a class's value merged with the object of the
+    /// namespace of its name: one merged declaration whose contributors are
+    /// the value, then the namespace, in declaration order. The peer-merge
+    /// reducer keeps the value's call and construct signatures and adds the
+    /// namespace's values as properties.
+    fn merged_value_and_namespace(
+        &self,
+        value: SemanticNodeId,
+        namespace: SemanticNodeId,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::MergedDecl {
+                contributors: crate::semantic_query::PayloadArray::from(
+                    vec![value, namespace].into_boxed_slice(),
+                ),
+            },
+            scope,
+        )
     }
 
     /// A function value's signatures as one surface: its call signatures,
@@ -3752,6 +4167,66 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ))
     }
 
+    /// The exact ambient inventory wins over file/export fallback when a
+    /// caller already carries its module scope.
+    pub(super) fn effective_prepared_value_decl_in_augmentation(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Option<EffectivePreparedValueDecl> {
+        let Some(augmentation) = augmentation else {
+            return self.effective_prepared_value_decl(canonical, owner, symbol);
+        };
+        let bundle = self.ctx.prepared_decl_bundle(canonical)?;
+        match self
+            .ctx
+            .prepare_augmentation_value(&bundle, augmentation, owner, symbol)
+        {
+            verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(Some(prepared)) => {
+                Some((
+                    canonical.into(),
+                    owner,
+                    symbol.into(),
+                    verter_retention::heap_size::OwnedValue::new(prepared),
+                ))
+            }
+            verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(None) => None,
+            verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss
+            | verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
+                self.fold_into_top_build_local_taint(false, true);
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
+                );
+                None
+            }
+        }
+    }
+
+    /// Recover a module-scoped value root's retained augmentation inventory.
+    pub(super) fn ambient_value_scope<'headers>(
+        scope: &crate::semantic_query::ScopeId,
+        headers: &'headers verter_session_query::declarations::header_index::DeclHeaderIndex,
+    ) -> Option<&'headers verter_session_query::declarations::AugmentationScopeKind> {
+        if scope.binder_scope_id == crate::semantic_query::BinderScopeId::file_scope(scope.owner) {
+            return None;
+        }
+        headers.augmentation_blocks.iter().find_map(|block| {
+            use verter_session_query::declarations::AugmentationScopeKind;
+            let AugmentationScopeKind::Module(specifier) = &block.scope else {
+                return None;
+            };
+            (block.owner == scope.owner
+                && scope.binder_scope_id
+                    == crate::semantic_query::BinderScopeId::augmentation_module_scope(
+                        block.owner,
+                        specifier.as_str().into(),
+                    ))
+            .then_some(&block.scope)
+        })
+    }
+
     /// `ResolveOverloadSet` — the ordered candidates of ONE of a callee's
     /// signature buckets.
     ///
@@ -3960,7 +4435,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &env,
             &scope,
             &mut substitutions,
+            None,
         );
+        let shape = self.normalize_class_initializers(shape, self.nullability_for(canonical));
         if context.mode != ProjectionMode::Expanded {
             return Some(shape);
         }
@@ -4483,6 +4960,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     param: *binder,
                     constraint,
                     default,
+                    original: None,
                     is_const: param.is_const,
                 }
             })
@@ -5717,6 +6195,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
 
+        // 3b. A type alias whose authored body is the `intrinsic` keyword is
+        // the compiler-provided type its name selects (the checker's
+        // `intrinsicTypeKinds`), whether the lib declares it or the user does:
+        // a local `type NoInfer<T> = intrinsic` is `NoInfer`. A name that
+        // selects no implemented intrinsic is that unsupported intrinsic, never
+        // the body it spells: the keyword is not a reference to evaluate.
+        if prepared.body_facts.classification == verter_type_expr::facts::TypeBodyClass::Intrinsic {
+            let mut output = match adapter.resolve_intrinsic_alias(decl_name.as_ref()) {
+                Some(utility) => self.build_instantiated_builtin_utility(
+                    base,
+                    decl_name,
+                    args,
+                    context,
+                    Some(utility),
+                ),
+                None => (
+                    QueryResult::Value(self.opaque(QueryError::UnsupportedIntrinsic {
+                        name: verter_type_expr::OwnedStr::from(decl_name.as_ref()),
+                    })),
+                    self.project_generation_signature(),
+                )
+                    .into(),
+            };
+            // The answer exists because the declaring file spells the alias
+            // `intrinsic`: root it on that file's observed version, as the
+            // ordinary declaration path does, so an edit to the alias misses
+            // the warm read. A non-file base has no version.
+            if !is_non_file_base {
+                output.dep_signature = output
+                    .dep_signature
+                    .iter()
+                    .cloned()
+                    .chain(
+                        self.dep_signature_for(decl_canonical, decl_whole_hash)
+                            .iter()
+                            .cloned(),
+                    )
+                    .collect();
+                output =
+                    output.with_observed_self_roots([(decl_canonical.clone(), decl_whole_hash)]);
+            }
+            return InstantiateStart::Done(Box::new(output));
+        }
+
         // 4. Bind type parameters to args (positional). When a
         // parameter has no explicit arg but carries a default
         // expression, lower the default in the decl's scope and bind
@@ -5731,8 +6253,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .ctx
             .prepared_decl_bundle(decl_canonical.as_ref())
             .map(|bundle| {
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle, decl_owner,
+                self.declaration_scope_payload(
+                    &bundle,
+                    decl_canonical.as_ref(),
+                    decl_owner,
+                    decl_name.as_ref(),
                 )
             });
         // R15/F11 — capture the scope-shadowing context
@@ -5747,6 +6272,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope_payload: scope_payload.as_ref(),
             shadowing: &shadowing,
             authored_resolution_debt: authored_resolution_debt.as_ref(),
+            augmentation: None,
         };
         let unbound_parameter = |index: usize, param: &verter_type_expr::facts::NarrowTypeParam| {
             // Skeleton mode preserves open generics: an unbound
@@ -5919,6 +6445,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitutions,
             tail: crate::semantic_query::checker_policy::ConditionalTail::resumed(0),
             tail_arguments: std::iter::once(Arc::clone(args)).collect(),
+            tail_current: Arc::clone(args),
+            growth: None,
             conditional_body: None,
             generic,
             suspend,
@@ -5936,6 +6464,210 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // named refs, an interface's `extends` heritage) go structural.
         build.body = self.begin_instantiated_body(&mut build);
         InstantiateStart::Build(build)
+    }
+
+    /// [`ExactSteps`] for the computation being built, when its steps so far
+    /// are exact: its build frame holds no partial and nothing its memo
+    /// would refuse to keep, and the request is live. `None` is no proof —
+    /// the caller evaluates on under its budget instead of certifying.
+    fn exact_steps(&self) -> Option<ExactSteps> {
+        if self.cancellation.is_cancelled() {
+            return None;
+        }
+        let frames = self.build_local_taint.borrow();
+        let frame = frames.last()?;
+        frame_is_exact(frame).then_some(ExactSteps { _proof: () })
+    }
+
+    /// [`ExactSteps`] for every step since the instantiation `claimed` began
+    /// on this path: the frame producing it is on this thread's build stack
+    /// ([`super::BuildLocalTaint::produces`]) and neither it nor any frame
+    /// built on top of it holds a partial or a result its memo would not
+    /// keep, and the request is live. `None` — the producer's frame is not
+    /// on the stack (a suspended continuation's), or a step read a partial —
+    /// is no proof.
+    fn exact_steps_since(&self, claimed: &SemanticQueryKey) -> Option<ExactSteps> {
+        if self.cancellation.is_cancelled() {
+            return None;
+        }
+        let identity = super::instantiation_frame_identity(claimed)?;
+        exact_since_producer(&self.build_local_taint.borrow(), identity)
+            .then_some(ExactSteps { _proof: () })
+    }
+
+    /// [`UniformGrowth`] for the tail run of `build` stepping from its
+    /// current arguments to `next`: exactly one argument changed, the
+    /// declaration grows that parameter uniformly ([`GrowthShape`]), the
+    /// current argument holds no type parameter (so neither does any later
+    /// one, and no later step defers), and `next`'s argument IS the wrapper
+    /// over the current one — this step took the recursive branch. Every
+    /// later step is then that branch again over a wrapped argument, with
+    /// no end. `None` is no proof.
+    fn uniform_growth(
+        &self,
+        build: &mut InstantiateBuild,
+        next: &[SemanticNodeId],
+    ) -> Option<UniformGrowth> {
+        let current = Arc::clone(&build.tail_current);
+        if current.len() != next.len() {
+            return None;
+        }
+        let mut changed = (0..next.len()).filter(|&position| current[position] != next[position]);
+        let index = changed.next()?;
+        if changed.next().is_some() {
+            return None;
+        }
+        let shape = self.growth_shape(build)?;
+        if shape.index != index || !self.type_params_within(&[current[index]]).is_empty() {
+            return None;
+        }
+        (self.substitute_semantic_type_param(shape.wrapper, shape.parameter, current[index])
+            == next[index])
+            .then_some(UniformGrowth { _proof: () })
+    }
+
+    /// The declaration's [`GrowthShape`], read once per build.
+    fn growth_shape(&self, build: &mut InstantiateBuild) -> Option<GrowthShape> {
+        if let Some(known) = build.growth {
+            return known;
+        }
+        let shape = self.read_growth_shape(build);
+        build.growth = Some(shape);
+        shape
+    }
+
+    /// The uniform growth `build`'s declaration declares, when its body is
+    /// a conditional `P extends E ? X : Y` over one of its own type
+    /// parameters `P`, written bare, where:
+    ///
+    /// - `E` is closed: no type parameter, no `infer`;
+    /// - exactly one branch applies the declaration again, passing every
+    ///   other parameter through unchanged and `P` wrapped in one structural
+    ///   constructor — a tuple without rest elements, an array or an object
+    ///   type, never a union, a spread or `never` whatever it holds — that
+    ///   mentions no other type variable;
+    /// - the checker's own generic test selects that branch for EVERY
+    ///   instantiation of the wrapper: definitely true when the wrapper over
+    ///   the parameter without its constraint relates to `E`
+    ///   (`getRestrictiveInstantiation`), definitely false when the wrapper
+    ///   over the wildcard does not (`getPermissiveInstantiation`).
+    ///
+    /// The decision reads the declaration and `E` only, never the run's
+    /// arguments, and its reads are this build's dependencies. Anything
+    /// else — a check that is not the bare parameter (`Acc["length"]`), an
+    /// open `E`, a branch the test leaves undecided — is no shape.
+    fn read_growth_shape(&self, build: &InstantiateBuild) -> Option<GrowthShape> {
+        let identity = crate::semantic_query::DeclIdentity {
+            canonical_id: build.decl_canonical.clone(),
+            owner: build.decl_owner,
+            whole_hash: build.decl_whole_hash,
+            decl_name: build.decl_name.clone(),
+        };
+        let body = self.declared_alias_body(&identity)??;
+        let graph = self.graph();
+        let (check, extends, true_branch, false_branch) = match graph.node_data(body).as_deref() {
+            Some(SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                pending: None,
+                ..
+            }) => (*check, *extends, *true_branch_ref, *false_branch_ref),
+            _ => return None,
+        };
+        let own_parameter = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                decl, param_index, ..
+            }) if decl.canonical_id == build.decl_canonical
+                && decl.owner == build.decl_owner
+                && decl.decl_name == build.decl_name =>
+            {
+                Some(usize::from(*param_index))
+            }
+            _ => None,
+        };
+        let index = own_parameter(check)?;
+        let applies = |branch: SemanticNodeId| {
+            self.conditional_tail_arguments(
+                branch,
+                &build.decl_canonical,
+                build.decl_owner,
+                &build.decl_name,
+                || true,
+            )
+        };
+        let (recurs_when_true, arguments) = match (applies(true_branch), applies(false_branch)) {
+            (Some(arguments), None) => (true, arguments),
+            (None, Some(arguments)) => (false, arguments),
+            _ => return None,
+        };
+        let passes_through = arguments.iter().enumerate().all(|(position, argument)| {
+            position == index || own_parameter(*argument) == Some(position)
+        });
+        let wrapper = *arguments.get(index)?;
+        if !passes_through
+            || !self.is_growth_constructor(wrapper)
+            || self.type_params_within(&[wrapper]) != [check]
+            || !self.type_params_within(&[extends]).is_empty()
+            || self.declares_or_reads_infer(wrapper)
+            || self.declares_or_reads_infer(extends)
+        {
+            return None;
+        }
+        let decided = if recurs_when_true {
+            matches!(
+                self.restrictive_relation(wrapper, extends, &[check]),
+                super::dispatch_txn::RelationStep::Assignable { .. }
+            )
+        } else {
+            matches!(
+                self.permissive_relation(wrapper, extends, &[check]),
+                super::dispatch_txn::RelationStep::NotAssignable
+            )
+        };
+        decided.then_some(GrowthShape {
+            index,
+            parameter: check,
+            wrapper,
+        })
+    }
+
+    /// Whether `node` is a structural constructor whose instantiation is
+    /// never a union, a spread or `never`, whatever it holds: a tuple
+    /// without rest elements, an array or an object type.
+    fn is_growth_constructor(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                elements.iter().all(|element| !element.rest)
+            }
+            Some(SemanticNodeData::Array { .. } | SemanticNodeData::Object(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether `node` declares or reads an `infer` type variable anywhere
+    /// below it.
+    fn declares_or_reads_infer(&self, node: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. }
+            ) {
+                return true;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        false
     }
 
     /// Carry an instantiation's build on as far as it can go. `delivery` is
@@ -5986,18 +6718,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // compatibility policy. The run fails with the checker's TS2589 at
             // Verter's tail budget, far past the checker's tail limit, or at
             // once, as a certified divergence, when the arguments come round
-            // again. Each step is charged to the
+            // again through exact steps. Each step is charged to the
             // connected-work ledger; a trip leaves the step's back-edge as a
             // typed partial.
             let next = build
                 .generic
                 .then(|| {
-                    self.conditional_tail_arguments(
-                        result,
-                        &build.decl_canonical,
-                        build.decl_owner,
-                        &build.decl_name,
-                    )
+                    let canonical = build.decl_canonical.clone();
+                    let owner = build.decl_owner;
+                    let name = build.decl_name.clone();
+                    self.conditional_tail_arguments(result, &canonical, owner, &name, || {
+                        self.declares_conditional_body(build) == Some(true)
+                    })
                 })
                 .flatten();
             use crate::semantic_query::{checker_policy, CheckerDiagnosticOperation};
@@ -6016,18 +6748,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
                 result = checker_policy::circular_type_alias_recovery(self.graph(), alias);
             } else if let Some(next) = next {
-                // A run that comes back to arguments it already took is in
-                // the state it was in then, and each step is a function of
-                // that state: it repeats forever, a certified divergence.
-                if build.tail_arguments.contains(&next) {
-                    self.connected_demand.note_divergence_certificate();
-                    result = checker_policy::divergence_recovery(
-                        self.graph(),
-                        checker_policy::CertifiedDivergence::exact_recurrence(
-                            CheckerDiagnosticOperation::ConditionalTail,
-                        ),
-                        None,
-                    );
+                // A run that comes back to arguments it already took — the
+                // same declaration, context and phase, this build's — is in
+                // the state it was in then, and when each step was a complete
+                // function of that state it repeats forever: a certified
+                // divergence. So is a run that wraps one argument in the
+                // same constructor at every step when the conditional takes
+                // its recursive branch for whatever the constructor holds
+                // (`Self::uniform_growth`). Arguments that came round, or
+                // grew, after a step read a partial prove nothing, and the
+                // run goes on under its budget.
+                let operation = CheckerDiagnosticOperation::ConditionalTail;
+                let certificate = if build.tail_arguments.contains(&next) {
+                    self.exact_steps().map(|exact| {
+                        checker_policy::CertifiedDivergence::exact_recurrence(operation, exact)
+                    })
+                } else {
+                    self.uniform_growth(build, &next).and_then(|growth| {
+                        self.exact_steps().map(|exact| {
+                            checker_policy::CertifiedDivergence::uniform_growth(
+                                operation, exact, growth,
+                            )
+                        })
+                    })
+                };
+                if let Some(certificate) = certificate {
+                    result = checker_policy::divergence_recovery(self.graph(), certificate, None);
                 } else if let Err(refusal) = self
                     .connected_demand
                     .tail_step(&mut build.tail, CheckerDiagnosticOperation::ConditionalTail)
@@ -6042,6 +6788,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.fold_local_partial_completeness(reasons);
                 } else {
                     build.tail_arguments.insert(Arc::clone(&next));
+                    build.tail_current = Arc::clone(&next);
                     build.substitutions.clear();
                     let (next_env, _) = self.bind_instantiate_arguments(build, &next);
                     build.env = next_env;
@@ -6069,6 +6816,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope_payload: build.scope_payload.as_ref(),
             shadowing: &build.shadowing,
             authored_resolution_debt: build.authored_resolution_debt.as_ref(),
+            augmentation: None,
         };
         let body_mode = build.body_mode;
         let decl_identity = crate::semantic_query::DeclIdentity {
@@ -6641,7 +7389,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 contribution,
                 target,
                 decl_name,
-                type_arguments,
                 context,
                 request_canonical,
                 excluded_contributor,
@@ -6807,34 +7554,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut contributor_nodes = Vec::with_capacity(plan.bodies.len());
         for body in &plan.bodies {
             let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-            let declared_env;
-            let env = match &body.binding {
-                PlannedBinding::Bound(env) => env,
-                PlannedBinding::Declared(prepared) => {
-                    declared_env = self
-                        .bind_declared_type_arguments(
-                            prepared,
-                            type_arguments,
-                            &DeclarationBindingScope {
-                                scope: &body.scope,
-                                scope_payload: body.scope_payload.as_ref(),
-                                shadowing: &body.shadowing,
-                                authored_resolution_debt: None,
-                            },
-                            &mut substitutions,
-                            context,
-                            |_, _| None,
-                        )
-                        .0;
-                    &declared_env
-                }
-            };
+            let (env, _) = self.bind_declared_type_arguments(
+                &body.prepared,
+                type_arguments,
+                &DeclarationBindingScope {
+                    scope: &body.scope,
+                    scope_payload: body.scope_payload.as_ref(),
+                    shadowing: &body.shadowing,
+                    authored_resolution_debt: None,
+                    augmentation: body.augmentation.as_ref(),
+                },
+                &mut substitutions,
+                context,
+                |_, _| None,
+            );
+            let env = &env;
             let mut lowering = match body.shape {
                 Some(shape) => self.begin_shape_lowering(
                     shape,
                     &body.owner_symbol,
-                    body.kind,
-                    &body.type_parameters,
+                    body.prepared.kind,
+                    &body.prepared.type_parameters,
                     env,
                     &body.scope,
                     &mut substitutions,
@@ -6842,13 +7582,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &[],
                     crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam::inline(
                     ),
+                    body.augmentation.as_ref(),
                 ),
                 None => BodyLowering::Ready(self.opaque(QueryError::Miss)),
             };
             let inputs = crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
                 env,
                 scope: &body.scope,
-                name_resolution: &body.name_resolution,
+                name_resolution: &body.prepared.name_resolution,
                 scope_payload: body.scope_payload.as_ref(),
                 shadowing: &body.shadowing,
                 authored_resolution_debt: None,
@@ -6902,12 +7643,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// set fingerprint) intact still moves the augmenter's `FileWholeHash`, so
     /// the per-augmenter whole-hash fact is what catches it.
     ///
-    /// `type_arguments` are the applied arguments of the augmented
-    /// declaration: each contributor binds its OWN declared type parameters to
-    /// them positionally, the same name environment `Instantiate` builds for a
-    /// base body, so a merged `interface Promise<T>` contribution read for
-    /// `Promise<number>` lowers its `T` as `number`. An unbound parameter
-    /// stays unbound, as in `Instantiate`'s published modes.
+    /// Type bodies retain their prepared declarations for projection. Each
+    /// contributor then binds the application's arguments positionally,
+    /// applying its own defaults through the same binder as Instantiate.
+    /// An unsupplied parameter without a default stays unbound.
     ///
     /// `excluded_contributor` names a file whose contribution the caller
     /// already holds as the base body (a global declaration's own file):
@@ -6925,7 +7664,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         contribution: AugmentationContribution,
         target: verter_session_query::resolution::AugmentationTargetKind,
         decl_name: &str,
-        type_arguments: &[SemanticNodeId],
         context: crate::semantic_query::ProjectionReductionContext,
         request_canonical: &str,
         excluded_contributor: Option<&str>,
@@ -7349,6 +8087,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         } else {
                             AugmentationScopeKind::Module(spec.clone())
                         };
+                        let aug_scope = Self::augmentation_body_scope(
+                            aug_scope,
+                            &indexed.shallow_state.headers,
+                            &scope_kind,
+                            decl_name,
+                        );
                         if contribution == AugmentationContribution::EnumBlocks {
                             // The block's members, read in the block's own
                             // scope: a same-named declaration of the file
@@ -7491,12 +8235,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 continue;
                             }
                         };
-                        let aug_env: FxHashMap<String, SemanticNodeId> = aug_prepared
-                            .type_parameters
-                            .iter()
-                            .zip(type_arguments.iter())
-                            .map(|(param, argument)| (param.name.clone(), *argument))
-                            .collect();
                         // Demand the augmenter's RETAINED contribution body through
                         // the augmenter's OWN `LowerLocator` (the augmentation-scoped
                         // locator leaf) — never an inline lowering of another file's
@@ -7533,10 +8271,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         planned_bodies.push(PlannedContributorBody {
                             shape,
                             owner_symbol: verter_type_expr::OwnedStr::from(decl_name),
-                            kind: aug_prepared.kind,
-                            type_parameters: Arc::from(aug_prepared.type_parameters),
-                            name_resolution: aug_prepared.name_resolution,
-                            binding: PlannedBinding::Bound(aug_env),
+                            prepared: verter_retention::heap_size::OwnedValue::new(aug_prepared),
+                            augmentation: Some(scope_kind),
                             scope: aug_scope,
                             scope_payload: aug_scope_payload,
                             shadowing: aug_shadowing,
@@ -7670,12 +8406,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         whole_hash: indexed.whole_hash,
                         local_scope: None,
                     };
-                    let aug_scope_payload = Some(
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle,
-                    entry.owner,
-                ),
-            );
+                    let aug_scope_payload = Some(self.declaration_scope_payload(
+                        &bundle,
+                        canonical,
+                        entry.owner,
+                        decl_name,
+                    ));
                     let aug_shadowing =
                         crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
                             aug_scope_payload.as_ref(),
@@ -7705,10 +8441,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     planned_bodies.push(PlannedContributorBody {
                         shape,
                         owner_symbol: verter_type_expr::OwnedStr::from(decl_name),
-                        kind: prepared.kind,
-                        type_parameters: Arc::from(prepared.type_parameters.as_slice()),
-                        name_resolution: prepared.name_resolution.clone(),
-                        binding: PlannedBinding::Declared(prepared),
+                        prepared,
+                        augmentation: None,
                         scope: aug_scope,
                         scope_payload: aug_scope_payload,
                         shadowing: aug_shadowing,
@@ -7886,7 +8620,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// declaration, an import assignment its `export = X` value, a namespace
     /// import's first segment the member it names — then the longest
     /// declared qualified member (`AN.f`) the rest of the path names.
-    fn ambient_import_member_root(
+    pub(super) fn ambient_import_member_root(
         &self,
         importer: &str,
         target: &verter_session_query::inputs::shallow::ImportTarget,
@@ -7916,6 +8650,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .as_ref()
                         .or(block.export_assignment.as_ref())?,
                 )
+            } else if let Some(assigned) = self.ambient_assigned_namespace(block) {
+                Arc::from(format!("{assigned}.{member}"))
             } else {
                 Arc::clone(&member)
             };
@@ -8032,31 +8768,251 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         blocks
     }
 
-    /// Whether the ambient module `block` declares the value `name` — a
-    /// member it names under its own scope, which the identity
-    /// `(canonical, owner, name)` addresses (no file-scope value of the
-    /// file shadows it, and no other module block of the file declares it).
+    /// Whether the exact ambient module inventory declares a value or namespace.
     pub(super) fn ambient_block_declares_value(
         &self,
         block: &AmbientModuleBlock,
         name: &str,
     ) -> bool {
-        let Some(indexed) = self
-            .ctx
+        self.ctx
             .ensure_indexed_ready_serve(block.canonical.as_ref())
-            .map(|serve| serve.indexed)
-        else {
-            return false;
-        };
-        let shallow = &indexed.shallow_state;
-        shallow.visible_value_binding(block.owner, name).is_none()
-            && shallow
-                .value_fallback_augmentation_scope(block.owner, name)
-                .as_ref()
-                == Some(&block.scope)
+            .is_some_and(|serve| {
+                let headers = &serve.indexed.shallow_state.headers;
+                headers
+                    .augmentation_value_header_in(&block.scope, block.owner, name)
+                    .is_some()
+                    || headers
+                        .augmentation_namespace_blocks
+                        .iter()
+                        .any(|(scope, namespace)| {
+                            scope == &block.scope
+                                && namespace.owner == block.owner
+                                && namespace.qualified_name == name
+                                && namespace.instantiated
+                        })
+            })
     }
 
-    /// Resolve a bare type name imported from a NON-FILE (external / ambient)
+    fn ambient_assigned_namespace(&self, block: &AmbientModuleBlock) -> Option<Arc<str>> {
+        let assigned = block.export_assignment.as_ref()?;
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(block.canonical.as_ref())?
+            .indexed;
+        indexed
+            .shallow_state
+            .headers
+            .augmentation_namespace_blocks
+            .iter()
+            .any(|(scope, namespace)| {
+                scope == &block.scope
+                    && namespace.owner == block.owner
+                    && namespace.qualified_name == assigned.as_ref()
+            })
+            .then(|| Arc::clone(assigned))
+    }
+
+    /// Route an imported type through an ambient module's retained inventory.
+    /// The imported spelling, rather than its local alias, selects the member.
+    /// An assigned namespace contributes its exported qualified members under
+    /// the module's own scope; no file-scope identity is fabricated for them.
+    pub(super) fn external_module_type_target(
+        &self,
+        importer: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> Option<(String, String)> {
+        use verter_session_query::inputs::shallow::LexicalValueBinding;
+
+        let indexed = self.ctx.ensure_indexed_ready_serve(importer)?.indexed;
+        let (head, rest) = name.split_once('.').unwrap_or((name, ""));
+        let LexicalValueBinding::Import(target) =
+            indexed.shallow_state.visible_value_binding(owner, head)?
+        else {
+            return None;
+        };
+        let member = if target.is_namespace || target.is_import_equals() {
+            if rest.is_empty() {
+                return None;
+            }
+            rest.to_owned()
+        } else if rest.is_empty() {
+            target.imported_name.clone()
+        } else {
+            format!("{}.{rest}", target.imported_name)
+        };
+        let blocks = self.ambient_module_blocks(importer, &target.source_specifier);
+        let assigned = blocks.iter().find_map(|block| {
+            self.ambient_assigned_namespace(block)
+                .map(|assigned| format!("{assigned}.{member}"))
+        });
+        let decl_name = assigned.unwrap_or(member);
+        let declared = blocks.iter().any(|block| {
+            self.ctx
+                .ensure_indexed_ready_serve(block.canonical.as_ref())
+                .is_some_and(|serve| {
+                    let headers = &serve.indexed.shallow_state.headers;
+                    headers
+                        .augmentation_type_header_in(&block.scope, block.owner, &decl_name)
+                        .is_some()
+                        && headers.namespace_member_is_exported(block.owner, &decl_name)
+                })
+        });
+        declared.then(|| (target.source_specifier.clone(), decl_name))
+    }
+
+    /// Preserve the retained namespace block addressing an ambient body.
+    /// The namespace address is an ordinal in `augmentation_namespace_blocks`,
+    /// pinned by the scope's owner and whole-file hash; it holds no siblings.
+    pub(super) fn augmentation_body_scope(
+        mut scope: NodeScopeId,
+        headers: &verter_session_query::declarations::header_index::DeclHeaderIndex,
+        augmentation: &verter_session_query::declarations::AugmentationScopeKind,
+        symbol: &str,
+    ) -> NodeScopeId {
+        let NodeScopeId::File {
+            owner, local_scope, ..
+        } = &mut scope
+        else {
+            return scope;
+        };
+        if !matches!(
+            augmentation,
+            verter_session_query::declarations::AugmentationScopeKind::Module(_)
+        ) {
+            return scope;
+        }
+        let span = headers
+            .augmentation_type_header_in(augmentation, *owner, symbol)
+            .map(|header| header.span)
+            .or_else(|| {
+                headers
+                    .augmentation_value_header_in(augmentation, *owner, symbol)
+                    .map(|header| header.span)
+            });
+        let Some((prefix, _)) = symbol.rsplit_once('.') else {
+            *local_scope = headers
+                .augmentation_blocks
+                .iter()
+                .position(|block| {
+                    &block.scope == augmentation
+                        && block.owner == *owner
+                        && span.is_some_and(|span| {
+                            block.span.start <= span.start && span.end <= block.span.end
+                        })
+                })
+                .and_then(|ordinal| u32::try_from(ordinal).ok())
+                .map(NodeLocalScopeId::AugmentationModule);
+            return scope;
+        };
+        *local_scope = headers
+            .augmentation_namespace_blocks
+            .iter()
+            .position(|(kind, block)| {
+                kind == augmentation
+                    && block.owner == *owner
+                    && block.qualified_name == prefix
+                    && span.is_some_and(|span| {
+                        block.span.start <= span.start && span.end <= block.span.end
+                    })
+            })
+            .and_then(|ordinal| u32::try_from(ordinal).ok())
+            .map(NodeLocalScopeId::AugmentationNamespace);
+        scope
+    }
+
+    /// A lexical type reference in an ambient namespace, before file/import
+    /// lookup. Walk enclosing namespaces within the exact module inventory;
+    /// a private sibling is visible here even when imports cannot name it.
+    pub(super) fn ambient_namespace_type_target(
+        &self,
+        scope: &NodeScopeId,
+        name: &str,
+    ) -> Option<(String, String)> {
+        self.ambient_namespace_target(scope, name, GlobalSpace::Type)
+    }
+
+    pub(super) fn ambient_namespace_target(
+        &self,
+        scope: &NodeScopeId,
+        name: &str,
+        space: GlobalSpace,
+    ) -> Option<(String, String)> {
+        use verter_session_query::declarations::AugmentationScopeKind;
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            whole_hash,
+            local_scope: Some(local_scope),
+        } = scope
+        else {
+            return None;
+        };
+        if matches!(local_scope, NodeLocalScopeId::Lexical(_)) {
+            return None;
+        }
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical_id.as_ref())?
+            .indexed;
+        if indexed.whole_hash != *whole_hash {
+            return None;
+        }
+        let headers = &indexed.shallow_state.headers;
+        let (augmentation, scope_owner, mut prefix) = match local_scope {
+            NodeLocalScopeId::AugmentationNamespace(ordinal) => {
+                let (augmentation, block) = headers
+                    .augmentation_namespace_blocks
+                    .get(*ordinal as usize)?;
+                (augmentation, block.owner, block.qualified_name.as_str())
+            }
+            NodeLocalScopeId::AugmentationModule(ordinal) => {
+                let block = headers.augmentation_blocks.get(*ordinal as usize)?;
+                (&block.scope, block.owner, "")
+            }
+            NodeLocalScopeId::Lexical(_) => return None,
+        };
+        let AugmentationScopeKind::Module(specifier) = augmentation else {
+            return None;
+        };
+        if scope_owner != *owner {
+            return None;
+        }
+        loop {
+            let qualified = if prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            let declared = match space {
+                GlobalSpace::Type => headers
+                    .augmentation_type_header_in(augmentation, *owner, &qualified)
+                    .is_some(),
+                GlobalSpace::Value => {
+                    headers
+                        .augmentation_value_header_in(augmentation, *owner, &qualified)
+                        .is_some()
+                        || headers
+                            .augmentation_namespace_blocks
+                            .iter()
+                            .any(|(kind, namespace)| {
+                                kind == augmentation
+                                    && namespace.owner == *owner
+                                    && namespace.qualified_name == qualified
+                            })
+                }
+            };
+            if declared {
+                return Some((specifier.clone(), qualified));
+            }
+            if prefix.is_empty() {
+                return None;
+            }
+            prefix = prefix.rsplit_once('.').map_or("", |(parent, _)| parent);
+        }
+    }
+
+    /// Resolve a type name imported from a NON-FILE (external / ambient)
     /// module specifier through `declare module "<spec>" { ... }` augmentation.
     ///
     /// This is the canonical Vue/Vite `vite/client` pattern: a virtual module
@@ -8071,40 +9027,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// peer-merge carrier the relative stitch uses (one merge engine, no source
     /// scan).
     ///
-    /// Returns `None` when `name` is not imported from a non-file specifier or
-    /// no `declare module` block contributes it (caller falls through to the
-    /// `Opaque(Miss)` sentinel). A relative / wildcard / global specifier is
+    /// Returns `None` when no `declare module` block contributes `name`.
+    /// The caller retains an unresolved carrier or returns a typed miss,
+    /// according to the projection mode. A relative / wildcard / global specifier is
     /// excluded by `augmenter_matches_target`'s `ExternalSpecifier` arm, so the
     /// index scan returns empty and this yields `None`.
     pub(super) fn resolve_external_module_augmentation(
         &self,
-        scope_canonical: &str,
+        specifier: &str,
         name: &str,
+        type_arguments: &[SemanticNodeId],
         scope: &NodeScopeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
         use verter_session_query::facts::registry::InternedSpecifier;
         use verter_session_query::resolution::AugmentationTargetKind;
 
-        // The imported specifier for `name` in the importing file. Only a
-        // NON-FILE specifier reaches here: a specifier resolving to a workspace
-        // file would have resolved `name` through the normal import path before
-        // the miss.
-        let indexed = self
-            .ctx
-            .ensure_indexed_ready_serve(scope_canonical)?
-            .indexed;
-        let specifier = indexed
-            .shallow_state
-            .import_target(name)
-            .map(|t| t.source_specifier.clone())?;
+        let NodeScopeId::File { canonical_id, .. } = scope else {
+            return None;
+        };
+        let scope_canonical = canonical_id.as_ref();
 
         // Contributor discovery for ambient external modules is the
         // ingestion-time global contributor population: a program-root
         // `.d.ts` that nothing imports is recorded when its `IndexedReady`
         // publishes, so lookup does not scan program membership.
-        let target =
-            AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier.as_str()));
+        let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier));
         let AugmentationContributions {
             contributor_nodes,
             // The external path DISCARDS the returned `contributor_roots`
@@ -8128,7 +9076,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             AugmentationContribution::TypeBody,
             target,
             name,
-            &[],
+            type_arguments,
             context,
             scope_canonical,
             None,
@@ -8168,6 +9116,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // synthesising a false zero-contributor `MergedDecl`.
         if contributor_nodes.is_empty() {
             return None;
+        }
+        // A type alias contributes its actual type, which may be a scalar or
+        // a reference. Peer surface merging applies only to multiple bodies.
+        if contributor_nodes.len() == 1 {
+            return Some(contributor_nodes[0]);
         }
 
         // Peer-merge carrier from the augmenter contributions ONLY (no base
@@ -8402,6 +9355,109 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> bool {
         name == "ThisType"
             && self.is_global_type_declaration(demand_canonical, canonical, owner, name)
+    }
+
+    /// The declaration-scope payload the body of the declaration
+    /// `decl_name` of `canonical`'s `owner` resolves its names in. A
+    /// script's namespace block is a block of the GLOBAL namespace, so a
+    /// declaration it declares also reads the members other scripts'
+    /// blocks of its enclosing namespaces contribute
+    /// ([`DeclarationScopePayload::within_global_namespace`]).
+    pub(super) fn declaration_scope_payload(
+        &self,
+        bundle: &impl crate::resolver_core::bare_name_resolve::PreparedInputSource,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        decl_name: &str,
+    ) -> crate::resolver_core::bare_name_resolve::DeclarationScopePayload {
+        let payload = crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+            bundle, owner,
+        );
+        match decl_name.rsplit_once('.') {
+            Some((namespace, _))
+                if owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                    && !self.canonical_is_module(canonical) =>
+            {
+                payload.within_global_namespace(verter_type_expr::OwnedStr::from(namespace))
+            }
+            _ => payload,
+        }
+    }
+
+    /// The type a name written in a block of the global namespace
+    /// `namespace` names as a member of an enclosing namespace:
+    /// `{N}.{name}` for each namespace `N` enclosing the block, innermost
+    /// first (`A.B`, then `A`), whichever script's block of `N` exports it
+    /// ([`Self::global_namespace_type_declaration`], which observes the
+    /// namespace's contributors). The walk stops before `outer_bound`, the
+    /// namespace whose member the declaration's own scope already binds the
+    /// name to, so only a more inner namespace's member shadows it. `None`
+    /// when no enclosing namespace declares the name.
+    pub(super) fn enclosing_namespace_type_member(
+        &self,
+        demand_canonical: &str,
+        namespace: &str,
+        name: &str,
+        outer_bound: Option<&str>,
+    ) -> Option<ResolvedRootIdentity> {
+        let mut current = Some(namespace);
+        while let Some(prefix) = current {
+            if outer_bound == Some(prefix) {
+                return None;
+            }
+            if let Some(member) = self
+                .global_namespace_type_declaration(demand_canonical, &format!("{prefix}.{name}"))
+            {
+                return Some(member);
+            }
+            current = prefix.rsplit_once('.').map(|(outer, _)| outer);
+        }
+        None
+    }
+
+    /// The qualified value a `typeof` path written in a block of the global
+    /// namespace `namespace` heads as a member of an enclosing namespace,
+    /// with the number of path segments it consumes: for each namespace
+    /// `N` enclosing the block, innermost first, the longest prefix of the
+    /// path that `{N}.{prefix}` names a global value of
+    /// ([`Self::global_value_declarations`]). The walk stops before
+    /// `outer_bound`, the namespace whose member the declaration's own scope
+    /// already binds the path's head to, so only a more inner namespace's
+    /// member shadows it. `None` when no enclosing namespace declares such a
+    /// value.
+    pub(super) fn enclosing_namespace_value_root(
+        &self,
+        demand_canonical: &str,
+        namespace: &str,
+        path: &[String],
+        outer_bound: Option<&str>,
+    ) -> Option<(verter_type_expr::OwnedStr, usize)> {
+        let mut current = Some(namespace);
+        while let Some(prefix) = current {
+            if outer_bound == Some(prefix) {
+                return None;
+            }
+            let mut qualified = String::from(prefix);
+            let mut candidates = Vec::with_capacity(path.len());
+            for segment in path {
+                qualified.push('.');
+                qualified.push_str(segment);
+                candidates.push(qualified.clone());
+            }
+            for (index, candidate) in candidates.iter().enumerate().rev() {
+                if self
+                    .global_value_declarations(demand_canonical, candidate)
+                    .is_some_and(|declarations| !declarations.is_empty())
+                {
+                    return Some((
+                        verter_type_expr::OwnedStr::from(candidate.as_str()),
+                        index + 1,
+                    ));
+                }
+            }
+            current = prefix.rsplit_once('.').map(|(outer, _)| outer);
+        }
+        None
     }
 
     /// The declaration the qualified type name `name` (`Ns.T`,
@@ -8758,7 +9814,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let binding = match (args.get(index).copied(), param.default.as_ref()) {
                 (Some(explicit), _) => Some(explicit),
                 (None, Some(default)) => Some(self.lower_located_body_with_resolution_debt(
-                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(default.clone()),
+                    scoped_type_body_locator(default, binding_scope.augmentation),
                     prepared.kind,
                     &prepared.type_parameters[..index],
                     &prepared.name_resolution,
@@ -8845,6 +9901,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 scope_payload: scope_payload.as_ref(),
                 shadowing: &shadowing,
                 authored_resolution_debt: None,
+                augmentation: None,
             },
             &mut Vec::new(),
             context,
@@ -9088,6 +10145,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         owner_symbol: &verter_type_expr::OwnedStr,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
     ) -> Vec<(Arc<str>, SemanticNodeId)> {
+        self.locator_binder_frame_from_narrow_params_in(scope, owner_symbol, type_parameters, None)
+    }
+
+    fn locator_binder_frame_from_narrow_params_in(
+        &self,
+        scope: &NodeScopeId,
+        owner_symbol: &verter_type_expr::OwnedStr,
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Vec<(Arc<str>, SemanticNodeId)> {
         use crate::project_semantic_dispatch::locator_shape::{
             BinderIdentityMode, TypeParamBinderSpec,
         };
@@ -9123,9 +10190,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param.default.as_ref()
                     }
                 }?;
-                match self.lower_locator(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                    slot.clone(),
-                )) {
+                match self.lower_locator(scoped_type_body_locator(slot, augmentation)) {
                     QueryResult::Value(node) => Some(node),
                     QueryResult::Recursive(_) | QueryResult::Error(_) => None,
                 }
@@ -9296,6 +10361,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
 
+        let augmentation = match &locator {
+            verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(body) => {
+                Some(match &body.scope {
+                    verter_type_expr::locators::AuthoredAugmentationScope::Global => {
+                        verter_session_query::declarations::AugmentationScopeKind::Global
+                    }
+                    verter_type_expr::locators::AuthoredAugmentationScope::Module { specifier } => {
+                        verter_session_query::declarations::AugmentationScopeKind::Module(
+                            specifier.to_string(),
+                        )
+                    }
+                })
+            }
+            _ => None,
+        };
+
         // 1. Fetch the fixed authored shape (one reusable body-shape family
         //    per locator/source-env).
         let Some(shape) = self.fetch_located_shape(locator) else {
@@ -9312,6 +10393,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
             vue_ignored_heritage,
             seam,
+            augmentation.as_ref(),
         )
     }
 
@@ -9342,6 +10424,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: crate::semantic_query::ProjectionReductionContext,
         vue_ignored_heritage: &[verter_type_expr::facts::VueIgnoredHeritageFact],
         seam: crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> BodyLowering {
         let shape = if context.suppresses_vue_ignored_heritage() && !vue_ignored_heritage.is_empty()
         {
@@ -9363,7 +10446,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             env,
             scope,
             substitutions,
+            augmentation,
         );
+        let substituted = if decl_kind == verter_session_query::declarations::TypeDeclKind::Class {
+            let canonical = scope.canonical_file();
+            verter_debug_assert!(
+                canonical.is_some(),
+                "a class initializer has an owning file"
+            );
+            canonical.map_or(substituted, |canonical| {
+                self.normalize_class_initializers(substituted, self.nullability_for(&canonical))
+            })
+        } else {
+            substituted
+        };
 
         // 3. Plan the projection of the demanded view: per-arm
         //    ProjectionStamp application + deferred-carrier evaluation under
@@ -9379,6 +10475,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Bind a fixed locator shape without demanding any member value.
     /// Header composition and demanded body projection share this substitution.
+    #[allow(clippy::too_many_arguments)]
     fn bind_located_shape_parameters(
         &self,
         shape: SemanticNodeId,
@@ -9387,9 +10484,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> SemanticNodeId {
-        let bindings =
-            self.locator_binder_frame_from_narrow_params(scope, owner_symbol, type_parameters);
+        let bindings = self.locator_binder_frame_from_narrow_params_in(
+            scope,
+            owner_symbol,
+            type_parameters,
+            augmentation,
+        );
         let mut substituted = shape;
         for (name, binder) in bindings {
             let bound = env.get(name.as_ref()).copied();
@@ -9791,6 +10893,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &mut substitutions,
                     context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
                 );
+                let value = self
+                    .normalize_inferred_initializer_type(value, self.nullability_for(canonical));
                 own.push(SurfaceEntry::Member(SurfaceMember {
                     key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
                     value,
@@ -10147,11 +11251,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
-        let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
-            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                &bundle, owner,
-            )
-        });
+        // The members lower in the scope the whole value lowers in
+        // ([`Self::declaration_scope_payload`]).
+        let scope_payload = self
+            .ctx
+            .prepared_decl_bundle(canonical)
+            .map(|bundle| self.declaration_scope_payload(&bundle, canonical, owner, symbol));
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
             scope_payload.as_ref(),
         );
@@ -10197,11 +11302,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// The member surface of the values `members` lowered.
-    fn finish_value_members(&self, members: ValueMembers, scope: NodeScopeId) -> SemanticNodeId {
-        self.graph().intern_node_with_scope(
+    fn finish_value_members(
+        &self,
+        mut members: ValueMembers,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
+        let nullability = self.nullability_for(members.canonical.as_ref());
+        for entry in &mut members.own {
+            let SurfaceEntry::Member(member) = entry else {
+                continue;
+            };
+            member.value = self.normalize_widened_object_literals(member.value, nullability);
+        }
+        let node = self.graph().intern_node_with_scope(
             SemanticNodeData::Object(SurfaceView::from_entries(members.own, None, false)),
             scope,
-        )
+        );
+        self.regularized_source_node_with_policy(node, nullability)
     }
 
     construction_ordinal_seam! {
@@ -11100,17 +12217,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // `build_key_of` apply. The full member set (incl. non-public)
                 // stays recorded on the source surface for the keep-all
                 // `native_props` carrier; only this DERIVATION is gated.
+                // An accessor is selected by its property's `keyof` key, so
+                // `get 1` / `set "1"` are picked together as one property.
+                let selection =
+                    crate::semantic_query::AccessorSelectionKeys::of(surface.positive_members());
                 let picked: Vec<SurfaceMember> = surface
                     .positive_members()
                     .iter()
                     .filter(|m| m.visibility.is_public())
                     .filter(|m| {
-                        m.key
-                            .cloned_known()
+                        selection
+                            .selection_key(m)
                             .is_some_and(|key| pick_set.contains(&key))
                     })
                     .map(crate::semantic_query::SurfaceMember::clone)
                     .collect();
+                // `Pick` is a mapping over the source's properties: an
+                // accessor maps as the property it is.
+                let picked = crate::semantic_query::members_with_accessors_as_properties(
+                    picked,
+                    &self.graph(),
+                    |signature| self.materialize_returned_callable(signature),
+                );
                 let result_surface = SurfaceView::from_members(picked, None);
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
@@ -11201,13 +12329,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &surface.construct_signatures,
                     &omitted_event_names,
                 );
-                let entries = surface
+                // An accessor is omitted by its property's `keyof` key, so
+                // `get 1` / `set "1"` are omitted together as one property.
+                let omit_selection = crate::semantic_query::AccessorSelectionKeys::of(
+                    surface.entries.iter().filter_map(|entry| match entry {
+                        SurfaceEntry::Member(member) => Some(member),
+                        _ => None,
+                    }),
+                );
+                let entries: Vec<SurfaceEntry> = surface
                     .entries
                     .iter()
                     .filter_map(|entry| match entry {
                         SurfaceEntry::Member(member)
                             if member.visibility.is_public()
-                                && member.key.cloned_known().is_none_or(|key| {
+                                && omit_selection.selection_key(member).is_none_or(|key| {
                                     #[cfg(any(test, feature = "test-support"))]
                                     OMIT_KEY_FILTER_STEPS.with(|count| count.set(count.get() + 1));
                                     !omit_set.contains(&key)
@@ -11229,6 +12365,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         _ => None,
                     })
                     .collect();
+                // `Omit` is a mapping over the source's kept properties: an
+                // accessor maps as the property it is.
+                let has_accessor = entries.iter().any(|entry| {
+                    matches!(entry, SurfaceEntry::Member(member)
+                        if crate::semantic_query::is_public_accessor(member))
+                });
+                let kept_members: Vec<SurfaceMember> = if has_accessor {
+                    entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            SurfaceEntry::Member(member) => Some(member.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let entries = match crate::semantic_query::accessor_property_slots(
+                    &kept_members,
+                    &self.graph(),
+                    |signature| self.materialize_returned_callable(signature),
+                ) {
+                    Some(slots) => {
+                        let mut slots = slots.into_iter();
+                        entries
+                            .into_iter()
+                            .filter_map(|entry| match entry {
+                                SurfaceEntry::Member(_) => {
+                                    slots.next().flatten().map(SurfaceEntry::Member)
+                                }
+                                other => Some(other),
+                            })
+                            .collect()
+                    }
+                    None => entries,
+                };
                 let result_surface = SurfaceView::from_entries(
                     entries,
                     surface.keyspace,
@@ -11550,7 +12722,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // query build's taint frame (refusing warm admission) instead of
         // silently returning an intermediate carrier the signature-utility
         // caller would classify as settled.
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         // Bounded loop: exact-identity cycle detection plus the shared
         // connected work envelope, both typed-partial on trip.
         loop {
@@ -11615,10 +12787,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Registry classification: `name` is the global lib `Promise` type
-    /// (`IntrinsicRegistry` → [`IntrinsicImpl::PromiseGlobal`](crate::intrinsic_registry::IntrinsicImpl::PromiseGlobal)).
-    /// The registry lookup is the lib-decl-identity rail — resolver code
-    /// never matches the name string directly.
+    /// Whether `name`, within the `__builtin__` sentinel namespace the
+    /// shadowing gates mint for an unshadowed global, is the runtime
+    /// nominal `Promise` ([`RuntimeNominal`](crate::intrinsic_registry::RuntimeNominal)).
     pub(super) fn is_promise_global_name(&self, name: &str) -> bool {
         matches!(
             self.runtime_nominal_global_name(name),
@@ -11795,13 +12966,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(|decl| (decl.name.as_ref(), decl.constraint)),
             crate::semantic_query::ClauseSpelling::Bound,
         );
-        let base = |node: SemanticNodeId| {
-            self.apply_clause_base_substitution(
-                &substitution,
-                node,
-                crate::semantic_query::ClauseSpelling::Bound,
-            )
-        };
+        let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
+            graph,
+            type_parameters
+                .iter()
+                .zip(&substitution.bases)
+                .map(|(decl, base)| (decl.param, *base))
+                .collect(),
+        );
+        let base = |node| self.substitute_canonical(node, &substitution);
         let params: Arc<[crate::semantic_query::FunctionParam]> = params
             .iter()
             .map(crate::semantic_query::FunctionParam::copy)
@@ -13317,10 +14490,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = walker.walk(start_base, walker_path.as_ref());
         let prefix_receipts = walker.take_prefix_receipts();
         let intermediate_nodes = std::mem::take(&mut walker.intermediate_nodes);
-        // A member read through a class reference binds the member's
-        // polymorphic `this` to that reference.
+        // A member read through a reference binds the member's polymorphic
+        // `this` to that reference: a class member's `this` binder, and an
+        // interface member's declared `this` (`x: this["y"]` read through
+        // `A` is `A["y"]`), as the checker instantiates a member's `this`
+        // type with the reference it is accessed through.
         let result = if path.len() == 1 && self.is_this_receiver(base) {
-            self.bind_this_receiver(result, base)
+            self.bind_callee_receiver(result, base)
         } else {
             result
         };
@@ -13556,9 +14732,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             node
         };
         let node = match data.as_deref() {
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
-                self.primitive_node(PrimitiveKind::Never)
-            }
+            // The non-primitive `object` declares no member, so it has no
+            // key (`keyof object` is `never`), as nullish types have none.
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Null | PrimitiveKind::Undefined | PrimitiveKind::Object,
+            )) => self.primitive_node(PrimitiveKind::Never),
             // `keyof ClassType` yields only public keys (TS semantics): a
             // private/protected member is not part of the keyspace. Filter
             // non-public members out here, the direct-Object keyof chokepoint.
@@ -13690,6 +14868,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .build_key_of(merged, context)
                     .with_observed_self_roots(observed_self_roots);
             }
+            // An array's keys are its apparent wrapper's (`keyof T[]` IS
+            // `keyof Array<T>`).
+            Some(SemanticNodeData::Array { .. }) => {
+                drop(data);
+                return self.build_array_key_of(base, context);
+            }
+            // A function or constructor type has no properties: its call
+            // and construct signatures name no key.
+            Some(SemanticNodeData::Signature { .. }) => self.primitive_node(PrimitiveKind::Never),
             Some(SemanticNodeData::Mapped { .. }) => self
                 .key_of_through_carrier(base, context)
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
@@ -14158,6 +15345,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &super::enumerate::KeyDomainKey,
     ) -> Option<SemanticNodeId> {
+        if let Some(binder) = key.binder {
+            return Some(binder);
+        }
         match (&key.literal, &key.key) {
             (Some(literal), _) => Some(
                 self.graph()
@@ -14249,7 +15439,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             source: SemanticNodeId,
             caller_context: crate::semantic_query::ProjectionReductionContext,
         ) -> Option<(Vec<SurfaceMember>, crate::semantic_query::PartialReasonSet)> {
-            self.source_projection_with_key_domain(source, caller_context)
+            self.source_projection_with_key_domain(source, caller_context, false)
                 .map(|(members, reasons, _, _)| (members, reasons))
         }
     }
@@ -14257,11 +15447,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Keep the shallow surface's finite-domain witness beside its members.
     /// Dropping this witness makes a named dictionary look like a finite map.
     /// The surface's listed index signatures ride beside it: a homomorphic
-    /// mapping maps each one, as it maps each member.
+    /// mapping maps each one, as it maps each member. `keys_only` when the
+    /// caller reads the members' keys and modifiers but never their values
+    /// ([`Self::declared_non_object_projection`]).
     fn source_projection_with_key_domain(
         &self,
         source: SemanticNodeId,
         caller_context: crate::semantic_query::ProjectionReductionContext,
+        keys_only: bool,
     ) -> Option<(
         Vec<SurfaceMember>,
         crate::semantic_query::PartialReasonSet,
@@ -14339,7 +15532,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             QueryResult::Value(id) => id,
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
-        match self.graph().node_data(node).as_deref() {
+        let projected = match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Object(view)) => Some((
                 public_members(view.positive_members()),
                 read_partial_classes,
@@ -14367,6 +15560,126 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )
                 }),
             _ => None,
+        };
+        // A surface that projected no member and no index signature may be
+        // a type whose properties the shallow surface does not carry: read
+        // what the source declares.
+        let projected_nothing = projected
+            .as_ref()
+            .is_none_or(|(members, _, _, signatures)| members.is_empty() && signatures.is_empty());
+        if projected_nothing {
+            if let Some(declared) =
+                self.declared_non_object_projection(source, source_context, keys_only)
+            {
+                return Some(declared);
+            }
+        }
+        projected
+    }
+
+    /// The surface of a source that declares a function or constructor
+    /// type, an array or a tuple — kinds whose properties the shallow
+    /// projection does not list. A function type has no properties and no
+    /// index signatures (`keyof (() => void)` is `never`); an array or tuple
+    /// maps the properties of its apparent type, a tuple's positions and
+    /// `length` over the `Array` wrapper's members and index signature
+    /// (`{ [K in keyof [1, 'a'] as …]: … }`). `None` for any other kind.
+    /// `keys_only` reads the wrapper's members as carriers
+    /// ([`Self::array_like_apparent_object`]).
+    fn declared_non_object_projection(
+        &self,
+        source: SemanticNodeId,
+        source_context: crate::semantic_query::ProjectionReductionContext,
+        keys_only: bool,
+    ) -> Option<(
+        Vec<SurfaceMember>,
+        crate::semantic_query::PartialReasonSet,
+        bool,
+        Vec<crate::semantic_query::IndexSignature>,
+    )> {
+        let declared = self.resolve_signature_source_carrier(source, source_context);
+        let apparent = match self.graph().node_data(declared).as_deref()? {
+            SemanticNodeData::Signature { .. } => {
+                return Some((
+                    Vec::new(),
+                    crate::semantic_query::PartialReasonSet::empty(),
+                    true,
+                    Vec::new(),
+                ));
+            }
+            SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. } => {
+                self.array_like_apparent_object(declared, keys_only)?
+            }
+            _ => return None,
+        };
+        match self.graph().node_data(apparent).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some((
+                view.positive_members()
+                    .iter()
+                    .filter(|member| member.visibility.is_public())
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect(),
+                crate::semantic_query::PartialReasonSet::empty(),
+                true,
+                view.index_signatures
+                    .iter()
+                    .map(crate::semantic_query::IndexSignature::clone)
+                    .collect(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The apparent object type of the array or tuple `node`
+    /// (`getApparentType`): a tuple's own positions and `length` over the
+    /// project's `Array` / `ReadonlyArray` wrapper, an array that wrapper
+    /// alone. `None` when the wrapper read does not settle, or an array's
+    /// project declares none.
+    ///
+    /// `keys_only` reads the wrapper under structural transit, its member
+    /// values kept carriers, for a caller that reads the members' keys and
+    /// modifiers alone: the wrapper's own members may map over its keys
+    /// (`Array`'s `[Symbol.unscopables]: { [K in keyof any[]]?: boolean }`),
+    /// so evaluating their values to read those keys would re-enter the
+    /// wrapper's own instantiation.
+    fn array_like_apparent_object(
+        &self,
+        node: SemanticNodeId,
+        keys_only: bool,
+    ) -> Option<SemanticNodeId> {
+        let (name, args) = self.apparent_wrapper_of(node)?;
+        let canonical = self
+            .graph()
+            .node_scope(node)
+            .and_then(|scope| scope.canonical_file())
+            .or_else(|| self.wrapper_demand_canonical())?;
+        let surface = if keys_only {
+            self.global_wrapper_surface_in(
+                name,
+                &args,
+                canonical.as_ref(),
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+        } else {
+            self.global_wrapper_surface(name, &args, canonical.as_ref())
+        };
+        let wrapper = match surface {
+            super::apparent_type::GlobalWrapper::Surface(surface) => {
+                Some(match self.graph().node_data(surface).as_deref() {
+                    Some(SemanticNodeData::MergedDecl { contributors }) => {
+                        self.reduce_merged_decl(contributors)
+                    }
+                    _ => surface,
+                })
+            }
+            super::apparent_type::GlobalWrapper::Absent => None,
+            super::apparent_type::GlobalWrapper::Unsettled => return None,
+        };
+        match self.graph().node_data(node).as_deref()? {
+            SemanticNodeData::Tuple { elements, readonly } => {
+                Some(self.tuple_apparent_surface(wrapper, elements, *readonly))
+            }
+            _ => wrapper,
         }
     }
 
@@ -14428,6 +15741,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// - a primitive, a literal, `object`, `null` and `undefined` pass
     ///   through unchanged (`Partial<string>` is `string`), with or without
     ///   an `as` clause; `never` is `never`, and `unknown` maps to `{}`;
+    /// - a function or constructor type, having no properties, maps to `{}`;
     /// - without an `as` clause, an array maps its element (`Partial<number[]>`
     ///   is `(number | undefined)[]`) and a tuple each element, the
     ///   modifiers applying to the element flags (`Partial<[1, 2?]>` is
@@ -14467,6 +15781,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticNodeData::TypeOfNominal(_) => {
                 drop(data);
                 Some(finish(resolved, false))
+            }
+            // A function or constructor type is an object with no properties
+            // and no index signatures: its signatures are not mapped, so the
+            // mapping is `{}` (`Partial<() => void>`).
+            SemanticNodeData::Signature { .. } => {
+                drop(data);
+                Some(finish(self.empty_object(), false))
             }
             SemanticNodeData::Union(members) => {
                 let members = members.members_arc();
@@ -14711,6 +16032,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Folds `value` into the member `produced` already holds under the
+    /// property spelling of `name`, as the checker unites the productions
+    /// of one property (`{ [K in 1 | "1"]: K }` is `{ 1: 1 | "1" }`); the
+    /// first production keeps the member's slot. `false` when no production
+    /// of that spelling exists yet.
+    pub(super) fn join_mapped_production(
+        &self,
+        produced: &mut MappedProducedMembers,
+        name: &PropertyKey,
+        value: SemanticNodeId,
+    ) -> bool {
+        let Some(&ordinal) = produced
+            .by_spelling
+            .get(&crate::semantic_query::property_spelling(name.clone()))
+        else {
+            return false;
+        };
+        let existing = &mut produced.members[ordinal];
+        if existing.value != value {
+            existing.value =
+                self.intern_normalized_union_or_intersection(&[existing.value, value], true);
+        }
+        true
+    }
+
+    /// A mapped member's value as the mapped type holds it under its
+    /// optionality modifier: `-?` removes the `undefined` an optional
+    /// source member added (`source_optional` reads that member's
+    /// optionality), and a kept `?` over a value that is the modifiers
+    /// type's own member read (`X[P]`, `kept_optional_read` that member)
+    /// drops the `undefined` the read added, since the member's optional
+    /// flag carries absence.
+    pub(super) fn settle_mapped_member_value(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        value: SemanticNodeId,
+        source: SemanticNodeId,
+        kept_optional_read: Option<&SurfaceMember>,
+        source_optional: impl Fn() -> Option<bool>,
+    ) -> SemanticNodeId {
+        if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
+            return self.mapped_member_optionality_with(mapper, value, source, source_optional);
+        }
+        match (kept_optional_read, mapper.modifiers_type) {
+            (Some(member), Some(modifiers)) if member.optional => {
+                self.read_without_optional_member_undefined(value, member.value, modifiers)
+            }
+            _ => value,
+        }
+    }
+
     /// A mapped member's value read at its key under its optionality
     /// modifier, as the checker types a mapped symbol's property under
     /// `strictNullChecks` (`resolveMappedTypeMembers`): `+?` adds `undefined`
@@ -14818,7 +16190,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
     }
 
-    fn union_arms(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+    pub(super) fn union_arms(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
             _ => vec![node],
@@ -15052,8 +16424,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => source,
         };
-        if let Some(absorbed) = self.absorb_mapped(reduced_source) {
-            return absorbed;
+        // A mapping over `keyof S` (homomorphic) whose `S` is `any` maps the
+        // one key type the checker reads off `any`, `string`
+        // (`forEachMappedTypePropertyKeyTypeAndIndexSignatureKeyType`): it
+        // is `{ [x: string]: … }` (`{ [K in keyof T]: T[K] }` over `any` is
+        // `{ [x: string]: any }`), never `any`.
+        let homomorphic_over_any = (mapper.over_type_variable || mapper.key_space != source)
+            && matches!(
+                self.graph().node_data(reduced_source).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+            );
+        if !homomorphic_over_any {
+            if let Some(absorbed) = self.absorb_mapped(reduced_source) {
+                return absorbed;
+            }
         }
         let graph = self.graph();
         let fence = self.project_generation_signature();
@@ -15169,7 +16553,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // through the source's heritage) is not re-lifted as the
         // anonymous `PROPAGATED` bridge downstream.
         let mut mapped_partial_reasons = crate::semantic_query::PartialReasonSet::empty();
-        let source_projection = self.source_projection_with_key_domain(source, context);
+        let source_projection = if homomorphic_over_any {
+            Some((
+                Vec::new(),
+                crate::semantic_query::PartialReasonSet::empty(),
+                true,
+                vec![crate::semantic_query::IndexSignature {
+                    key_type: self.primitive_node(PrimitiveKind::String),
+                    value_type: source,
+                    readonly: false,
+                    spans: verter_type_expr::IndexSignatureSpans::default(),
+                    declaration_origin: None,
+                }],
+            ))
+        } else {
+            // Only the identity mapper reads a source member's value; any
+            // other reads the source's keys and modifiers alone.
+            let keys_only = !matches!(mapper.kind, crate::semantic_query::MapperKind::Identity);
+            self.source_projection_with_key_domain(source, context, keys_only)
+        };
         // A source that RESOLVED (to any surface, including an EMPTY one)
         // is distinct from a source that did NOT project: only the latter
         // defers a homomorphic mapping — see the resolved-empty arm below.
@@ -15439,8 +16841,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // removes. The evaluation itself is unchanged — see
         // [`Self::evaluate_k_independent_mapped_value`].
         let mut shared_value: Option<SemanticNodeId> = None;
-        let mut produced: Vec<SurfaceMember> = Vec::with_capacity(keys.len());
-        let mut produced_by_key = std::collections::HashMap::with_capacity(keys.len());
+        let mut produced = MappedProducedMembers::with_capacity(keys.len());
         let mut project_member_edges: Vec<(SemanticNodeId, PropertyKey)> = Vec::new();
         // A key whose `as` remap fails closed (`DeferCarrier`) taints the whole
         // mapped type: it returns the deferred `Mapped` carrier rather than a
@@ -15455,6 +16856,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source_member_index.entry(key).or_insert(member);
             }
         }
+        let source_accessors =
+            crate::semantic_query::AccessorReadonlyByProperty::of(&source_members);
         // A kept modifier is read off the modifiers type
         // (`getModifiersTypeFromMappedType`): `source` itself, or the `X` of
         // a key parameter constrained to `keyof X`. One that does not
@@ -15478,6 +16881,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             index
         });
+        let modifiers_accessors = modifiers_members
+            .as_deref()
+            .map(crate::semantic_query::AccessorReadonlyByProperty::of);
         // `X[P]` over the modifiers type `X` is the property read `X[P]` — an
         // overloaded method's whole signature group, an accessor's read
         // type — under the member's kept `?`, which carries the `undefined`
@@ -15525,9 +16931,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             };
             let source_member = source_member_index.get(&key.key).copied();
+            // An accessor maps as the property it is: `readonly` without a
+            // setter, its value read through the key, never the accessor.
+            let source_accessor_readonly = source_accessors.readonly(&key.key);
             let modifiers_member = match &modifiers_member_index {
                 Some(index) => index.get(&key.key).copied(),
                 None => source_member,
+            };
+            let modifiers_accessor_readonly = match &modifiers_accessors {
+                Some(accessors) => accessors.readonly(&key.key),
+                None => source_accessor_readonly,
             };
             let optional = match mapper.optionality {
                 crate::semantic_query::OptionalityMod::Add => true,
@@ -15539,9 +16952,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let readonly = match mapper.readonly {
                 crate::semantic_query::ReadonlyMod::Add => true,
                 crate::semantic_query::ReadonlyMod::Remove => false,
-                crate::semantic_query::ReadonlyMod::Keep => {
-                    modifiers_member.map(|m| m.readonly).unwrap_or(false)
-                }
+                crate::semantic_query::ReadonlyMod::Keep => modifiers_accessor_readonly
+                    .or(modifiers_member.map(|m| m.readonly))
+                    .unwrap_or(false),
             };
             // Value selection branches:
             //
@@ -15581,7 +16994,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 cancelled = true;
                 break;
             }
-            let value = if let (Some(source_member), true) = (source_member, value_is_identity) {
+            let value_member = source_member.filter(|_| source_accessor_readonly.is_none());
+            let value = if let (Some(source_member), true) = (value_member, value_is_identity) {
                 source_member.value
             } else if value_is_identity {
                 let read = self.execute_read(SemanticQueryKey::IndexedAccess {
@@ -15628,20 +17042,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // A surface's optional flag carries absence; adding `undefined`
             // belongs to a member read. Removing optionality must settle its
             // value before the source modifier is lost.
-            let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
-                self.key_domain_binder(key).map_or(value, |key_node| {
-                    self.mapped_member_optionality(mapper, value, source, key_node)
-                })
-            } else {
-                match (modifiers_member, mapper.modifiers_type) {
-                    (Some(member), Some(modifiers))
-                        if value_reads_modifiers_member && optional && member.optional =>
-                    {
-                        self.read_without_optional_member_undefined(value, member.value, modifiers)
-                    }
-                    _ => value,
-                }
-            };
+            let value = self.settle_mapped_member_value(
+                mapper,
+                value,
+                source,
+                modifiers_member.filter(|_| value_reads_modifiers_member && optional),
+                || {
+                    self.key_domain_binder(key)
+                        .and_then(|key_node| self.mapped_source_member_optional(source, key_node))
+                },
+            );
             // `produced_names` was decided above, before this key's value
             // operand was forced — see the key-domain ordering note at the
             // top of the loop.
@@ -15654,17 +17064,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // first production keeps the member slot (position,
                 // modifiers, and declaration site); later same-name
                 // productions fold their value into a Union arm.
-                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
-                if let Some(&ordinal) = produced_by_key.get(&spelling) {
-                    let existing: &mut SurfaceMember = &mut produced[ordinal];
-                    if existing.value != value {
-                        // Canonical construction: duplicate produced names
-                        // UNION their per-K values through the one authority.
-                        existing.value = self.intern_normalized_union_or_intersection(
-                            &[existing.value, value],
-                            true,
-                        );
-                    }
+                if self.join_mapped_production(&mut produced, &produced_name, value) {
                     project_member_edges.push((value, produced_name.clone()));
                     continue;
                 }
@@ -15681,7 +17081,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // NOT via own-body declaration in any consuming macro's
                 // T body. The construction layer is structurally
                 // heritage-equivalent — `false` is the truth.
-                produced_by_key.insert(spelling, produced.len());
                 produced.push(SurfaceMember {
                     key: crate::semantic_query::AuthoredPropertyKey::from_known(
                         produced_name.clone(),
@@ -15776,19 +17175,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // inherit modifiers from: only the mapping's own `+?` and
             // `+readonly` apply. A name produced again unites its values.
             for produced_name in produced_names {
-                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
-                if let Some(&ordinal) = produced_by_key.get(&spelling) {
-                    let existing: &mut SurfaceMember = &mut produced[ordinal];
-                    if existing.value != value {
-                        existing.value = self.intern_normalized_union_or_intersection(
-                            &[existing.value, value],
-                            true,
-                        );
-                    }
+                if self.join_mapped_production(&mut produced, &produced_name, value) {
                     project_member_edges.push((value, produced_name));
                     continue;
                 }
-                produced_by_key.insert(spelling, produced.len());
                 produced.push(SurfaceMember {
                     key: crate::semantic_query::AuthoredPropertyKey::from_known(
                         produced_name.clone(),
@@ -15896,6 +17286,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(crate::semantic_query::SurfaceEntry::IndexSignature)
                 .chain(
                     produced
+                        .into_members()
                         .into_iter()
                         .map(crate::semantic_query::SurfaceEntry::Member),
                 )
@@ -16025,21 +17416,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Substitute one selected key, then evaluate its value through the
     /// shared continuation runtime. Instantiation and conditional reduction
     /// retain the full publication context and typed completion outcome.
-    pub(super) fn materialize_selected_key_mapped_value(
-        &self,
-        mapper: &crate::semantic_query::MapperKey,
-        key_literal: &LiteralValue,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        let key_arg = self
-            .graph()
-            .intern_node(SemanticNodeData::Literal(key_literal.clone()));
-        self.materialize_selected_key_mapped_value_with_node(mapper, key_arg, context)
-    }
-
-    /// Node-keyed selected value; numeric and nominal keys retain their
-    /// original identity during substitution. The active build adopts the
-    /// typed evaluation rails before receiving a node.
+    /// Numeric, enum-member and nominal keys retain their original identity
+    /// during substitution. The active build adopts the typed evaluation
+    /// rails before receiving a node.
     pub(super) fn materialize_selected_key_mapped_value_with_node(
         &self,
         mapper: &crate::semantic_query::MapperKey,
@@ -16061,7 +17440,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         resolved_source: SemanticNodeId,
     ) -> Result<Vec<SemanticNodeId>, crate::semantic_query::PartialReasonSet> {
         let mut reads = Vec::new();
-        let mut seen = FxHashSet::default();
+        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut pending = vec![mapper.value_expr];
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
@@ -16258,6 +17637,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let substituted_remap =
             self.substitute_semantic_type_param(remap_node, mapper.parameter_node, key_literal);
+        // A remap whose conditional the relation engine cannot decide
+        // (`T[K] extends Function` over an operand it has no judgement for)
+        // leaves this key's name unknown: the key domain is unknown, so the
+        // mapped type stays its deferred carrier, as it does over an open
+        // domain, instead of a gap. The undecided reading is declined, but
+        // its roots stay, and the carrier it led to is never warm-admitted.
+        // Any other partial (a budget, a missing dependency alone, a
+        // degraded read) joins the build as it would unobserved.
+        let read = self.observe_read(|| self.evaluate_remap_outcome(substituted_remap, context));
+        let undecided = crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL;
+        let reasons = read.result_completeness().reasons();
+        if matches!(read.value(), MappedKeyRemapOutcome::DeferCarrier)
+            && reasons.contains(undecided)
+            && undecided
+                .union(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY)
+                .contains(reasons)
+        {
+            read.preserve_reuse_evidence(self);
+            self.fold_into_top_build_local_taint(false, true);
+            return read
+                .discard()
+                .unwrap_or(MappedKeyRemapOutcome::DeferCarrier);
+        }
+        read.adopt(self)
+            .unwrap_or(MappedKeyRemapOutcome::DeferCarrier)
+    }
+
+    /// The `as`-clause outcome of one substituted remap: its evaluation,
+    /// a helper application bound and re-evaluated, then classified.
+    fn evaluate_remap_outcome(
+        &self,
+        substituted_remap: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> MappedKeyRemapOutcome {
         let evaluated_remap = self
             .evaluate_deferred_semantic_node_with_context(substituted_remap, context)
             .into_active_query_build_node(self);
@@ -17145,7 +18558,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut current = self
             .evaluate_deferred_semantic_node_with_context(node, context)
             .into_active_query_build_node(self);
@@ -17698,7 +19111,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// The `Instantiate` key [`Self::declaration_carrier_body`] reads for a
-    /// declaration carrier, or `None` for any other node.
+    /// declaration carrier, or `None` for any other node. A runtime nominal
+    /// the project declares (`Promise<T>`) reads the global declaration it
+    /// refers to.
     fn declaration_carrier_key(&self, carrier: SemanticNodeId) -> Option<SemanticQueryKey> {
         let (identity, args) = match self.graph().node_data(carrier).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => (
@@ -17710,6 +19125,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => return None,
         };
+        let identity = self
+            .runtime_nominal_declaration(carrier, &identity)
+            .unwrap_or(identity);
         let slot = self.type_slot_for(
             identity.canonical_id.clone(),
             identity.owner,
@@ -17924,16 +19342,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The arguments of the next step of a generic declaration's tail run:
-    /// `result`, its body as lowered, is an application of this very
-    /// declaration (`canonical`, `owner`, `name`) — as the recursive
-    /// back-edge the lowering mints while the declaration is being
-    /// instantiated, or as the application carrier a carrier-preserving
-    /// demand keeps. A generic declaration whose type is an application of
-    /// itself is a conditional that selected that branch; a non-generic
-    /// one names itself directly, which the checker reports as a circular
-    /// alias, and its back-edge stays the recursive reference. `None` for
-    /// any other result, an application nested inside a type included.
     /// Whether the declaration an instantiation builds declares a
     /// conditional type as its body (through `Alias` wrappers): only then
     /// is its body applying the declaration again a step of the checker's
@@ -17960,29 +19368,76 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         known
     }
 
+    /// The next arguments of this declaration's tail run, directly or
+    /// through aliases that only forward their own bare parameters.
+    /// Applications nested inside constructors and conditional alias bodies
+    /// stay on the ordinary evaluation path, never a guessed tail edge.
+    /// Eligibility is read only after a non-self application is found;
+    /// ordinary aliases never scan the rest of their forwarding chain.
     fn conditional_tail_arguments(
         &self,
         result: SemanticNodeId,
         canonical: &verter_type_expr::OwnedStr,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &verter_type_expr::OwnedStr,
+        forwarding_allowed: impl FnOnce() -> bool,
     ) -> Option<Arc<[SemanticNodeId]>> {
         let graph = self.graph();
-        match graph.node_data(result).as_deref() {
-            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name: edge, args })) => {
-                let declared_here = matches!(
-                    graph.node_scope(result),
-                    Some(NodeScopeId::File { canonical_id, owner: edge_owner, .. })
-                        if canonical_id == *canonical && edge_owner == owner
-                );
-                (edge == name && declared_here)
-                    .then(|| Arc::<[SemanticNodeId]>::from(args.operands()))
-            }
-            Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                (base.canonical_id == *canonical && base.owner == owner && base.decl_name == *name)
-                    .then(|| Arc::clone(args.as_arc()))
-            }
+        let reference = |node| match graph.node_data(node).as_deref() {
+            Some(
+                SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }),
+            ) => self.raw_generic_reference(node),
             _ => None,
+        };
+        let (mut declaration, mut arguments) = reference(result)?;
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut forwarding_allowed = Some(forwarding_allowed);
+        loop {
+            if declaration.canonical_id == *canonical
+                && declaration.owner == owner
+                && declaration.decl_name == *name
+            {
+                return Some(arguments);
+            }
+            if let Some(allowed) = forwarding_allowed.take() {
+                if !allowed() {
+                    return None;
+                }
+            }
+            if self.cancellation.is_cancelled() || !seen.insert(declaration.clone()) {
+                return None;
+            }
+            let prepared = self.ctx.prepared_type_decl_return_only(
+                declaration.canonical_id.as_ref(),
+                declaration.owner,
+                declaration.decl_name.as_ref(),
+            )?;
+            if prepared.kind != verter_session_query::declarations::TypeDeclKind::Alias {
+                return None;
+            }
+            // A forwarding alias changes no type: `Wrap<T> = Grow<T>`
+            // takes Grow's selected branch back to Grow with the same
+            // arguments. Read only that declared application, never
+            // evaluate another conditional or descend into a constructor.
+            let body = self.declared_alias_body(&declaration)??;
+            let (next, parameters) = reference(body)?;
+            let forwarded = parameters
+                .iter()
+                .map(|parameter| match graph.node_data(*parameter).as_deref() {
+                    Some(SemanticNodeData::TypeParam {
+                        decl, param_index, ..
+                    }) if decl.canonical_id == declaration.canonical_id
+                        && decl.owner == declaration.owner
+                        && decl.decl_name == declaration.decl_name =>
+                    {
+                        arguments.get(usize::from(*param_index)).copied()
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            declaration = next;
+            arguments = forwarded.into();
         }
     }
 
@@ -18010,17 +19465,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// ([`Self::lib_awaited_node`]); this read is a root. When
     /// `Awaited<argument>` is a root whose evaluation is ALREADY in progress
     /// on this path, the conditional has come back to itself with the same
-    /// argument and can never reach a value — a certified divergence: the
-    /// checker reports TS2589 and continues with its error type, which
-    /// dominates each union and branch on the way. That recovery is the
-    /// answer, a complete one.
+    /// argument: through exact steps it can never reach a value — a
+    /// certified divergence: the checker reports TS2589 and continues with
+    /// its error type, which dominates each union and branch on the way.
+    /// That recovery is the answer, a complete one
+    /// ([`Self::lib_awaited_recurs`]). The steps are every step since that
+    /// application began, in its own frame and each frame built on top of
+    /// it ([`Self::exact_steps_since`]), so a partial read anywhere on the
+    /// cycle proves nothing.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
         if self
             .graph()
             .is_same_path_claim_at(&application, self.checking_site.get())
         {
-            return Some(Some(self.lib_awaited_recurs()));
+            return match self.lib_awaited_recurs(self.exact_steps_since(&application)) {
+                LibAwaited::Reduced(recovery) => Some(Some(recovery)),
+                _ => None,
+            };
         }
         let body = match self.execute_read(application).value {
             QueryResult::Value(body) => body,
@@ -18082,19 +19544,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.lib_awaited_run(operand, &mut walk, 0)
     }
 
-    /// The TS2589 recovery of the lib conditional re-entering itself with
-    /// an argument it is still evaluating on this path: the same
-    /// application under the same context, so a certified divergence — a
-    /// complete answer, kept.
-    fn lib_awaited_recurs(&self) -> SemanticNodeId {
-        self.connected_demand.note_divergence_certificate();
-        crate::semantic_query::checker_policy::divergence_recovery(
+    /// Exercise the library walk under the caller's build-local observations.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lib_awaited_for_tests(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self.lib_awaited_node(operand) {
+            LibAwaited::Reduced(node) => Some(node),
+            LibAwaited::Deferred | LibAwaited::Refused => None,
+        }
+    }
+
+    /// The lib conditional re-entering itself with an argument it is still
+    /// evaluating on this path: the same application under the same
+    /// context. Through `exact` steps that is a certified divergence, its
+    /// TS2589 recovery a complete answer, kept. Without that witness — a
+    /// step on the cycle read a partial, or the frame that began the
+    /// application is not on this stack — it proves nothing: the
+    /// cross-query application stops as a same-path partial, never kept.
+    /// A local walk with an executable transition instead continues through
+    /// `lib_awaited_resolved` under its work and depth allowances.
+    fn lib_awaited_recurs(&self, exact: Option<ExactSteps>) -> LibAwaited {
+        let Some(exact) = exact else {
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+            );
+            return LibAwaited::Refused;
+        };
+        LibAwaited::Reduced(crate::semantic_query::checker_policy::divergence_recovery(
             self.graph(),
             crate::semantic_query::checker_policy::CertifiedDivergence::exact_recurrence(
                 crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+                exact,
             ),
             None,
-        )
+        ))
     }
 
     /// The TS2589 recovery of the lib conditional after `refusal`.
@@ -18205,10 +19687,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return LibStep::Done(LibAwaited::Reduced(resolved));
         }
         if walk.on_path.contains(&resolved) {
-            return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_recurs()));
+            if let Some(exact) = self.exact_steps() {
+                return LibStep::Done(self.lib_awaited_recurs(Some(exact)));
+            }
+            // No proof: evaluate the transition again. Tail transitions
+            // remain charged by the run; synchronous carrier transitions
+            // also need a depth rail, since they can recur without
+            // returning a tail step to that run.
+            let within = walk.depth.enter(
+                1,
+                crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+            );
+            let result = if let Err(refusal) = within {
+                LibStep::Done(LibAwaited::Reduced(self.lib_awaited_too_deep(refusal)))
+            } else if let Err(reasons) = self.charge_connected_work() {
+                self.fold_local_partial_completeness(reasons);
+                LibStep::Done(LibAwaited::Refused)
+            } else {
+                self.lib_awaited_resolved(resolved, walk)
+            };
+            walk.depth.leave(1);
+            return result;
         }
         walk.path.push(resolved);
         walk.on_path.insert(resolved);
+        self.lib_awaited_resolved(resolved, walk)
+    }
+
+    /// Evaluate one resolved operand. Active membership belongs to the
+    /// first run that entered it; a repeated transition adds no duplicate
+    /// path entry that could remove an enclosing run's membership on exit.
+    fn lib_awaited_resolved(&self, resolved: SemanticNodeId, walk: &mut LibAwaitedWalk) -> LibStep {
         let Some(data) = self.graph().node_data(resolved) else {
             return LibStep::Done(LibAwaited::Refused);
         };
@@ -18230,11 +19739,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.intern_normalized_union_or_intersection(&reduced, true),
                 ))
             }
+            // Verter's own `Promise<V>`, which no declaration of the project
+            // describes: its `then`'s `onfulfilled` is the optional, nullable
+            // `((value: V) => ...) | null | undefined`, a callback union. A
+            // `Promise` the project declares is a reference to that
+            // declaration and reads its `then` like any other carrier below.
             SemanticNodeData::InstantiationRef { base, args }
-                if args.len() == 1 && self.is_promise_global_identity(base) =>
+                if args.len() == 1
+                    && self.is_promise_global_identity(base)
+                    && self.runtime_nominal_declaration(resolved, base).is_none() =>
             {
-                // `Promise<V>.then`'s `onfulfilled` is the optional, nullable
-                // `((value: V) => ...) | null | undefined`: a callback union.
                 let value = args[0];
                 drop(data);
                 LibStep::Done(self.lib_awaited_nested(value, walk, true))
@@ -19573,8 +21087,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// operations and projections that construct through this funnel are
     /// shared across projects and do not model `strictNullChecks`. A
     /// producer that answers under one project's policy — the flow-return
-    /// evaluator — constructs through [`Self::intern_normalized_union`]
-    /// with that policy instead.
+    /// evaluator or a published Expanded locator projection — constructs
+    /// through [`Self::intern_normalized_union`] with that policy instead.
     /// The union an intersection of `arms` denotes when an arm is a union —
     /// the checker's distribution (`getIntersectionType`), even where the
     /// canonical construction keeps the written intersection as its printed
@@ -19655,6 +21169,205 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             );
             self.deposit_canonical_evidence(composite.evidence);
             composite.node
+        }
+    }
+
+    construction_ordinal_seam! {
+        /// The type the checker constructs from a WRITTEN union
+        /// (`getUnionType` over its arms) when that construction absorbs a
+        /// literal: `"a" | string` is `string`, `1 | number | "x"` is
+        /// `number | "x"`, `"a1" | `a${number}` | "ab"` is
+        /// `"ab" | `a${number}``.
+        ///
+        /// An alias is transparent to that construction, so a named arm
+        /// (`type A = "a"`) is resolved before absorption is decided: an arm
+        /// resolving to a literal, primitive or pattern template stands for
+        /// its resolution, and one resolving to a union contributes that
+        /// union's arms, resolved the same way. Any other named arm stays
+        /// written by its name. A canonical union is offered too: the
+        /// canonical algebra keeps a named arm unresolved, so only its named
+        /// arms can still absorb or be absorbed.
+        ///
+        /// `None` for any other node and for a written union with no literal
+        /// beside a primitive or pattern template that could absorb it: such
+        /// a union is not re-decided here and stays the authored display form
+        /// in its written order (`"a" | "b" | never`, `A | "b"`).
+        ///
+        /// Otherwise the shared `ReduceUnion` query decides the resolved arms
+        /// under `nullability`, the root file's `null` / `undefined`
+        /// algebra, and the outcome is
+        /// returned typed: the reduced type when it absorbed a literal, the
+        /// written node itself when it absorbed none, and the reducer's (or a
+        /// named arm's resolution) error or opaque result verbatim, for the
+        /// caller to classify as a fault or a miss.
+        fn reduced_written_union(
+            &self,
+            node: SemanticNodeId,
+            nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        ) -> Option<QueryResult<SemanticNodeId>> {
+            use crate::semantic_query::composite::CompositeOriginCategory as Category;
+            let graph = self.graph();
+            let arms = match graph.node_data(node)?.as_ref() {
+                SemanticNodeData::Union(arms)
+                    if matches!(
+                        arms.origin_category(),
+                        Category::AuthoredShell
+                            | Category::PreservingRebuild
+                            | Category::Canonical(_)
+                            | Category::CanonicalUnproven
+                    ) =>
+                {
+                    arms.members_arc()
+                }
+                _ => return None,
+            };
+            // A named arm: a declaration reference, an alias shell or a
+            // declaration placeholder.
+            let is_named = |arm: SemanticNodeId| {
+                matches!(
+                    graph.node_data(arm).as_deref(),
+                    Some(
+                        SemanticNodeData::DeclRef { .. }
+                            | SemanticNodeData::Alias(_)
+                            | SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder { .. })
+                    )
+                )
+            };
+            // The arm a named arm stands for when deciding absorption: its
+            // resolution through the whole alias chain, unless that is
+            // neither a union nor a literal, primitive or pattern template. A
+            // chain is finite, as the declarations it names are; one that
+            // comes back to a node it already passed is a recursive alias,
+            // which stays written by its name. A resolution that fails is
+            // returned for the caller to classify.
+            let resolve_named = |arm: SemanticNodeId| -> Result<SemanticNodeId, QueryResult<SemanticNodeId>> {
+                let mut resolved = arm;
+                let mut passed: FxHashSet<SemanticNodeId> = FxHashSet::default();
+                loop {
+                    if !passed.insert(resolved) {
+                        return Ok(arm);
+                    }
+                    let key = match graph.node_data(resolved).as_deref() {
+                        Some(SemanticNodeData::Alias(inner)) => {
+                            resolved = *inner;
+                            continue;
+                        }
+                        Some(SemanticNodeData::DeclRef { identity }) => {
+                            SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
+                                &identity.canonical_id,
+                                identity.owner,
+                                &identity.decl_name,
+                            ))
+                        }
+                        Some(SemanticNodeData::Opaque(
+                            crate::semantic_query::QueryError::DeclPlaceholder {
+                                canonical_id,
+                                owner,
+                                name,
+                                ..
+                            },
+                        )) => SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                            self.type_slot_for(canonical_id.clone(), *owner, name.clone()),
+                            Arc::from(Vec::new().into_boxed_slice()),
+                            self.instantiate_context_for(
+                                canonical_id,
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    ProjectionMode::Navigate,
+                                ),
+                            ),
+                        )),
+                        Some(
+                            SemanticNodeData::Union(_)
+                            | SemanticNodeData::Literal(_)
+                            | SemanticNodeData::TemplateLiteral { .. }
+                            | SemanticNodeData::Primitive(_),
+                        ) => return Ok(resolved),
+                        Some(SemanticNodeData::Opaque(_)) if resolved != arm => {
+                            return Err(QueryResult::Value(resolved));
+                        }
+                        _ => return Ok(arm),
+                    };
+                    match self.execute_read(key).value {
+                        QueryResult::Value(next) => resolved = next,
+                        // A recursive alias stays written by its name.
+                        QueryResult::Recursive(_) => return Ok(arm),
+                        error @ QueryResult::Error(_) => return Err(error),
+                    }
+                }
+            };
+            // The written arms, nested and named unions flattened as the
+            // reducer reads them, and named arms standing for their
+            // resolution.
+            let mut flat = Vec::with_capacity(arms.len());
+            let mut seen_names: FxHashSet<SemanticNodeId> = FxHashSet::default();
+            let mut pending: Vec<SemanticNodeId> = arms.iter().rev().copied().collect();
+            while let Some(arm) = pending.pop() {
+                let arm = if is_named(arm) {
+                    if !seen_names.insert(arm) {
+                        flat.push(arm);
+                        continue;
+                    }
+                    match resolve_named(arm) {
+                        Ok(resolved) => resolved,
+                        Err(outcome) => return Some(outcome),
+                    }
+                } else {
+                    arm
+                };
+                match graph.node_data(arm).as_deref() {
+                    Some(SemanticNodeData::Union(inner)) => {
+                        pending.extend(inner.iter().rev().copied());
+                    }
+                    _ => flat.push(arm),
+                }
+            }
+            // Each arm's part in absorption: a literal, a pattern template, or a
+            // supertype a literal may be absorbed into (its primitive, `any` or
+            // `unknown`).
+            let role = |arm: SemanticNodeId| match graph.node_data(arm).as_deref() {
+                Some(SemanticNodeData::Literal(_)) => AbsorptionRole::Literal,
+                Some(SemanticNodeData::TemplateLiteral { .. }) => AbsorptionRole::PatternTemplate,
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::Any
+                    | PrimitiveKind::Unknown,
+                )) => AbsorptionRole::Supertype,
+                _ => AbsorptionRole::Inert,
+            };
+            let reducible = may_absorb_a_literal(&flat, role);
+            if !reducible {
+                return None;
+            }
+            let members: Arc<[SemanticNodeId]> = Arc::from(flat.as_slice());
+            let key = SemanticQueryKey::ReduceUnion {
+                members,
+                nullability,
+            };
+            let reduced = match self.execute_read(key).value {
+                QueryResult::Value(reduced) => reduced,
+                other => return Some(other),
+            };
+            let is_literal = |arm: SemanticNodeId| {
+                matches!(
+                    role(arm),
+                    AbsorptionRole::Literal | AbsorptionRole::PatternTemplate
+                )
+            };
+            let absorbed = match graph.node_data(reduced).as_deref() {
+                // An opaque reduction is the caller's to classify.
+                Some(SemanticNodeData::Opaque(_)) => true,
+                Some(SemanticNodeData::Union(kept)) => {
+                    let kept: FxHashSet<SemanticNodeId> = kept.iter().copied().collect();
+                    flat.iter()
+                        .any(|&arm| is_literal(arm) && !kept.contains(&arm))
+                }
+                Some(_) => flat.iter().any(|&arm| is_literal(arm) && arm != reduced),
+                None => false,
+            };
+            Some(QueryResult::Value(if absorbed { reduced } else { node }))
         }
     }
 
@@ -19964,7 +21677,17 @@ impl AmbientModuleBlock {
                 canonical_id: verter_type_expr::OwnedStr::from(self.canonical.clone()),
                 owner: self.owner,
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(self.owner),
+                binder_scope_id: match &self.scope {
+                    verter_session_query::declarations::AugmentationScopeKind::Module(
+                        specifier,
+                    ) => crate::semantic_query::BinderScopeId::augmentation_module_scope(
+                        self.owner,
+                        specifier.as_str().into(),
+                    ),
+                    verter_session_query::declarations::AugmentationScopeKind::Global => {
+                        crate::semantic_query::BinderScopeId::augmentation_global_scope(self.owner)
+                    }
+                },
             },
             name: name.into(),
         }
@@ -20345,6 +22068,11 @@ pub(super) struct InstantiateBuild {
     /// Every argument list the tail run has taken, for the recurrence that
     /// never reaches a value.
     tail_arguments: rustc_hash::FxHashSet<Arc<[SemanticNodeId]>>,
+    /// The arguments of the tail run's current step.
+    tail_current: Arc<[SemanticNodeId]>,
+    /// The declaration's uniform growth ([`GrowthShape`]), once read
+    /// (`Some(None)` when its body has none).
+    growth: Option<Option<GrowthShape>>,
     /// Whether the declaration's body is a conditional type, once read
     /// (`Some(None)` when it could not be recovered).
     conditional_body: Option<Option<bool>>,
@@ -20364,6 +22092,37 @@ struct MappedIndexRemap {
     key_types: Vec<SemanticNodeId>,
     /// The property names it produces.
     names: Vec<PropertyKey>,
+}
+
+/// The members a mapped type produces, in production order, indexed by
+/// property spelling so a later production of the same property joins the
+/// first ([`ProjectSemanticDispatch::join_mapped_production`]).
+pub(super) struct MappedProducedMembers {
+    members: Vec<SurfaceMember>,
+    by_spelling: FxHashMap<PropertyKey, usize>,
+}
+
+impl MappedProducedMembers {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            members: Vec::with_capacity(capacity),
+            by_spelling: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
+        }
+    }
+
+    /// Adds the first production of a property.
+    pub(super) fn push(&mut self, member: SurfaceMember) {
+        if let Some(key) = member.key.cloned_known() {
+            self.by_spelling
+                .entry(crate::semantic_query::property_spelling(key))
+                .or_insert(self.members.len());
+        }
+        self.members.push(member);
+    }
+
+    pub(super) fn into_members(self) -> Vec<SurfaceMember> {
+        self.members
+    }
 }
 
 /// A key TYPE of a homomorphic mapping's key domain — its source's index
@@ -20398,9 +22157,10 @@ struct TypeofBodyScope<'p> {
 /// inferred initializer type and its const-object shape are recovered.
 fn value_position_locator(
     prepared: &verter_session_query::type_solver::PreparedValueDecl,
+    augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
 ) -> verter_type_expr::locators::AuthoredBodyLocator {
-    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-        verter_type_expr::locators::TypeBodySlot {
+    scoped_type_body_locator(
+        &verter_type_expr::locators::TypeBodySlot {
             anchor: verter_type_expr::locators::AuthoredAnchor {
                 canonical_id: prepared.root_identity.canonical_id.clone(),
                 owner: prepared.root_identity.owner,
@@ -20409,6 +22169,7 @@ fn value_position_locator(
             },
             path: verter_type_expr::OwnedSlice::default(),
         },
+        augmentation,
     )
 }
 
@@ -20620,11 +22381,12 @@ impl SignatureLowering {
         >,
         is_class: bool,
         global_peers: Vec<ResolvedRootIdentity>,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> Self {
         Self {
             own: own.clone(),
             is_class,
-            jobs: dispatch.value_signature_jobs(own).into(),
+            jobs: dispatch.value_signature_jobs(own, augmentation).into(),
             peers: global_peers.into(),
             groups: Vec::new(),
             current_block: None,
@@ -20660,7 +22422,36 @@ pub(super) enum BodyPoll {
     Need(crate::semantic_query::SemanticQueryKey),
 }
 
+/// Address one declared body position in its exact inventory.
+fn scoped_type_body_locator(
+    slot: &verter_type_expr::locators::TypeBodySlot,
+    augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+) -> verter_type_expr::locators::AuthoredBodyLocator {
+    use verter_type_expr::locators::{
+        AugmentationBodyLocator, AuthoredAugmentationScope, AuthoredBodyLocator,
+    };
+    let Some(augmentation) = augmentation else {
+        return AuthoredBodyLocator::DeclBody(slot.clone());
+    };
+    let scope = match augmentation {
+        verter_session_query::declarations::AugmentationScopeKind::Global => {
+            AuthoredAugmentationScope::Global
+        }
+        verter_session_query::declarations::AugmentationScopeKind::Module(specifier) => {
+            AuthoredAugmentationScope::Module {
+                specifier: verter_type_expr::OwnedStr::from(specifier.as_str()),
+            }
+        }
+    };
+    AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
+        anchor: slot.anchor.clone(),
+        scope,
+        path: slot.path.clone(),
+    })
+}
+
 struct DeclarationBindingScope<'s> {
+    augmentation: Option<&'s verter_session_query::declarations::AugmentationScopeKind>,
     scope: &'s NodeScopeId,
     scope_payload: Option<&'s crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
     shadowing: &'s crate::resolver_core::scope_shadowing::ScopeShadowing,
@@ -20675,6 +22466,60 @@ fn modified_readonly(readonly: bool, modifier: crate::semantic_query::ReadonlyMo
         crate::semantic_query::ReadonlyMod::Add => true,
         crate::semantic_query::ReadonlyMod::Remove => false,
         crate::semantic_query::ReadonlyMod::Keep => readonly,
+    }
+}
+
+#[cfg(test)]
+mod same_path_witness_tests {
+    use super::exact_since_producer;
+    use crate::project_semantic_dispatch::BuildLocalTaint;
+
+    const CLAIMED: u64 = 7;
+
+    fn frame(produces: Option<u64>, partial: bool) -> BuildLocalTaint {
+        BuildLocalTaint {
+            produces,
+            result_is_partial: partial,
+            ..BuildLocalTaint::default()
+        }
+    }
+
+    /// A same-path claim on an application an enclosing build produces is
+    /// proved only through every frame from that build's to the top: a
+    /// partial in the producer's frame or in any frame between refuses the
+    /// proof even when the innermost frame is clean, a partial below the
+    /// producer (its callers') does not, and a producer that is not on the
+    /// stack (a suspended continuation's) proves nothing.
+    #[test]
+    fn a_same_path_claim_is_exact_only_through_every_frame_since_its_producer() {
+        let cases = [
+            (vec![frame(Some(CLAIMED), false), frame(None, false)], true),
+            (vec![frame(Some(CLAIMED), true), frame(None, false)], false),
+            (
+                vec![
+                    frame(Some(CLAIMED), false),
+                    frame(Some(3), true),
+                    frame(None, false),
+                ],
+                false,
+            ),
+            (
+                vec![
+                    frame(None, true),
+                    frame(Some(CLAIMED), false),
+                    frame(None, false),
+                ],
+                true,
+            ),
+            (vec![frame(Some(3), false), frame(None, false)], false),
+        ];
+        for (index, (frames, exact)) in cases.iter().enumerate() {
+            assert_eq!(
+                exact_since_producer(frames, CLAIMED),
+                *exact,
+                "case {index}"
+            );
+        }
     }
 }
 

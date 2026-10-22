@@ -339,6 +339,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
             param: t,
             constraint: None,
             default: None,
+            original: None,
             is_const: false,
         }],
         boolean,

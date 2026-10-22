@@ -393,6 +393,48 @@ fn an_optional_call_adds_undefined_to_the_callee_result() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Module values read through a computed key and an optional chain, beside a
+/// setup function whose nested functions return the consts it captures.
+const MODULE_MEMBER_READS: &str = r##"
+type __BenchInit = 0;
+interface D { [k: `data-${string}`]: string; [k: `n${number}`]: number; id: boolean }
+declare const d: D;
+declare const o: { a?: { b: 1 } };
+declare const p: { a: { b: 1 } };
+const x = d['data-foo'];
+const y = d['n42'];
+const z = d['id'];
+let lx = (d['data-foo']);
+const r = o.a?.b;
+const q = p.a?.b;
+function setup() { const r0 = { value: 0 }; const r1 = { value: "v1" }; function f0() { return r0.value; } function f1() { return r1.value; } return { f0, f1 }; }
+"##;
+
+/// A module value whose initializer reads a member through a computed key
+/// or an optional chain is that read: a key a template literal index
+/// signature matches reads that signature (`data-${string}`, `n${number}`),
+/// a key a property names reads the property, and a chain that may
+/// short-circuit adds `undefined` (none without `strictNullChecks`, or
+/// over a member that is never nullish).
+#[test]
+fn a_module_value_read_through_a_computed_key_or_an_optional_chain_is_that_read() {
+    let matrix = Matrix::new(MODULE_MEMBER_READS);
+    let failures = matrix.nullness(&[
+        (Read::Type("typeof x"), "string", "string"),
+        (Read::Type("typeof y"), "number", "number"),
+        (Read::Type("typeof z"), "boolean", "boolean"),
+        (Read::Type("typeof lx"), "string", "string"),
+        (Read::Type("typeof r"), "1 | undefined", "1"),
+        (Read::Type("typeof q"), "1", "1"),
+        (
+            Read::Type(r#"ReturnType<ReturnType<typeof setup>["f1"]>"#),
+            "string",
+            "string",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Optional chains that hold a call, measured with tsc 7.0.2 under the four
 /// settings (`noImplicitAny` never changes the answer).
 const OPTIONAL_CALLS: &str = r##"
@@ -597,14 +639,7 @@ fn a_write_to_an_inferred_declared_local_reduces_by_its_declared_type() {
         ("adUnionOk", "number"),
         ("adVar", "string"),
     ]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Writes in `try`, `catch` and `finally` blocks, and catch variables.

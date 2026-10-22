@@ -5206,6 +5206,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
                 param: inner_u,
                 constraint: None,
                 default: None,
+                original: None,
                 is_const: false,
             }]
             .into_boxed_slice(),
@@ -6620,6 +6621,7 @@ pub(crate) mod fresh_excess_property_checking {
     ) -> SemanticNodeId {
         graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
             verter_type_engine::semantic_query::ObjectSpreadProgram {
+                is_literal: true,
                 effects: verter_type_engine::semantic_query::PayloadArray::from([
                     verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(operand),
                 ]),

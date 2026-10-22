@@ -37,9 +37,8 @@ pub struct MetaProvenance {
     pub component_meta_resolved_state_recomputes: WorkObservedU64,
     pub get_analysis_calls: ObservedU64,
     pub evaluate_types_calls: ObservedU64,
-    /// Bumped on every `VerterHost::upsert(...)` call. Used by
-    /// `tests/cases/g_session/session_view_isolation.rs` to assert the R17
-    /// invariant that session query paths do NOT mutate the host.
+    /// Bumped on every `VerterHost::upsert(...)` call. Used by session-view
+    /// isolation tests to assert that query paths do not mutate the host.
     pub host_upsert_calls: ObservedU64,
     /// Bumped on every cache-key derivation that consulted a
     /// [`crate::session_view::SessionView`] via

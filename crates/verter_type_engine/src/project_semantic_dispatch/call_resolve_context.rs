@@ -273,7 +273,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     } else {
                         ConstParamPolicy::NonConst
                     },
-                    decl.constraint.is_some(),
+                    decl.constraint,
                 )
             })
             .collect()
@@ -328,15 +328,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         // The parameters the argument deposits into: a regular literal is
         // written as authored into each of them.
-        let reached: Vec<SemanticNodeId> = if provenance.is_some() {
-            declared
-                .iter()
-                .map(|decl| decl.param)
-                .filter(|&param| self.mentions_node(target, param))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let reached: Vec<SemanticNodeId> =
+            if provenance.is_some_and(|provenance| !provenance.positions.is_empty()) {
+                declared
+                    .iter()
+                    .map(|decl| decl.param)
+                    .filter(|&param| self.mentions_node(target, param))
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let mut steps = vec![PositionStep::Enter(root.clone())];
         while let Some(step) = steps.pop() {
             let (position, children, widen) = match step {
@@ -525,9 +526,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     ));
                                 }
                             }
+                            // Joined literals are a conditional's or a read's,
+                            // never one literal expression of their own.
                             if !position.root {
                                 widen = self.decide_literal_position(
                                     &position,
+                                    false,
                                     regular_here.flatten().as_deref(),
                                     declared,
                                     &reached,
@@ -537,8 +541,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         }
                         Some(SemanticNodeData::Literal(_)) if !position.root => {
                             drop(data);
+                            let authored_literal = !provenance
+                                .is_some_and(|provenance| provenance.reads_fresh(&position.path));
                             widen = self.decide_literal_position(
                                 &position,
+                                authored_literal,
                                 regular_here.flatten().as_deref(),
                                 declared,
                                 &reached,
@@ -580,9 +587,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// location widens: it keeps its type at any contextual type, and each
     /// parameter the argument deposits into (`reached`) keeps it as
     /// written.
+    ///
+    /// `authored_literal` says the position's expression is a literal of
+    /// its own (`isValidConstAssertionArgument`), not a read or a
+    /// conditional: only such a position is a const context through a
+    /// `const` type parameter that types it.
     fn decide_literal_position(
         &self,
         position: &ArgumentPosition,
+        authored_literal: bool,
         regular: Option<&[SemanticNodeId]>,
         declared: &[TypeParamDecl],
         reached: &[SemanticNodeId],
@@ -619,7 +632,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 fresh
             };
         }
-        match self.literal_context_of(node, contexts, declared) {
+        // A literal whose contextual type is a `const` type parameter is a
+        // const context (`isConstContext`), whose fresh literals are written
+        // as they are whatever the parameter's constraint, and every
+        // parameter the contextual type names keeps them (`f<const T>(x: {
+        // v: T })` over `{ v: "a" }` is `"a"`). A read or a conditional
+        // there is none: the parameter is then no literal context by itself
+        // (`isLiteralOfContextualType`), and `{ v: s }` or `{ v: c ? "a" :
+        // "b" }` infers `string`.
+        let context = if position.const_context
+            || authored_literal
+                && contexts
+                    .iter()
+                    .any(|&contextual| self.is_const_type_variable(contextual, declared))
+        {
+            LiteralContext::Keep
+        } else {
+            self.literal_context_of(node, contexts, declared)
+        };
+        match context {
             LiteralContext::Keep => {
                 for decl in declared {
                     if position.through.contains(&decl.param)
@@ -642,24 +673,34 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// The checker's `isConstTypeVariable` over the call's declared type
     /// parameters: `contextual` is a `const` type parameter, or a union or
-    /// intersection holding one.
+    /// intersection holding one at any depth (`(T & {}) | undefined`).
+    /// TypeScript's routine (`checker.ts`, TypeScript 5.4) visits a union's
+    /// or intersection's members at the depth of the composite; its bound of
+    /// five counts only indexed-access, conditional and mapped hops, which
+    /// this walk does not take, so no composite nesting stops it.
     fn is_const_type_variable(
         &self,
         contextual: SemanticNodeId,
         declared: &[TypeParamDecl],
     ) -> bool {
-        let is_const = |node: SemanticNodeId| {
-            declared
+        let graph = self.graph();
+        let mut pending = vec![contextual];
+        while let Some(node) = pending.pop() {
+            if declared
                 .iter()
                 .any(|decl| decl.is_const && decl.param == node)
-        };
-        is_const(contextual)
-            || self
-                .graph()
-                .node_data(contextual)
+            {
+                return true;
+            }
+            if let Some(members) = graph
+                .node_data(node)
                 .as_deref()
                 .and_then(SemanticNodeData::composite_members)
-                .is_some_and(|members| members.iter().any(|&member| is_const(member)))
+            {
+                pending.extend(members.iter().copied());
+            }
+        }
+        false
     }
 
     /// The step into an object literal's member keyed `key`: the literal
@@ -722,6 +763,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             RegularContributor::Composite => None,
         };
         let mut positions = Vec::new();
+        let mut fresh_reads: Vec<Arc<[ArgumentPathStep]>> = Vec::new();
         'positions: for position in authored.positions.iter() {
             let mut path = Vec::with_capacity(position.path.len());
             for step in position.path.iter() {
@@ -734,8 +776,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     IndexedLiteralStep::Elements => ArgumentPathStep::Elements,
                 });
             }
+            let path: Arc<[ArgumentPathStep]> = Arc::from(path.into_boxed_slice());
             let separate = position.arms.len() > 1;
             let mut mixed = false;
+            let mut reads_fresh = false;
             // Each arm's regular contributors' types, and the fresh
             // literals it writes when another arm can hold them regular.
             let mut arms: Vec<(Vec<RegularContributor>, Vec<SemanticNodeId>)> =
@@ -773,6 +817,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             };
                             if widens {
                                 mixed = true;
+                                reads_fresh = true;
                                 if separate {
                                     if let Some(node) = type_of(&contributor) {
                                         fresh.extend(literal_members(graph.store(), node));
@@ -785,6 +830,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                 }
                 arms.push((regular, fresh));
+            }
+            if reads_fresh {
+                fresh_reads.push(Arc::clone(&path));
             }
             if arms.iter().all(|(regular, _)| regular.is_empty()) {
                 continue;
@@ -814,14 +862,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             } else {
                 None
             };
-            positions.push(ArgumentRegularPosition {
-                path: Arc::from(path.into_boxed_slice()),
-                literals,
-            });
+            positions.push(ArgumentRegularPosition { path, literals });
         }
-        (!positions.is_empty()).then(|| {
+        (!positions.is_empty() || !fresh_reads.is_empty()).then(|| {
             Arc::new(ArgumentLiteralProvenance {
                 positions: Arc::from(positions.into_boxed_slice()),
+                fresh_reads: Arc::from(fresh_reads.into_boxed_slice()),
             })
         })
     }
@@ -943,6 +989,110 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 self.intern_normalized_union_or_intersection(&members, true)
             }
         }
+    }
+
+    /// The type parameters a context-sensitive argument's first-pass
+    /// `reading` relates a withheld member's placeholder to as a naked
+    /// inference position of `target`. A placeholder is an `any` of the
+    /// reading where the argument's own type `argument` holds no `any`: the
+    /// checker's non-inferrable `anyFunctionType`, which infers nothing for
+    /// the parameter it lands in, where an authored `any` is a candidate.
+    /// `hc({ s: 1, r: { inc(a) {} } })` over `hc<S, R extends { inc: (a: S)
+    /// => void }>(o: { s: S; r: R })` reads `r` as a placeholder for `R`;
+    /// `f({ a: anyv, m(x) { return x; } })` over `f<T, U>(o: { a: T; m: (x:
+    /// T) => U })` reads `a` as authored. A parameter an authored `any`
+    /// also lands in is none of them: `f({ a: anyv, b(x) { return x; }, m(x)
+    /// { return x; } })` over `f<T, U>(o: { a: T; b: T; m: (x: T) => U })`
+    /// infers `any` for `T`. A member related to a type parameter whole
+    /// relates nothing nested.
+    pub(super) fn first_pass_withheld_targets(
+        &self,
+        reading: SemanticNodeId,
+        argument: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.graph();
+        let is_any = |node: SemanticNodeId| {
+            matches!(
+                graph
+                    .node_data(self.resolved_reduction_view(node))
+                    .as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+            )
+        };
+        let members = |node: SemanticNodeId| match graph
+            .node_data(self.resolved_reduction_view(node))
+            .as_deref()
+        {
+            Some(SemanticNodeData::Object(surface)) => Some(
+                surface
+                    .positive_members()
+                    .iter()
+                    .map(|member| (member.key.clone(), member.value))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        let mut withheld = Vec::new();
+        let mut authored = Vec::new();
+        let mut pending = vec![(reading, argument, target)];
+        let mut seen = FxHashSet::default();
+        while let Some((reading, argument, target)) = pending.pop() {
+            if !seen.insert((reading, argument, target)) {
+                continue;
+            }
+            if is_any(reading) {
+                if is_any(argument) {
+                    authored.extend(self.top_level_type_param_targets(target));
+                } else {
+                    withheld.extend(self.top_level_type_param_targets(target));
+                }
+                continue;
+            }
+            let resolved = self.resolved_reduction_view(target);
+            let data = graph.node_data(resolved);
+            match data.as_deref() {
+                Some(
+                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                ) => {
+                    let arms: Vec<SemanticNodeId> = composite
+                        .composite_members()
+                        .expect("composite arm")
+                        .iter()
+                        .copied()
+                        .collect();
+                    drop(data);
+                    pending.extend(arms.into_iter().map(|arm| (reading, argument, arm)));
+                    continue;
+                }
+                Some(SemanticNodeData::TypeParam { .. }) | None => continue,
+                Some(_) => drop(data),
+            }
+            let (Some(read), Some(own)) = (members(reading), members(argument)) else {
+                continue;
+            };
+            for (key, value) in read {
+                let Some(own_value) = own
+                    .iter()
+                    .find(|(own_key, _)| *own_key == key)
+                    .map(|(_, own_value)| *own_value)
+                else {
+                    continue;
+                };
+                let mut crossed = FxHashSet::default();
+                pending.extend(
+                    self.contextual_member_types(resolved, &key, &[], &mut crossed)
+                        .into_iter()
+                        .map(|member_target| (value, own_value, member_target)),
+                );
+            }
+        }
+        // A parameter an authored `any` also lands in holds that `any` as a
+        // candidate already, which the placeholder's `any` only repeats.
+        withheld.retain(|param| !authored.contains(param));
+        withheld.sort_unstable();
+        withheld.dedup();
+        withheld
     }
 
     /// The contextual types an object literal member named `key` takes
@@ -1356,22 +1506,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.relation_combine_candidates(&members, crate::semantic_query::VariancePhase::Covariant)
     }
 
-    /// An unfixed binder retains its constraint as a contextual literal type.
+    /// An unfixed binder retains its constraint as a contextual literal type,
+    /// the constraint instantiated with the `inferences` made so far (the
+    /// checker reads a contextual type's apparent type under its non-fixing
+    /// mapper): `hc({ s: 1, r: { inc(a) {} } })` over `hc<S, R extends {
+    /// inc: (a: S) => void }>(o: { s: S; r: R })` types `a` as `number`.
     pub(super) fn contextual_uninferred_parameter(
         &self,
         param: SemanticNodeId,
         constraint: Option<SemanticNodeId>,
+        inferences: &crate::semantic_query::CanonicalTypeSubstitution,
     ) -> SemanticNodeId {
         let Some(constraint) = constraint else {
             return param;
         };
+        let constraint = self.substitute_canonical(constraint, inferences);
         let graph = self.graph();
         let Some(SemanticNodeData::TypeParam {
             decl,
             param_index,
             default,
             display_name,
-            constraint: None,
+            ..
         }) = graph
             .node_data(param)
             .as_deref()
@@ -1803,6 +1959,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             );
         let surface = |node| match self.normalize_node_for_structural_fact_demand(node, transit) {
             super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
+                let node = self.regularized_empty_object_program(node);
                 match self.graph().node_data(node)?.as_ref() {
                     SemanticNodeData::Object(view) => Some(view.clone()),
                     _ => None,

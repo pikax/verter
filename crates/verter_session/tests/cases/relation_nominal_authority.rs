@@ -1361,6 +1361,7 @@ fn qualified_typeof_key_does_not_truncate_trailing_segments() {
     );
 
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 verter_type_expr::AuthoredPropertyKey::Computed(TypeExpr::TypeOf(ValueRef {

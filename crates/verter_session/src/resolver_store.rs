@@ -347,8 +347,6 @@ pub fn dump_from_host_call_sites() -> Vec<(String, u64)> {
 /// the audit-builder finalisation.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ComponentMetaStoreCounters {
-    pub materialize_structure_calls: u64,
-    pub materialize_structure_cache_hits: u64,
     pub node_arena_lock_acquisitions: u64,
     pub family_map_lock_acquisitions: u64,
     pub dep_signature_merges: u64,
@@ -4751,12 +4749,6 @@ impl VerterHost {
         let component_meta_counters =
             match verter_type_engine::request_context::current_request_context() {
                 Some(ctx) => ComponentMetaStoreCounters {
-                    materialize_structure_calls: ctx
-                        .materialize_structure_calls
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    materialize_structure_cache_hits: ctx
-                        .materialize_structure_cache_hits
-                        .load(std::sync::atomic::Ordering::Relaxed),
                     node_arena_lock_acquisitions: ctx
                         .node_arena_lock_acquisitions
                         .load(std::sync::atomic::Ordering::Relaxed),

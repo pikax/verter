@@ -87,5 +87,6 @@ name = "gen-query-key-spec"
 path = "src/bin/gen_query_key_spec.rs"
 
 [dev-dependencies]
+aho-corasick = "1.1.4"
 verter_session_query = { workspace = true, features = ["test-support"] }
 verter_type_engine = { path = ".", features = ["test-support"] }

@@ -80,7 +80,7 @@ impl<'a> SourceMapOptions<'a> {
     }
 }
 
-impl<'a> CodeTransform<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// Generate a source map for the transformations
     ///
     /// # Example

@@ -280,8 +280,16 @@ workspace maintenance pass — may use the untyped forms, which read the slot
 once. A scheduler job carries its submitting request's context from
 submission, and its dispatch publishes only when that carried context
 reports `RequestContextLike::captured`; the worker never polls a slot to
-decide. A `CodeTransform` counts its operations in a plain per-transform
-tally and publishes the count once, when dropped.
+decide. `CodeTransform<'_, M>` carries that execution mode through script,
+template and source-map generation. Captured transforms count operations in
+a plain local tally and publish once on drop. Uncaptured operations compile
+out the tally update, and their drop performs no observer lookup.
+`CodeTransform::new` constructs an uncaptured transform; compiler execution
+uses `CodeTransform::<M>::new_in` with its selected mode.
+Standalone transform owners (script-fragment stripping, declaration rendering,
+style emission, assembly and Svelte projection) adopt the installed selection
+once before constructing their transform. Their inner operations carry that
+mode, so helper-created transforms still contribute to captured compile counts.
 
 In a debug instrumented build a dispatcher bound to a request context asserts
 its compiled mode equals the mode the installed root entry selected, so a

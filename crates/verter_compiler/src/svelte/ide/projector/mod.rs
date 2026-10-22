@@ -115,9 +115,10 @@ pub fn project_svelte_ide(
     filename: Option<&str>,
     skip_source_map: bool,
 ) -> SvelteIdeProjection {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let dialect = SvelteIdeDialect::for_component(parsed);
     let allocator = Allocator::default();
-    let mut ct = CodeTransform::new(source, &allocator);
+    let mut ct = CodeTransform::<M>::new_in(source, &allocator);
     let mut diagnostics = Vec::new();
 
     // The first template-markup byte: the render fragment opens here.
@@ -327,6 +328,8 @@ pub fn project_svelte_ide(
         is_jsx: dialect.is_javascript(),
         diagnostics,
     }
+
+    })
 }
 
 /// Return genuine TypeScript file-check pragmas from the leading trivia of the
@@ -414,7 +417,7 @@ fn style_full_span(style: &crate::svelte::parser::SvelteStyle) -> Span {
 }
 
 /// Remove a span (overwrite with whitespace-equivalent nothing).
-fn remove_span(ct: &mut CodeTransform, span: Span) {
+fn remove_span(ct: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>, span: Span) {
     if span.start < span.end {
         ct.remove(span.start, span.end);
     }
@@ -430,7 +433,7 @@ fn remove_span(ct: &mut CodeTransform, span: Span) {
 /// mapped via `move_*`) — keeping the projected module a valid top-level
 /// script + one render function.
 fn strip_script_tags(
-    ct: &mut CodeTransform,
+    ct: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
     script: Option<&SvelteScript>,
     first_template: Option<u32>,
 ) {
@@ -464,8 +467,8 @@ fn strip_script_tags(
 }
 
 /// The recursive template projector.
-struct TemplateProjector<'ct, 'a> {
-    ct: &'ct mut CodeTransform<'a>,
+struct TemplateProjector<'ct, 'a, M: verter_audit::observe::ObserveExec> {
+    ct: &'ct mut CodeTransform<'a, M>,
     source: &'a str,
     diagnostics: &'ct mut Vec<SvelteIdeUnsupportedDiagnostic>,
     /// Snippet declarator MOVE requests collected during the walk, applied
@@ -579,7 +582,7 @@ impl ElementScopeSite {
     }
 }
 
-impl TemplateProjector<'_, '_> {
+impl<M: verter_audit::observe::ObserveExec> TemplateProjector<'_, '_, M> {
     /// Project the whole template into the render scope function.
     ///
     /// `region` is the markup byte range `[start, end)` the render fragment

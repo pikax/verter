@@ -211,63 +211,160 @@ impl WorkObservedU64 {
     }
 }
 
-/// Optional per-request counter: a relaxed `u64` atomic with
-/// `semantic-observe`, a zero-size value whose writes compile to nothing
-/// without it.
-///
-/// The reader exists only where the counter is kept, so a default build
-/// cannot substitute zero for a measurement it never took.
-#[derive(Debug, Default)]
-pub struct ObservedU64 {
-    #[cfg(feature = "semantic-observe")]
-    value: std::sync::atomic::AtomicU64,
+mod counter_storage {
+    pub trait Sealed {}
+    impl Sealed for () {}
+    impl Sealed for std::sync::atomic::AtomicU64 {}
+    impl Sealed for std::sync::Arc<std::sync::atomic::AtomicU64> {}
 }
 
-impl ObservedU64 {
-    /// Add `amount`. A no-op without `semantic-observe`.
+/// Storage selected by an optional counter's owner: `()` strips it,
+/// `AtomicU64` keeps it, and `Arc<AtomicU64>` shares it between stores.
+/// The selection is static and does not enable capture in another owner.
+pub trait CounterStorage: counter_storage::Sealed + Default + std::fmt::Debug {
+    /// fetch_add on retained storage; a static no-op on stripped storage.
+    fn fetch_add(&self, value: u64, order: std::sync::atomic::Ordering);
+    /// store on retained storage; a static no-op on stripped storage.
+    fn store(&self, value: u64, order: std::sync::atomic::Ordering);
+    /// fetch_sub on retained storage; a static no-op on stripped storage.
+    fn fetch_sub(&self, value: u64, order: std::sync::atomic::Ordering);
+    /// fetch_max on retained storage; a static no-op on stripped storage.
+    fn fetch_max(&self, value: u64, order: std::sync::atomic::Ordering);
+    /// Subtract without wrapping, or do nothing on stripped storage.
+    fn saturating_sub(&self, amount: u64);
+}
+
+impl CounterStorage for () {
+    #[inline(always)]
+    fn fetch_add(&self, _value: u64, _order: std::sync::atomic::Ordering) {}
+    #[inline(always)]
+    fn store(&self, _value: u64, _order: std::sync::atomic::Ordering) {}
+    #[inline(always)]
+    fn fetch_sub(&self, _value: u64, _order: std::sync::atomic::Ordering) {}
+    #[inline(always)]
+    fn fetch_max(&self, _value: u64, _order: std::sync::atomic::Ordering) {}
+    #[inline(always)]
+    fn saturating_sub(&self, _amount: u64) {}
+}
+
+macro_rules! impl_counter_storage {
+    ($storage:ty, $this:ident => $atomic:expr) => {
+        impl CounterStorage for $storage {
+            #[inline(always)]
+            fn fetch_add(&self, value: u64, order: std::sync::atomic::Ordering) {
+                let $this = self;
+                std::sync::atomic::AtomicU64::fetch_add($atomic, value, order);
+            }
+            #[inline(always)]
+            fn store(&self, value: u64, order: std::sync::atomic::Ordering) {
+                let $this = self;
+                std::sync::atomic::AtomicU64::store($atomic, value, order);
+            }
+            #[inline(always)]
+            fn fetch_sub(&self, value: u64, order: std::sync::atomic::Ordering) {
+                let $this = self;
+                std::sync::atomic::AtomicU64::fetch_sub($atomic, value, order);
+            }
+            #[inline(always)]
+            fn fetch_max(&self, value: u64, order: std::sync::atomic::Ordering) {
+                let $this = self;
+                std::sync::atomic::AtomicU64::fetch_max($atomic, value, order);
+            }
+            #[inline(always)]
+            fn saturating_sub(&self, amount: u64) {
+                let $this = self;
+                use std::sync::atomic::Ordering::Relaxed;
+                let _ =
+                    std::sync::atomic::AtomicU64::fetch_update($atomic, Relaxed, Relaxed, |n| {
+                        Some(n.saturating_sub(amount))
+                    });
+            }
+        }
+    };
+}
+
+impl_counter_storage!(std::sync::atomic::AtomicU64, storage => storage);
+impl_counter_storage!(std::sync::Arc<std::sync::atomic::AtomicU64>, storage => storage.as_ref());
+
+/// Counter storage that retains a measurement. Stripped storage deliberately
+/// lacks this capability, so it cannot report a fabricated zero.
+pub trait ReadCounterStorage: CounterStorage {
+    /// Borrow the retained atomic.
+    fn retained(&self) -> &std::sync::atomic::AtomicU64;
+}
+
+impl ReadCounterStorage for std::sync::atomic::AtomicU64 {
+    fn retained(&self) -> &std::sync::atomic::AtomicU64 {
+        self
+    }
+}
+
+impl ReadCounterStorage for std::sync::Arc<std::sync::atomic::AtomicU64> {
+    fn retained(&self) -> &std::sync::atomic::AtomicU64 {
+        self
+    }
+}
+
+/// Optional counter with an explicit owner-selected storage gate. Aliases
+/// select storage at compilation; writes to `Counter<()>` do nothing and
+/// no reader exists. Clones of shared storage observe the same count.
+#[derive(Clone, Debug, Default)]
+pub struct Counter<S: CounterStorage> {
+    value: S,
+}
+
+impl<S: CounterStorage> Counter<S> {
+    /// A fresh zero count, or stripped storage.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add `amount`. A no-op with stripped storage.
     #[inline(always)]
     pub fn fetch_add(&self, amount: u64, order: std::sync::atomic::Ordering) {
-        #[cfg(feature = "semantic-observe")]
-        self.value.fetch_add(amount, order);
-        #[cfg(not(feature = "semantic-observe"))]
-        let _ = (amount, order);
+        CounterStorage::fetch_add(&self.value, amount, order);
     }
 
-    /// Overwrite the counter. A no-op without `semantic-observe`.
+    /// Overwrite the counter. A no-op with stripped storage.
     #[inline(always)]
     pub fn store(&self, value: u64, order: std::sync::atomic::Ordering) {
-        #[cfg(feature = "semantic-observe")]
-        self.value.store(value, order);
-        #[cfg(not(feature = "semantic-observe"))]
-        let _ = (value, order);
+        CounterStorage::store(&self.value, value, order);
     }
 
-    /// Subtract `amount`. A no-op without `semantic-observe`.
+    /// Subtract `amount`. A no-op with stripped storage.
     #[inline(always)]
     pub fn fetch_sub(&self, amount: u64, order: std::sync::atomic::Ordering) {
-        #[cfg(feature = "semantic-observe")]
-        self.value.fetch_sub(amount, order);
-        #[cfg(not(feature = "semantic-observe"))]
-        let _ = (amount, order);
+        CounterStorage::fetch_sub(&self.value, amount, order);
     }
 
-    /// Raise the counter to at least `value`. A no-op without
-    /// `semantic-observe`.
+    /// Raise the counter to at least `value`. A no-op with stripped storage.
     #[inline(always)]
     pub fn fetch_max(&self, value: u64, order: std::sync::atomic::Ordering) {
-        #[cfg(feature = "semantic-observe")]
-        self.value.fetch_max(value, order);
-        #[cfg(not(feature = "semantic-observe"))]
-        let _ = (value, order);
+        CounterStorage::fetch_max(&self.value, value, order);
     }
 
-    /// Read the counter. Exists only where the counter is kept.
-    #[cfg(feature = "semantic-observe")]
-    #[must_use]
-    pub fn load(&self, order: std::sync::atomic::Ordering) -> u64 {
-        self.value.load(order)
+    /// Subtract without wrapping, including concurrent decrements.
+    #[inline(always)]
+    pub fn saturating_sub(&self, amount: u64) {
+        CounterStorage::saturating_sub(&self.value, amount);
     }
 }
+
+impl<S: ReadCounterStorage> Counter<S> {
+    /// Read the retained measurement.
+    #[must_use]
+    pub fn load(&self, order: std::sync::atomic::Ordering) -> u64 {
+        self.value.retained().load(order)
+    }
+}
+
+/// Production observation counter, kept only with `semantic-observe`.
+#[cfg(feature = "semantic-observe")]
+pub type ObservedU64 = Counter<std::sync::atomic::AtomicU64>;
+/// Stripped production observation counter, with no measurement reader.
+#[cfg(not(feature = "semantic-observe"))]
+pub type ObservedU64 = Counter<()>;
 
 /// Optional per-request `u32` counter or bit mask. See [`ObservedU64`].
 #[derive(Debug, Default)]

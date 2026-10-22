@@ -13,23 +13,28 @@ declare function thenBox<T>(x: PromiseLike<T>): { v: T };
 declare function thenNum<T>(x: PromiseLike<T>): number;
 declare function id<T>(x: T): T;
 declare function aw<T>(x: T): Awaited<T>;
+interface Mapper<T> { m<R>(f: (v: T) => R): R }
+declare const mapper: Mapper<number>;
+declare function takeMapper<T>(x: { m(f: (v: T) => 1): 1 }): T;
 export function w1() { return thenOf(p1); }
 export function w2() { return thenBox(p1); }
 export function w3() { return thenNum(p1); }
 export function w4() { return id(p1); }
 export function w5() { return aw(p1); }
+export function w6() { return takeMapper(mapper); }
 "##;
 
 /// tsc 7.0.2 over the global-library tests' library (`--noLib`), in all
 /// four settings: `w1` is `number`, `w2` `{ v: number; }`, `w3` `number`,
-/// `w4` `Promise<number>` and `w5` `number`.
+/// `w4` `Promise<number>`, `w5` `number` and `w6` `number`.
 ///
-/// The lane cannot relate the library's `Promise<number>` to
-/// `PromiseLike<T>`, so `w1` and `w2` are the typed `UnrepresentableCallee`
-/// gap, never the fallback's `unknown` / `{ v: unknown; }` they published
-/// before; `w3`'s return reads no clause parameter, so the fallback is the
-/// checker's answer. A binder takes the argument's carrier as written, so
-/// `w4` and `w5` infer `T := Promise<number>` (they published `unknown`).
+/// The library's `Promise<number>` is a reference to its global `Promise`
+/// declaration, so `PromiseLike<T>` infers `T := number` through its `then`
+/// (`w1`, `w2`, `w3`). A binder takes the argument's carrier as written, so
+/// `w4` and `w5` infer `T := Promise<number>`. `w6` relates a generic method
+/// to a non-generic callback signature, an inference the executor does not
+/// decide: its return reads the clause parameter, so it is the typed
+/// `UnrepresentableCallee` gap, never the fallback's `unknown`.
 #[test]
 fn an_undecided_generic_call_is_a_typed_gap_never_its_fallback() {
     let rows: Vec<(Read<'_>, Vec<&str>)> = vec![
@@ -38,6 +43,7 @@ fn an_undecided_generic_call_is_a_typed_gap_never_its_fallback() {
         (Read::Return("w3"), vec!["number"]),
         (Read::Return("w4"), vec!["Promise<number>"]),
         (Read::Return("w5"), vec!["number"]),
+        (Read::Return("w6"), vec!["number"]),
     ];
     let verdicts = Matrix::new(SOURCE)
         .lib(GLOBALS_LIB)
@@ -49,7 +55,7 @@ fn an_undecided_generic_call_is_a_typed_gap_never_its_fallback() {
             unreachable!("return rows only")
         };
         let verdict = &row[0];
-        let expected_gap = matches!(*name, "w1" | "w2");
+        let expected_gap = *name == "w6";
         let as_expected = if expected_gap {
             verdict.class == "GAP" && verdict.lane.contains("UnrepresentableCallee")
         } else {

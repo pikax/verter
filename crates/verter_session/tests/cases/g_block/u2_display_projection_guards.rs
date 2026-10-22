@@ -682,6 +682,7 @@ fn function_type_parameters_render_constraint_and_default() {
             param: t_decl_param,
             constraint: Some(string_id),
             default: Some(number_id),
+            original: None,
             is_const: false,
         }]),
         signature_span: None,

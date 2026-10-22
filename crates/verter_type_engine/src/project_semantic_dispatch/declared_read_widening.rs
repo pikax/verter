@@ -15,11 +15,11 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    ObjectConstructionEffect, ObjectSpreadProgram, PartialReasonSet, PrimitiveKind,
-    ProjectionReductionContext, SemanticNodeData, SemanticNodeId, SurfaceKeyProjection,
-    SurfaceMember,
+    AuthoredPropertyKey, ObjectConstructionEffect, ObjectSpreadProgram, PartialReasonSet,
+    PrimitiveKind, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
+    SurfaceKeyProjection, SurfaceMember, SurfaceView,
 };
-use verter_type_expr::{DeclaredReadPosition, DeclaredReadStep};
+use verter_type_expr::{DeclaredReadPosition, DeclaredReadStep, TypeExpr};
 
 use super::ProjectSemanticDispatch;
 
@@ -65,84 +65,280 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let Some(provenance) = parts.read_provenance.as_ref() else {
             return node;
         };
-        // The positions at one path — the elements of one array literal —
-        // widen together; a position nested in another widens first, so
-        // the outer position's rebuild holds the widened inner one.
-        let mut groups: Vec<(&[DeclaredReadStep], Vec<&DeclaredReadPosition>)> = Vec::new();
-        for position in provenance.positions.iter() {
-            match groups
-                .iter_mut()
-                .find(|(path, _)| *path == position.path.as_ref())
-            {
-                Some((_, group)) => group.push(position),
-                None => groups.push((position.path.as_ref(), vec![position])),
-            }
-        }
-        groups.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
-        groups.into_iter().fold(node, |node, (path, group)| {
-            let widen = self.declared_widening_literals(&group, canonical, owner);
-            if widen.is_empty() {
-                return node;
-            }
-            self.rewrite_declared_position(node, path, &|at| self.widen_literals_at(at, &widen))
-        })
+        let positions: Vec<Addressed<'_>> = provenance
+            .positions
+            .iter()
+            .map(|position| (position.path.as_ref(), position))
+            .collect();
+        let widening = DeclaredWidening {
+            canonical,
+            owner,
+            arms: std::cell::RefCell::new(Vec::new()),
+        };
+        self.widen_positions_at(node, &positions, &widening)
     }
 
-    /// `node` with the position `path` addresses rewritten by `rewrite`: an
-    /// object's member by its key and the authored property declaring it,
-    /// an array's element type, through each member of a union. A path that
+    /// `node` with each of `positions` it reaches widened: an object's
+    /// member by its key and the authored property declaring it (by that
+    /// property alone under a computed key), an array's element type, each
+    /// member of a union — of a conditional arm's union, only the members
+    /// the arm holds. The positions reaching one node — the elements of one
+    /// array literal — widen together, after every position nested in it,
+    /// so its rebuild holds the widened inner ones. A position that
     /// addresses nothing leaves `node` as it is.
-    fn rewrite_declared_position(
+    fn widen_positions_at(
         &self,
         node: SemanticNodeId,
-        path: &[DeclaredReadStep],
-        rewrite: &dyn Fn(SemanticNodeId) -> SemanticNodeId,
+        positions: &[Addressed<'_>],
+        widening: &DeclaredWidening<'_>,
     ) -> SemanticNodeId {
-        let Some((step, rest)) = path.split_first() else {
-            return rewrite(node);
-        };
+        if positions.is_empty() {
+            return node;
+        }
         let graph = self.graph();
-        let data = graph.node_data(node);
-        match (data.as_deref(), step) {
-            (Some(SemanticNodeData::Union(members)), _) => {
-                let members: Vec<SemanticNodeId> = members.iter().copied().collect();
-                drop(data);
-                let rewritten: Vec<SemanticNodeId> = members
-                    .iter()
-                    .map(|&member| self.rewrite_declared_position(member, path, rewrite))
-                    .collect();
+        let union_members: Option<Vec<SemanticNodeId>> = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => Some(members.iter().copied().collect()),
+            _ => None,
+        };
+        let mut here: Vec<&DeclaredReadPosition> = Vec::new();
+        let mut deeper: Vec<Addressed<'_>> = Vec::new();
+        let node = match union_members {
+            Some(members) => {
+                for &(path, position) in positions {
+                    if path.is_empty() {
+                        here.push(position);
+                    } else {
+                        deeper.push((path, position));
+                    }
+                }
+                let mut reached = vec![false; deeper.len()];
+                let mut rewritten = Vec::with_capacity(members.len());
+                for &member in &members {
+                    let mut at_member = Vec::new();
+                    for (index, &(path, position)) in deeper.iter().enumerate() {
+                        if let Some(rest) = self.arms_holding(path, member, widening) {
+                            reached[index] = true;
+                            at_member.push((rest, position));
+                        }
+                    }
+                    rewritten.push(self.widen_positions_at(member, &at_member, widening));
+                }
+                // An arm holds the members its written type lowers to; one
+                // holding none of them is a lowering this union does not
+                // hold, never a position to drop silently.
+                if reached.contains(&false) {
+                    self.fold_local_partial_completeness(PartialReasonSet::UNSTABLE_STATE);
+                }
                 if rewritten == members {
                     node
                 } else {
                     self.intern_normalized_union_or_intersection(&rewritten, true)
                 }
             }
-            (Some(SemanticNodeData::Object(surface)), DeclaredReadStep::Member { key, at }) => {
+            None => {
+                for &(path, position) in positions {
+                    match self.arms_holding(path, node, widening) {
+                        Some([]) => here.push(position),
+                        Some(rest) => deeper.push((rest, position)),
+                        None => {
+                            self.fold_local_partial_completeness(PartialReasonSet::UNSTABLE_STATE)
+                        }
+                    }
+                }
+                self.widen_parts_at(node, &deeper, widening)
+            }
+        };
+        if here.is_empty() {
+            return node;
+        }
+        let widen = self.declared_widening_literals(&here, widening.canonical, widening.owner);
+        if widen.is_empty() {
+            return node;
+        }
+        self.widen_literals_at(node, &widen)
+    }
+
+    /// `path` past the conditional arms it starts with when each of them
+    /// holds `node` — a member its written type lowers to, the same
+    /// structure whichever lowering interned it — else `None`. An arm
+    /// whose written type lowers to nothing holds nothing.
+    fn arms_holding<'p>(
+        &self,
+        mut path: &'p [DeclaredReadStep],
+        node: SemanticNodeId,
+        widening: &DeclaredWidening<'_>,
+    ) -> Option<&'p [DeclaredReadStep]> {
+        let mut canonical_node: Option<SemanticNodeId> = None;
+        while let Some((DeclaredReadStep::Arm { written }, rest)) = path.split_first() {
+            let cached = widening
+                .arms
+                .borrow()
+                .iter()
+                .find(|(arm, _)| Arc::ptr_eq(arm, written))
+                .map(|(_, members)| members.clone());
+            let members = match cached {
+                Some(members) => members,
+                None => {
+                    let members: Option<Arc<[SemanticNodeId]>> = self
+                        .lower_type_expr_in_owner_scope_with_context(
+                            widening.canonical,
+                            widening.owner,
+                            written,
+                            ProjectionReductionContext::structural_transit(),
+                        )
+                        .map(|arm| self.canonical_written(arm))
+                        .map(|arm| match self.graph().node_data(arm).as_deref() {
+                            Some(SemanticNodeData::Union(members)) => {
+                                members.iter().copied().collect()
+                            }
+                            _ => Arc::from([arm]),
+                        });
+                    widening
+                        .arms
+                        .borrow_mut()
+                        .push((Arc::clone(written), members.clone()));
+                    members
+                }
+            };
+            let graph = self.graph();
+            let held = members.is_some_and(|members| {
+                let holds = |node: SemanticNodeId| {
+                    members.iter().any(|&member| {
+                        member == node
+                            || crate::semantic_query::stable_key::provably_equal(
+                                &graph, member, node,
+                            )
+                    })
+                };
+                // A union nested in `node` keeps the origin its lowering
+                // gave it (`[1, "x"]`'s element as authored), so `node`
+                // matches the arm reduced the same way.
+                holds(node) || {
+                    let canonical =
+                        *canonical_node.get_or_insert_with(|| self.canonical_written(node));
+                    canonical != node && holds(canonical)
+                }
+            });
+            if !held {
+                return None;
+            }
+            path = rest;
+        }
+        Some(path)
+    }
+
+    /// `node`, a written type lowered as authored, with its unions and
+    /// intersections reduced as the declaration's inferred type holds them —
+    /// through array elements and object members — so a member of that type
+    /// is the same structure as the written part it lowers.
+    fn canonical_written(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        let data = graph.node_data(node);
+        let composite: Option<(Vec<SemanticNodeId>, bool)> = match data.as_deref() {
+            Some(SemanticNodeData::Union(members)) => {
+                Some((members.iter().copied().collect(), true))
+            }
+            Some(SemanticNodeData::Intersection(members)) => {
+                Some((members.iter().copied().collect(), false))
+            }
+            _ => None,
+        };
+        if let Some((members, union)) = composite {
+            drop(data);
+            let members: Vec<SemanticNodeId> = members
+                .into_iter()
+                .map(|member| self.canonical_written(member))
+                .collect();
+            return self.intern_normalized_union_or_intersection(&members, union);
+        }
+        match data.as_deref() {
+            Some(SemanticNodeData::Array { element, readonly }) => {
+                let (element, readonly) = (*element, *readonly);
+                drop(data);
+                let canonical = self.canonical_written(element);
+                if canonical == element {
+                    return node;
+                }
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::Array {
+                        element: canonical,
+                        readonly,
+                    },
+                )
+            }
+            Some(SemanticNodeData::Object(surface)) => {
                 let surface = surface.clone();
                 drop(data);
-                let SurfaceKeyProjection::Exact(member) = surface.project_known_key(key) else {
-                    return node;
-                };
-                if !written_at(&member.spans, *at) {
-                    return node;
-                }
-                let Some(index) = surface
+                let mut changed = false;
+                let members: Vec<SurfaceMember> = surface
                     .positive_members()
                     .iter()
-                    .position(|candidate| std::ptr::eq(candidate, member))
-                else {
-                    return node;
-                };
-                let value = self.rewrite_declared_position(member.value, rest, rewrite);
-                if value == member.value {
-                    return node;
-                }
-                let mut members: Vec<SurfaceMember> = surface
-                    .positive_members()
-                    .iter()
-                    .map(SurfaceMember::clone)
+                    .map(|member| {
+                        let mut member = SurfaceMember::clone(member);
+                        let value = self.canonical_written(member.value);
+                        changed |= value != member.value;
+                        member.value = value;
+                        member
+                    })
                     .collect();
-                members[index].value = value;
+                if !changed {
+                    return node;
+                }
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::Object(
+                        surface.with_positive_members(Arc::from(members.into_boxed_slice())),
+                    ),
+                )
+            }
+            _ => node,
+        }
+    }
+
+    /// `node` (no union) with each of `positions` widened in the part its
+    /// first step addresses: an object's member, the property or spread an
+    /// object that spreads another writes it by, an array's element type.
+    fn widen_parts_at(
+        &self,
+        node: SemanticNodeId,
+        positions: &[Addressed<'_>],
+        widening: &DeclaredWidening<'_>,
+    ) -> SemanticNodeId {
+        if positions.is_empty() {
+            return node;
+        }
+        let graph = self.graph();
+        let data = graph.node_data(node);
+        match data.as_deref() {
+            Some(SemanticNodeData::Object(surface)) => {
+                let surface = surface.clone();
+                drop(data);
+                let mut members: Option<Vec<SurfaceMember>> = None;
+                for (index, member) in surface.positive_members().iter().enumerate() {
+                    let at_member: Vec<Addressed<'_>> = positions
+                        .iter()
+                        .filter_map(|&(path, position)| {
+                            let (step, rest) = path.split_first()?;
+                            (addressed_member(&surface, step) == Some(index))
+                                .then_some((rest, position))
+                        })
+                        .collect();
+                    let value = self.widen_positions_at(member.value, &at_member, widening);
+                    if value != member.value {
+                        members.get_or_insert_with(|| {
+                            surface
+                                .positive_members()
+                                .iter()
+                                .map(SurfaceMember::clone)
+                                .collect()
+                        })[index]
+                            .value = value;
+                    }
+                }
+                let Some(members) = members else {
+                    return node;
+                };
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::Object(
@@ -154,10 +350,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // authored property writing it: its own write of the key, which
             // a later spread may override but never rewrites, or a member of
             // a spread's operand, which the object holds as its own.
-            (
-                Some(SemanticNodeData::ObjectSpreadProgram(program)),
-                DeclaredReadStep::Member { key, at },
-            ) => {
+            Some(SemanticNodeData::ObjectSpreadProgram(program)) => {
+                let is_literal = program.is_literal;
                 let mut effects: Vec<ObjectConstructionEffect> = program
                     .effects
                     .iter()
@@ -167,17 +361,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let mut changed = false;
                 for effect in &mut effects {
                     match effect {
-                        ObjectConstructionEffect::DirectProperty(property)
-                            if property.key.cloned_known().as_ref() == Some(key)
-                                && written_at(&property.spans, *at) =>
-                        {
+                        ObjectConstructionEffect::DirectProperty(property) => {
+                            let at_property: Vec<Addressed<'_>> = positions
+                                .iter()
+                                .filter_map(|&(path, position)| {
+                                    let (step, rest) = path.split_first()?;
+                                    addresses(step, &property.key, &property.spans)
+                                        .then_some((rest, position))
+                                })
+                                .collect();
                             let value =
-                                self.rewrite_declared_position(property.value, rest, rewrite);
+                                self.widen_positions_at(property.value, &at_property, widening);
                             changed |= value != property.value;
                             property.value = value;
                         }
                         ObjectConstructionEffect::Spread(operand) => {
-                            let value = self.rewrite_declared_position(*operand, path, rewrite);
+                            let at_operand: Vec<Addressed<'_>> = positions
+                                .iter()
+                                .copied()
+                                .filter(|(path, _)| {
+                                    matches!(
+                                        path.first(),
+                                        Some(
+                                            DeclaredReadStep::Member { .. }
+                                                | DeclaredReadStep::ComputedMember { .. }
+                                        )
+                                    )
+                                })
+                                .collect();
+                            let value = self.widen_positions_at(*operand, &at_operand, widening);
                             changed |= value != *operand;
                             *operand = value;
                         }
@@ -190,14 +402,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+                        is_literal,
                         effects: crate::semantic_query::PayloadArray::from(effects),
                     }),
                 )
             }
-            (Some(SemanticNodeData::Array { element, readonly }), DeclaredReadStep::Element) => {
+            Some(SemanticNodeData::Array { element, readonly }) => {
                 let (element, readonly) = (*element, *readonly);
                 drop(data);
-                let rewritten = self.rewrite_declared_position(element, rest, rewrite);
+                let at_element: Vec<Addressed<'_>> = positions
+                    .iter()
+                    .filter_map(|&(path, position)| match path.split_first() {
+                        Some((DeclaredReadStep::Element, rest)) => Some((rest, position)),
+                        _ => None,
+                    })
+                    .collect();
+                let rewritten = self.widen_positions_at(element, &at_element, widening);
                 if rewritten == element {
                     return node;
                 }
@@ -321,13 +541,64 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 }
 
-/// Whether the member `spans` locate is the one the authored property
-/// declared at `at` writes; a member without a declaration site is
-/// addressed by its key alone.
-fn written_at(spans: &verter_type_expr::MemberSpans, at: verter_span::Span) -> bool {
-    spans
-        .declaration
-        .is_none_or(|declaration| declaration == at)
+/// A position and the steps left from the node it has reached.
+type Addressed<'p> = (&'p [DeclaredReadStep], &'p DeclaredReadPosition);
+
+/// A conditional arm's written type and the members it lowers to (`None`
+/// when it lowers to nothing).
+type ArmMembers = (Arc<TypeExpr>, Option<Arc<[SemanticNodeId]>>);
+
+/// The declaration whose positions widen, and the union members each
+/// conditional arm it writes holds (its written type lowered once).
+struct DeclaredWidening<'d> {
+    canonical: &'d str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    arms: std::cell::RefCell<Vec<ArmMembers>>,
+}
+
+/// The index of the member of `surface` the member step `step` addresses
+/// ([`addresses`]).
+fn addressed_member(surface: &SurfaceView, step: &DeclaredReadStep) -> Option<usize> {
+    let member = match step {
+        DeclaredReadStep::Member { key, .. } => match surface.project_known_key(key) {
+            SurfaceKeyProjection::Exact(member) => member,
+            _ => return None,
+        },
+        DeclaredReadStep::ComputedMember { at } => surface
+            .positive_members()
+            .iter()
+            .find(|member| member.spans.declaration == Some(*at))?,
+        DeclaredReadStep::Element | DeclaredReadStep::Arm { .. } => return None,
+    };
+    if !addresses(step, &member.key, &member.spans) {
+        return None;
+    }
+    surface
+        .positive_members()
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, member))
+}
+
+/// Whether the member step `step` addresses the member of `key` that
+/// `spans` locate: a member of the step's key the authored property
+/// declared at its site writes — a member without a declaration site is
+/// addressed by its key alone — or, under a computed key, the member that
+/// property writes, whatever its key resolves to.
+fn addresses(
+    step: &DeclaredReadStep,
+    key: &AuthoredPropertyKey,
+    spans: &verter_type_expr::MemberSpans,
+) -> bool {
+    match step {
+        DeclaredReadStep::Member { key: step_key, at } => {
+            key.cloned_known().as_ref() == Some(step_key)
+                && spans
+                    .declaration
+                    .is_none_or(|declaration| declaration == *at)
+        }
+        DeclaredReadStep::ComputedMember { at } => spans.declaration == Some(*at),
+        DeclaredReadStep::Element | DeclaredReadStep::Arm { .. } => false,
+    }
 }
 
 /// Whether `a` and `b` are the same literal type, whatever scope each
@@ -371,7 +642,7 @@ fn literal_like_members(
 }
 
 /// The primitive a literal widens to.
-fn literal_primitive(literal: &crate::semantic_query::LiteralValue) -> PrimitiveKind {
+pub(super) fn literal_primitive(literal: &crate::semantic_query::LiteralValue) -> PrimitiveKind {
     match literal {
         crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
         crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,

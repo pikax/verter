@@ -394,6 +394,18 @@ impl SemanticGraphStore {
             .is_some_and(|task| task.produces_key(key, prepared::hash_key(key), site))
     }
 
+    /// Whether a producer of the key `attempt` claims is in flight at its
+    /// checking site, so the claim would join it rather than produce. A
+    /// read-only preflight: the claim stays the sole authority that joins.
+    /// An independent claim never joins another producer.
+    pub(crate) fn has_flight(&self, attempt: &ClaimAttempt) -> bool {
+        !attempt.independent
+            && self
+                .site_inflight(attempt.site)
+                .lock()
+                .contains_key(&attempt.prepared)
+    }
+
     /// The recursion carrier for `recursion`, with `sentinel` as its value.
     pub(crate) fn recursion_read(
         &self,
@@ -1236,7 +1248,7 @@ impl SemanticGraphStore {
     /// its carrier is delivered through `capture`, and the read
     /// carries the receipt its recording sealed. The returned carrier is
     /// `Some` when the result is complete, cacheable and priced — what the
-    /// dispatcher may keep and serve again — and `None` otherwise. A
+    /// request may keep and serve again — and `None` otherwise. A
     /// cancelled request answers with the cancellation read.
     pub(crate) fn complete_request_local_in<M: verter_audit::observe::ObserveExec>(
         &self,
@@ -1284,6 +1296,34 @@ impl SemanticGraphStore {
             receipt: cost_receipt.into(),
         };
         (read, settled.admissible.then_some(settled.carrier))
+    }
+
+    /// The read a member of a component completed for the request is kept
+    /// with: its decided value on a delivery lease of its own, complete,
+    /// carrying the receipt of the component's root — every member of a
+    /// component shares its root's cost, as a published member does. `Err`
+    /// when the value names a node that is no longer live.
+    pub(crate) fn completed_member_read(
+        &self,
+        value: SemanticQueryValue,
+        receipt: crate::semantic_query::ReadReceipt,
+    ) -> Result<ValueRead, QueryError> {
+        let value = QueryResult::Value(value);
+        let walker_diagnostics = super::empty_diagnostics();
+        let dep_signature = empty_signature();
+        Ok(CacheRead {
+            lease: self.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                &value,
+                &walker_diagnostics,
+                &dep_signature,
+            ))?,
+            value,
+            dep_signature,
+            walker_diagnostics,
+            cache_suppress: false,
+            fact_status: crate::semantic_query::FactStatus::Complete,
+            receipt,
+        })
     }
 }
 

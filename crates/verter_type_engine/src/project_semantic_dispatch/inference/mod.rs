@@ -7,6 +7,9 @@ mod collect;
 pub mod constraints;
 pub mod fixation;
 pub mod session;
+mod tuple;
+
+pub(in crate::project_semantic_dispatch) use tuple::{slice_occurrence, VariadicElementFacts};
 
 pub use fixation::{winning_candidates, WinningCandidates};
 

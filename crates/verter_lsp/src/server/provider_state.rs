@@ -539,6 +539,8 @@ impl VerterLanguageServer {
     /// Make the incomplete owning-project carriers the scanner's next work
     /// without making this interactive request join background compilation.
     async fn signal_frontier_scanner_priority(&self, expected_sources: Vec<String>) {
+        // The first unmet frontier demand is what starts the workspace scan.
+        self.activate_workspace_scan().await;
         if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
             for source in expected_sources {
                 scanner.signal_priority(source);

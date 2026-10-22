@@ -125,7 +125,6 @@ fn decorators_identity_field_decorator_preserves_field_type() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not project the `accessor` keyword's public surface through identity accessor decoration; keep as the future accessor-decorator identity contract"]
 fn decorators_identity_accessor_decorator_publishes_public_property() {
     // TS7 contract: `accessor visible: string` produces a public property
     // of declared type `string` on the instance side. `@readonlyGet` is
@@ -280,7 +279,6 @@ fn decorators_method_decorator_with_add_initializer_preserves_instance_shape() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not project the `accessor` keyword's public surface even when the decorator's return shape is the same `ClassAccessorDecoratorTarget` it received; keep as the future accessor-decorator-with-explicit-target-return contract"]
 fn decorators_accessor_decorator_returning_same_target_publishes_public_property() {
     // TS7 contract: `trackedAccessor` receives the synthesised
     // `ClassAccessorDecoratorTarget<unknown, T>` for `accessor count: number`

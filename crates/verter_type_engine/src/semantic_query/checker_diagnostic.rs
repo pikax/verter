@@ -47,6 +47,7 @@ impl CheckerDiagnostic {
         match self.code {
             CheckerDiagnosticCode::ExcessivelyDeepInstantiation
             | CheckerDiagnosticCode::CircularTypeAlias
+            | CheckerDiagnosticCode::CannotFindName
             | CheckerDiagnosticCode::RecursiveFulfillmentCallback
             | CheckerDiagnosticCode::UnionTooComplex
             | CheckerDiagnosticCode::TupleTooLarge
@@ -88,6 +89,12 @@ pub enum CheckerDiagnosticCode {
     /// ([`checker_policy::circular_type_alias`](super::checker_policy::circular_type_alias)).
     /// A checker error, not a resource limit: the alias is `any`.
     CircularTypeAlias,
+    /// TS2304: a type reference to a name no declaration in scope declares —
+    /// a conditional type's `infer` declaration read outside the true
+    /// branch its `extends` clause scopes (the false branch, or another
+    /// declaration's constraint in the same pattern). A checker error: the
+    /// reference is the error type, `any`.
+    CannotFindName,
     /// TS2590: a cross product over unions has at least the checker's
     /// product limit of constituents, checked before one is built
     /// ([`checker_policy::cross_product_union`](super::checker_policy::cross_product_union)).
@@ -157,6 +164,7 @@ impl CheckerDiagnosticCode {
             | Self::ExpressionTupleTooLarge
             | Self::RelationTooComplex => true,
             Self::CircularTypeAlias
+            | Self::CannotFindName
             | Self::NoMatchingOverload
             | Self::TypeNotAssignable
             | Self::RecursiveFulfillmentCallback
@@ -180,6 +188,7 @@ impl CheckerDiagnosticCode {
             Self::TypeNotAssignable => 2322,
             Self::ExcessivelyDeepInstantiation => 2589,
             Self::CircularTypeAlias => 2456,
+            Self::CannotFindName => 2304,
             Self::UnionTooComplex => 2590,
             Self::TupleTooLarge => 2799,
             Self::ExpressionTupleTooLarge => 2800,
@@ -215,6 +224,7 @@ impl CheckerDiagnosticCode {
                 "Type instantiation is excessively deep and possibly infinite."
             }
             Self::CircularTypeAlias => "Type alias '{0}' circularly references itself.",
+            Self::CannotFindName => "Cannot find name '{0}'.",
             Self::UnionTooComplex => {
                 "Expression produces a union type that is too complex to represent."
             }
@@ -323,6 +333,8 @@ pub enum CheckerDiagnosticOperation {
     /// A type alias's declared type (`getDeclaredTypeOfTypeAlias`), whose
     /// body requires the alias itself.
     TypeAliasDeclaration,
+    /// A type reference's name resolution (`resolveEntityName`).
+    TypeReference,
 }
 
 /// Why a checker recovery is the answer: what the recovery proves.

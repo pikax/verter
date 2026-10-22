@@ -599,6 +599,7 @@ fn inference_context_heap_bytes(context: &InferenceContextKey, aliases: &mut Ali
         no_infer_mask,
         const_param_policy,
         contextual_inference_mode,
+        verdict_use,
     } = context;
     inferable_params.key_heap_bytes(aliases)
         + inline(variance_phase)
@@ -607,6 +608,7 @@ fn inference_context_heap_bytes(context: &InferenceContextKey, aliases: &mut Ali
         + inline(no_infer_mask)
         + inline(const_param_policy)
         + inline(contextual_inference_mode)
+        + inline(verdict_use)
 }
 
 /// The payload an interned relation record holds.
@@ -817,7 +819,8 @@ fn call_argument_heap_bytes(argument: &CallArgKey, aliases: &mut AliasSet) -> us
 }
 
 /// A call argument's literal provenance: its shared record, the record's
-/// position slice, and each position's path and literal slices.
+/// position slice, each position's path and literal slices, and the
+/// fresh-read path slices.
 fn literal_provenance_heap_bytes(
     provenance: Option<&Arc<crate::semantic_query::ArgumentLiteralProvenance>>,
     aliases: &mut AliasSet,
@@ -831,8 +834,18 @@ fn literal_provenance_heap_bytes(
     let record = verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
         crate::semantic_query::ArgumentLiteralProvenance,
     >());
-    let crate::semantic_query::ArgumentLiteralProvenance { positions } = &**provenance;
+    let crate::semantic_query::ArgumentLiteralProvenance {
+        positions,
+        fresh_reads,
+    } = &**provenance;
     record
+        + arc_slice_block_bytes(fresh_reads, aliases).map_or(0, |block| {
+            block
+                + fresh_reads
+                    .iter()
+                    .map(|path| copy_slice_bytes(path, aliases))
+                    .sum::<usize>()
+        })
         + arc_slice_block_bytes(positions, aliases).map_or(0, |block| {
             block
                 + positions

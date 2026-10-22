@@ -494,7 +494,7 @@ pub struct CanonicalEvidence {
     pub(crate) exhausted: crate::semantic_query::PartialReasonSet,
     /// Nodes already scope-classified — one sidecar lookup per unique node
     /// per canonicalization, regardless of how many walks revisit it.
-    seen_nodes: FxHashSet<SemanticNodeId>,
+    seen_nodes: verter_retention::word_set::WordSet,
     /// The roots [`Self::inspected_file_roots`] holds, so recording one is
     /// constant time however many files the walk inspects.
     seen_roots: FxHashSet<ObservedGraphSelfRoot>,
@@ -759,6 +759,13 @@ fn inspect_literal_provenance_with_budget(
 }
 
 impl CanonicalEvidence {
+    /// Whether this canonicalization proved its result outright: no
+    /// incomplete comparison, refusal or unpaid construction. Only such a
+    /// proof may be reused in place of running it again.
+    pub(super) fn is_complete_proof(&self) -> bool {
+        !self.incomplete && self.refusal.is_none() && self.exhausted.is_empty()
+    }
+
     /// Fold another canonicalization's evidence into this one — the
     /// threading primitive for helpers that run several canonical
     /// constructions before their caller reaches the single disposition
@@ -770,11 +777,13 @@ impl CanonicalEvidence {
         for root in other.inspected_file_roots {
             self.note_file_root(root);
         }
-        self.seen_nodes.extend(other.seen_nodes);
+        for node in other.seen_nodes.iter() {
+            self.seen_nodes.insert(node);
+        }
     }
 
     pub(super) fn record_file_root(&mut self, graph: &SemanticGraphStore, node: SemanticNodeId) {
-        if !self.seen_nodes.insert(node) {
+        if !self.seen_nodes.insert(node.0) {
             return;
         }
         if let Some(NodeScopeId::File {

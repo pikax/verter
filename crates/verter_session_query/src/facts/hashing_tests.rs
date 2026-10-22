@@ -28,7 +28,10 @@ fn make_object(members: Vec<(&str, TypeExpr)>) -> TypeExpr {
             ))
         })
         .collect();
-    TypeExpr::Object(Arc::new(ObjectExpr { properties }))
+    TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
+        properties,
+    }))
 }
 
 #[test]
@@ -380,6 +383,7 @@ fn synthetic_carrier_fact_hash_value_node_discriminates() {
 
 fn object_with_property_visibility(vis: verter_type_expr::MemberVisibility) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
             "x".into(),
             prim(PrimitiveName::Number),
@@ -393,6 +397,7 @@ fn object_with_property_visibility(vis: verter_type_expr::MemberVisibility) -> T
 
 fn object_with_method_visibility(vis: verter_type_expr::MemberVisibility) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Method(MethodSignature::with_key_visibility(
             "m".into(),
             FunctionExpr::synthetic(vec![], None, vec![]),
@@ -795,6 +800,7 @@ fn value_body_fingerprint_enum_folds_members_and_discriminates() {
     // Byte-parity against the hand-assembled legacy folded object view (each
     // member's stored literal, readonly + non-optional + public).
     let expected_obj = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "Red".into(),
@@ -950,6 +956,7 @@ fn value_body_fingerprint_object_shape_fallback_matches_legacy_and_discriminates
     // (hand-built `Unknown` node through `compute_semantic_hash`), so a
     // divergence in the producer's kind/object-shape fallback bytes fails here.
     let shape = ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key(
                 "x".into(),
@@ -976,6 +983,7 @@ fn value_body_fingerprint_object_shape_fallback_matches_legacy_and_discriminates
 
     // Discrimination 1: an object-shape member edit moves the fingerprint.
     let edited_shape = ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key(
                 "x".into(),
@@ -1024,6 +1032,7 @@ fn value_body_fingerprint_mixed_enum_folds_only_foldable_members_and_discriminat
     let via_producer = value_body_fingerprint(&input, SymbolSpace::Value, &UnresolvedLens);
 
     let expected_obj = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "Red".into(),
@@ -1111,6 +1120,7 @@ fn value_body_fingerprint_enum_members_take_precedence_over_annotation() {
     let via_producer = value_body_fingerprint(&input, SymbolSpace::Value, &UnresolvedLens);
 
     let expected_obj = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key("Red".into(), num(0.0), false, true),
         )],

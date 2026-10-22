@@ -55,6 +55,7 @@ fn referenced_names_reaches_every_nested_carrier() {
         Vec::new(),
     )));
     let object = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key("k".into(), type_of("inMember"), false, false),
         )],
@@ -280,6 +281,7 @@ fn referenced_names_masks_function_and_constructor_binders_depth_safely() {
     // A METHOD / call signature inside an object carries its own frame,
     // and the object's OTHER members are outside it.
     let object = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "sibling".into(),

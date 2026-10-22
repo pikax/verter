@@ -46,7 +46,8 @@ fn proven_closed_source_reports_closed() {
         &host,
         "/types.ts",
         "export interface Closed { a: string; b: number }\n\
-         export type Chain = Closed;",
+         export type Chain = Closed;\n\
+         export type Callable = () => string;",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
     let mut budget = 256u32;
@@ -75,6 +76,20 @@ fn proven_closed_source_reports_closed() {
         ClosednessVerdict::ProvenClosed,
         "a bare alias chain onto a closed object proves closed through the ref hop"
     );
+    // A function type has no properties: its key domain is the closed empty
+    // set (`keyof (() => string)` is `never`).
+    let mut budget = 256u32;
+    assert_eq!(
+        prepared_decl_body_is_closed(
+            &dispatch,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Callable",
+            &mut budget,
+        ),
+        ClosednessVerdict::ProvenClosed,
+        "a function-typed body is a proven-closed (empty) key domain"
+    );
 }
 
 #[test]
@@ -83,9 +98,9 @@ fn proven_open_source_reports_open_not_unavailable() {
     upsert_ts(
         &host,
         "/types.ts",
-        // A function type is not an enumerable key surface — the recipe's
-        // decided-open leaf.
-        "export type Bare = () => string;",
+        // The keys of a free type parameter: the escape's node walk reaches
+        // the unbound parameter and decides open.
+        "export type Bare<T> = keyof T;",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
     let mut budget = 256u32;
@@ -98,7 +113,7 @@ fn proven_open_source_reports_open_not_unavailable() {
             &mut budget,
         ),
         ClosednessVerdict::ProvenOpen,
-        "a function-typed body is a PROOF of openness at the key domain, not a refusal"
+        "a free generic body is a PROOF of openness at the key domain, not a refusal"
     );
 }
 

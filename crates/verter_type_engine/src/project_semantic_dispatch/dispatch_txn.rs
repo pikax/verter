@@ -69,9 +69,7 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::InlineMemberFlight;
 
-use super::inference::session::{
-    InferenceSession, InferenceSessionSetup, InferenceSessionState, ReverseProjectionState,
-};
+use super::inference::session::{InferenceSession, InferenceSessionSetup, InferenceSessionState};
 
 /// Transient per-transaction session token. Content-free; NEVER enters a
 /// published key, a `ReadSetSignature.facts` observation, or any fact
@@ -86,13 +84,25 @@ pub struct SessionId(pub(crate) u64);
 pub struct InferenceOccurrence {
     pub(crate) priority: InferenceCandidatePriority,
     pub(crate) variance: VariancePhase,
+    /// A method parameter was crossed. Orientation still flips normally,
+    /// but nested candidates combine covariantly (`inferFromSignature`).
+    pub(crate) bivariant: bool,
 }
 
 impl InferenceOccurrence {
     pub const ARGUMENT_COVARIANT: Self = Self {
         priority: InferenceCandidatePriority::Argument,
         variance: VariancePhase::Covariant,
+        bivariant: false,
     };
+
+    pub(crate) fn candidate_variance(self) -> VariancePhase {
+        if self.bivariant {
+            VariancePhase::Covariant
+        } else {
+            self.variance
+        }
+    }
 }
 
 /// The typed strict-family configuration the relation reducer BRANCHES on,
@@ -315,6 +325,23 @@ impl RelationFrameState {
     }
 }
 
+/// What one occurrence contributes to its origin's recursion count.
+#[derive(Debug, Clone)]
+pub(crate) enum RecursionCountMode {
+    /// Declaration references distinguish their instantiated arguments.
+    DistinctInstantiation(Arc<[SemanticNodeId]>),
+    /// Function symbols count repeated visits to the same instance too.
+    /// `visit` is when the transaction first met the instance
+    /// ([`RelationDomainRuntime::signature_visits`]).
+    EveryOccurrence { visit: u32 },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RelationRecursionIdentity {
+    pub(crate) origin: crate::semantic_query::DeclIdentity,
+    pub(crate) counting: RecursionCountMode,
+}
+
 /// One relation frame's place in its relation chain: the relation frames
 /// stacked directly on one another, which the checker relates in one
 /// `checkTypeRelatedTo` call with one recursion depth, one overflow flag
@@ -342,12 +369,9 @@ pub(crate) struct RelationChainPosition {
     /// source side, bit 2 the target side was found deeply nested at this
     /// frame or one below it in the chain.
     pub(crate) expanding: u8,
-    /// The recursion identities of this counted frame's source and target
-    /// with the instantiation each was read from — its type arguments, none
-    /// for the alias named without any (see
-    /// `ProjectSemanticDispatch::relation_recursion_identity`).
-    pub(crate) identities:
-        [Option<(crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>)>; 2],
+    /// Each operand's origin paired with its counting mode: references
+    /// distinguish argument instances; signatures count repeated visits.
+    pub(crate) identities: [Option<RelationRecursionIdentity>; 2],
     /// The chain's depth when this frame opened — the depth its parent
     /// had reached.
     pub(crate) opened_at: u16,
@@ -369,7 +393,7 @@ pub(crate) struct RelationRecursionUse {
     /// or a replayed memo entry would have reached.
     pub(crate) reached: u16,
     /// Per side (source, target): for each recursion identity, the most
-    /// distinct instantiations of it the computation stacked on one path
+    /// occurrences it counts that the computation stacked on one path
     /// from this frame, a replayed entry's own counts added to the chain's
     /// below it; and the bound a replayed cyclic member carries for every
     /// identity.
@@ -2267,6 +2291,84 @@ impl CompletedSccMember {
     }
 }
 
+/// The relations this transaction decided and queued for the root's batched
+/// publish (completed SCC members and inline SCC roots), with the cold
+/// answers among them indexed by key: a relation met again before the batch
+/// publishes reads its answer here, as the checker's relation cache serves a
+/// pair it already related, instead of relating it again — without it, a
+/// pair reached along every one of `2ⁿ` paths was related `2ⁿ` times. Only
+/// cold answers are indexed (no overflow or deeply-nested answer, no
+/// session-local delta, no binding key), each read through its recursion
+/// footprint like a memo entry.
+///
+/// Request-scoped working state, one queued member per decided pair: the
+/// index holds a member's position, never a second copy of its key or
+/// payload, so a pair costs its member and one index slot. The index is
+/// cleared with the batch it mirrors — at its publish or its abort.
+#[derive(Debug, Default)]
+pub struct CompletedRelations {
+    members: Vec<CompletedSccMember>,
+    /// Positions in `members` of the indexed cold answers, hashed by key.
+    settled: hashbrown::HashTable<u32>,
+}
+
+impl CompletedRelations {
+    fn key_hash(key: &RelateMemoKey) -> u64 {
+        std::hash::BuildHasher::hash_one(&rustc_hash::FxBuildHasher, key)
+    }
+
+    /// Whether no member is queued.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// The queued members, in the order they completed.
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, CompletedSccMember> {
+        self.members.iter()
+    }
+
+    /// The member queued last.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn last(&self) -> Option<&CompletedSccMember> {
+        self.members.last()
+    }
+
+    /// Queue `member`; when `settles`, its answer becomes the cold answer
+    /// later reads of its key take, in place of an earlier one.
+    pub(crate) fn push(&mut self, member: CompletedSccMember, settles: bool) {
+        let position = u32::try_from(self.members.len())
+            .expect("a transaction queues fewer than 2^32 relation members");
+        if settles {
+            let members = &self.members;
+            match self.settled.entry(
+                Self::key_hash(&member.key),
+                |&slot| members[slot as usize].key == member.key,
+                |&slot| Self::key_hash(&members[slot as usize].key),
+            ) {
+                hashbrown::hash_table::Entry::Occupied(mut slot) => *slot.get_mut() = position,
+                hashbrown::hash_table::Entry::Vacant(slot) => {
+                    slot.insert(position);
+                }
+            }
+        }
+        self.members.push(member);
+    }
+
+    /// The cold answer queued for `key`.
+    pub(crate) fn settled(&self, key: &RelateMemoKey) -> Option<&RelationPayload> {
+        let position = self.settled.find(Self::key_hash(key), |&slot| {
+            self.members[slot as usize].key == *key
+        })?;
+        Some(&self.members[*position as usize].payload)
+    }
+
+    /// Take every queued member, clearing the index with them.
+    pub(crate) fn take(&mut self) -> Vec<CompletedSccMember> {
+        self.settled = hashbrown::HashTable::new();
+        std::mem::take(&mut self.members)
+    }
+}
+
 impl RelationDomainRuntime {
     /// The session `id`. Sessions are appended in the order their ids are
     /// allocated and never reordered, so the stack is sorted by id and a
@@ -2345,10 +2447,18 @@ pub struct RelationDomainRuntime {
         usize,
         crate::semantic_query::checker_policy::RelationComplexity,
     )>,
+    /// The order in which this transaction first met each signature
+    /// instance as a recursion identity: its position stands in for the
+    /// checker's type id, which orders a type's creation, so an inference
+    /// walk reads an instance an earlier walk already expanded as the
+    /// cached, older type the checker's `isDeeplyNestedType` does not count
+    /// again. Every transaction starts empty, as a fresh checker does.
+    pub(crate) signature_visits: FxHashMap<SemanticNodeId, u32>,
     /// Per-session deferred-admission ledger.
     pub session_admission: SessionAdmissionLedger,
-    /// SCC-closed members queued for the root's batched publish drain.
-    pub completed_members: Vec<CompletedSccMember>,
+    /// SCC-closed members queued for the root's batched publish drain, and
+    /// the cold answers among them by key.
+    pub completed_members: CompletedRelations,
     /// The normalized strict-family configuration in force (RI-10).
     pub(crate) strict: Option<StrictFamilyConfig>,
     /// Virtual root occurrence used while an SCC member re-discharges after
@@ -2359,6 +2469,11 @@ pub struct RelationDomainRuntime {
     /// Per-target-node memo of the `infer`-pattern detection (a pure
     /// function of the pattern; avoids rescanning per ask).
     pub(crate) pattern_cache: FxHashMap<SemanticNodeId, Option<super::relation::InferPatternInfo>>,
+    /// Per-pattern-node memo of its `infer` inventory (a pure function of
+    /// the pattern): every member of a distributed conditional asks it of
+    /// the one `extends` operand.
+    pub(crate) inventory_cache:
+        FxHashMap<SemanticNodeId, std::sync::Arc<super::relation::InferInventory>>,
     /// Nestable call-applicability final-check barriers. Sessions below the
     /// newest length watermark are inactive; a genuinely nested call may push
     /// a fresh session above it and infer normally.
@@ -2384,18 +2499,6 @@ pub struct RelationDomainRuntime {
     /// variance marker — read by the variance measurement that asked for
     /// it, right after asking. Transient: overwritten at every close.
     pub(crate) last_relation_unreliable: bool,
-    /// The relations this transaction decided and queued for publication
-    /// (completed SCC members and inline SCC roots), by key: a relation
-    /// met again before the batch publishes reads its answer here, as the
-    /// checker's relation cache serves a pair it already related, instead
-    /// of relating it again — without it, a pair reached along every one
-    /// of `2ⁿ` paths was related `2ⁿ` times. Only cold answers enter (no
-    /// overflow or deeply-nested answer, no session-local delta, no binding
-    /// key), each read through its recursion footprint like a memo entry.
-    /// Request-scoped: it lives on the transaction, and is cleared with the
-    /// member batch it mirrors — at its publish or its abort — so one entry
-    /// per queued member at most.
-    pub(crate) settled: FxHashMap<RelateMemoKey, RelationPayload>,
     next_session_id: u64,
 }
 
@@ -2426,6 +2529,10 @@ struct CallArgumentLiteralPolicy {
     /// into a naked type parameter (`inferFromTypes` skips a
     /// `NonInferrableType` source).
     first_pass: bool,
+    /// The type parameters the first-pass reading relates a withheld
+    /// member's placeholder `any` to at a naked position: no candidate
+    /// for them, as the checker's non-inferrable `anyFunctionType` is none.
+    withheld_targets: Vec<SemanticNodeId>,
 }
 
 /// A literal an authored position of a call argument keeps, with a type
@@ -2992,13 +3099,9 @@ impl CheckerDispatchTransaction {
     /// Push a fresh collecting session unconditionally. Call-owned candidate
     /// execution uses this path even when an outer collector exists; relation
     /// roots retain their separate admission predicate.
-    pub fn push_collecting_session(
-        &mut self,
-        setup: InferenceSessionSetup,
-        reverse_projection: Option<ReverseProjectionState>,
-    ) -> SessionId {
+    pub fn push_collecting_session(&mut self, setup: InferenceSessionSetup) -> SessionId {
         let id = self.alloc_session_id();
-        let mut session = InferenceSession::new(id, setup, reverse_projection);
+        let mut session = InferenceSession::new(id, setup);
         session.opened_at_depth = self.reentry().depth();
         verter_debug_assert!(
             self.relation
@@ -3067,7 +3170,7 @@ impl CheckerDispatchTransaction {
         top_level_infer_targets: Vec<SemanticNodeId>,
         argument: Option<SemanticNodeId>,
         context_keeps: Vec<ContextKeptLiteral>,
-        first_pass: bool,
+        first_pass: Option<Vec<SemanticNodeId>>,
     ) {
         self.relation
             .call_argument_literal_modes
@@ -3076,7 +3179,8 @@ impl CheckerDispatchTransaction {
                 top_level_infer_targets,
                 argument,
                 context_keeps,
-                first_pass,
+                first_pass: first_pass.is_some(),
+                withheld_targets: first_pass.unwrap_or_default(),
             });
     }
 
@@ -3117,6 +3221,18 @@ impl CheckerDispatchTransaction {
             .call_argument_literal_modes
             .last()
             .is_some_and(|policy| policy.argument == Some(bound))
+    }
+
+    /// Whether the CURRENT call argument relates as its first-pass reading
+    /// and lands a withheld member's placeholder at a naked position of
+    /// `param_node`.
+    pub(crate) fn call_argument_withheld_target(&self, param_node: SemanticNodeId) -> bool {
+        self.relation
+            .call_argument_literal_modes
+            .last()
+            .is_some_and(|policy| {
+                policy.first_pass && policy.withheld_targets.contains(&param_node)
+            })
     }
 
     /// Whether depositing `bound` into `param_node` would deposit the

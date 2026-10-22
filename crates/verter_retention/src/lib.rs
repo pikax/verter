@@ -98,6 +98,7 @@ pub mod shared;
 pub mod unshared;
 #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
 pub mod witness;
+pub mod word_set;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};

@@ -362,6 +362,7 @@ fn hash_node_rec<H: std::hash::Hasher, M: verter_audit::observe::ObserveExec>(
         }
         SemanticNodeData::EnumLiteral(literal) => {
             literal.enum_decl.hash(hasher);
+            literal.module_specifier.hash(hasher);
             literal.member.hash(hasher);
         }
         SemanticNodeData::Primitive(kind) => {
@@ -877,7 +878,7 @@ mod tests {
         });
         let object = |operand| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-                verter_type_engine::semantic_query::ObjectSpreadProgram {
+                verter_type_engine::semantic_query::ObjectSpreadProgram { is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from([
                         verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                             verter_type_engine::semantic_query::AuthoredPropertyEffect {

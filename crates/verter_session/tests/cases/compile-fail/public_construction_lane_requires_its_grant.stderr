@@ -45,9 +45,9 @@ note: the function `printed_union_arms` is defined here
    = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `stable_key_for_node` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:87:28
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:91:28
    |
-87 |     let _key = stable_key::stable_key_for_node(graph, id);
+91 |     let _key = stable_key::stable_key_for_node(graph, id);
    |                            ^^^^^^^^^^^^^^^^^^^ private function
    |
 note: the function `stable_key_for_node` is defined here
@@ -68,9 +68,9 @@ note: the function `stable_key_for_node` is defined here
    = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `provably_equal` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:88:30
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:92:30
    |
-88 |     let _equal = stable_key::provably_equal(graph, id, id);
+92 |     let _equal = stable_key::provably_equal(graph, id, id);
    |                              ^^^^^^^^^^^^^^ private function
    |
 note: the function `provably_equal` is defined here
@@ -91,9 +91,9 @@ note: the function `provably_equal` is defined here
    = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `sort_by_stable_key` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:89:17
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:93:17
    |
-89 |     stable_key::sort_by_stable_key(graph, ids);
+93 |     stable_key::sort_by_stable_key(graph, ids);
    |                 ^^^^^^^^^^^^^^^^^^ private function
    |
 note: the function `sort_by_stable_key` is defined here
@@ -114,9 +114,9 @@ note: the function `sort_by_stable_key` is defined here
    = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `sort_union_members_by_stable_key` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:90:17
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:94:17
    |
-90 |     stable_key::sort_union_members_by_stable_key(graph, ids);
+94 |     stable_key::sort_union_members_by_stable_key(graph, ids);
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
    |
 note: the function `sort_union_members_by_stable_key` is defined here
@@ -137,9 +137,9 @@ note: the function `sort_union_members_by_stable_key` is defined here
    = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `sort_and_collapse_union_members` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:91:17
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:95:17
    |
-91 |     stable_key::sort_and_collapse_union_members(graph, ids);
+95 |     stable_key::sort_and_collapse_union_members(graph, ids);
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
    |
 note: the function `sort_and_collapse_union_members` is defined here
@@ -160,9 +160,9 @@ note: the function `sort_and_collapse_union_members` is defined here
    = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `canonicalize_union_members` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:92:34
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:96:34
    |
-92 |     let _canonical = stable_key::canonicalize_union_members(graph, ids);
+96 |     let _canonical = stable_key::canonicalize_union_members(graph, ids);
    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
    |
 note: the function `canonicalize_union_members` is defined here
@@ -183,9 +183,9 @@ note: the function `canonicalize_union_members` is defined here
    = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `union_rank_order` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:93:30
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:97:30
    |
-93 |     let _ranks = stable_key::union_rank_order(graph, ids);
+97 |     let _ranks = stable_key::union_rank_order(graph, ids);
    |                              ^^^^^^^^^^^^^^^^ private function
    |
 note: the function `union_rank_order` is defined here
@@ -206,32 +206,32 @@ note: the function `union_rank_order` is defined here
    = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `semantic_union_members` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:97:32
-   |
-97 |     let _members = stable_key::semantic_union_members(graph, id, ctx);
-   |                                ^^^^^^^^^^^^^^^^^^^^^^ private function
-   |
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:101:32
+    |
+101 |     let _members = stable_key::semantic_union_members(graph, id, ctx);
+    |                                ^^^^^^^^^^^^^^^^^^^^^^ private function
+    |
 note: the function `semantic_union_members` is defined here
-  --> $WORKSPACE/crates/verter_type_engine/src/lib.rs
-   |
-   |           pub(crate) fn $($item)*
-   |           ^^^
-   |
-  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/stable_key.rs
-   |
-   | / construction_ordinal_seam! {
-   | |     /// Lazy `SemanticUnionMembers` view. A resident valid view is not re-sorted.
-   | |     /// Views live in the store whose arena the union's id indexes.
-   | |     fn semantic_union_members(
-...  |
-   | | }
-   | |_- in this macro invocation
-   = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
+   --> $WORKSPACE/crates/verter_type_engine/src/lib.rs
+    |
+    |           pub(crate) fn $($item)*
+    |           ^^^
+    |
+   ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/stable_key.rs
+    |
+    | / construction_ordinal_seam! {
+    | |     /// Lazy `SemanticUnionMembers` view. A resident valid view is not re-sorted.
+    | |     /// Views live in the store whose arena the union's id indexes.
+    | |     fn semantic_union_members(
+...   |
+    | | }
+    | |_- in this macro invocation
+    = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `intern_ordered_union` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:105:37
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:109:37
     |
-105 |     let _union = canonical_algebra::intern_ordered_union(graph, &[id], nullability);
+109 |     let _union = canonical_algebra::intern_ordered_union(graph, &[id], nullability);
     |                                     ^^^^^^^^^^^^^^^^^^^^ private function
     |
 note: the function `intern_ordered_union` is defined here
@@ -252,9 +252,9 @@ note: the function `intern_ordered_union` is defined here
     = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `intern_ordered_intersection_charged` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:108:28
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:112:28
     |
-108 |         canonical_algebra::intern_ordered_intersection_charged(graph, &[id], unmetered);
+112 |         canonical_algebra::intern_ordered_intersection_charged(graph, &[id], unmetered);
     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
     |
 note: the function `intern_ordered_intersection_charged` is defined here
@@ -275,9 +275,9 @@ note: the function `intern_ordered_intersection_charged` is defined here
     = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `reduced_authored_intersection_charged` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:110:39
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:114:39
     |
-110 |     let _reduced = canonical_algebra::reduced_authored_intersection_charged(
+114 |     let _reduced = canonical_algebra::reduced_authored_intersection_charged(
     |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
     |
 note: the function `reduced_authored_intersection_charged` is defined here
@@ -298,9 +298,9 @@ note: the function `reduced_authored_intersection_charged` is defined here
     = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `reduce_merged_decl_with_graph` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:117:25
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:121:25
     |
-117 |     let _merged = walk::reduce_merged_decl_with_graph(graph, &[id]);
+121 |     let _merged = walk::reduce_merged_decl_with_graph(graph, &[id]);
     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
     |
 note: the function `reduce_merged_decl_with_graph` is defined here
@@ -321,9 +321,9 @@ note: the function `reduce_merged_decl_with_graph` is defined here
     = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `index_signature_applies_to_property` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:130:41
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:134:41
     |
-130 |     let _applies = relation_predicates::index_signature_applies_to_property(graph, id, key);
+134 |     let _applies = relation_predicates::index_signature_applies_to_property(graph, id, key);
     |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
     |
 note: the function `index_signature_applies_to_property` is defined here
@@ -344,9 +344,9 @@ note: the function `index_signature_applies_to_property` is defined here
     = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `display` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:134:27
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:138:27
     |
-134 |     let _shown = display::display(
+138 |     let _shown = display::display(
     |                           ^^^^^^^ private function
     |
 note: the function `display` is defined here
@@ -367,9 +367,9 @@ note: the function `display` is defined here
     = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `merge_union_surfaces` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:149:25
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:153:25
     |
-149 |     let _common = walk::merge_union_surfaces(graph, arms, unmetered, evidence);
+153 |     let _common = walk::merge_union_surfaces(graph, arms, unmetered, evidence);
     |                         ^^^^^^^^^^^^^^^^^^^^ private function
     |
 note: the function `merge_union_surfaces` is defined here
@@ -390,9 +390,9 @@ note: the function `merge_union_surfaces` is defined here
     = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `merge_union_surfaces_for_macro` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:150:24
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:154:24
     |
-150 |     let _macro = walk::merge_union_surfaces_for_macro(graph, arms, unmetered, evidence);
+154 |     let _macro = walk::merge_union_surfaces_for_macro(graph, arms, unmetered, evidence);
     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
     |
 note: the function `merge_union_surfaces_for_macro` is defined here
@@ -413,9 +413,9 @@ note: the function `merge_union_surfaces_for_macro` is defined here
     = note: this error originates in the macro `construction_ordinal_seam` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0603]: function `spread_formula_positive_members_for_macro` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:152:15
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:156:15
     |
-152 |         walk::spread_formula_positive_members_for_macro(graph, alternatives, unmetered, evidence);
+156 |         walk::spread_formula_positive_members_for_macro(graph, alternatives, unmetered, evidence);
     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
     |
 note: the function `spread_formula_positive_members_for_macro` is defined here
@@ -493,10 +493,21 @@ error[E0624]: method `node_scope` is private
    |         pub(crate) fn $($item)*
    |         --- private method defined here
 
-error[E0624]: method `node_reaches_unresolved` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:55:11
+error[E0624]: method `intern_preserving_scope` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:55:24
    |
-55 |     graph.node_reaches_unresolved(id) || graph.node_is_inert_structure(id)
+55 |     GraphIn::of(graph).intern_preserving_scope(id, SemanticNodeData::Primitive(PrimitiveKind::String))
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `node_reaches_unresolved` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:59:11
+   |
+59 |     graph.node_reaches_unresolved(id) || graph.node_is_inert_structure(id)
    |           ^^^^^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -505,9 +516,9 @@ error[E0624]: method `node_reaches_unresolved` is private
    |         --- private method defined here
 
 error[E0624]: method `node_is_inert_structure` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:55:48
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:59:48
    |
-55 |     graph.node_reaches_unresolved(id) || graph.node_is_inert_structure(id)
+59 |     graph.node_reaches_unresolved(id) || graph.node_is_inert_structure(id)
    |                                                ^^^^^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -516,9 +527,9 @@ error[E0624]: method `node_is_inert_structure` is private
    |         --- private method defined here
 
 error[E0624]: method `substitute_memo_get` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:59:22
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:63:22
    |
-59 |     let _hit = graph.substitute_memo_get(id, id, id);
+63 |     let _hit = graph.substitute_memo_get(id, id, id);
    |                      ^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -527,9 +538,9 @@ error[E0624]: method `substitute_memo_get` is private
    |         --- private method defined here
 
 error[E0624]: method `substitute_memo_publish` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:60:11
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:64:11
    |
-60 |     graph.substitute_memo_publish(id, id, id, id);
+64 |     graph.substitute_memo_publish(id, id, id, id);
    |           ^^^^^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -538,9 +549,9 @@ error[E0624]: method `substitute_memo_publish` is private
    |         --- private method defined here
 
 error[E0624]: method `member_ordinal_index` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:64:24
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:68:24
    |
-64 |     let _index = graph.member_ordinal_index(id, view);
+68 |     let _index = graph.member_ordinal_index(id, view);
    |                        ^^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -549,9 +560,9 @@ error[E0624]: method `member_ordinal_index` is private
    |         --- private method defined here
 
 error[E0624]: method `export_all_origin_edges` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:68:24
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:72:24
    |
-68 |     let _edges = graph.export_all_origin_edges();
+72 |     let _edges = graph.export_all_origin_edges();
    |                        ^^^^^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -560,9 +571,9 @@ error[E0624]: method `export_all_origin_edges` is private
    |         --- private method defined here
 
 error[E0624]: method `note_released_nodes` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:72:45
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:76:45
    |
-72 |     let _stranded = graph.signature_store().note_released_nodes([id]);
+76 |     let _stranded = graph.signature_store().note_released_nodes([id]);
    |                                             ^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -571,9 +582,9 @@ error[E0624]: method `note_released_nodes` is private
    |         --- private method defined here
 
 error[E0624]: method `release_signature_records_naming` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:73:24
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:77:24
    |
-73 |     let _epoch = graph.release_signature_records_naming([id]);
+77 |     let _epoch = graph.release_signature_records_naming([id]);
    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -582,9 +593,9 @@ error[E0624]: method `release_signature_records_naming` is private
    |         --- private method defined here
 
 error[E0624]: method `record_origin_edge` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:83:11
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:87:11
    |
-83 |       graph.record_origin_edge(id, kind, std::sync::Arc::from([id]), meta, fence);
+87 |       graph.record_origin_edge(id, kind, std::sync::Arc::from([id]), meta, fence);
    |             ^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/graph_in.rs
@@ -599,9 +610,9 @@ error[E0624]: method `record_origin_edge` is private
    | |_____- private method defined here
 
 error[E0624]: method `printed_name_in` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:127:23
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:131:23
     |
-127 |     let _name = class.printed_name_in(graph, &[id]);
+131 |     let _name = class.printed_name_in(graph, &[id]);
     |                       ^^^^^^^^^^^^^^^ private method
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -610,9 +621,9 @@ error[E0624]: method `printed_name_in` is private
     |         --- private method defined here
 
 error[E0624]: associated function `classify_value_expr` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:128:31
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:132:31
     |
-128 |     let _mapper = MapperKind::classify_value_expr(graph, id, id, id);
+132 |     let _mapper = MapperKind::classify_value_expr(graph, id, id, id);
     |                               ^^^^^^^^^^^^^^^^^^^ private associated function
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -621,9 +632,9 @@ error[E0624]: associated function `classify_value_expr` is private
     |         --- private associated function defined here
 
 error[E0624]: associated function `new` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:139:38
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:143:38
     |
-139 |     let _verdict = FlowReturnResult::new(graph, id, completion, None);
+143 |     let _verdict = FlowReturnResult::new(graph, id, completion, None);
     |                                      ^^^ private associated function
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -632,9 +643,9 @@ error[E0624]: associated function `new` is private
     |         --- private associated function defined here
 
 error[E0624]: method `get_validated` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:164:23
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:168:23
     |
-164 |     let _warm = graph.get_validated(&key, ctx);
+168 |     let _warm = graph.get_validated(&key, ctx);
     |                       ^^^^^^^^^^^^^ private method
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -643,9 +654,9 @@ error[E0624]: method `get_validated` is private
     |         --- private method defined here
 
 error[E0624]: method `get_flow_return_result` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:165:23
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:169:23
     |
-165 |     let _flow = graph.get_flow_return_result(ctx, flow);
+169 |     let _flow = graph.get_flow_return_result(ctx, flow);
     |                       ^^^^^^^^^^^^^^^^^^^^^^ private method
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -654,9 +665,9 @@ error[E0624]: method `get_flow_return_result` is private
     |         --- private method defined here
 
 error[E0624]: method `get_relation_payload` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:166:27
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:170:27
     |
-166 |     let _relation = graph.get_relation_payload(ctx, relation);
+170 |     let _relation = graph.get_relation_payload(ctx, relation);
     |                           ^^^^^^^^^^^^^^^^^^^^ private method
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -665,9 +676,9 @@ error[E0624]: method `get_relation_payload` is private
     |         --- private method defined here
 
 error[E0624]: method `get_resolve_call_result` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:167:23
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:171:23
     |
-167 |     let _call = graph.get_resolve_call_result(ctx, call);
+171 |     let _call = graph.get_resolve_call_result(ctx, call);
     |                       ^^^^^^^^^^^^^^^^^^^^^^^ private method
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -676,9 +687,9 @@ error[E0624]: method `get_resolve_call_result` is private
     |         --- private method defined here
 
 error[E0624]: method `is_same_path_claim` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:168:28
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:172:28
     |
-168 |     let _same_path = graph.is_same_path_claim(&key);
+172 |     let _same_path = graph.is_same_path_claim(&key);
     |                            ^^^^^^^^^^^^^^^^^^ private method
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -687,9 +698,9 @@ error[E0624]: method `is_same_path_claim` is private
     |         --- private method defined here
 
 error[E0624]: method `begin_query_recompute` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:169:28
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:173:28
     |
-169 |     let _recompute = graph.begin_query_recompute(flags, key);
+173 |     let _recompute = graph.begin_query_recompute(flags, key);
     |                            ^^^^^^^^^^^^^^^^^^^^^ private method
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -698,9 +709,9 @@ error[E0624]: method `begin_query_recompute` is private
     |         --- private method defined here
 
 error[E0624]: method `begin_inline_flow_return_flight` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:170:30
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:174:30
     |
-170 |     let _flow_flight = graph.begin_inline_flow_return_flight(flow);
+174 |     let _flow_flight = graph.begin_inline_flow_return_flight(flow);
     |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
@@ -709,9 +720,9 @@ error[E0624]: method `begin_inline_flow_return_flight` is private
     |         --- private method defined here
 
 error[E0624]: method `begin_inline_relation_flight` is private
-   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:171:34
+   --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:175:34
     |
-171 |     let _relation_flight = graph.begin_inline_relation_flight(relation);
+175 |     let _relation_flight = graph.begin_inline_relation_flight(relation);
     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
     |
    ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs

@@ -998,6 +998,7 @@ fn lower_function_signature<M: verter_audit::observe::ObserveExec>(
             param: binder,
             constraint,
             default,
+            original: None,
             is_const: tp.is_const,
         });
     }

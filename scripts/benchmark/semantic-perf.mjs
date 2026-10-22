@@ -13,6 +13,7 @@ main(process.argv.slice(2)).then(
   (code) => process.exit(code),
   (err) => {
     console.error(`semantic-perf: ${err?.message ?? err}`);
+    if (err?.stack) console.error(err.stack);
     process.exit(2);
   },
 );

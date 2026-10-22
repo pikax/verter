@@ -5161,9 +5161,20 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 // Removing optionality consumes the authored
                                 // value before a member read adds absence. This
                                 // preserves explicit undefined in exact mode.
+                                // An accessor's stored member is its accessor
+                                // function: its value is read through the key.
                                 let stored = (mapper.optionality == crate::semantic_query::OptionalityMod::Remove)
                                     .then(|| self.dispatch.mapped_source_member(source, key_arg))
-                                    .flatten();
+                                    .flatten()
+                                    .filter(|member| {
+                                        !matches!(
+                                            member.method_kind,
+                                            Some(
+                                                verter_type_expr::ObjectMethodKind::Get
+                                                    | verter_type_expr::ObjectMethodKind::Set
+                                            )
+                                        )
+                                    });
                                 if let Some(member) = stored {
                                     member.value
                                 } else {
@@ -8997,7 +9008,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// walker-side mirror of `build_builtin_utility`'s materialising
     /// route: PUBLIC members only, name-filtered to the key selection;
     /// call/construct/index signatures and the keyspace are dropped
-    /// (`Pick` produces a named-property surface).
+    /// (`Pick` produces a named-property surface), and an accessor maps as
+    /// the one property it is.
     fn apply_pick_filter_to_surface(
         &self,
         surface: ShallowSurface,
@@ -9007,16 +9019,22 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // member (element-access collision, matching the fold and the
         // merge aggregations), one set probe per member.
         let selection = crate::projection::aggregation::PropertyKeySet::new(keys);
-        let members: Vec<ShallowSurfaceMember> = surface
+        let picked: Vec<SurfaceMember> = surface
             .members
-            .into_iter()
+            .iter()
             .filter(|m| m.visibility.is_public())
             .filter(|m| selection.contains(&m.key))
+            .map(surface_member_from_shallow)
             .collect();
+        let members = crate::semantic_query::members_with_accessors_as_properties(
+            picked,
+            &self.graph(),
+            |signature| self.dispatch.materialize_returned_callable(signature),
+        );
         ShallowSurface::from_entries(
             members
-                .into_iter()
-                .map(ShallowSurfaceEntry::Member)
+                .iter()
+                .map(|member| ShallowSurfaceEntry::Member(shallow_member_from_surface(member)))
                 .collect(),
             None,
         )
@@ -9106,7 +9124,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// (`mapper.parameter_node`) with the key literal in
     /// `mapper.value_expr`, then materialises the substituted node only
     /// enough to close the selected key via the shared
-    /// [`ProjectSemanticDispatch::materialize_selected_key_mapped_value`]
+    /// [`ProjectSemanticDispatch::materialize_selected_key_mapped_value_with_node`]
     /// helper. The materialisation runs under
     /// `structural_transit_with_mode(Navigate)`: nested `KeyOf` /
     /// `MappedType` operators carrier-stop via
@@ -9202,10 +9220,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             if self.dispatch.cancellation.is_cancelled() {
                 return None;
             }
-            let literal = iteration_key.literal.as_ref()?;
-            let key_arg = self
-                .graph()
-                .intern_node(SemanticNodeData::Literal(literal.clone()));
+            let key_arg = self.dispatch.key_domain_binder(iteration_key)?;
             let value = if matches!(mapper.kind, crate::semantic_query::MapperKind::Identity) {
                 // The preimage PROVED this produced member exists, so its
                 // value must never surface as `Opaque(Miss)` — that node
@@ -9549,6 +9564,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             index
         });
+        let source_accessors = source_members
+            .as_deref()
+            .map(crate::semantic_query::AccessorReadonlyByProperty::of)
+            .unwrap_or_default();
         // A kept modifier is read off the modifiers type — the
         // `build_mapped_type` mirror: `source` itself, or the `X` of a key
         // parameter constrained to `keyof X`, whose `X[P]` read leaves a
@@ -9586,6 +9605,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     mapper.parameter_node,
                 ) == crate::semantic_query::MapperKind::Identity
             });
+        let modifiers_accessors = modifiers_members
+            .as_deref()
+            .map(crate::semantic_query::AccessorReadonlyByProperty::of);
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -9655,12 +9677,19 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         modifiers_member.map(|m| m.optional).unwrap_or(false)
                     }
                 };
+                // An accessor maps as the property it is: `readonly`
+                // without a setter, its value read through the key.
+                let source_accessor_readonly = source_accessors.readonly(&key.key);
+                let modifiers_accessor_readonly = match &modifiers_accessors {
+                    Some(accessors) => accessors.readonly(&key.key),
+                    None => source_accessor_readonly,
+                };
                 let readonly = match readonly_mod {
                     crate::semantic_query::ReadonlyMod::Add => true,
                     crate::semantic_query::ReadonlyMod::Remove => false,
-                    crate::semantic_query::ReadonlyMod::Keep => {
-                        modifiers_member.map(|m| m.readonly).unwrap_or(false)
-                    }
+                    crate::semantic_query::ReadonlyMod::Keep => modifiers_accessor_readonly
+                        .or(modifiers_member.map(|m| m.readonly))
+                        .unwrap_or(false),
                 };
                 // Identity fast path — use source_member.value
                 // verbatim when the source enumeration captured a
@@ -9692,7 +9721,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // Conditional carrier shell. Without this, the
                 // graph-native slot-binding consumer's `Function`-arm
                 // match would fail at the publication boundary.
-                let value = if let (Some(sm), true) = (source_member, value_is_identity) {
+                let value_member = source_member.filter(|_| source_accessor_readonly.is_none());
+                let value = if let (Some(sm), true) = (value_member, value_is_identity) {
                     sm.value
                 } else if value_is_identity {
                     match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
@@ -9728,12 +9758,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                     shared_value.expect("initialised immediately above")
                 } else {
-                    let literal = key.literal.as_ref()?;
-                    self.dispatch.materialize_selected_key_mapped_value(
-                        mapper,
-                        literal,
-                        materialise_context,
-                    )
+                    let key_arg = self.dispatch.key_domain_binder(&key)?;
+                    self.dispatch
+                        .materialize_selected_key_mapped_value_with_node(
+                            mapper,
+                            key_arg,
+                            materialise_context,
+                        )
                 };
                 let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
                     self.dispatch
@@ -10234,8 +10265,11 @@ fn merge_intersection_surfaces_with_graph<M: verter_audit::observe::ObserveExec>
                 ShallowSurfaceEntry::Member(member) => {
                     // The arm streams give the order: each property is
                     // emitted at its first occurrence, taken from its slot.
-                    if let Some(member) = merged.get_mut(&member.key).and_then(Option::take) {
+                    if let Some((member, accessor_half)) =
+                        merged.get_mut(&member.key).and_then(Option::take)
+                    {
                         entries.push(ShallowSurfaceEntry::Member(member));
+                        entries.extend(accessor_half.map(ShallowSurfaceEntry::Member));
                     }
                 }
                 ShallowSurfaceEntry::CallSignature(node) if seen_calls.insert(*node) => {
@@ -10282,6 +10316,16 @@ struct MergedMemberAccum {
     optional: bool,
     readonly: bool,
     method_kind: Option<verter_type_expr::ObjectMethodKind>,
+    /// The `method_kind` fold over the `OwnBody` contributors alone: the
+    /// form of the member that shadows heritage, so an own property over an
+    /// inherited accessor is a property and an own accessor over an
+    /// inherited property is an accessor. `None` until the first own-body
+    /// contributor is absorbed.
+    own_body_method_kind: Option<Option<verter_type_expr::ObjectMethodKind>>,
+    /// The `OwnBody` contributors as accessor halves: an own `get` / `set`
+    /// pair is ONE accessor, kept as its two members rather than folded
+    /// into one member whose form is neither.
+    own_body_accessor: AccessorHalves,
     has_implementation_body: bool,
     declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp,
     /// Spans of the first `OwnBody` contributor — the winning member when the
@@ -10327,6 +10371,8 @@ impl MergedMemberAccum {
             optional: true,
             readonly: false,
             method_kind: None,
+            own_body_method_kind: None,
+            own_body_accessor: AccessorHalves::default(),
             has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             own_body_spans: None,
@@ -10343,7 +10389,10 @@ impl MergedMemberAccum {
         use crate::semantic_query::MemberMergeRole;
         self.optional = self.optional && member.optional;
         self.readonly = self.readonly || member.readonly;
-        self.method_kind = match (self.method_kind, member.method_kind) {
+        let fold_kind = |current: Option<verter_type_expr::ObjectMethodKind>| match (
+            current,
+            member.method_kind,
+        ) {
             (None, incoming) => incoming,
             (current, None) => current,
             (Some(current), Some(incoming)) if current == incoming => Some(current),
@@ -10351,6 +10400,14 @@ impl MergedMemberAccum {
             // surface; their distinct authored facts remain source-ordered.
             _ => None,
         };
+        self.method_kind = fold_kind(self.method_kind);
+        if member.merge_role.role() == MemberMergeRole::OwnBody {
+            self.own_body_method_kind = Some(match self.own_body_method_kind {
+                Some(current) => fold_kind(current),
+                None => member.method_kind,
+            });
+            self.own_body_accessor.absorb(member);
+        }
         self.has_implementation_body |= member.has_implementation_body;
         // Single-contributor verbatim carry; any second contributor demotes
         // to `NonLiteral` (merge synthesis is never a literal origin).
@@ -10417,7 +10474,7 @@ impl MergedMemberAccum {
         graph: crate::semantic_query_memo::GraphIn<'_, M>,
         meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-    ) -> ShallowSurfaceMember {
+    ) -> (ShallowSurfaceMember, Option<ShallowSurfaceMember>) {
         use crate::semantic_query::MemberMergeRole;
         // P2-1 own-body-shadows-heritage: when the name has an own-body
         // contributor AND a heritage contributor, the derived own-body member
@@ -10428,6 +10485,21 @@ impl MergedMemberAccum {
         // intersect branch and keeps `number & string`.
         let saw_own_body = self.own_body_role.is_some();
         let saw_heritage = self.heritage_role.is_some();
+        // An own `get` / `set` pair that shadows heritage, or that is the
+        // key's only contribution, survives as the accessor it is: its two
+        // members verbatim, which every accessor reader reads as one
+        // property.
+        if saw_heritage || self.other_values.is_empty() {
+            if let Some(pair) = self.own_body_accessor.into_pair() {
+                return pair;
+            }
+        }
+        // The shadowing own-body member keeps its own form: an own property
+        // over an inherited `get` is a property, not the accessor.
+        let method_kind = match self.own_body_method_kind {
+            Some(own) if saw_heritage => own,
+            _ => self.method_kind,
+        };
         let (values, role): (Vec<SemanticNodeId>, crate::semantic_query::MergeRoleStamp) =
             match (self.own_body_role, self.heritage_role) {
                 (Some(own_role), Some(_)) => (self.own_body_values, own_role),
@@ -10496,13 +10568,13 @@ impl MergedMemberAccum {
         } else {
             (self.first_spans.unwrap_or_default(), self.first_origin)
         };
-        ShallowSurfaceMember {
+        let member = ShallowSurfaceMember {
             key: self.key,
             value,
             optional: self.optional,
             readonly: self.readonly,
-            method_kind: self.method_kind,
-            has_implementation_body: self.method_kind.is_some() && self.has_implementation_body,
+            method_kind,
+            has_implementation_body: method_kind.is_some() && self.has_implementation_body,
             visibility,
             excess_origin: self
                 .excess_origin
@@ -10511,6 +10583,55 @@ impl MergedMemberAccum {
             merge_role: role,
             spans,
             declaration_origin,
+        };
+        (member, None)
+    }
+}
+
+/// The `get` / `set` halves of one key's contributors, in arrival order.
+/// A pair is one accessor only while exactly one getter and one setter
+/// arrived; any other form, or a second getter or setter of a different
+/// value, leaves no pair.
+#[derive(Default)]
+struct AccessorHalves {
+    halves: Vec<ShallowSurfaceMember>,
+    other: bool,
+}
+
+impl AccessorHalves {
+    fn absorb(&mut self, member: &ShallowSurfaceMember) {
+        if self.other {
+            return;
+        }
+        if !matches!(
+            member.method_kind,
+            Some(verter_type_expr::ObjectMethodKind::Get | verter_type_expr::ObjectMethodKind::Set)
+        ) {
+            self.other = true;
+            self.halves = Vec::new();
+            return;
+        }
+        match self
+            .halves
+            .iter()
+            .find(|half| half.method_kind == member.method_kind)
+        {
+            Some(half) if half.value == member.value => {}
+            Some(_) => {
+                self.other = true;
+                self.halves = Vec::new();
+            }
+            None => self.halves.push(member.clone()),
+        }
+    }
+
+    /// The getter and setter, in arrival order, when they form one
+    /// accessor.
+    fn into_pair(self) -> Option<(ShallowSurfaceMember, Option<ShallowSurfaceMember>)> {
+        let mut halves = self.halves.into_iter();
+        match (halves.next(), halves.next()) {
+            (Some(first), Some(second)) if !self.other => Some((first, Some(second))),
+            _ => None,
         }
     }
 }
@@ -11313,6 +11434,7 @@ fn collect_literal_keys(
             out.push(crate::project_semantic_dispatch::enumerate::KeyDomainKey {
                 key: crate::semantic_query::PropertyKey::string_literal(s.as_str()),
                 literal: Some(crate::semantic_query::LiteralValue::String(s.clone())),
+                binder: None,
             });
             true
         }
@@ -11325,6 +11447,7 @@ fn collect_literal_keys(
             out.push(crate::project_semantic_dispatch::enumerate::KeyDomainKey {
                 key: crate::semantic_query::PropertyKey::from_js_number(*n),
                 literal: Some(crate::semantic_query::LiteralValue::Number(*n)),
+                binder: None,
             });
             true
         }

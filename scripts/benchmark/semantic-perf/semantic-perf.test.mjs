@@ -10,9 +10,10 @@
 //   node --test scripts/benchmark/semantic-perf/semantic-perf.test.mjs
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
@@ -31,6 +32,8 @@ import {
   ROOT,
   TIER_DEFAULTS,
   materialize,
+  main,
+  parseArgs,
 } from "./run.mjs";
 import {
   allScenarios,
@@ -202,6 +205,31 @@ test("the canonical form fails closed on syntax it does not know", () => {
 });
 
 // ---------------------------------------------------------------- catalog and schedule
+
+test("a selected reference is checked before building probes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-reference-"));
+  const reference = join(dir, "missing.json");
+  try {
+    for (const flag of ["--reference", "--expected"]) {
+      await assert.rejects(main([flag, reference]), (error) => error.message.includes(reference));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a run can select a fresh measured reference without changing the committed table", () => {
+  const path = join("local-evidence", "reference.json");
+  assert.equal(parseArgs(["--expected", path]).expected, resolve(path));
+  assert.equal(parseArgs(["--reference", path]).expected, resolve(path));
+});
+
+test("the array literal normalization reproduction is selectable", () => {
+  const s = allScenarios().find((s) => s.id === "edge-array-literal-normalization");
+  assert.ok(s, "the captured reproduction belongs in the benchmark catalog");
+  assert.equal(s.probe, "typeof arr");
+  assert.match(s.source, /const arr = \[\{ a: 1 \}, \{ b: "x" \}\];/);
+});
 
 test("every scenario entry declares __BenchInit and __Probe once", () => {
   const ids = new Set();
@@ -593,6 +621,58 @@ test("an elided long answer classifies exactly as its raw text", () => {
   assert.deepEqual(compactProbeRecord(short), short);
 });
 
+test("a long request audit is embedded as its digest and verified against the raw record", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-perf-audit-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const footprint = { events: Array.from({ length: 2000 }, (_, i) => ({ id: i, kind: "hop" })) };
+  const small = { counts: { hops: 1 } };
+  const raw = {
+    tool: "verter",
+    probes: [
+      {
+        alias: "__Probe",
+        cold: { micros: 1, outcome: { kind: "value" }, audit: { footprint } },
+        warm: [
+          { micros: 1, outcome: { kind: "value" }, audit: { footprint } },
+          { micros: 1, outcome: { kind: "value" }, audit: small },
+        ],
+        observation: { text: "1", error: null },
+      },
+    ],
+  };
+  const serialised = JSON.stringify({ footprint });
+  const compact = compactProbeRecord(raw);
+  for (const request of [compact.probes[0].cold, compact.probes[0].warm[0]]) {
+    assert.equal(request.audit, null);
+    assert.equal(request.auditElided, true);
+    assert.equal(request.auditLength, serialised.length);
+    assert.equal(request.auditSha256, sha256Text(serialised));
+    assert.equal(request.micros, 1);
+  }
+  assert.deepEqual(compact.probes[0].warm[1], raw.probes[0].warm[1]);
+  assert.deepEqual(compact.probes[0].observation, raw.probes[0].observation);
+  // The embedded copy no longer carries the footprint's bytes.
+  assert.ok(JSON.stringify(compact).length < serialised.length);
+  // The raw record on disk stays the authority the validator compares against.
+  const run = syntheticRun();
+  const inv = run.invocations[0];
+  inv.supervisorOut = join(dir, "rep-0.sup.json");
+  inv.probeOut = join(dir, "rep-0.probe.json");
+  inv.probe = compact;
+  writeFileSync(inv.supervisorOut, JSON.stringify(inv.supervisor));
+  writeFileSync(inv.probeOut, JSON.stringify(raw, null, 2));
+  writeFileSync(
+    `${inv.probeOut}.phase`,
+    JSON.stringify({ phase: inv.phase, history: inv.phaseHistory }),
+  );
+  run.invocations = [inv];
+  assert.deepEqual(rawFileProblems(run), []);
+  const edited = structuredClone(raw);
+  edited.probes[0].cold.audit.footprint.events[0].kind = "expansion";
+  writeFileSync(inv.probeOut, JSON.stringify(edited, null, 2));
+  assert.ok(rawFileProblems(run).some((p) => /probe record on disk differs/.test(p)));
+});
+
 test("a verdict names a winner only when the repetitions do not overlap", () => {
   assert.equal(verdict([1, 1.2], [5, 6], 1).verdict, "verter");
   assert.equal(verdict([5, 6], [1, 1.2], 1).verdict, "tsc");
@@ -945,6 +1025,33 @@ const resummarize = (run) => {
 };
 const firstOf = (run, arm, measured = true) =>
   run.invocations.find((i) => i.arm === arm && i.warmup !== measured);
+
+test("validation uses the committed reference unless an alternate is explicitly selected", () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-reference-"));
+  try {
+    const expectedPath = join(dir, "expected.json");
+    const runPath = join(dir, "results.json");
+    const expectedText = JSON.stringify(EXPECTED);
+    writeFileSync(expectedPath, expectedText);
+    const run = syntheticRun();
+    run.meta.expected = { file: expectedPath, sha256: sha256Text(expectedText) };
+    writeFileSync(runPath, JSON.stringify(run));
+    const invoke = (...args) => {
+      const result = spawnSync(process.execPath, [join(HERE, "validate.mjs"), ...args, runPath], {
+        encoding: "utf8",
+      });
+      assert.equal(result.error, undefined);
+      // Synthetic paths intentionally have no raw files on disk. The reference
+      // digest diagnostic distinguishes selection from those other failures.
+      assert.equal(result.status, 1, result.stderr);
+      return result.stdout;
+    };
+    assert.match(invoke(), /reference digest differs/);
+    assert.doesNotMatch(invoke("--expected", expectedPath), /reference digest differs/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("a well-formed synthetic run passes and compares the matched row", () => {
   const run = syntheticRun();

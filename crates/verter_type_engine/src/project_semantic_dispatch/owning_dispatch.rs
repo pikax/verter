@@ -191,6 +191,14 @@ owning_methods! {
     /// Widen a nominal `typeof` carrier.
     fn widened_nominal_typeof(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
 
+    /// The shared reducer's outcome, under `nullability`, for a written
+    /// union that may absorb a literal.
+    fn reduced_written_union(
+        &self,
+        node: SemanticNodeId,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> Option<QueryResult<SemanticNodeId>>;
+
     /// Widen every owner-local nominal `typeof` in `node`.
     fn widen_owner_local_nominal_typeofs(&self, node: SemanticNodeId, canonical: &str) -> SemanticNodeId;
 
@@ -338,6 +346,13 @@ impl ConstructionResult for Arc<crate::semantic_query::ArgumentLiteralProvenance
                 .flat_map(|literals| literals.iter())
             {
                 visit(*literal);
+            }
+        }
+        for read in self.fresh_reads.iter() {
+            for step in read.iter() {
+                if let crate::semantic_query::ArgumentPathStep::Member(key) = step {
+                    visit(*key);
+                }
             }
         }
     }

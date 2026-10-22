@@ -572,6 +572,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     v.push((
         "object-all-members",
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 ObjectMember::Property(ObjectProperty::with_key_spans_public(
                     "p".into(),
@@ -621,6 +622,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     v.push((
         "object-nonpublic-members",
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 ObjectMember::Property(ObjectProperty::with_key_visibility(
                     "prot".into(),
@@ -1195,6 +1197,7 @@ fn pre_visibility_ref_object_member<H: Hasher>(member: &ObjectMember, h: &mut H)
 #[test]
 fn all_public_object_hash_stream_is_unchanged_from_pre_visibility() {
     let public_object = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::with_key_spans_public(
                 "p".into(),
@@ -1244,6 +1247,7 @@ fn all_public_object_hash_stream_is_unchanged_from_pre_visibility() {
 fn non_public_member_changes_hash_stream_from_pre_visibility() {
     let make = |vis: MemberVisibility| {
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
                 "x".into(),
                 TypeExpr::Primitive(PrimitiveName::Number),

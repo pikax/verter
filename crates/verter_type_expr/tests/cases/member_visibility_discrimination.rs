@@ -39,6 +39,7 @@ fn empty_fn() -> FunctionExpr {
 
 fn object_of(member: ObjectMember) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![member],
     }))
 }

@@ -165,7 +165,7 @@ pub struct MappingProduct {
 impl MappingProduct {
     /// Derive the product from the transform's emission record.
     #[must_use]
-    pub fn of(transform: &CodeTransform<'_>) -> Self {
+    pub fn of(transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>) -> Self {
         let (projected, insertion_anchors) = project(transform);
         let carrier_len = transform.original().len() as u32;
         let carrier = partition_carrier(&projected, carrier_len);
@@ -293,7 +293,9 @@ fn push_synthesized(out: &mut Vec<ProjectedRegion>, generated: &mut u32, len: u3
 }
 
 /// Walk the chunks in output order and classify every projected byte.
-fn project(transform: &CodeTransform<'_>) -> (Vec<ProjectedRegion>, Vec<InsertionAnchor>) {
+fn project(
+    transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
+) -> (Vec<ProjectedRegion>, Vec<InsertionAnchor>) {
     let mut out: Vec<ProjectedRegion> = Vec::with_capacity(transform.chunks().len() + 2);
     let mut insertion_anchors = Vec::with_capacity(1);
     let mut generated: u32 = 0;

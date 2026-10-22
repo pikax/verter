@@ -24,9 +24,9 @@ use verter_type_engine::semantic_query::semantic_context::SemanticContext;
 use verter_type_engine::semantic_query::{
     display, keyof_operand_is_type_variable, printed_union_arms, stable_key,
     ClassExpressionIdentity, DepSignature, DisplayNeeds, FlowReturnKey, FlowReturnResult,
-    MapperKind, ObjectProjectionAlternative, OriginEdgeKind, OriginMeta, PropertyKey,
-    RelateMemoKey, ResolveCallKey, SemanticNodeId, SemanticQueryKey, SemanticQueryValue,
-    SurfaceView,
+    MapperKind, ObjectProjectionAlternative, OriginEdgeKind, OriginMeta, PrimitiveKind,
+    PropertyKey, RelateMemoKey, ResolveCallKey, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SemanticQueryValue, SurfaceView,
 };
 use verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant;
 use verter_type_engine::semantic_query_memo::{GraphIn, SemanticGraphStore};
@@ -49,6 +49,10 @@ fn follow_an_alias_chain(graph: &SemanticGraphStore, id: SemanticNodeId) {
 
 fn read_an_origin_scope(graph: &SemanticGraphStore, id: SemanticNodeId) {
     let _scope = graph.node_scope(id);
+}
+
+fn copy_an_origin_scope(graph: &SemanticGraphStore, id: SemanticNodeId) -> SemanticNodeId {
+    GraphIn::of(graph).intern_preserving_scope(id, SemanticNodeData::Primitive(PrimitiveKind::String))
 }
 
 fn classify_a_structure(graph: &SemanticGraphStore, id: SemanticNodeId) -> bool {

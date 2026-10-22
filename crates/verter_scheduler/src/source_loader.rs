@@ -33,6 +33,18 @@ pub trait SourceLoader: Send + Sync {
     /// Load file content by canonical ID.
     fn load(&self, canonical_id: &str) -> Option<Arc<str>>;
 
+    /// Load with capture data bound at the job boundary. Uncaptured jobs
+    /// call `load` and never query optional capture state per read.
+    #[cfg(feature = "semantic-observe")]
+    fn load_captured(
+        &self,
+        canonical_id: &str,
+        _request_id: u64,
+        _timing: bool,
+    ) -> Option<Arc<str>> {
+        self.load(canonical_id)
+    }
+
     /// Check whether a file exists.
     fn exists(&self, canonical_id: &str) -> bool;
 
@@ -338,5 +350,92 @@ mod tests {
                 "must not use drive-as-segment form"
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "semantic-observe"))]
+mod capture_tests {
+    use super::*;
+    use crate::scheduler::{Request, Scheduler, SchedulerConfig};
+    use crate::stage::{Priority, TargetStage};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use verter_execution::request_context::{
+        OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
+    };
+
+    struct Loader(AtomicU64);
+    impl SourceLoader for Loader {
+        fn load(&self, _canonical: &str) -> Option<Arc<str>> {
+            Some(Arc::from("export const value = 1;"))
+        }
+        fn load_captured(
+            &self,
+            canonical: &str,
+            request_id: u64,
+            timing: bool,
+        ) -> Option<Arc<str>> {
+            assert!(timing);
+            self.0.store(request_id, Relaxed);
+            self.load(canonical)
+        }
+        fn exists(&self, _canonical: &str) -> bool {
+            true
+        }
+        fn classify(&self, canonical: &str) -> FileLanguage {
+            verter_language::LanguageRegistry::global()
+                .classify_static(canonical)
+                .static_resolution()
+        }
+        fn realpath(&self, canonical: &str) -> Option<String> {
+            Some(canonical.to_owned())
+        }
+    }
+
+    struct Context;
+    impl RequestContextLike for Context {
+        fn request_id(&self) -> u64 {
+            42
+        }
+        fn captured(&self) -> bool {
+            true
+        }
+        fn timing_enabled(&self) -> bool {
+            true
+        }
+        fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+            struct Guard {
+                _guard: OpaqueContextGuard,
+            }
+            impl TlsUninstall for Guard {
+                fn uninstall(self: Box<Self>) {}
+            }
+            Box::new(Guard {
+                _guard: OpaqueContextGuard::install(OpaqueRequestContext(self)),
+            })
+        }
+    }
+
+    #[test]
+    fn synchronous_source_stage_uses_submitted_capture_without_ambient_context() {
+        let _clear = OpaqueContextGuard::clear();
+        let loader = Arc::new(Loader(AtomicU64::new(0)));
+        let scheduler = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
+        let handle = scheduler.submit_request(Request {
+            file_id: "/capture.ts".into(),
+            source: None,
+            target: TargetStage::Source,
+            priority: Priority::Interactive,
+            file_language: None,
+            request_context: Some(OpaqueRequestContext(Arc::new(Context))),
+        });
+        assert!(matches!(
+            scheduler.wait_or_drive(&handle),
+            crate::job::CompletionState::Ready(_)
+        ));
+        assert_eq!(
+            loader.0.load(Relaxed),
+            42,
+            "capture belongs to the submitted job, independently of caller TLS"
+        );
     }
 }

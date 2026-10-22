@@ -6,6 +6,32 @@
 
 use super::*;
 
+/// A source job's bound capture execution. The job boundary adopts its
+/// installed winner context once; individual reads use these plain values.
+#[cfg(feature = "semantic-observe")]
+struct CapturedSourceLoader<'a> {
+    inner: &'a dyn SourceLoader,
+    request_id: u64,
+    timing: bool,
+}
+
+#[cfg(feature = "semantic-observe")]
+impl SourceLoader for CapturedSourceLoader<'_> {
+    fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.inner
+            .load_captured(canonical_id, self.request_id, self.timing)
+    }
+    fn exists(&self, canonical_id: &str) -> bool {
+        self.inner.exists(canonical_id)
+    }
+    fn classify(&self, canonical_id: &str) -> verter_language::FileLanguage {
+        self.inner.classify(canonical_id)
+    }
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        self.inner.realpath(canonical_id)
+    }
+}
+
 /// THE single routing point from a dequeued [`ReadyJob`] to the
 /// [`StageExecutor`]. Both the native pump path
 /// ([`Scheduler::dispatch_ready_job`]) and the inline path
@@ -225,6 +251,24 @@ pub(super) fn run_file_stage(
             job.kind,
         )
     });
+    #[cfg(feature = "semantic-observe")]
+    let captured_loader = job
+        .request_context
+        .clone()
+        .or_else(|| {
+            dag.lock()
+                .winner_context_for(&Arc::from(node.canonical_id.as_str()), generation)
+        })
+        .filter(|ctx| ctx.0.captured())
+        .map(|ctx| CapturedSourceLoader {
+            inner: source_loader,
+            request_id: ctx.0.request_id(),
+            timing: ctx.0.timing_enabled(),
+        });
+    #[cfg(feature = "semantic-observe")]
+    let source_loader = captured_loader
+        .as_ref()
+        .map_or(source_loader, |loader| loader as &dyn SourceLoader);
     Scheduler::execute_stage_on_worker(
         node,
         generation,

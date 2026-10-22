@@ -95,17 +95,20 @@ impl<'a, M: ObserveExec> GraphIn<'a, M> {
             .intern_node_with_scope_in::<M>(self.capture_targets(), data, scope)
     }
 
-    /// [`SemanticGraphStore::intern_preserving_scope_in`] under this unit's
-    /// mode.
-    #[inline(always)]
-    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
-    pub fn intern_preserving_scope(
-        self,
-        origin: SemanticNodeId,
-        data: SemanticNodeData,
-    ) -> SemanticNodeId {
-        self.store
-            .intern_preserving_scope_in::<M>(self.capture_targets(), origin, data)
+    construction_ordinal_seam! {
+        /// [`SemanticGraphStore::intern_preserving_scope_in`] under this
+        /// unit's mode. Copying an origin's scope by bare ordinal is a
+        /// construction lane: outside the engine it exists only for tests.
+        #[inline(always)]
+        #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
+        fn intern_preserving_scope(
+            self,
+            origin: SemanticNodeId,
+            data: SemanticNodeData,
+        ) -> SemanticNodeId {
+            self.store
+                .intern_preserving_scope_in::<M>(self.capture_targets(), origin, data)
+        }
     }
 
     /// [`SemanticGraphStore::intern_rooted_node_in`] under this unit's mode.

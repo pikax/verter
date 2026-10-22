@@ -28,7 +28,7 @@ use verter_type_engine::semantic_query::query_key_spec::semantic_query_key_specs
 use verter_type_engine::semantic_query::{
     BudgetExceededKind, ConstParamPolicy, ContextualInferenceMode, FreshnessKey, IndexKey,
     InferableParamSetId, InferenceCandidatePriority, InferenceContextKey, InferencePassKind,
-    NoInferMask, OverloadSelectionPolicy, PrimitiveKind, ProjectionMode,
+    InferenceVerdictUse, NoInferMask, OverloadSelectionPolicy, PrimitiveKind, ProjectionMode,
     ProjectionReductionContext, RelateMemoKey, RelationContext, RelationKind, RelationOutcome,
     RelationPayload, RelationPolicy, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag, SubstitutionCanonicalHash,
@@ -484,9 +484,10 @@ pub(crate) fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_war
 // ---------------------------------------------------------------------------
 // (3) RELATION MEMO RE-KEY: same nodes, different inference context occupy
 //     DISTINCT memo slots — the inference session a relation runs within is
-//     part of identity. Each of the seven content-free session axes
+//     part of identity. Each of the eight content-free session axes
 //     (inferable_params / variance_phase / pass_kind / candidate_priority /
-//     no_infer_mask / const_param_policy / contextual_inference_mode) is a distinct
+//     no_infer_mask / const_param_policy / contextual_inference_mode /
+//     verdict_use) is a distinct
 //     discriminator.
 // ---------------------------------------------------------------------------
 
@@ -557,7 +558,7 @@ pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
 
     // Each remaining session axis, mutated one at a time off `session`, is a
     // distinct discriminator — same nodes, distinct memo slot.
-    let axis_mutations: [(InferenceContextKey, &str); 6] = [
+    let axis_mutations: [(InferenceContextKey, &str); 7] = [
         (
             InferenceContextKey {
                 variance_phase: VariancePhase::Contravariant,
@@ -567,7 +568,7 @@ pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
         ),
         (
             InferenceContextKey {
-                pass_kind: InferencePassKind::ReverseHomomorphicMapped,
+                pass_kind: InferencePassKind::CallApplicability,
                 ..session.clone()
             },
             "pass_kind",
@@ -599,6 +600,13 @@ pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
                 ..session.clone()
             },
             "contextual_inference_mode",
+        ),
+        (
+            InferenceContextKey {
+                verdict_use: InferenceVerdictUse::CandidatesOnly,
+                ..session.clone()
+            },
+            "verdict_use",
         ),
     ];
 

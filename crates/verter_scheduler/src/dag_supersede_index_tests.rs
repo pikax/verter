@@ -186,7 +186,7 @@ fn index_blocker_refs(dag: &SchedulerDag, c: &str) -> BTreeMap<(Arc<str>, u64), 
     dag.canonical_index
         .blocker_dep_refs
         .get(c)
-        .map(|owners| owners.iter().map(|(k, v)| (k.clone(), *v)).collect())
+        .map(|owners| owners.counts.iter().map(|(k, v)| (k.clone(), *v)).collect())
         .unwrap_or_default()
 }
 

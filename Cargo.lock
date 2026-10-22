@@ -4185,6 +4185,7 @@ dependencies = [
 name = "verter_type_engine"
 version = "0.0.1-beta.7"
 dependencies = [
+ "aho-corasick",
  "arc-swap",
  "boxcar",
  "dashmap",

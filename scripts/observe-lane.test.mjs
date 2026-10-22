@@ -5,7 +5,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildObserveLaneArgs, observeLanePackages } from "./observe-lane.mjs";
+import {
+  buildObserveLaneArgs,
+  buildObserveLaneBuildArgs,
+  observeLanePackages,
+} from "./observe-lane.mjs";
 
 function metadata(packages, members = packages.map((pkg) => pkg.id)) {
   return { packages, workspace_members: members };
@@ -46,6 +50,24 @@ test("switches the feature on for every selected package under the given filter"
   ]);
 });
 
+test("the fixture-metadata build selection is the run's own package and feature set", () => {
+  const meta = metadata([
+    pkg("b", { "semantic-observe": [] }),
+    pkg("a", { "semantic-observe": [] }),
+  ]);
+  const build = buildObserveLaneBuildArgs(meta);
+  assert.deepEqual(build, [
+    "-p",
+    "a",
+    "-p",
+    "b",
+    "--features",
+    "a/semantic-observe,b/semantic-observe",
+  ]);
+  assert.deepEqual(buildObserveLaneArgs(meta, "all()").slice(3, 3 + build.length), build);
+});
+
 test("an empty selection fails closed instead of running nothing", () => {
   assert.throws(() => buildObserveLaneArgs(metadata([pkg("a")]), "all()"), /no workspace member/);
+  assert.throws(() => buildObserveLaneBuildArgs(metadata([pkg("a")])), /no workspace member/);
 });

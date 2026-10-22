@@ -21,9 +21,9 @@ use crate::code_transform::CodeTransform;
 /// * `code_transform` - The code transform to apply removals to (uses SFC-absolute positions)
 /// * `base_offset` - Offset to add to all spans to convert to SFC-absolute positions
 /// * `script_source` - The raw script content source text (for reading source fragments)
-pub fn strip_typescript_types<'a>(
+pub fn strip_typescript_types<'a, M: verter_audit::observe::ObserveExec>(
     program: &Program,
-    code_transform: &mut CodeTransform<'a>,
+    code_transform: &mut CodeTransform<'a, M>,
     base_offset: u32,
     script_source: &'a str,
 ) {
@@ -44,9 +44,9 @@ pub fn strip_typescript_types<'a>(
 /// generics, type declarations (interfaces/type aliases lowered/removed, enums
 /// → runtime IIFE), and exports — so a setup import is edited exactly once and
 /// never double-overwritten (which corrupts the transform).
-pub fn strip_typescript_body_types<'a>(
+pub fn strip_typescript_body_types<'a, M: verter_audit::observe::ObserveExec>(
     program: &Program,
-    code_transform: &mut CodeTransform<'a>,
+    code_transform: &mut CodeTransform<'a, M>,
     base_offset: u32,
     script_source: &'a str,
 ) {
@@ -70,9 +70,9 @@ pub fn strip_typescript_body_types<'a>(
 /// * `code_transform` - The code transform to apply removals to (uses SFC-absolute positions)
 /// * `base_offset` - The byte position of the expression content in the SFC source
 /// * `expression_source` - Source text starting at the expression's offset (for reading chars)
-pub fn strip_typescript_from_expression<'a>(
+pub fn strip_typescript_from_expression<'a, M: verter_audit::observe::ObserveExec>(
     expression: &Expression,
-    code_transform: &mut CodeTransform<'a>,
+    code_transform: &mut CodeTransform<'a, M>,
     base_offset: u32,
     expression_source: &'a str,
 ) {
@@ -89,9 +89,9 @@ pub fn strip_typescript_from_expression<'a>(
 /// program. This is the statement-granular entry used by Svelte runtime script
 /// completion: the statement and reactive rewrite edits share the same original
 /// source coordinates and compose on one [`CodeTransform`].
-pub fn strip_typescript_from_statement<'a>(
+pub fn strip_typescript_from_statement<'a, M: verter_audit::observe::ObserveExec>(
     statement: &Statement,
-    code_transform: &mut CodeTransform<'a>,
+    code_transform: &mut CodeTransform<'a, M>,
     base_offset: u32,
     script_source: &'a str,
 ) {
@@ -104,8 +104,8 @@ pub fn strip_typescript_from_statement<'a>(
     stripper.visit_statement(statement);
 }
 
-struct TypeStripper<'a, 'ct> {
-    code_transform: &'ct mut CodeTransform<'a>,
+struct TypeStripper<'a, 'ct, M: verter_audit::observe::ObserveExec> {
+    code_transform: &'ct mut CodeTransform<'a, M>,
     base_offset: u32,
     source: &'a str,
     /// When true, leave import declarations untouched (the `<script setup>`
@@ -113,7 +113,7 @@ struct TypeStripper<'a, 'ct> {
     skip_imports: bool,
 }
 
-impl<'a, 'ct> TypeStripper<'a, 'ct> {
+impl<'a, 'ct, M: verter_audit::observe::ObserveExec> TypeStripper<'a, 'ct, M> {
     #[inline]
     fn remove(&mut self, start: u32, end: u32) {
         self.code_transform

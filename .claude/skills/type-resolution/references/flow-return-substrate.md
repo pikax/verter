@@ -1,5 +1,7 @@
 ## Flow-Return Substrate (U6)
 
+Value inference types an expression-bodied function value directly. It leaves a block body's return to that body, which is the flow evaluator's job. Discovery and the declaration facts share one classification, `literal_holds_block_bodied_function`: a declarator whose object or array literal holds such a function (at any literal depth, through parentheses, `as const`, `satisfies` and non-null assertions, and with no `as T` assertion) is a served initializer, and so is a call with such a literal argument. In the call route, an object or array literal argument whose indexed value still holds a body-derived return (`indexed_literal_holds_body_return`) is evaluated by the frame instead of taking the indexed value. That check includes method implementations without a declared or already anchored return, alongside function-valued properties. Expression bodies stay on the indexed route, which keeps a literal return in a generic context (`keep({ run: () => 1 })` is `{ run: () => 1; }`).
+
 Capture obligations follow the callable site's retained selection. A value-selected
 callable requires reaching-value evidence for its read captures. An effect-only
 callable retains its exact captured cells and effect dependencies without demanding
@@ -200,6 +202,60 @@ absorbing it would delete the `n` member the checker publishes. The gate is scop
 to surfaces whose key domain is the member list — a call, construct or index
 signature on either side goes to the relation.
 
+Inferred value declarations also run the shared
+`normalize_widened_object_literals` owner before publishing their `typeof`
+answer, on both the located-body and expression-source paths. Array element
+unions and conditional results therefore receive the same optional `undefined`
+properties as return/yield joins, including nested literal siblings. Authored
+computed keys use shared index-key resolution before literal eligibility and
+matching. Spread-built siblings supply same-property nested contexts without
+contributing their outer keys to missing-property padding. Authored
+annotations and non-literal object types keep their own shapes. Nonempty
+literals carry provenance on their members; the transient `ObjectExpr` carries
+`empty_literal` for an empty source literal, which lowers to a zero-effect
+object construction program. An authored empty object type has no such marker.
+Rebuilt unions continue through `ReduceUnion` and canonical kernel ordering.
+Locator lowering preserves expression-origin facts until that normalization
+finishes. The existing source regularizer then consumes freshness across object,
+array, tuple and union nodes with a memoized postorder walk. Spread construction
+programs record whether they still denote a literal expression; regularization
+clears that bit and their direct-member origins without expanding spread operands.
+An effect-free construction program becomes an ordinary empty object surface at
+publication. Relation checks, subtype-reduction views and call-diagnostic
+structural readers use that same empty surface, so a fresh `{}` still absorbs
+a primitive sibling and reports required missing properties where the checker
+does, without losing its literal provenance before object normalization.
+The empty construction and its regular surface both display as `{}`.
+Const-context spread readers also regularize effect-free operands before
+copying their readonly members, so an empty literal contributes no properties
+without degrading the result. Strict-subtype object comparisons retain a fresh
+empty program through correlated projection: its empty domain satisfies an
+inferable index signature, while a declared `{}` keeps the ordinary surface
+rules and does not acquire literal status.
+Thus separately declared object values do not normalize against later siblings.
+Member-granular and whole-value publication apply the same rule through nested
+object properties, without a depth cutoff. Class fields normalize as independent
+initializers on selected-member, instance and constructor-object publication
+paths, without forcing deferred sibling fields. Inferred default-parameter types
+normalize for standalone functions, arrow functions and object methods;
+authored parameter types keep their own shapes. Signature normalization preserves
+the callable header's occurrence, return carrier and scope, including a deferred
+callable whose return has not been demanded.
+
+Tuple elements enter independent widening contexts before publication consumes
+their initializer freshness; tuple labels, optional/rest markers and readonly
+modifiers survive rebuilding. Literal spread programs likewise normalize their
+initializer children before receiving missing sibling properties, without
+flattening the construction or changing write order. A spread operand union
+retains its construction alternatives: it does not introduce a sibling-widening
+context of its own. Property initializers inside an inline spread source still
+normalize independently, including arrays of object literals. Constructor headers use
+the same parameter normalization as function headers; authored parameter types
+remain unchanged. For nested literals, TypeScript 7.0.2 diagnostic messages can
+omit inferred optional properties that its native API and `keyof` expose. Use
+the actual checker type and key assertions to distinguish that abbreviated
+diagnostic print from a semantic normalization cutoff.
+
 The call value carries a matching reduction on the intersection side: a callee's
 INSTANTIATED return that pairs the empty object type `{}` with a definitely
 non-nullish constituent drops the `{}` arm (`andD<T>(x: T): T & {}` called at
@@ -280,6 +336,10 @@ An entered call of a closed same-file assertion lowers to `SliceStatement::Asser
 
 Gap COUNT cannot discriminate these defects — a modeled fact and a proved-inert fact both mint zero gaps — so a regression test for this contract must assert the lowered guard SHAPE or the boundary degradation, never the gap count alone.
 
+### Guard-Chain Cost
+
+A chain of guards over one union subject (`instanceof`, `in`, a user type predicate, a strict discriminant equality) costs work linear in the chain, never the chain times the arms each guard passes over. The subject's arms are enumerated once per root evaluation into an `ArmIndex` (`flow_return_arm_index.rs`, held in the `arm_indexes` `SharedEvaluationMemo` beside `carrier_unwraps`, `discriminant_members` and `guard_relations`), with per-family indexes prepared on first demand: class heritage (each arm's ancestry read once, its observations folded into every frame that decides by it), own string property keys of plain closed object arms (`ProjectSemanticDispatch::closed_object_own_string_keys`), and distinct string-literal tags or arms. A guard visits only the arms its operand can decide differently — the tested class's family and bases, the arms declaring the `in` key, the arms declaring every property a predicate's target requires (`assignability_refuting_keys`: a plain closed object lacking a required property not on the apparent `Object` is proved not assignable without a relation), the arm carrying the compared tag — plus the arms an index cannot read, and decides them by the family's own per-arm rule; every other arm keeps the verdict the index proves. An excluding edge establishes `GuardNarrowing::Excluded`: the narrowing fact holds a `FlowNarrowed::Remainder` (`FlowArmRemainder` — the base arms and a persistent excluded set) instead of a built union, and the union is built once, on the first read that needs the type itself (`FlowEvaluator::narrowed_node`; an `if` arm's ledger window builds it only when two continuing arms join). A fast path runs only over an index that stands for its union exactly (`arm_index_is_exact`: distinct, resolved arms whose union enumerates back to exactly them, so every subset is its own union's arms) and steps aside to the general narrow wherever it cannot prove the general answer — an undecided heritage, the `in` unknown-key regime, a predicate with no surviving arm. `narrowing_chain_growth_tests` holds the growth proofs on work counters: semantic reads, cold builds, connected work, relations, union enumeration (`union_leaf_visits_for_tests`) and construction (`union_construction_members_for_tests`), index preparation (`index_preparation_for_tests`) and arm visits (`indexed_arm_visits_for_tests`).
+
 ### Positional Element Reads
 
 A numeric key of an array, a tuple or a string is the checker's indexed access by the key's type, in expression position and in a declared type alike.
@@ -329,6 +389,7 @@ Acceptance: `a_const_tuple_element_read_is_the_element_the_checker_reads`, `a_ne
 
   Recorded interim: TypeScript instantiates from the call's explicit type arguments and its argument inference, and NEITHER is modeled here — `idT<string>("a")` answers `unknown` where the checker says `string`. Call-site instantiation proper, and overload resolution, are `U6.CALL_RESOLVE`'s; sb15 IS the checker's answer for the one shape TS itself cannot infer (`bare<T>(): T` called with no arguments is `unknown`), and a declared default is exact. Acceptance: `flow_return_generic_direct_callee_never_publishes_the_callees_binder`, `flow_return_every_call_route_instantiates_the_callees_clause`, `flow_return_scc_fixed_point_never_republishes_a_foreign_callee_binder`, `flow_return_callee_clause_shadowing_a_file_scope_declaration_still_instantiates`, `flow_return_overloaded_callee_never_publishes_the_hidden_implementation`, `flow_return_ambient_overload_group_is_not_answerable_either`, `flow_return_callee_clause_default_applies_only_when_inference_has_no_candidate`, `flow_return_clause_claim_never_erases_a_foreign_same_named_declaration`, `flow_return_type_member_route_shares_the_whole_return_clause_policy`, `return_type_member_of_generic_callee_publishes_the_utility_policy`, `type_param_occurrence_records_the_smallest_supplying_parameter_ordinal`.
 - **The public FlowReturn entry releases the SCC's member batch.** A flow SCC defers its non-root members: each claims the ordinary family flight, computes inline on the root's transaction, and batches its publish for the machinery ROOT to drain. `execute_flow_return_cold_build` is therefore the SOLE way a `SemanticQueryKey::FlowReturn` reaches the family cold build — the typed producer entry (`execute_flow_return_root`) AND the generic `SemanticQueryApi` entries (which reach the family through `execute_via_cold_build_helper`) both route through it. Release is decided by the PUBLICATION, never the returned value's shape: a real `PublishedMemoCandidate` drains the batch onto that carrier with member fences intact; its ABSENCE — `ReturnOnly`, a typed failure, cancellation, a refused admission — aborts and retires the ENTIRE deferred batch without publishing anything. A path that skips the executor leaves every member with a CLAIMED, uncompleted in-flight entry whose owner has dropped, so the next demand joins it, the wait graph reports a cycle against an inactive owner, and the caller gets a PERMANENT false `QueryResult::Recursive` (acceptance: `flow_return_public_execute_releases_drained_members_both_orders`).
+- **A delivered return is observed through its own lease, never its ordinal.** `FlowReturnResult::return_root()` hands out an owning `NodeRoot` of the return node from the result's delivery lease (`ForeignSemanticOperand` for a result never delivered out of the engine, `StaleSemanticOperand` once the node is gone); `VerterHost::project_node_to_type_expr_json_bytes` is the bounded projection that reads it. The public projection takes only a `NodeRoot`, so the raw `return_type()` ordinal cannot be projected (compile contract `flow_return_root_rejects_raw_ordinal`), and the capture-off `soak-support` profile reaches the same API (`flow_return_root_positive_through_soak_support`). Materialization re-reads the delivered node: it publishes no memo entry, interns no node and leaves graph ownership unchanged, so a held result keeps materializing the same value across cache retirement and host close, and its last owner's release drains the node (`flow_return_root_tests`). `degradation()` still separates an exact return from a degraded one; the value oracle compares the materialized bytes, not ordinals.
 - **Ternary vs `if` self-recursion is NOT a parity gap — the checker makes the same distinction.** `return n > 0 ? f(n - 1) : 0` fails closed (`Error(Miss)`, cands=0) where `if (n > 0) return f(n - 1); return 0` converges to `number`: the `SliceExpr::Union` arm turns a coinductive HOLD into `Err` for the whole ternary, because the SCC discharge joins WHOLE contributions and a held union arm is a fragment of one. The round that gave the conditional its structural arm claimed the two spellings answer alike. They do not, and they must not: measured against TypeScript 7.0.2 (`tsc --noEmit --strict --ignoreConfig`, UNANNOTATED — the annotated spellings answer `number` from the annotation and say nothing about the body-derived inference this rail computes), TypeScript aggregates return STATEMENTS and tolerates a circular one among several, but a circular reference INSIDE one return expression poisons that expression and the whole inferred return becomes the circularity error:
 
   | body | tsgo |

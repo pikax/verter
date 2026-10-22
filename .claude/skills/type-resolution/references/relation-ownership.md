@@ -20,6 +20,41 @@ this index. Native `Omit` already enumerates canonical `PropertyKey` values into
 an `FxHashSet` and filters by membership; it retains that typed property-key
 owner, including its numeric/string key normalization, without relation scans.
 
+A pair question (`execute_relate_pair`) of a literal against a literal-only
+union takes no relation frame and publishes no memo entry, as a literal pair
+does: a distributive conditional asks one per member. It replays a memoized
+answer for the pair first (paying its receipt, which is never below the index
+price), then answers from the index, the lookup's roots and the index receipt
+going to the asking build. The path depends on the operands' shapes alone,
+never on what an earlier read prepared. A pair asked while a relation frame is
+on top joins that frame's chain, and a pair already open lower on the
+obligation stack is the relation's coinductive assumption: both take the
+ordinary path, which applies the chain's overflow, depth and comparison limits
+and the assumption. A preparation ahead of any relation
+frame starts only when the demand can pay for every arm and records no budget
+edge (a frame on top never asked for it); a refused one falls back to the
+relation authority, whose own frame records the refusal. Inside a relation, a
+literal-only union source against a union target reads its members through the
+index in member order and stops at the first one the target lacks
+(`eachTypeRelatedToSomeType` over `containsType`), depositing the same roots in
+the same first-inspection order as one arm per member, without a work item per
+member; a refused preparation falls back to one arm per member, and each arm
+reports it. One membership test (`literal_members_in_union`) serves all three
+paths.
+
+The structural-fact demand's composite reduction reduces a resolved union
+once per operation when every arm is a literal, a primitive or an enum member:
+such a union, proven left as written (the canonical union over the arms keeps
+every one), is recorded with the file roots that canonicalization inspected,
+and a later demand replays those roots instead of reducing it again. That
+canonicalization runs no metered construction (the meter pays only for
+distributions), so a replay prices a demand exactly as reducing again does
+(`a_reused_composite_proof_prices_a_demand_as_reducing_again`); a union with
+any other arm is reduced by every demand. A distributive conditional's members
+each read their named `extends` operand through that demand. The outermost
+dispatch operation releases the record with the membership indexes.
+Member-set comparisons in the reduction use a hashed index for wide unions.
+
 Closed single-property scalar object unions use a request-local property index
 inside the relation authority. Matching properties still enter the ordinary
 member relation in authored order, including the positional first attempt.
@@ -117,6 +152,86 @@ Guards: `many_distinct_relations_under_tiny_retention_keep_operand_only_residenc
 
 **Superseding notes for other owners' documents** (folded in by the documentation closure): `.claude/skills/host-session/SKILL.md` still lists relation proofs among what a close releases and names `semantic_query_memo/intern_table.rs` as the proof/relate-key table storage — both are gone; `docs/contributing/semantic-benchmark.md` still lists interned relation proofs among the retention/work counts — the counter no longer exists (the benchmark records, `session-analyze.mjs` required state and the dx-harness churn counters dropped it).
 
+### Library generic interfaces and generic-method relations
+
+A runtime nominal's `__builtin__` carrier (`Promise<T>`, `Map<K, V>`,
+`Set<T>`, `Date`, …; never `Function`, which relations decide by tag) is, to
+the relation, the project's global interface of that name
+(`relation_declaration_identity` → `runtime_nominal_global_declaration`,
+through `first_global_declaration`, read from the library
+`relation_wrapper_canonical` names). Two applications relate by their
+arguments under the interface's measured variance (`generic_reference`), and
+the identity unwrap expands an application to the interface's members, the
+members a walk's read already takes. A project that declares no such
+interface keeps the carrier unresolvable. Such a carrier is a reference, not a
+builtin utility: `infer_inventory` infers through `Promise<infer O>`'s
+arguments and the permissive test's wildcard check does not read it as an
+operation.
+
+`keyof T[]` is `keyof` the project's `Array<T>` (`ReadonlyArray<T>`):
+`scope_apparent_wrapper_subject` rewrites a reducing `KeyOf` of a scope-less
+array before memo admission, and `build_array_key_of` serves a file-scoped
+one. The wrapper is read under structural transit, so member values stay
+carriers: `Array`'s `[Symbol.unscopables]` maps over `keyof any[]`.
+
+Generic method relations follow `compareSignaturesRelated`:
+
+- A generic source is instantiated in the context of the target's canonical
+  signature (`canonical_signature`, the checker's `getCanonicalSignature`):
+  an unconstrained target parameter is its declaration's own binder whatever
+  default an instantiation gave it, so `then<R = T>` of `A<R>` against
+  `B<R>` meets its own pair one level down instead of recursing on fresh
+  binders.
+- A source parameter the target's clause declares too (a binder no
+  instantiation moved, `R2 = never`) binds to itself and asks the return for
+  nothing.
+- An instantiation whose inference does not settle while a conditional's
+  `infer` is collecting and the target names one of its declarations
+  (`Promise<number> extends PromiseLike<infer U>`: `then`'s callback reads
+  `U`) leaves the signature pair undecided
+  (`InContextInstantiation::Unsettled`): the instantiation's own session takes
+  only the source's parameters, so the uninstantiated pair would decide a
+  branch it never related. Inference through a lib thenable's `then` into an
+  enclosing inference (`thenOf(p1)`) is not done yet; such calls are typed
+  `UnrepresentableCallee` gaps.
+- Two callback parameters (one non-generic call signature each, nullable
+  alike, no predicate) relate target-to-source with strictly contravariant
+  parameters, never the method-bivariant fallback (`callback_parameter_pair`,
+  `SignatureCheckMode::Callback`). Where the enclosing relation is not strict
+  (a method target, or `strictFunctionTypes` off) the callback's RETURN
+  relates in either direction (the checker's `BivariantCallback`): `add(cb:
+  () => T)` is bivariant in `T`; otherwise it is covariant
+  (`StrictCallback`). The callback relation runs inside the enclosing frame,
+  so its parameters infer at `InferPosition::CallbackParam` (the two flips
+  cancel) and its return at `InferPosition::ContravariantParam`.
+- Inference into a union with one naked parameter follows the checker's
+  `inferFromMatchingTypes` + `inferToMultipleTypes`
+  (`union_source_inferred_to_naked_parameter`, `NakedUnionInference`):
+  source members identical to a fixed member are removed; a member
+  referencing the declaration a fixed member references
+  (`references_one_declaration`, the checker's `isTypeCloselyMatchedBy`)
+  pairs with it and infers by its type arguments — `PromiseLike<R'>` into
+  `R | PromiseLike<R>` infers `R'`, a declaration's reference to itself in
+  its own body (a `RecursiveRef` carrier, `raw_generic_reference`) matching
+  like any other reference. Each remaining member is then tried against
+  each fixed member through the shared inference walk
+  (`infers_into_fixed_member`, read back with `InferenceSession::inferred_since`):
+  a member whose walk reaches the variable at the current priority pairs
+  with that fixed member — `Promise<2>` into `MyPL<any>`, `Promise<1> | 2`
+  into `PL<U> | U` infers `1 | 2` — and only the unmatched rest is one
+  candidate for the variable. A walk that met an inference circularity
+  makes the whole source a lower-priority candidate instead. Circularity is
+  recorded only where the cycling pair names one of the session's
+  variables (`pair_mentions_session_variable`, the checker's
+  `couldContainTypeVariables` stop): a generic method instantiated in
+  another's context, its own type parameters one level deeper each time,
+  is no inference circularity.
+  `thenables_of_different_declarations_infer_through_their_structure` and
+  `a_promise_member_infers_its_payload_beside_the_naked_union_remainder`
+  pin the cross-declaration rows.
+
+Guards: the `lib_generic_relation_tests` suite (`verter_session`).
+
 ### Object-literal spreads: canonical construction programs
 
 Every spread-bearing object is a `SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram)` — one immutable, source-ordered effect list (`DirectProperty` / `DirectMethod` / `DirectGet` / `DirectSet` / `DirectIndex` / `DirectCall` / `DirectConstruct` / `Spread`). It is the sole stored description of the object: no folded member surface, completeness mirror, replay cursor, or side log coexists. A non-spread object stays a closed `SemanticNodeData::Object` surface (every `SurfaceView` is closed by construction; the open-operand representation is gone). Direct effects carry lossless typed facts: typed key or computed-key child, value/signature children, optional/readonly, method/get/set kind, implementation-body fact, visibility, spans/declaration origin, and excess origin.
@@ -185,3 +300,7 @@ resolved type surfaces.
 - A second `fn shallow_lower_type_expr` — FORBIDDEN (besides `project_semantic_dispatch::lower`).
 - A second struct owning a `RelationMemo` field — FORBIDDEN (besides `SemanticGraphStore`).
 - A second struct owning the semantic node map — FORBIDDEN (besides `SemanticGraphStore`).
+
+**Closed mapped operands reduce relation-locally.** The identity-carrier unwrap reduces a `Mapped` operand whose source, key domain and template are closed, such as a signature's mapped parameter after substitution. It handles identity templates, index-key domains and enumerable keys alike: each key reads the template with the binder bound to it, and `Keep` modifiers come from the modifiers type (the source of a homomorphic mapping). The object is interned for the relation alone, without member edges, matching the identity and index-key reducers. Open sources, name remaps, distributing homomorphic sources (unions, arrays, tuples), unique-symbol keys and templates that read as `Opaque` keep the carrier, so the relation stays undecided. The mapped build still carrier-stops under structural transit.
+
+**Function recursion counts repeated occurrences.** `RelationRecursionIdentity` pairs its origin with a typed `RecursionCountMode`. A signature uses its authored scope and span as the function origin and counts every occurrence, including revisiting the same instance. Declaration references retain distinct argument instances. The live stack and cached-footprint replay apply the same rule, independent of graph allocation and query order. Inside an inference walk the live stack also reads each signature instance's first visit in the transaction, as the checker reads type ids; a verdict that order changes is context-dependent. A `BivariantCallback` return relates the target's return to the source's first, then covariantly, in the checker's order. `repeated_method_signatures_count_without_counting_finite_reference_descent` guards finite reference descent, the method expansion boundary, and both warm query orders.

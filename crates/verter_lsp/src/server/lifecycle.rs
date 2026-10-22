@@ -73,26 +73,50 @@ pub(super) async fn handle_initialize(
         })
         .unwrap_or(PositionEncodingKind::UTF16);
     tracing::info!("negotiated position encoding: {}", encoding.as_str());
-    {
-        let workspace = params.capabilities.workspace.as_ref();
-        server.client_refreshes_semantic_tokens.store(
-            workspace
-                .and_then(|workspace| workspace.semantic_tokens.as_ref())
-                .and_then(|tokens| tokens.refresh_support)
-                .unwrap_or(false),
-            std::sync::atomic::Ordering::Release,
+    // The client's whole demand is negotiated here, once: capabilities,
+    // enabled features and recurring-notification subscriptions. Work and
+    // notifications it did not ask for stay off for the session.
+    let demand = crate::demand_plan::LspDemandPlan::from_initialize(&params);
+    server.client_refreshes_semantic_tokens.store(
+        demand.refreshes_semantic_tokens,
+        std::sync::atomic::Ordering::Release,
+    );
+    server.client_applies_versioned_edits.store(
+        demand.applies_versioned_edits,
+        std::sync::atomic::Ordering::Release,
+    );
+    server.client_refreshes_inlay_hints.store(
+        demand.refreshes_inlay_hints,
+        std::sync::atomic::Ordering::Release,
+    );
+    server.subscriptions.install(demand.subscriptions);
+    tracing::info!("client subscriptions: {:?}", demand.subscriptions);
+    if let Some(stats_enabled) = demand.statistics {
+        server.statistics.set_enabled(stats_enabled);
+        tracing::info!(
+            "statistics: {}",
+            if stats_enabled { "enabled" } else { "disabled" }
         );
-        server.client_applies_versioned_edits.store(
-            crate::features::action_utils::WorkspaceEditSupport::negotiate(&params.capabilities)
-                == crate::features::action_utils::WorkspaceEditSupport::VersionedDocumentChanges,
-            std::sync::atomic::Ordering::Release,
+    }
+    if let Some(trace_enabled) = demand.interaction_trace {
+        server.interaction_trace.set_enabled(trace_enabled);
+        tracing::info!(
+            "interactionTrace: {}",
+            if trace_enabled { "enabled" } else { "disabled" }
         );
-        server.client_refreshes_inlay_hints.store(
-            workspace
-                .and_then(|workspace| workspace.inlay_hint.as_ref())
-                .and_then(|hints| hints.refresh_support)
-                .unwrap_or(false),
-            std::sync::atomic::Ordering::Release,
+    }
+    // A client that sent no options leaves enrichment at its default (off).
+    if params.initialization_options.is_some() {
+        server
+            .documents
+            .set_semantic_analysis_enabled(demand.semantic_analysis);
+        tracing::info!(
+            "native semantic enrichment: {}",
+            if demand.semantic_analysis {
+                "enabled (isolated background lane)"
+            } else {
+                "disabled"
+            }
         );
     }
     *server.position_encoding.write() = encoding.clone();
@@ -133,44 +157,10 @@ pub(super) async fn handle_initialize(
     // Parse initialization options (statistics config, lint config, etc.)
     if let Some(opts) = &params.initialization_options {
         tracing::debug!("initialization options: {opts}");
-        if let Some(stats_enabled) = opts
-            .get("statistics")
-            .and_then(|s| s.get("enabled"))
-            .and_then(|v| v.as_bool())
-        {
-            server.statistics.set_enabled(stats_enabled);
-            tracing::info!(
-                "statistics: {}",
-                if stats_enabled { "enabled" } else { "disabled" }
-            );
-        }
-        if let Some(trace_enabled) = opts
-            .get("interactionTrace")
-            .and_then(|s| s.get("enabled"))
-            .and_then(|v| v.as_bool())
-        {
-            server.interaction_trace.set_enabled(trace_enabled);
-            tracing::info!(
-                "interactionTrace: {}",
-                if trace_enabled { "enabled" } else { "disabled" }
-            );
-        }
         // Store lint options for use in initialized()
         if opts.get("lint").is_some() {
             *server.init_lint_options.lock().await = Some(opts.clone());
         }
-        let native_semantic_enabled = crate::config::parse_native_semantic_options(opts).enabled;
-        server
-            .documents
-            .set_semantic_analysis_enabled(native_semantic_enabled);
-        tracing::info!(
-            "native semantic enrichment: {}",
-            if native_semantic_enabled {
-                "enabled (isolated background lane)"
-            } else {
-                "disabled"
-            }
-        );
         // Read viteConfig settings
         {
             let mut vite_opts = server.vite_config_options.lock().await;
@@ -322,11 +312,11 @@ pub(super) fn provider_recommendation(
 pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: InitializedParams) {
     tracing::info!("verter-lsp initialized");
 
-    // A. Spawn heartbeat FIRST — ensures the extension sees heartbeats
-    // even while background initialization is running. The server itself
-    // is the wiring: the heartbeat reads the server's own handler
-    // activity, never a call-site-supplied handle.
-    spawn_heartbeat(server);
+    // A. Spawn the heartbeat FIRST when the client subscribed to it, so its
+    // watchdog sees heartbeats even while background initialization runs.
+    // The server itself is the wiring: the heartbeat reads the server's own
+    // handler activity, never a call-site-supplied handle.
+    let _ = spawn_heartbeat(server);
 
     // B. Send immediate non-blocking notifications
     let tp_label = server.type_provider_kind.to_string();
@@ -559,9 +549,7 @@ pub(super) async fn handle_did_open(
 ) {
     let _hg = HandlerGuard::new(&server.handler_activity, "did_open");
     let uri = &params.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("did_open", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("did_open", Some(uri.as_str()));
     tracing::info!("did_open: {}", uri.as_str());
     let is_virtual = uri.as_str().starts_with("verter-virtual://");
     // Registry membership and its open-generation token change under the same
@@ -834,9 +822,7 @@ pub(super) async fn handle_did_change(
     );
     tracing::info!("did_change MUTEX_ACQUIRED v{version}");
 
-    let _timer = server
-        .statistics
-        .timer("did_change", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("did_change", Some(uri.as_str()));
 
     tracing::info!(
         "did_change UPSERT_START v{version} thread={:?}",
