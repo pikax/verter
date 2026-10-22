@@ -587,17 +587,28 @@ export async function signatureHelpAt(
   );
 }
 
+/**
+ * Document highlights are a passive surface: the server reads the document's
+ * current provider surface and never compiles or syncs for the request. A file
+ * first opened by the case is synced by the debounced coordinator, not by level
+ * 2 of the readiness ladder, so the first answer can precede that sync. Poll
+ * until the provider-merged answer (more than one region) arrives.
+ */
 export async function documentHighlightsAt(
   anchor: TokenAnchor,
 ): Promise<vscode.DocumentHighlight[]> {
   const doc = await openRelative(anchor.file);
   const position = tokenPosition(doc, anchor);
-  return (
+  const request = async () =>
     (await vscode.commands.executeCommand<vscode.DocumentHighlight[]>(
       "vscode.executeDocumentHighlights",
       doc.uri,
       position,
-    )) ?? []
+    )) ?? [];
+  return pollUntil(
+    `document highlights ${anchor.file}#${anchor.token}`,
+    request,
+    (highlights) => highlights.length >= 2,
   );
 }
 
