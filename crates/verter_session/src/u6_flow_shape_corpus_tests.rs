@@ -3950,7 +3950,7 @@ mod corpus_suite {
             ),
             (
                 "X14_accessor_pair",
-                "checker prints `{ get g(): string; set g(v: string | number); n: number; }`; the renderer spells the one property the pair reads as `{ g: string, n: number }` — accessor spelling and member terminators differ| number)) => void, n: number }` — accessor spelling and member terminators differ",
+                "checker prints `{ get g(): string; set g(v: string | number); n: number; }`; the renderer spells the one property the pair reads as `{ g: string, n: number }` — accessor spelling and member terminators differ",
             ),
             (
                 "X18_async_return",

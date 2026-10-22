@@ -3874,8 +3874,8 @@ enum DeclRef<'a> {
     /// A class declaration.
     #[cfg(any(test, feature = "test-support"))]
     Class(&'a Class<'a>),
-    /// A namespace or module declaration's block (`None` for a bodiless
-    /// module or a dotted namespace, whose body is the inner namespace).
+    /// A namespace or module declaration's block, past a dotted name's
+    /// segments (`None` for a bodiless module).
     Module(Option<&'a oxc_ast::ast::TSModuleBlock<'a>>),
     /// An `export default { … }` object expression.
     #[cfg(any(test, feature = "test-support"))]
@@ -3899,13 +3899,18 @@ fn class_declaration_of<'a>(statement: &'a Statement<'a>) -> Option<&'a Class<'a
     }
 }
 
-/// A namespace declaration's own block (`None` for a dotted namespace).
+/// A namespace declaration's block, past a dotted name's segments
+/// (`namespace A.B.C { … }` is `C`'s block).
 fn namespace_block<'a>(
-    module: &'a oxc_ast::ast::TSNamespaceDeclaration<'a>,
-) -> Option<&'a oxc_ast::ast::TSModuleBlock<'a>> {
-    match &module.body {
-        oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => Some(block),
-        oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => None,
+    mut module: &'a oxc_ast::ast::TSNamespaceDeclaration<'a>,
+) -> &'a oxc_ast::ast::TSModuleBlock<'a> {
+    loop {
+        match &module.body {
+            oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => return block,
+            oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
+                module = inner;
+            }
+        }
     }
 }
 
@@ -3916,7 +3921,9 @@ fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
         Statement::VariableDeclaration(decl) => Some(DeclRef::Variable(decl)),
         #[cfg(any(test, feature = "test-support"))]
         Statement::ClassDeclaration(class) => Some(DeclRef::Class(class)),
-        Statement::TSNamespaceDeclaration(module) => Some(DeclRef::Module(namespace_block(module))),
+        Statement::TSNamespaceDeclaration(module) => {
+            Some(DeclRef::Module(Some(namespace_block(module))))
+        }
         Statement::TSExternalModuleDeclaration(module) => {
             Some(DeclRef::Module(module.body.as_deref()))
         }
@@ -3926,7 +3933,7 @@ fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
             #[cfg(any(test, feature = "test-support"))]
             Declaration::ClassDeclaration(class) => Some(DeclRef::Class(class)),
             Declaration::TSNamespaceDeclaration(module) => {
-                Some(DeclRef::Module(namespace_block(module)))
+                Some(DeclRef::Module(Some(namespace_block(module))))
             }
             Declaration::TSExternalModuleDeclaration(module) => {
                 Some(DeclRef::Module(module.body.as_deref()))
