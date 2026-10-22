@@ -409,6 +409,9 @@ pub(super) struct TypeParamBinderSpec {
 pub(super) struct BuiltTypeParamBinder {
     pub(super) name: Arc<str>,
     pub(super) binder: SemanticNodeId,
+    pub(super) original: Option<
+        verter_session_query::retention::owned::Owned<crate::semantic_query::TypeParamOrigin>,
+    >,
     pub(super) constraint: Option<SemanticNodeId>,
     pub(super) default: Option<SemanticNodeId>,
 }
@@ -2337,6 +2340,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 param: binder.binder,
                 constraint: binder.constraint,
                 default: binder.default,
+                original: binder.original.clone(),
                 is_const: tp.is_const,
             })
             .collect();

@@ -66,6 +66,184 @@ use crate::semantic_query::{
 struct SubstitutionCost(SemanticNodeId, SemanticNodeId, SemanticNodeId);
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    pub(super) fn type_parameter_origin(
+        &self,
+        parameter: SemanticNodeId,
+    ) -> Option<verter_session_query::retention::owned::Owned<crate::semantic_query::TypeParamOrigin>>
+    {
+        let data = self.graph().node_data(parameter)?;
+        let SemanticNodeData::TypeParam {
+            decl, param_index, ..
+        } = data.as_ref()
+        else {
+            return None;
+        };
+        Some(verter_session_query::retention::owned::Owned::new(
+            crate::semantic_query::TypeParamOrigin {
+                declaration: decl.clone(),
+                index: *param_index,
+            },
+        ))
+    }
+
+    /// A deterministic alpha identity outside the surrounding binder slots.
+    pub(super) fn capture_avoiding_parameter_decl(
+        &self,
+        origin: &crate::semantic_query::DeclIdentity,
+        index: u16,
+        forbidden: &[SemanticNodeId],
+    ) -> crate::semantic_query::DeclIdentity {
+        for ordinal in 1..=forbidden.len() + 1 {
+            let mut candidate = origin.clone();
+            candidate.decl_name =
+                OwnedStr::from(format!("{}\u{1}capture{ordinal}", origin.decl_name));
+            if !forbidden.iter().any(|node| {
+                matches!(self.graph().node_data(*node).as_deref(),
+                Some(SemanticNodeData::TypeParam { decl, param_index, .. })
+                    if decl == &candidate && *param_index == index)
+            }) {
+                return candidate;
+            }
+        }
+        unreachable!("more fresh slots than forbidden slots")
+    }
+
+    /// Instantiate a clause with distinct local parameters before inserting
+    /// an outer argument. A later substitution preserves those parameters
+    /// unless its argument would be captured by them.
+    fn signature_avoiding_capture(
+        &self,
+        signature: SemanticNodeId,
+        parameters: &[TypeParamDecl],
+        argument: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        if parameters.is_empty() {
+            return None;
+        }
+        let free = self.type_params_within(&[argument]);
+        if parameters
+            .iter()
+            .all(|parameter| parameter.original.is_some())
+            && !parameters
+                .iter()
+                .any(|parameter| free.contains(&parameter.param))
+        {
+            return None;
+        }
+        let graph = self.graph();
+        let mut forbidden = self.type_params_within(&[signature, argument]);
+        forbidden.extend(parameters.iter().map(|parameter| parameter.param));
+        let families: Vec<_> = parameters
+            .iter()
+            .map(
+                |parameter| match graph.node_data(parameter.param).as_deref() {
+                    Some(SemanticNodeData::TypeParam {
+                        decl, param_index, ..
+                    }) => Some((decl.clone(), *param_index)),
+                    _ => None,
+                },
+            )
+            .collect::<Option<_>>()?;
+        let mut shells = Vec::with_capacity(parameters.len());
+        for (parameter, (origin, index)) in parameters.iter().zip(&families) {
+            let decl = self.capture_avoiding_parameter_decl(origin, *index, &forbidden);
+            let shell = graph.intern_preserving_scope(
+                parameter.param,
+                SemanticNodeData::TypeParam {
+                    decl,
+                    param_index: *index,
+                    constraint: None,
+                    default: None,
+                    display_name: parameter.name.clone(),
+                },
+            );
+            forbidden.push(shell);
+            shells.push(shell);
+        }
+        // Bounded and bound-free representations name the same clause slot.
+        let mut variants = Vec::new();
+        let mut pending = vec![signature];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            if let SemanticNodeData::TypeParam {
+                decl, param_index, ..
+            } = data.as_ref()
+            {
+                if let Some(position) = families
+                    .iter()
+                    .position(|(origin, index)| origin == decl && index == param_index)
+                {
+                    variants.push((node, position));
+                }
+            }
+            let _ = data.for_each_child(|child| pending.push(child));
+        }
+        let mut fresh: Vec<TypeParamDecl> = Vec::with_capacity(parameters.len());
+        for (ordinal, parameter) in parameters.iter().enumerate() {
+            let bindings = crate::semantic_query::CanonicalTypeSubstitution::new(
+                graph,
+                variants
+                    .iter()
+                    .map(|&(node, position)| {
+                        (
+                            node,
+                            fresh
+                                .get(position)
+                                .map_or(shells[position], |decl| decl.param),
+                        )
+                    })
+                    .collect(),
+            );
+            let constraint = parameter
+                .constraint
+                .map(|node| self.substitute_canonical(node, &bindings));
+            let default = parameter
+                .default
+                .map(|node| self.substitute_canonical(node, &bindings));
+            let data = graph.node_data(shells[ordinal])?;
+            let SemanticNodeData::TypeParam {
+                decl, param_index, ..
+            } = data.as_ref()
+            else {
+                return None;
+            };
+            let param = graph.intern_preserving_scope(
+                parameter.param,
+                SemanticNodeData::TypeParam {
+                    decl: decl.clone(),
+                    param_index: *param_index,
+                    constraint,
+                    default,
+                    display_name: parameter.name.clone(),
+                },
+            );
+            fresh.push(TypeParamDecl {
+                name: parameter.name.clone(),
+                param,
+                constraint,
+                default,
+                original: self.type_parameter_origin(parameter.param),
+                is_const: parameter.is_const,
+            });
+        }
+        let bindings = crate::semantic_query::CanonicalTypeSubstitution::new(
+            graph,
+            variants
+                .iter()
+                .map(|&(node, position)| (node, fresh[position].param))
+                .collect(),
+        );
+        let body =
+            self.substitute_canonical(self.signature_without_type_parameters(signature), &bindings);
+        Some(self.signature_with_type_parameters(body, fresh))
+    }
+
     fn priced_substitution_read(
         &self,
         node: SemanticNodeId,
@@ -1667,9 +1845,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 predicate,
                 is_abstract,
             } => {
-                // Signature-local TypeParams need no spelling-based stop:
-                // legitimate outer references carry an exact InferRef;
-                // locally shadowed occurrences carry the local TypeParam.
+                // Binding the clause's own exact node is an intentional
+                // instantiation. An outer substitution instead keeps its
+                // argument free of the signature's local clause.
+                if !type_parameters
+                    .iter()
+                    .any(|decl| decl.param == parameter_node)
+                    && !self.binder_dependency_proves_absent(node, parameter_node)
+                {
+                    if let Some(fresh) = self.signature_avoiding_capture(node, type_parameters, arg)
+                    {
+                        return (
+                            self.substitute_with_change_tracking(fresh, parameter_node, arg)
+                                .0,
+                            true,
+                        );
+                    }
+                }
                 let mut any_changed = false;
                 let mapped_carrier = return_carrier.map_source_images(|image| {
                     let (value, changed) =
@@ -1755,6 +1947,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param,
                         constraint: new_constraint,
                         default: new_default,
+                        original: tp.original.clone(),
                         is_const: tp.is_const,
                     });
                 }
@@ -1925,6 +2118,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param: tp.param,
                         constraint: new_constraint,
                         default: new_default,
+                        original: tp.original.clone(),
                         is_const: tp.is_const,
                     });
                 }

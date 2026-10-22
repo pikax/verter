@@ -110,6 +110,44 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
         };
 
+        // Owner arguments may contain this method's very declaration slots.
+        // Freshen before lowering the clause so its base/erased signature
+        // cannot erase a surrounding variable passed back through the owner.
+        let mut visible = rustc_hash::FxHashSet::default();
+        let mut surrounding = Vec::new();
+        for frame in base.binders.innermost_first() {
+            for (name, slot) in &frame.names {
+                if visible.insert(Arc::clone(name)) {
+                    if let BinderSlot::Usable(node) = slot {
+                        surrounding.push(*node);
+                    }
+                }
+            }
+        }
+        let has_outer_bindings = !surrounding.is_empty();
+        let surrounding = self.type_params_within(&surrounding);
+        let mut identities: Vec<_> = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| mint_identity(&spec.name, index))
+            .collect();
+        let originals = identities.clone();
+        let captures = !matches!(identity, BinderIdentityMode::DeclHeader { .. })
+            && (has_outer_bindings
+                || identities.iter().any(|(origin, index)| {
+                    surrounding.iter().any(|node| {
+                        matches!(graph.node_data(*node).as_deref(),
+                    Some(SemanticNodeData::TypeParam { decl, param_index, .. })
+                        if decl == origin && param_index == index)
+                    })
+                }));
+        if captures {
+            for (decl, index) in &mut identities {
+                *decl = self.capture_avoiding_parameter_decl(decl, *index, &surrounding);
+            }
+        }
+        let mint_identity = |_: &Arc<str>, index: usize| identities[index].clone();
+
         // Phase 1: predeclare every sibling as a bound-free binder node. In
         // the embedded-bound modes these are the SHELLS the per-position
         // frames expose for self / forward constraint references; in the
@@ -229,6 +267,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             finals.push(BuiltTypeParamBinder {
                 name: Arc::clone(&spec.name),
                 binder,
+                original: captures.then(|| {
+                    verter_session_query::retention::owned::Owned::new(
+                        crate::semantic_query::TypeParamOrigin {
+                            declaration: originals[index].0.clone(),
+                            index: originals[index].1,
+                        },
+                    )
+                }),
                 constraint,
                 default,
             });

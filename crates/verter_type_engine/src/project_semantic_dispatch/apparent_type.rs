@@ -116,10 +116,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 name,
                 args,
                 canonical,
-                // The apparent surface supplies members and signature
-                // carriers. Their interiors are demanded only by a
-                // selected member or signature read.
-                ProjectionReductionContext::published(ProjectionMode::Shallow),
+                // A member read through the interface, as through any
+                // interface reference: carrier-preserving transit, so the
+                // interface's references to itself
+                // (`then(...): Promise<TResult1 | TResult2>`) stay
+                // references to it. The apparent surface supplies members
+                // and signature carriers; their interiors are demanded only
+                // by a selected member or signature read.
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Shallow),
             )
         }
     }
@@ -181,11 +185,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let declaration = self.first_global_declaration(canonical, nominal.global_name())?;
         let whole_hash = self
-            .ctx
-            .shallow_file_state(declaration.canonical_id.as_ref())
-            .map_or(crate::semantic_query::HashValue::default(), |state| {
-                state.whole_hash
-            });
+            .transaction_indexed_record(declaration.canonical_id.as_ref())
+            .map(|indexed| indexed.whole_hash)
+            .unwrap_or_default();
         Some(crate::semantic_query::DeclIdentity {
             canonical_id: declaration.canonical_id,
             owner: declaration.owner,
@@ -519,9 +521,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 path,
                 context,
             } => SemanticQueryKey::ProjectPath {
+                // The surface `Self::global_wrapper_surface` reads.
                 base: scoped(
                     base,
-                    ProjectionReductionContext::published(ProjectionMode::Shallow),
+                    ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Shallow,
+                    ),
                 ),
                 path,
                 context,

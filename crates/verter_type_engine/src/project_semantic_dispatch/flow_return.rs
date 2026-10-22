@@ -6446,6 +6446,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // The slice-content clause does not model `<const T>`;
                 // const-ness reaches declarations through the prepared
                 // fact path, never through a body slice.
+                original: None,
                 is_const: false,
             });
         }

@@ -12,8 +12,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::super::dispatch_txn::SessionId;
 use crate::semantic_query::{
     ConstParamPolicy, ContextualInferenceMode, IndexSignature, InferBinding, InferableParamSetId,
-    InferenceCandidatePriority, InferenceContextKey, InferencePassKind, NoInferMask,
-    SemanticNodeId, SurfaceMember, TupleElement, VariancePhase,
+    InferenceCandidatePriority, InferenceContextKey, InferencePassKind, InferenceVerdictUse,
+    NoInferMask, SemanticNodeId, SurfaceMember, TupleElement, VariancePhase,
 };
 
 /// Lifecycle of an in-flight inference session.
@@ -227,9 +227,18 @@ impl InferenceSessionSetup {
                 no_infer_mask,
                 const_param_policy,
                 contextual_inference_mode,
+                verdict_use: InferenceVerdictUse::Decides,
             },
             infos,
         }
+    }
+
+    /// The same setup for a session whose relations are run for their
+    /// candidates alone ([`InferenceVerdictUse::CandidatesOnly`]).
+    #[must_use]
+    pub fn reading_candidates_only(mut self) -> Self {
+        self.context_key.verdict_use = InferenceVerdictUse::CandidatesOnly;
+        self
     }
 
     pub(crate) fn context_key(&self) -> &InferenceContextKey {
@@ -279,6 +288,9 @@ pub struct InferenceSession {
     /// Per-parameter candidate state.
     infos: Vec<InferenceInfo>,
     info_positions: FxHashMap<SemanticNodeId, usize>,
+    /// A recursive inference edge was encountered in the current walk.
+    /// Deposits alone cannot establish a complete fixed-member match.
+    pub(crate) inference_circularity: bool,
     /// The journals of each reverse mapping in flight, innermost last.
     reverse_frames: Vec<ReverseProjectionState>,
     /// Immutable fixed bindings retained across staging and commit.
@@ -317,6 +329,7 @@ impl InferenceSession {
             setup,
             infos,
             info_positions,
+            inference_circularity: false,
             reverse_frames: Vec::new(),
             staged_bindings: None,
             opened_at_depth: 0,
@@ -395,6 +408,20 @@ impl InferenceSession {
             recovered_len: reverse.map_or(0, |state| state.recovered.len()),
             reverse_partial: reverse.is_some_and(|state| state.partial),
         }
+    }
+
+    /// Whether this attempt reached `param` at the caller's inference priority.
+    pub(crate) fn inferred_since(
+        &self,
+        checkpoint: &SessionCheckpoint,
+        param: SemanticNodeId,
+        priority: InferenceCandidatePriority,
+    ) -> bool {
+        self.info_positions.get(&param).is_some_and(|&position| {
+            self.infos[position].candidates[checkpoint.candidate_lens[position]..]
+                .iter()
+                .any(|candidate| candidate.priority == priority)
+        })
     }
 
     /// Truncate every parameter's candidate list back to `checkpoint`
@@ -655,12 +682,6 @@ impl InferenceSession {
     /// Whether this session infers `param_node`.
     pub(crate) fn infers(&self, param_node: SemanticNodeId) -> bool {
         self.info_positions.contains_key(&param_node)
-    }
-
-    /// How many candidates the session's parameters hold: a relation that
-    /// raised it made an inference.
-    pub(crate) fn candidate_total(&self) -> usize {
-        self.infos.iter().map(|info| info.candidates.len()).sum()
     }
 
     /// A contextual mapper fixes only the binders its argument reads, rather

@@ -1772,6 +1772,16 @@ fn encode_type_parameters(enc: &mut Recipe, type_parameters: &[TypeParamDecl]) {
             }
         }
         enc.bool(tp.is_const);
+        match &tp.original {
+            None => enc.u8(0),
+            Some(original) => {
+                enc.u8(1);
+                enc.str(&original.declaration.canonical_id);
+                encode_owner(enc, original.declaration.owner);
+                enc.str(&original.declaration.decl_name);
+                enc.u16(original.index);
+            }
+        }
     }
 }
 

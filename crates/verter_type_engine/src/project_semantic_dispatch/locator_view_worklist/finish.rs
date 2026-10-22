@@ -1518,6 +1518,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         default: parameter
                             .default
                             .map(|value| self.answer_member(projected(memo, value, context), context, inputs)),
+                        original: parameter.original.clone(),
                         is_const: parameter.is_const,
                     })
                     .collect();

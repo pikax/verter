@@ -25,6 +25,24 @@ fn nested(depth: usize, inner: &str) -> String {
 
 const BOX: &str = "interface Box<T> { v: T }\n";
 
+#[test]
+fn repeated_method_signatures_count_without_counting_finite_reference_descent() {
+    let source = "interface A<T> { next: A<T> }\ninterface B<T> { next: T }\n\
+        interface AM<T> { next(): AM<T> }\ninterface BM<T> { next(): T }\n";
+    let rows = [
+        ("[A<1>] extends [B<B<0>>] ? 1 : 0", "0"),
+        ("[A<1>] extends [B<B<B<0>>>] ? 1 : 0", "0"),
+        ("[AM<1>] extends [BM<BM<0>>] ? 1 : 0", "0"),
+        ("[AM<1>] extends [BM<BM<BM<0>>>] ? 1 : 0", "1"),
+        ("[AM<1>] extends [BM<BM<BM<BM<0>>>>] ? 1 : 0", "1"),
+    ];
+    let mut failures = mismatches(source, &rows);
+    for rows in [rows.to_vec(), rows.into_iter().rev().collect()] {
+        failures.extend(mismatches_in_one_host(source, &rows));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A nesting shape: a type nested `depth` levels around an inner type.
 type Shape = fn(usize, &str) -> String;
 

@@ -19,7 +19,7 @@
 //! the checker does; "wrong-but-clean" marks a lane answer published
 //! complete and undegraded.
 
-use super::differential_harness_tests::{Matrix, Read};
+use super::differential_harness_tests::{Matrix, Read, STRICT};
 
 /// Array and readonly array method calls and reads.
 const ARRAYS: &str = r##"
@@ -351,6 +351,7 @@ export async function pReturnPromise() { return p; }
 export async function pReturnValue() { return 1; }
 export function pThen() { return p.then((v) => "" + v); }
 export function pThenNoArg() { return p.then(); }
+export function pThenChain() { return p.then((n) => "" + n).then((s) => s.length > 0); }
 export function pCatch() { return p.catch(() => "e" as const); }
 export function pResolve() { return Promise.resolve("x"); }
 export function pResolveVoid() { return Promise.resolve(); }
@@ -416,34 +417,17 @@ export function rejectedExecutor() {
 
 /// Method calls on `Promise<number>`, `Map<string, number>` and `Set<string>`
 /// resolve through the instantiated interface: `p.then((v) => "" + v)` is
-/// `Promise<string>`, `p.then()` `Promise<number>`, `p.catch(() => "e" as
-/// const)` `Promise<number | "e">`, `m.get` `number | undefined`, `m.set` the
-/// map, `s.has` `boolean`, `s.add` the set.
-///
-/// What the lane gives:
-/// - `pThen`: the checker answers `Promise<string>`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `pThenNoArg`: the checker answers `Promise<number>`; the lane measured
-///   `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `pCatch`: the checker answers `Promise<number | "e">`; the lane measured
-///   `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `mGet`: the checker answers `number | undefined` (strict), `number`
-///   (strictNullChecks off), `number | undefined` (noImplicitAny off), `number`
-///   (both off); the lane measured `<opaque UnmodeledPosition>` degraded by
-///   UnrepresentableCallee.
-/// - `mSet`: the checker answers `Map<string, number>`; the lane measured
-///   `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `sHas`: the checker answers `boolean`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `sAdd`: the checker answers `Set<string>`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-
+/// `Promise<string>` — the callback typed by the function arm of the optional
+/// `onfulfilled` union — and chained again `Promise<boolean>`, `p.then()`
+/// `Promise<number>` (the interface's `Promise<…>` return is a reference to
+/// itself), `p.catch(() => "e" as const)` `Promise<number | "e">`, `m.get`
+/// `number | undefined`, `m.set` the map, `s.has` `boolean`, `s.add` the set.
 #[test]
-#[ignore = "a method call on an instantiated library generic interface resolves its signature"]
 fn a_method_call_on_a_library_generic_instance_resolves() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
     let mut failures = matrix.returns(&[
         ("pThen", "Promise<string>"),
+        ("pThenChain", "Promise<boolean>"),
         ("pThenNoArg", "Promise<number>"),
         ("pCatch", "Promise<number | \"e\">"),
         ("mSet", "Map<string, number>"),
@@ -487,22 +471,100 @@ fn promise_resolve_awaits_its_argument() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `Promise.all([p, "s"] as const)` is `Promise<[number, "s"]>` (a homomorphic
-/// mapped type over the tuple) and `Promise.race([p, pp])` is `Promise<string |
-/// number>`.
-///
-/// What the lane gives:
-/// - `pAll`: the checker answers `Promise<[number, "s"]>`; the lane measured
-///   `Promise<<unreduced mapped>>`.
-/// - `pRace`: the checker answers `Promise<string | number>`; the lane measured
-///   `Promise<Awaited<<unreduced indexed access>>>`.
+/// `Promise.race([p, pp])` is `Promise<string | number>`: `Awaited` over the
+/// tuple argument's element union.
 #[test]
-#[ignore = "Promise.all and Promise.race resolve their mapped and indexed return types"]
-fn promise_all_and_race_map_their_tuple_argument() {
+fn promise_race_awaits_its_tuple_arguments_elements() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[
-        ("pAll", "Promise<[number, \"s\"]>"),
-        ("pRace", "Promise<string | number>"),
+    let failures = matrix.returns(&[("pRace", "Promise<string | number>")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `Promise.all([p, "s"] as const)` is `Promise<[number, "s"]>`: a homomorphic
+/// mapped type over the tuple whose template applies `Awaited` to `T[P]`,
+/// each element read off the tuple before `Awaited` applies to it.
+#[test]
+fn promise_all_maps_its_tuple_argument() {
+    let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
+    let failures = matrix.returns(&[("pAll", "Promise<[number, \"s\"]>")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// References to the library's runtime globals infer and relate through the
+/// global declarations they refer to, as the checker's `Promise<T>` refers to
+/// its global interface: `Promise<infer U>` infers ONE layer (where `Awaited`
+/// unwraps every layer), `PromiseLike<infer U>` infers structurally through
+/// `then`, `Map<infer K, infer V>` and `Set<infer T>` read their arguments,
+/// and an object whose `then` returns `void` is no `PromiseLike`.
+/// TypeScript 7.0.2, all four settings alike.
+#[test]
+fn library_references_infer_through_their_global_declarations() {
+    let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
+    let failures = matrix.types(&[
+        (
+            "Promise<Promise<1>> extends Promise<infer U> ? U : 0",
+            "Promise<1>",
+        ),
+        ("Awaited<Promise<Promise<1>>>", "1"),
+        (
+            "Promise<Promise<1>> extends PromiseLike<infer U> ? U : 0",
+            "Promise<1>",
+        ),
+        (
+            "Map<string, number[]> extends Map<infer K, infer V> ? [K, V] : never",
+            "[string, number[]]",
+        ),
+        ("Set<\"a\"> extends Set<infer T> ? T : never", "\"a\""),
+        (
+            "{ then(f: (v: 2) => void): void } extends PromiseLike<infer U> ? U : 0",
+            "0",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A program's global augmentation of the library's `Promise` is part of the
+/// declaration `Promise<1>` refers to: `[Promise<1>] extends [{ extra: 1 }]`
+/// is `2` until a declaration file augments `interface Promise<T> { extra: T
+/// }`, then `1` (TypeScript 7.0.2) — the answer read before the augmentation
+/// does not survive its upsert.
+#[test]
+fn a_global_promise_augmentation_reaches_the_library_reference() {
+    let probe = "[Promise<1>] extends [{ extra: 1 }] ? 1 : 2";
+    let before = [(Read::Type(probe), vec!["2"])];
+    let matrix = Matrix::new(PROMISES_AND_COLLECTIONS)
+        .lib(GLOBALS_LIB)
+        .settings(&[STRICT]);
+    let host = matrix.host(&before);
+    let verdict = &matrix.verdicts_on(&host, &before)[0][0];
+    assert!(verdict.matched, "before the augmentation: {}", verdict.lane);
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        &format!("{}/augment.d.ts", STRICT.root),
+        "interface Promise<T> { extra: T }\n",
+        crate::LanguageRegistry::global()
+            .classify_static("augment.d.ts")
+            .static_resolution(),
+    );
+    let after = [(Read::Type(probe), vec!["1"])];
+    let verdict = &matrix.verdicts_on(&host, &after)[0][0];
+    assert!(verdict.matched, "after the augmentation: {}", verdict.lane);
+}
+
+/// A module's own `interface Promise<T>` shadows the library's: `Promise<1>`
+/// names it, so it is no `PromiseLike`, `Awaited` leaves it as it is, and
+/// `Promise<infer U>` infers through the module's declaration. TypeScript
+/// 7.0.2, all four settings alike.
+#[test]
+fn a_module_promise_shadows_the_library_promise() {
+    let matrix = Matrix::new("interface Promise<T> { v: T }\n").lib(GLOBALS_LIB);
+    let failures = matrix.types(&[
+        ("[Promise<1>] extends [PromiseLike<number>] ? 1 : 2", "2"),
+        ("Awaited<Promise<1>>", "Promise<1>"),
+        (
+            "Promise<Promise<1>> extends Promise<infer U> ? U : 0",
+            "Promise<1>",
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -540,5 +602,80 @@ fn a_tuple_wrapper_reads_an_optional_element_with_its_undefined() {
             "string | number",
         ),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Two thenable interfaces whose `then` mirrors the library `Promise`'s:
+/// its callback parameters are unions with `undefined` and `null` whose
+/// returns name the interface again under the method's own defaulted type
+/// parameters.
+pub(super) const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PL<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PL<TResult2>) | undefined | null): PL<TResult1 | TResult2>; }\ninterface PP2<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PP2<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PP2<TResult2>) | undefined | null): PP2<TResult1 | TResult2>; }\n";
+
+/// Cyclic authored and library thenables complete through shared inference.
+/// The library reference infers one layer and accepts the fixed thenable;
+/// the two authored interfaces keep the checker's negative result.
+/// `Promise`'s `then` callback is its own declaration, not `PromiseLike`'s,
+/// so the inference into it is not circular; `PromiseLike` mirrors `PL`
+/// declaration for declaration and stays negative like the authored pair.
+/// Every row asserts the answer, not merely
+/// termination. The named-alias controls also run on a 1 MiB stack.
+#[test]
+fn a_mirrored_thenable_relation_terminates() {
+    let rows = [
+        (Read::Type("Promise<1> extends PL<infer U> ? U : 0"), "1"),
+        (Read::Type("[PP2<1>] extends [PL<1>] ? 1 : 0"), "0"),
+        (Read::Type("[Promise<1>] extends [PL<1>] ? 1 : 0"), "1"),
+        (Read::Type("[PromiseLike<1>] extends [PL<1>] ? 1 : 0"), "0"),
+    ];
+    let matrix = Matrix::new(MIRRORED_THENABLE)
+        .lib(GLOBALS_LIB)
+        .settings(&[STRICT]);
+    let failures = matrix.same(&rows);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn unrelated_generic_references_remain_naked_union_candidates() {
+    let matrix = Matrix::new(
+        "interface Box<T> { x: number }\n\
+         interface Th<T> { then(cb: (v: T) => void): void }\n\
+         declare const v: string | Box<1>;\n\
+         declare function h<T>(x: T | Th<T>): T;\n\
+         declare function f<T>(x: T | PromiseLike<T>): T;\n\
+         export function authored() { return h(v); }\n\
+         export function library() { return f(v); }\n",
+    )
+    .lib(GLOBALS_LIB)
+    .settings(&[STRICT]);
+    let failures = matrix.types(&[(
+        "(string | Box<1>) extends Th<infer T> | infer T ? T : 0",
+        "string | Box<1>",
+    )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let failures = matrix.returns(&[
+        ("authored", "string | Box<1>"),
+        ("library", "string | Box<1>"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A library `Promise` beside a plain member, against an authored cyclic
+/// thenable and its naked variable: the `Promise` infers its payload through
+/// the thenable, and only the plain member reaches the variable, so the
+/// variable is the payload union, never the `Promise` itself.
+#[test]
+fn a_promise_member_infers_its_payload_beside_the_naked_union_remainder() {
+    let source = format!(
+        "{MIRRORED_THENABLE}declare const v: Promise<1> | 2;\n\
+         declare function resolve<T>(x: T | PL<T>): T;\n\
+         export function resolved() {{ return resolve(v); }}\n"
+    );
+    let matrix = Matrix::new(&source).lib(GLOBALS_LIB).settings(&[STRICT]);
+    let failures = matrix.types(&[(
+        "(Promise<1> | 2) extends PL<infer U> | infer U ? U : 0",
+        "1 | 2",
+    )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let failures = matrix.returns(&[("resolved", "1 | 2")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

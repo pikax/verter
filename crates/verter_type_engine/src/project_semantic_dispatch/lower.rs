@@ -3174,6 +3174,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 reduction_context,
                             )
                         }),
+                        original: None,
                         is_const: tp.is_const,
                     })
                     .collect();

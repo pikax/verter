@@ -599,6 +599,7 @@ fn inference_context_heap_bytes(context: &InferenceContextKey, aliases: &mut Ali
         no_infer_mask,
         const_param_policy,
         contextual_inference_mode,
+        verdict_use,
     } = context;
     inferable_params.key_heap_bytes(aliases)
         + inline(variance_phase)
@@ -607,6 +608,7 @@ fn inference_context_heap_bytes(context: &InferenceContextKey, aliases: &mut Ali
         + inline(no_infer_mask)
         + inline(const_param_policy)
         + inline(contextual_inference_mode)
+        + inline(verdict_use)
 }
 
 /// The payload an interned relation record holds.
