@@ -281,7 +281,12 @@ pub fn check_gates(index: u32, e: &GateEvidence) -> Vec<SoakFailure> {
 /// The depth bound has no larger profile: a shallow equivalent heals it, and
 /// a request that spent before asking, a different operation profile, a
 /// sibling and a missing input each compute rather than inherit a refusal.
-pub fn check_refusal(index: u32, e: &RefusalEvidence) -> Vec<SoakFailure> {
+pub fn check_refusal(
+    index: u32,
+    variant: RefusalVariant,
+    entry_spends: [u32; 2],
+    e: &RefusalEvidence,
+) -> Vec<SoakFailure> {
     let mut out = Vec::new();
     let mut check = |holds: bool, detail: &str| {
         if !holds {
@@ -291,7 +296,11 @@ pub fn check_refusal(index: u32, e: &RefusalEvidence) -> Vec<SoakFailure> {
             });
         }
     };
-    let class = if e.variant.is_depth() {
+    check(
+        e.variant == variant,
+        "the refusal evidence variant differs from the frozen action variant",
+    );
+    let class = if variant.is_depth() {
         AnswerClass::ConnectedDepth
     } else {
         AnswerClass::OperationProfile
@@ -365,6 +374,41 @@ pub fn check_refusal(index: u32, e: &RefusalEvidence) -> Vec<SoakFailure> {
                     all(DemandRole::Sibling, 1, &sibling_exact),
                     "a sibling of the refusing component inherited an incomplete answer",
                 );
+            } else {
+                check(
+                    entry_spends[0] > 0
+                        && entry_spends[1] > 0
+                        && entry_spends[0] != entry_spends[1],
+                    "the entry-allowance control needs two distinct non-isolated spends",
+                );
+                let first = e.of(DemandRole::EntrySealed).next();
+                check(
+                    all(DemandRole::EntrySealed, 1, &|d| {
+                        d.answer.class == class
+                            && computed(d)
+                            && d.entry_operations == Some(u64::from(entry_spends[0]))
+                    }),
+                    "the first entry allowance did not seal a measured operation refusal",
+                );
+                check(
+                    all(DemandRole::OtherAllowance, 1, &|d| {
+                        d.answer.class == class
+                            && computed(d)
+                            && d.entry_operations == Some(u64::from(entry_spends[1]))
+                    }),
+                    "a different entry allowance inherited the sealed refusal",
+                );
+                if let Some(first) = first {
+                    for role in [DemandRole::EntryRepeat, DemandRole::EntryRestored] {
+                        check(
+                            all(role, 1, &|d| {
+                                replayed(d, &first.answer)
+                                    && d.entry_operations == first.entry_operations
+                            }),
+                            "the original entry allowance did not replay its eligible refusal",
+                        );
+                    }
+                }
             }
         }
         RefusalVariant::Edited => {
@@ -779,6 +823,17 @@ pub fn check_pressure_outcomes(
             )),
         }
         let pressure = surge.pressure.as_ref();
+        if pressure
+            .and_then(|p| p.live_digests.as_ref())
+            .is_none_or(|live| {
+                live != &surge.digests || shape.is_none_or(|s| live.len() != s.concurrency as usize)
+            })
+        {
+            fail(format!(
+                "surge {} did not keep every delivered result live through the population sample",
+                surge.index
+            ));
+        }
         let attributed = pressure
             .and_then(|p| p.active.as_ref())
             .and_then(|a| a.attributed_peak);
@@ -989,6 +1044,25 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
         };
         let first = record.digests.first().cloned().unwrap_or_default();
         let expect = |want: Outcome| record.outcome == want;
+        if let Target::Refusal {
+            variant,
+            entry_spends,
+            ..
+        } = &action.target
+        {
+            match &record.refusal {
+                Some(evidence) => failures.extend(check_refusal(
+                    record.index,
+                    *variant,
+                    *entry_spends,
+                    evidence,
+                )),
+                None => failures.push(wrong(
+                    record.index,
+                    "the refusal action recorded no observations".into(),
+                )),
+            }
+        }
         // Every result the action's target promises is present.
         let promised = match &action.target {
             Target::Overlap { threads, .. } => Some(*threads as usize),
@@ -1057,21 +1131,8 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
                         "the default profile did not heal the narrower profile's answer".into(),
                     ));
                 }
-                match &record.refusal {
-                    Some(evidence) => failures.extend(check_refusal(record.index, evidence)),
-                    None => failures.push(wrong(
-                        record.index,
-                        "the healing action recorded no refusal observations".into(),
-                    )),
-                }
             }
-            RefusalRepeat => match &record.refusal {
-                Some(evidence) => failures.extend(check_refusal(record.index, evidence)),
-                None => failures.push(wrong(
-                    record.index,
-                    "the refusal action recorded no observations".into(),
-                )),
-            },
+            RefusalRepeat => {}
             WarmDemand | PostEditDemand => {
                 let answered = record.digests.last().cloned().unwrap_or_default();
                 let before = query.as_ref().and_then(|key| cold.get(key));

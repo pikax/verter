@@ -102,7 +102,9 @@ written summary: action, result and publication inventories, the per-class
 answer rules, sampling at least every `sampleEvery` actions, the envelope the
 first `envelopeActions` actions set, and the drain to baseline (object
 counts, content pins and retained account bytes at the host's close route;
-pinned account bytes and store storage once the host is dropped). Overlapping
+pinned account bytes and store storage once the host is dropped). Ordinary
+action samples wait on the public queued-release completion boundary; live
+external readers remain charged. Overlapping
 cold demands are scheduled by the flight rendezvous and judged by one shared
 producer, a subscriber registered on its flight and a positive `joined_waits`
 delta. A cancellation's uncancelled retry is materialized through its own
@@ -127,6 +129,12 @@ worker; wall time, peak RSS and the process-tree peak are `benchM3Only`
 cells. A soak manifest carries `name`, `kind`, `description`, `modes`,
 `noise`, `soak` and `requiredCells` (`mode`, `metrics`, `benchM3Only`).
 
+The surge holds every delivered reader, including uncached results, until
+after its population and ACTIVE-window samples. Its `liveDigests` re-read
+those payloads at the sample and must match the delivered inventory and
+registered concurrency. The bounded oversized-entry test exercises the same
+holder with the frozen oversized source and two small retained controls.
+
 Candidate churn records the demanded slot's admission tokens and declared
 cap: an old token leaving while a new one enters at the cap proves displacement.
 An unchanged aggregate candidate count alone does not. Concurrent refusal
@@ -135,7 +143,12 @@ can prove a replay without recomputation. A demand's work is the host's
 component-meta producer entries (early returns included) and its resolver
 request results, read through the host's narrow work reader; graph misses or
 queries never stand in for either. Paid-context controls also record and
-check their equal entry allowance.
+check their equal entry allowance. Separate operation-refusal controls hold
+the root, profile and empty paid context fixed while changing only a positive
+entry spend. They require computation at the changed allowance and retained
+replay at the original allowance. Both entry spends and the alternate depth
+profile are serialized in the action inventory and hashed; refusal evidence
+must match the manifest action's variant.
 
 | Field                             | Meaning                                                                                                                                                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

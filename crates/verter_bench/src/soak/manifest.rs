@@ -140,6 +140,10 @@ pub const REFUSAL_OP_BUDGET: usize = 20;
 /// Mapped-type props of the refusal component: more than the refusal
 /// allowance covers on their own.
 pub const REFUSAL_PROPS: u32 = 16;
+/// An alternate profile, still sufficient to reach the fixed depth bound.
+pub const OTHER_REFUSAL_PROFILE: usize = 4_000_000;
+/// Two non-isolated entries with an identical empty paid set.
+pub const REFUSAL_ENTRY_SPENDS: [u32; 2] = [1, 2];
 /// Sources one publication-gate action holds gates on at once: enough that
 /// the gate registry grows past its retained floor and must shrink back.
 pub const GATE_SOURCES: usize = 128;
@@ -357,6 +361,8 @@ pub enum Target {
         variant: RefusalVariant,
         op_budget: usize,
         props: u32,
+        other_profile: usize,
+        entry_spends: [u32; 2],
     },
     /// `sources` carrier sources whose membership gates the action drives.
     Gates { sources: usize },
@@ -626,12 +632,16 @@ fn tranche_template(mode: Mode, tranche: u32) -> Vec<(LifecycleClass, Target)> {
                 variant,
                 op_budget: 0,
                 props: DEPTH_LEVELS,
+                other_profile: OTHER_REFUSAL_PROFILE,
+                entry_spends: REFUSAL_ENTRY_SPENDS,
             }
         } else {
             Target::Refusal {
                 variant,
                 op_budget: REFUSAL_OP_BUDGET,
                 props: REFUSAL_PROPS,
+                other_profile: OTHER_REFUSAL_PROFILE,
+                entry_spends: REFUSAL_ENTRY_SPENDS,
             }
         };
         (class, target)

@@ -89,6 +89,75 @@ fn smoke_pressure_passes_and_drains_to_baseline() {
     assert_smoke_passes(Mode::Pressure);
 }
 
+#[test]
+fn refusal_configuration_changes_the_workload_identity() {
+    let original = Manifest::generate(Mode::Normal, 1);
+    for change_profile in [true, false] {
+        let mut changed = original.clone();
+        let action = changed
+            .actions
+            .iter_mut()
+            .find(|a| {
+                matches!(
+                    a.target,
+                    Target::Refusal {
+                        variant: RefusalVariant::DepthControls,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let Target::Refusal {
+            other_profile,
+            entry_spends,
+            ..
+        } = &mut action.target
+        else {
+            unreachable!()
+        };
+        if change_profile {
+            *other_profile += 1;
+        } else {
+            entry_spends[1] += 1;
+        }
+        assert_ne!(
+            original.digest(),
+            changed.digest(),
+            "every executed refusal configuration must be frozen"
+        );
+    }
+}
+
+#[test]
+fn surge_samples_include_every_live_delivery() {
+    let (summary, failures) = smoke(Mode::Pressure);
+    assert!(failures.is_empty(), "{failures:#?}");
+    let surge = summary
+        .records
+        .iter()
+        .find(|r| r.class == LifecycleClass::PressureSurge)
+        .unwrap();
+    assert_eq!(
+        surge.pressure.as_ref().unwrap().live_digests.as_ref(),
+        Some(&surge.digests)
+    );
+    for live in [
+        None,
+        Some(surge.digests[..2].to_vec()),
+        Some(vec!["wrong".into(); 3]),
+    ] {
+        let mut doctored = summary.clone();
+        record_of(&mut doctored, LifecycleClass::PressureSurge)
+            .pressure
+            .as_mut()
+            .unwrap()
+            .live_digests = live;
+        assert!(verify_summary(Mode::Pressure, 1, &doctored).iter().any(
+            |f| matches!(f, SoakFailure::PressureNotExercised { detail } if detail.contains("live"))
+        ));
+    }
+}
+
 /// One cold demand, then repeated demand/close cycles on a live host, return
 /// every drained figure to the baseline while the host stays reusable.
 #[test]
@@ -121,10 +190,8 @@ fn repeated_demand_close_cycles_return_to_baseline_on_a_live_host() {
         host.evict(&id);
         host.remove(&id).expect("the module was open");
         host.close();
-        host.release_completion()
-            .wait()
-            .expect("the parse workers apply the close's releases");
-        let closed = counts(&host);
+        let closed = verter_bench::soak::run::settled_counts(&host)
+            .expect("the action sample waits for queued parse releases");
         let leaks = verter_audit::soak::drain_violations(
             &baseline,
             &closed,
@@ -566,6 +633,7 @@ fn demand(role: DemandRole, answer: Answer, work: u64) -> Demand {
         answer,
         recomputes: Some(work),
         producer_runs: Some(work),
+        entry_operations: None,
     }
 }
 
@@ -577,12 +645,25 @@ fn refusal(variant: RefusalVariant) -> RefusalEvidence {
     let deep = answer("deep", ConnectedDepth);
     let sibling = answer("sibling", Complete);
     let demands = match variant {
-        RefusalVariant::Sealed => vec![
-            demand(Sealed, sealed.clone(), 3),
-            demand(Repeat, sealed.clone(), 0),
-            demand(Repeat, sealed.clone(), 0),
-            demand(Oracle, sealed, 3),
-        ],
+        RefusalVariant::Sealed => {
+            let mut demands = vec![
+                demand(Sealed, sealed.clone(), 3),
+                demand(Repeat, sealed.clone(), 0),
+                demand(Repeat, sealed.clone(), 0),
+                demand(Oracle, sealed.clone(), 3),
+            ];
+            for (role, operations, work) in [
+                (EntrySealed, 1, 3),
+                (EntryRepeat, 1, 0),
+                (OtherAllowance, 2, 3),
+                (EntryRestored, 1, 0),
+            ] {
+                let mut entry = demand(role, sealed.clone(), work);
+                entry.entry_operations = Some(operations);
+                demands.push(entry);
+            }
+            demands
+        }
         RefusalVariant::Edited => {
             let mut out = vec![demand(Sealed, sealed, 3)];
             for edit in 1..=3 {
@@ -643,13 +724,18 @@ fn refusal(variant: RefusalVariant) -> RefusalEvidence {
 }
 
 fn refusal_details(evidence: &RefusalEvidence) -> Vec<String> {
-    check_refusal(0, evidence)
-        .into_iter()
-        .map(|f| match f {
-            SoakFailure::RefusalBroken { detail, .. } => detail,
-            other => panic!("unexpected failure {other:?}"),
-        })
-        .collect()
+    check_refusal(
+        0,
+        evidence.variant,
+        verter_bench::soak::manifest::REFUSAL_ENTRY_SPENDS,
+        evidence,
+    )
+    .into_iter()
+    .map(|f| match f {
+        SoakFailure::RefusalBroken { detail, .. } => detail,
+        other => panic!("unexpected failure {other:?}"),
+    })
+    .collect()
 }
 
 fn broken(variant: RefusalVariant, plant: impl FnOnce(&mut RefusalEvidence)) -> Vec<String> {
@@ -669,6 +755,33 @@ fn refusal_rules_fail_each_broken_property() {
         );
     }
     let fails = |details: Vec<String>, what: &str| assert!(!details.is_empty(), "{what}");
+    for role in [
+        DemandRole::EntrySealed,
+        DemandRole::EntryRepeat,
+        DemandRole::OtherAllowance,
+        DemandRole::EntryRestored,
+    ] {
+        fails(
+            broken(RefusalVariant::Sealed, |e| {
+                e.demands.retain(|d| d.role != role);
+            }),
+            "entry-allowance demand missing",
+        );
+        fails(
+            broken(RefusalVariant::Sealed, |e| {
+                let d = e.demands.iter_mut().find(|d| d.role == role).unwrap();
+                d.entry_operations = Some(0);
+            }),
+            "entry-allowance control accidentally isolated",
+        );
+        fails(
+            broken(RefusalVariant::Sealed, |e| {
+                let d = e.demands.iter_mut().find(|d| d.role == role).unwrap();
+                d.recomputes = d.recomputes.map(|n| u64::from(n == 0));
+            }),
+            "entry-allowance reuse/computation reversed",
+        );
+    }
     // An absent symbol or a generic incomplete answer never stands in for a
     // typed refusal, and neither class stands in for the other.
     for (variant, class) in [
@@ -1152,6 +1265,7 @@ fn surge(
             memo_candidate_cap: 0,
             refusals_active: 0,
             retained_results: Some(u64::from(modules) / 2),
+            live_digests: Some((0..modules).map(|i| format!("d{i}")).collect()),
             surge_counts: Some(SoakCounts {
                 live_artifacts: shape.live_artifacts_max,
                 registered_sources: shape.registered_sources_max,
@@ -1669,6 +1783,24 @@ fn summary_judgments_fail_closed_on_doctored_evidence() {
             _ => false,
         })
     };
+    let wrong_variant = judged(&|s| {
+        let record = s
+            .records
+            .iter_mut()
+            .find(|r| {
+                r.refusal
+                    .as_ref()
+                    .is_some_and(|e| e.variant == RefusalVariant::DepthSealed)
+            })
+            .unwrap();
+        record.refusal = Some(refusal(RefusalVariant::Sealed));
+    });
+    assert!(
+        wrong_variant.iter().any(|f| matches!(
+            f, SoakFailure::RefusalBroken { detail, .. } if detail.contains("variant")
+        )),
+        "{wrong_variant:#?}"
+    );
     // A churn whose candidate count never grows admitted nothing; one that
     // never stops growing displaced nothing.
     for trace in [
@@ -1779,6 +1911,8 @@ fn concurrent_refusal_work_is_explicitly_unmeasured() {
         verter_bench::soak::manifest::REFUSAL_OP_BUDGET,
         0,
         verter_bench::soak::manifest::REFUSAL_PROPS,
+        verter_bench::soak::manifest::OTHER_REFUSAL_PROFILE,
+        verter_bench::soak::manifest::REFUSAL_ENTRY_SPENDS,
     );
     let concurrent: Vec<_> = observed
         .demands
@@ -1803,38 +1937,19 @@ fn concurrent_refusal_work_is_explicitly_unmeasured() {
 /// (not for aggregate pressure) and is still delivered complete.
 #[test]
 fn the_oversized_surge_component_exceeds_the_entry_cap_alone() {
-    use std::sync::Arc;
-    use verter_bench::soak::fixtures::surge_source;
     use verter_bench::soak::manifest::OVERSIZED_PROPS;
-    use verter_session::{HostConfig, UpsertRequest, VerterHost};
-    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
     let _serial = serial();
-    let workspace: Arc<dyn WorkspaceAccess> =
-        Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
-    let host = VerterHost::new(HostConfig::default(), workspace);
-    let before = host.retention_snapshot();
-    let id = "/w/oversized.vue".to_string();
-    let _ = host
-        .upsert(UpsertRequest {
-            canonical_id: Some(id.clone()),
-            input_id: id.clone(),
-            source: Arc::from(surge_source(0, 0, OVERSIZED_PROPS).as_str()),
-            file_language: verter_session::LanguageRegistry::global()
-                .classify_static(&id)
-                .static_resolution(),
-            aliases: Vec::new(),
-        })
-        .expect("an upsert");
-    let delivery = host.get_component_meta(&id);
-    let after = host.retention_snapshot();
-    assert!(delivery.as_ref().is_some_and(|d| d.is_complete()));
-    assert!(after.refusals_oversized > before.refusals_oversized);
-    assert_eq!(after.refusals_pressure, before.refusals_pressure);
-    drop(delivery);
-    host.close();
-    host.release_completion().wait().expect("release boundary");
+    // One genuinely oversized result plus two tiny retained controls use the
+    // same holder and observation path as both registered surge shapes.
+    let record = verter_bench::soak::run::run_surge(0, (3, 1, OVERSIZED_PROPS));
+    assert_eq!(record.outcome, Outcome::Value);
+    assert!(record.refusals_oversized.is_some_and(|n| n > 0));
+    assert_eq!(record.refusals_pressure, Some(0));
+    assert_eq!(record.digests.len(), 3);
+    let pressure = record.pressure.as_ref().unwrap();
+    assert!(pressure.retained_results.is_some_and(|n| n < 3));
+    assert_eq!(pressure.live_digests.as_ref(), Some(&record.digests));
 }
-
 /// Two deliveries that keep every prop name and cause but change one prop's
 /// type differ in their digest; the answer class alone would not tell them
 /// apart.

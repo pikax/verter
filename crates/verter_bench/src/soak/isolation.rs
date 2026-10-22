@@ -276,6 +276,39 @@ impl Rig {
         self.demand_of(tranche, name)
     }
 
+    /// The same profile and empty paid set, entered after a measured number
+    /// of plain operation charges. Both positive spends are non-isolated;
+    /// no semantic query runs before the refuser, so no paid identity differs.
+    #[must_use]
+    pub fn demand_with_entry_spend(
+        &self,
+        tranche: u32,
+        name: &str,
+        op_budget: usize,
+        spend: u32,
+    ) -> (Answer, u64) {
+        let file = isolation_file(tranche, name);
+        let _request =
+            RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+                0,
+                Arc::from(file.as_str()),
+                RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                op_budget,
+            ));
+        let budget = current_request_budget().expect("the installed request owns its budget");
+        for _ in 0..spend {
+            assert!(
+                !budget.check_projection_op_count(),
+                "entry spend fits the profile"
+            );
+        }
+        let operations = budget.projection_ops_executed_count() as u64;
+        (self.demand_of(tranche, name), operations)
+    }
+
     /// Demand `name`'s component metadata inside a request that already
     /// spent a projection operation before it asked: a request that is not
     /// an isolated root.

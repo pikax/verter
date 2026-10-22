@@ -36,9 +36,6 @@ const SIBLING: &str = "sibling.vue";
 const EXTRA: &str = "extra.ts";
 /// The larger profile: the shipped projection-operation allowance.
 const LARGE_PROFILE: usize = 0;
-/// A different operation profile than the shipped one, still far above what
-/// the depth fixture spends.
-const OTHER_PROFILE: usize = 4_000_000;
 /// Aliases of the shallow equivalent that heals a depth refusal.
 const SHALLOW_LEVELS: u32 = 2;
 
@@ -105,6 +102,14 @@ impl RefusalVariant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DemandRole {
+    /// An operation refusal entered with the first nonzero spend.
+    EntrySealed,
+    /// The eligible repeat at the same entry allowance.
+    EntryRepeat,
+    /// The same root/profile/paid set with a different nonzero entry spend.
+    OtherAllowance,
+    /// The original entry allowance after the other allowance ran.
+    EntryRestored,
     /// The first demand of the refusing component.
     Sealed,
     /// The same demand again.
@@ -154,6 +159,9 @@ pub struct Demand {
     /// single-attempt retained hit (`resolver_node_cache_misses`), with the
     /// same attribution rule.
     pub producer_runs: Option<u64>,
+    /// Measured at entry for the allowance-only controls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_operations: Option<u64>,
 }
 
 /// What one refusal action observed.
@@ -186,6 +194,7 @@ impl Driver<'_> {
             answer: answer.clone(),
             recomputes: Some(self.rig.recomputes() - recomputes),
             producer_runs: Some(self.rig.producer_runs() - producers),
+            entry_operations: None,
         });
         answer
     }
@@ -193,6 +202,21 @@ impl Driver<'_> {
     fn demand(&mut self, role: DemandRole, name: &str) -> Answer {
         let tranche = self.tranche;
         self.measure(role, |rig| rig.demand_of(tranche, name))
+    }
+
+    fn entry_demand(&mut self, role: DemandRole, op_budget: usize, spend: u32) {
+        let tranche = self.tranche;
+        let mut operations = None;
+        self.measure(role, |rig| {
+            let (answer, measured) =
+                rig.demand_with_entry_spend(tranche, REFUSER, op_budget, spend);
+            operations = Some(measured);
+            answer
+        });
+        self.demands
+            .last_mut()
+            .expect("a measured demand")
+            .entry_operations = operations;
     }
 }
 
@@ -235,6 +259,8 @@ pub fn run(
     op_budget: usize,
     tranche: u32,
     props: u32,
+    other_profile: usize,
+    entry_spends: [u32; 2],
 ) -> (RefusalEvidence, Vec<String>) {
     let tag = format!("t{tranche:03}");
     let rig = Rig::new(op_budget);
@@ -249,6 +275,10 @@ pub fn run(
         RefusalVariant::Sealed => {
             d.demand(DemandRole::Sealed, REFUSER);
             d.demand(DemandRole::Repeat, REFUSER);
+            d.entry_demand(DemandRole::EntrySealed, op_budget, entry_spends[0]);
+            d.entry_demand(DemandRole::EntryRepeat, op_budget, entry_spends[0]);
+            d.entry_demand(DemandRole::OtherAllowance, op_budget, entry_spends[1]);
+            d.entry_demand(DemandRole::EntryRestored, op_budget, entry_spends[0]);
             d.demand(DemandRole::Repeat, REFUSER);
             published_elsewhere = oracle(&mut d, variant, op_budget, props, REFUSER);
         }
@@ -303,6 +333,7 @@ pub fn run(
                     answer,
                     recomputes: None,
                     producer_runs: None,
+                    entry_operations: None,
                 }));
         }
         RefusalVariant::DepthSealed => {
@@ -335,7 +366,7 @@ pub fn run(
                 });
             }
             d.measure(DemandRole::OtherProfile, |rig| {
-                rig.demand_under_profile(tranche, DEEP, OTHER_PROFILE)
+                rig.demand_under_profile(tranche, DEEP, other_profile)
             });
             d.demand(DemandRole::Sibling, SIBLING);
             d.demand(DemandRole::Repeat, DEEP);

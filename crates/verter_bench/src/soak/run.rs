@@ -262,6 +262,10 @@ pub struct PressureEvidence {
     /// every requested result was delivered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_results: Option<u64>,
+    /// Re-read from all held deliveries at the population sample, including
+    /// results refused retention. Prior request digests are not live readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_digests: Option<Vec<String>>,
     /// For a surge: the surge host's own populations and charges, read while
     /// every delivered result was still live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1124,11 +1128,9 @@ impl Engine {
     }
 
     /// Demand the component-meta result of every surge component on a fresh
-    /// host while all of them stay open, so their retained results are live
-    /// together in the process-wide account, then drop the host. The refusal
-    /// deltas are read while every result is still retained. A refused
-    /// retention still delivers a complete result.
-    fn surge(&self, tranche: u32, shape: (u32, u32, u32), record: &mut ActionRecord) {
+    /// host, holding every delivery through the live-population and ACTIVE
+    /// observations. Retention refusal must not shorten caller ownership.
+    fn surge(tranche: u32, shape: (u32, u32, u32), record: &mut ActionRecord) {
         let (modules, props, oversized_props) = shape;
         let workspace: Arc<dyn WorkspaceAccess> =
             Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
@@ -1138,6 +1140,7 @@ impl Engine {
         // idle while it runs, so detectable foreign work rejects it.
         let owner = host.mint_active_occupancy_owner();
         let window = host.open_active_occupancy_window(&owner);
+        let mut deliveries = Vec::with_capacity(modules as usize);
         record.outcome = Outcome::Value;
         for ordinal in 0..modules {
             let file = surge_file(tranche, ordinal);
@@ -1162,13 +1165,15 @@ impl Engine {
                 Some(delivery) => delivery_digest(delivery),
                 None => "absent".into(),
             });
-            if !delivery.is_some_and(|d| d.is_complete()) {
+            let Some(delivery) = delivery.filter(|d| d.is_complete()) else {
                 record.outcome = Outcome::Miss;
                 break;
-            }
+            };
+            deliveries.push(delivery);
         }
-        // Read while every delivered result the account admitted is still
-        // retained.
+        // Caller ownership keeps uncached deliveries alive too. Re-read
+        // every payload at this boundary before dropping any reader.
+        let live_digests = deliveries.iter().map(delivery_digest).collect();
         let after = host.retention_snapshot();
         let surge_counts = counts(&host);
         let retained_results = host.project_type_store().component_meta_results().len() as u64;
@@ -1190,9 +1195,11 @@ impl Engine {
             memo_candidate_cap: 0,
             refusals_active: after.refusals_active.saturating_sub(before.refusals_active),
             retained_results: Some(retained_results),
+            live_digests: Some(live_digests),
             surge_counts: Some(surge_counts),
             active: Some(ActiveEvidence::of(&report)),
         });
+        drop(deliveries);
         host.close();
         // The surge host's parse releases complete before it is dropped, so
         // none of its pins is still pending when the soak host is sampled.
@@ -1247,6 +1254,8 @@ impl Engine {
                     variant,
                     op_budget,
                     props,
+                    other_profile,
+                    entry_spends,
                 },
             ) => {
                 if action.class == ProfileHealing {
@@ -1259,8 +1268,14 @@ impl Engine {
                     );
                     observe(&mut record, demand(&self.host, &file, "A12", None));
                 }
-                let (evidence, published) =
-                    refusal::run(*variant, *op_budget, action.tranche, *props);
+                let (evidence, published) = refusal::run(
+                    *variant,
+                    *op_budget,
+                    action.tranche,
+                    *props,
+                    *other_profile,
+                    *entry_spends,
+                );
                 record.refusal = Some(evidence);
                 record.published = published;
             }
@@ -1526,6 +1541,7 @@ impl Engine {
                     memo_candidate_cap: cap,
                     refusals_active: after.refusals_active.saturating_sub(before.refusals_active),
                     retained_results: None,
+                    live_digests: None,
                     surge_counts: None,
                     active: None,
                 });
@@ -1555,7 +1571,7 @@ impl Engine {
                     oversized_props,
                 },
             ) => {
-                self.surge(
+                Self::surge(
                     action.tranche,
                     (*modules, *props, *oversized_props),
                     &mut record,
@@ -1646,6 +1662,24 @@ fn planned(manifest: &Manifest, mutation: Option<Mutation>) -> (Vec<Action>, Vec
     }
 }
 
+/// Exercise a pressure shape without the surrounding editor actions. The
+/// manifest verifier independently restricts which shapes count as workloads.
+#[must_use]
+pub fn run_surge(tranche: u32, shape: (u32, u32, u32)) -> ActionRecord {
+    let mut record = ActionRecord::new(0, LifecycleClass::PressureSurge);
+    Engine::surge(tranche, shape, &mut record);
+    record
+}
+
+/// Observe an ordinary action boundary only after queued releases finish.
+/// Live readers remain charged; release failure cannot yield a sample.
+pub fn settled_counts(host: &VerterHost) -> Result<SoakCounts, SoakError> {
+    host.release_completion()
+        .wait()
+        .map_err(|err| SoakError(format!("sample release completion: {err:?}")))?;
+    Ok(counts(host))
+}
+
 /// Run the soak: execute the manifest of `options`, sample retention and
 /// write the summary into `options.out_dir`. Returns the summary.
 pub fn run(options: &RunOptions) -> Result<SoakSummary, SoakError> {
@@ -1680,7 +1714,7 @@ pub fn run(options: &RunOptions) -> Result<SoakSummary, SoakError> {
             samples.push(Sample {
                 at: "action".into(),
                 actions_done: done,
-                counts: counts(&engine.host),
+                counts: settled_counts(&engine.host)?,
             });
         }
     }
