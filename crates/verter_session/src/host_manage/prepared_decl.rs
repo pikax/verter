@@ -3153,7 +3153,7 @@ impl VerterHost {
             })
         });
         if let Some(parse_fact) = indexed.and_then(|indexed| {
-            self.syntactic_route_interface_fact_for_indexed(canonical.id(), indexed)
+            self.syntactic_route_interface_fact_for_indexed(&canonical, indexed)
         }) {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);
             if seen.insert(fact.clone()) {
@@ -3196,11 +3196,7 @@ impl VerterHost {
             })
         });
         if let Some(parse_fact) = indexed.and_then(|indexed| {
-            self.syntactic_route_interface_fact_for_indexed_with_context(
-                ctx,
-                canonical.id(),
-                indexed,
-            )
+            self.syntactic_route_interface_fact_for_indexed_with_context(ctx, &canonical, indexed)
         }) {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);
             if seen.insert(fact.clone()) {

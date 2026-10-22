@@ -158,6 +158,15 @@ fn a_cloned_fact_charges_its_shared_canonical_once_per_alias_set() {
         arc_block_bytes(canonical.len())
     );
     assert!(alone.is_empty());
+    // The contract for a single-owner text: counted each time its owner is
+    // measured, as the `String` it replaced was. No charge measures one
+    // fact twice (see `FactMeasure`).
+    assert_eq!(
+        fact_heap_bytes(&fact, &mut alone),
+        arc_block_bytes(canonical.len()),
+        "a single-owner canonical is counted per pass"
+    );
+    assert!(alone.is_empty());
     // A collecting measurement charges the canonical inline: it is never
     // registered as a shared leaf of its own.
     let mut collecting = AliasSet::collecting();
@@ -216,6 +225,22 @@ fn an_empty_canonical_charges_nothing() {
     };
     assert_eq!(fact_heap_bytes(&empty, &mut AliasSet::new()), 0);
     assert_eq!(fact_heap_bytes(&empty, &mut AliasSet::collecting()), 0);
+    // Every shared-text path charges the static empty text nothing.
+    let shared_empty: Arc<str> = Arc::default();
+    assert_eq!(arc_str_bytes(&shared_empty, &mut AliasSet::new()), 0);
+    let mut collecting = AliasSet::collecting();
+    assert_eq!(arc_str_bytes(&shared_empty, &mut collecting), 0);
+    assert!(collecting.take_leaves().is_empty());
+    let list: Arc<[Arc<str>]> = Arc::from(vec![Arc::default(), Arc::default()]);
+    assert_eq!(
+        arc_str_list_bytes(&list, &mut AliasSet::new()),
+        arc_block_bytes(2 * std::mem::size_of::<Arc<str>>())
+    );
+    assert_eq!(
+        verter_retention::heap_size::footprint(&shared_empty).bytes,
+        0,
+        "a tree's raw empty text costs nothing"
+    );
     // An empty text built as its own allocation still costs its counters.
     let allocated = FactVersionRef::FileWholeHash {
         canonical_id: Arc::from(String::new()),

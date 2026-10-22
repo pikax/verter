@@ -3305,8 +3305,8 @@ impl VerterHost {
         }
 
         if let Some(artifacts) = self.current_content_pinned_artifacts(canonical) {
-            if let Some(parse_fact) = self
-                .syntactic_route_interface_fact_for_indexed(canonical_id.id(), &artifacts.indexed)
+            if let Some(parse_fact) =
+                self.syntactic_route_interface_fact_for_indexed(&canonical_id, &artifacts.indexed)
             {
                 let fact =
                     verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);

@@ -80,6 +80,38 @@ use crate::VerterHost;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
 
+/// The canonicals one compile-tier observation pass names: each allocated
+/// once, when a fact first names it, and shared by every fact after it, so a
+/// file several steps observe costs one allocation.
+#[derive(Default)]
+struct CanonicalTexts(smallvec::SmallVec<[Arc<str>; 8]>);
+
+impl CanonicalTexts {
+    /// The shared text of `canonical`, allocated the first time it is named.
+    fn text(&mut self, canonical: &str) -> Arc<str> {
+        match self.find(canonical) {
+            Some(text) => text,
+            None => self.keep(Arc::from(canonical)),
+        }
+    }
+
+    /// Share `canonical`'s existing allocation with the facts of this pass.
+    fn adopt(&mut self, canonical: &Arc<str>) {
+        if self.find(canonical).is_none() {
+            self.keep(Arc::clone(canonical));
+        }
+    }
+
+    fn find(&self, canonical: &str) -> Option<Arc<str>> {
+        self.0.iter().find(|text| ***text == *canonical).cloned()
+    }
+
+    fn keep(&mut self, text: Arc<str>) -> Arc<str> {
+        self.0.push(Arc::clone(&text));
+        text
+    }
+}
+
 /// Observe the compile-tier fact-dependency set for a single SFC
 /// cold compute and route every observation through the active
 /// tracer.
@@ -107,18 +139,17 @@ pub(crate) fn observe_compile_tier_dependencies(
     //    file). Adding / removing the binding on the owner side
     //    invalidates the compile output that references it.
     let mut seen_imports = FxHashSet::default();
-    // The owner's canonical, shared by every fact observed on it.
-    let owner = verter_session_query::facts::version::SharedCanonical::new(canonical_id);
+    // Every canonical this pass names, allocated once and shared by the
+    // facts of every step that name it.
+    let mut texts = CanonicalTexts::default();
     // Resolved deps reached through a value (runtime) import binding —
     // each one needs a `FileWholeHash` observation (step 1b below).
     let mut runtime_dep_canonicals = FxHashSet::default();
     for import in script_imports {
         let space = symbol_space_for_import(import);
         let specifier = InternedSpecifier::from(import.source.as_str());
-        // One shared text per resolved dep, for every fact naming it.
-        let resolved_dep: Option<Arc<str>> =
-            resolve_import_source_to_canonical(host, canonical_id, import.source.as_str())
-                .map(Arc::from);
+        let resolved_dep =
+            resolve_import_source_to_canonical(host, canonical_id, import.source.as_str());
         for binding in import.bindings.iter() {
             let local = binding.name.clone();
             // A binding is a *value* (runtime) binding iff neither the
@@ -133,7 +164,7 @@ pub(crate) fn observe_compile_tier_dependencies(
                 binding: InternedName::from(local.as_str()),
                 space,
             };
-            observe_parse_fact_present(host, &owner.id(), key, FactLane::Semantic);
+            observe_parse_fact_present(host, &mut texts, canonical_id, key, FactLane::Semantic);
 
             // R28 path-precise cross-file: also observe the
             // `Export(binding, space)` fact on the resolved dep so
@@ -144,12 +175,18 @@ pub(crate) fn observe_compile_tier_dependencies(
             // declaration's body fingerprint. Path-precise: editing
             // a sibling export in the dep does not invalidate this
             // consumer.
-            if let Some(resolved_dep) = resolved_dep.as_ref() {
+            if let Some(resolved_dep) = resolved_dep.as_deref() {
                 let dep_export_key = FactKey::Export {
                     name: InternedName::from(local.as_str()),
                     space,
                 };
-                observe_parse_fact_present(host, resolved_dep, dep_export_key, FactLane::Semantic);
+                observe_parse_fact_present(
+                    host,
+                    &mut texts,
+                    resolved_dep,
+                    dep_export_key,
+                    FactLane::Semantic,
+                );
 
                 // Runtime imports: the `Export` fact above is
                 // signature-pinned (a value declaration hashes its
@@ -159,8 +196,8 @@ pub(crate) fn observe_compile_tier_dependencies(
                 // output re-emits the runtime dependency, so its
                 // full content matters — record the dep for a
                 // whole-hash observation.
-                if binding_is_value && **resolved_dep != *canonical_id {
-                    runtime_dep_canonicals.insert(Arc::clone(resolved_dep));
+                if binding_is_value && resolved_dep != canonical_id {
+                    runtime_dep_canonicals.insert(resolved_dep.to_string());
                 }
             }
         }
@@ -175,9 +212,9 @@ pub(crate) fn observe_compile_tier_dependencies(
         // declaration is non-type-only and has no bindings, mirroring
         // the per-binding `binding_is_value` admission above.
         if import.bindings.is_empty() && !import.is_type_only {
-            if let Some(resolved_dep) = resolved_dep.as_ref() {
-                if **resolved_dep != *canonical_id {
-                    runtime_dep_canonicals.insert(Arc::clone(resolved_dep));
+            if let Some(resolved_dep) = resolved_dep.as_deref() {
+                if resolved_dep != canonical_id {
+                    runtime_dep_canonicals.insert(resolved_dep.to_string());
                 }
             }
         }
@@ -188,7 +225,7 @@ pub(crate) fn observe_compile_tier_dependencies(
     //     the signature-pinned `Export` fact cannot see) invalidates
     //     the dependent compile slot.
     for dep_canonical in &runtime_dep_canonicals {
-        observe_file_whole_hash(host, dep_canonical);
+        observe_file_whole_hash(host, &mut texts, dep_canonical);
     }
 
     // 2. Per-`macro_type_deps` cross-file observation. The macro
@@ -229,8 +266,13 @@ pub(crate) fn observe_compile_tier_dependencies(
             name: type_name.clone(),
             space,
         };
-        let resolved_id: Arc<str> = Arc::from(resolved_canonical.as_str());
-        observe_parse_fact_present(host, &resolved_id, export_key, FactLane::Semantic);
+        observe_parse_fact_present(
+            host,
+            &mut texts,
+            &resolved_canonical,
+            export_key,
+            FactLane::Semantic,
+        );
 
         // MemberShape(exporter=type_name) — member surface
         // fingerprint. Changes on sibling add / remove.
@@ -238,19 +280,31 @@ pub(crate) fn observe_compile_tier_dependencies(
             exporter: type_name.clone(),
             space,
         };
-        observe_parse_fact_present(host, &resolved_id, shape_key, FactLane::Semantic);
+        observe_parse_fact_present(
+            host,
+            &mut texts,
+            &resolved_canonical,
+            shape_key,
+            FactLane::Semantic,
+        );
 
         // Enumerate the type's existing members from the
         // dependency's FactRegistry and emit one
         // `MemberPresence(exporter=type_name, name=m)` per member.
-        observe_member_presences_for_export(host, &resolved_id, &type_name, space);
+        observe_member_presences_for_export(
+            host,
+            &mut texts,
+            &resolved_canonical,
+            &type_name,
+            space,
+        );
     }
 
     // 3. ModuleAugmentationIndexShape per consumed specifier (R29).
     //    Augmenters for `'vue'` etc. change the compiled prop /
     //    emit validation surface; observe the fingerprint so an
     //    augmenter-set churn invalidates dependent slots.
-    observe_augmentation_fingerprints(host, script_imports);
+    observe_augmentation_fingerprints(host, &mut texts, script_imports);
 
     // 4. External `src=` block deps. The deferred typed-content lane consumes
     //    the WHOLE content of each external file, so any edit to an external template /
@@ -270,7 +324,7 @@ pub(crate) fn observe_compile_tier_dependencies(
         if !seen_external.insert(resolved.clone()) {
             continue;
         }
-        observe_file_whole_hash(host, &Arc::from(resolved));
+        observe_file_whole_hash(host, &mut texts, &resolved);
     }
 
     // 5. Owner import-route witness — the route-retarget pin.
@@ -323,13 +377,13 @@ pub(crate) fn with_extra_compile_observations<T>(
 /// specifier) the observation is skipped — consistent with the
 /// `observe_parse_fact_present` skip-on-miss contract: a consumer
 /// must never depend on a fact the producer cannot publish.
-fn observe_file_whole_hash(host: &VerterHost, canonical_id: &Arc<str>) {
+fn observe_file_whole_hash(host: &VerterHost, texts: &mut CanonicalTexts, canonical_id: &str) {
     let Some(whole_hash) = host.current_or_read_whole_hash(canonical_id) else {
         return;
     };
     verter_type_engine::resolver_core::resolver_context::observe_fan_out(
         FactVersionRef::FileWholeHash {
-            canonical_id: Arc::clone(canonical_id),
+            canonical_id: texts.text(canonical_id),
             hash: whole_hash,
         },
     );
@@ -359,7 +413,8 @@ fn observe_file_whole_hash(host: &VerterHost, canonical_id: &Arc<str>) {
 ///   never depends on a fact that the producer cannot publish.
 fn observe_parse_fact_present(
     host: &VerterHost,
-    canonical_id: &Arc<str>,
+    texts: &mut CanonicalTexts,
+    canonical_id: &str,
     key: FactKey,
     lane: FactLane,
 ) {
@@ -368,7 +423,7 @@ fn observe_parse_fact_present(
     };
     verter_type_engine::resolver_core::resolver_context::observe_fan_out(FactVersionRef::Parse(
         ParseFactRef {
-            canonical_id: Arc::clone(canonical_id),
+            canonical_id: texts.text(canonical_id),
             key,
             lane,
             expected_hash,
@@ -387,7 +442,8 @@ fn observe_parse_fact_present(
 /// holds for unresolvable specifiers).
 fn observe_member_presences_for_export(
     host: &VerterHost,
-    canonical_id: &Arc<str>,
+    texts: &mut CanonicalTexts,
+    canonical_id: &str,
     exporter: &InternedName,
     space: SymbolSpace,
 ) {
@@ -412,7 +468,13 @@ fn observe_member_presences_for_export(
                     name: name.clone(),
                     space: *sp,
                 };
-                observe_parse_fact_present(host, canonical_id, presence_key, FactLane::Semantic);
+                observe_parse_fact_present(
+                    host,
+                    texts,
+                    canonical_id,
+                    presence_key,
+                    FactLane::Semantic,
+                );
             }
         }
     }
@@ -518,7 +580,11 @@ fn resolve_import_source_to_canonical(
 /// stitch's per-augmenter `FileWholeHash` fact, not a second
 /// mechanism: that whole-file content fact is already available, so
 /// this adds NO body lowering at publish.
-fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[AnalyzedImport]) {
+fn observe_augmentation_fingerprints(
+    host: &VerterHost,
+    texts: &mut CanonicalTexts,
+    script_imports: &[AnalyzedImport],
+) {
     let store = host.project_type_store.indexed();
     let snapshot = store.snapshot_augmentation_index_fingerprints();
     if snapshot.is_empty() {
@@ -581,7 +647,8 @@ fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[Analyz
                 for entry in augmenter_set.entries.iter() {
                     let augmenter_canonical = entry.canonical();
                     if emitted_augmenter_whole_hashes.insert(Arc::clone(augmenter_canonical)) {
-                        observe_file_whole_hash(host, augmenter_canonical);
+                        texts.adopt(augmenter_canonical);
+                        observe_file_whole_hash(host, texts, augmenter_canonical);
                     }
                 }
             }

@@ -42,11 +42,19 @@ impl<'a> SharedCanonical<'a> {
     pub fn id(&self) -> Arc<str> {
         Arc::clone(self.shared.get_or_init(|| Arc::from(self.text)))
     }
+}
 
-    /// The text.
-    #[must_use]
-    pub fn as_str(&self) -> &'a str {
+impl AsRef<str> for SharedCanonical<'_> {
+    fn as_ref(&self) -> &str {
         self.text
+    }
+}
+
+/// Passed by reference to a callee that may decline to emit, the text is
+/// allocated only if the callee does emit.
+impl From<&SharedCanonical<'_>> for Arc<str> {
+    fn from(canonical: &SharedCanonical<'_>) -> Self {
+        canonical.id()
     }
 }
 

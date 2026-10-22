@@ -48,6 +48,10 @@ pub fn facts_heap_bytes(facts: &[FactVersionRef], aliases: &mut AliasSet) -> usi
 /// result's evidence or a page — carries its own charge from birth, claimed
 /// by the first retaining admission
 /// ([`crate::facts::receipt::reserve_retained_with_evidence`]).
+///
+/// A text with more than one owner is counted once per `aliases`; a text
+/// this fact alone owns is counted each time the fact is measured (see
+/// [`FactMeasure`]).
 #[must_use]
 pub fn fact_heap_bytes(fact: &FactVersionRef, aliases: &mut AliasSet) -> usize {
     FactMeasure::new(aliases).fact(fact)
@@ -88,11 +92,7 @@ impl FactMeter for HeapMeter<'_, '_> {
 
     /// Counted like any other raw `Arc<str>` of the tree.
     fn leaf_name(&mut self, name: &Arc<str>) -> usize {
-        if self.first(name) {
-            arc_block_bytes(name.len())
-        } else {
-            0
-        }
+        self.arc_str_bytes(name)
     }
 
     fn handles(&mut self) -> &mut AliasSet {
@@ -117,6 +117,15 @@ impl FactMeter for HeapMeter<'_, '_> {
 /// only those are offered to the meter's set: a text this fact alone owns
 /// is counted in full without a set entry, and a measurement of facts that
 /// share nothing records nothing, exactly as when each owned a `String`.
+///
+/// The contract is therefore: a shared text is counted once per meter; a
+/// single-owner text is counted each time its owner is measured, as the
+/// `String` it replaced was. Measuring the same fact twice on one meter
+/// counts its single-owner texts twice. No charge does that: a fact is
+/// reached only through the value that owns it, every shared container on
+/// the way (a signature's `Arc` slice, an owned list's cell, a tree's
+/// `Arc`) is itself counted once per meter, and each receipt measures its
+/// own facts once on a set of its own.
 /// The measurement also remembers the last shared text it counted, so a
 /// run of facts naming one allocation offers it once: a canonically sorted
 /// list keeps one file's facts of one kind together.
@@ -190,7 +199,7 @@ impl<'m, M: FactMeter> FactMeasure<'m, M> {
             return 0;
         }
         self.last_text = address;
-        if is_shared_empty(text) || !self.first_owned(text) {
+        if is_shared_empty_str(text) || !self.first_owned(text) {
             return 0;
         }
         arc_block_bytes(text.len())
@@ -299,14 +308,6 @@ impl<'m, M: FactMeter> FactMeasure<'m, M> {
     }
 }
 
-/// Whether `text` is the empty text `Arc::<str>::default()` hands out. The
-/// standard library shares one static for it, so it allocates nothing; an
-/// empty text built any other way is its own allocation and is charged.
-fn is_shared_empty(text: &Arc<str>) -> bool {
-    static EMPTY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
-    text.is_empty() && Arc::ptr_eq(text, EMPTY.get_or_init(Arc::default))
-}
-
 impl verter_retention::heap_size::HeapSize for FactVersionRef {
     /// A fact's own heap, its raw allocations counted on the tree's raw
     /// set; a receipt carries its own charge.
@@ -335,11 +336,7 @@ impl verter_retention::owned::Measured for FactVersionRef {
 impl verter_retention::heap_size::HeapSize for crate::facts::fact_cache::ReadSetSignature {
     /// The fact slice and every fact's own heap, on the tree's raw set.
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        if !meter.first(&self.facts) {
-            return 0;
-        }
-        arc_block_bytes(std::mem::size_of_val::<[FactVersionRef]>(&self.facts))
-            + FactMeasure::new(meter).facts(self.facts.iter())
+        self.facts.heap_size(meter)
     }
 }
 
