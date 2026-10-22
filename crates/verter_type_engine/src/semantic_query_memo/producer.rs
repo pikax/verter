@@ -1447,18 +1447,21 @@ impl<'s> ProducerLease<'s> {
         };
         // A build that answered with a node it no longer holds cannot be
         // delivered: its flight is retired and the caller gets the typed
-        // refusal, never the destroyed node.
-        let lease = match store.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
-            &result,
-            &walker_diagnostics,
-            &dep_signature,
-        )) {
-            Ok(lease) => lease,
-            Err(error) => {
-                store.abort_inflight_for_cancellation(&prepared, &inflight, independent);
-                return Err(super::refused_operand_cache_read(error));
-            }
-        };
+        // refusal, never the destroyed node. The lease is IN-FLIGHT: its
+        // payload stays ACTIVE until the publication adopts it or
+        // `complete` hands it off to the caller.
+        let lease =
+            match store.lease_delivery_in_flight(super::delivery_lease::DeliveredAllocations::read(
+                &result,
+                &walker_diagnostics,
+                &dep_signature,
+            )) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    store.abort_inflight_for_cancellation(&prepared, &inflight, independent);
+                    return Err(super::refused_operand_cache_read(error));
+                }
+            };
         Ok(SettledProducer {
             lease,
             store,
@@ -1657,6 +1660,20 @@ impl SettledProducer<'_> {
         // a cold-built child, a warm-hit child and a joined child deliver the
         // identical fact set to their parent.
         capture.deliver_carrier(&carrier);
+
+        // The delivery reaches its caller handoff here: whatever the
+        // publication decided, the charges still in flight transfer to a
+        // pin — a published candidate already adopted its share into
+        // retention — so every holder of this lease, subscriber or caller,
+        // sees the settled classes the flight is about to complete with.
+        store.hand_off_delivered_allocations(
+            &super::delivery_lease::DeliveredAllocations::read(
+                &result,
+                &walker_diagnostics,
+                &dep_signature,
+            ),
+            &lease,
+        );
 
         // Complete the flight and wake its subscribers. An abort planted by
         // an invalidation stays: subscribers that wake on it retry rather

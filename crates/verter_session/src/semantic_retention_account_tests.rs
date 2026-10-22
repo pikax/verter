@@ -20,10 +20,9 @@ use verter_session_query::retention::{
     RetentionRefusal, SemanticRetentionAccount,
 };
 
-fn account(aggregate: usize, active: usize, max_entry: usize) -> Arc<SemanticRetentionAccount> {
+fn account(aggregate: usize, max_entry: usize) -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: aggregate,
-        active_ceiling_bytes: active,
         max_entry_bytes: max_entry,
         // Pin pressure is a reporting threshold, not an admission gate,
         // so the admission tests park it at the aggregate ceiling and
@@ -40,7 +39,6 @@ fn account(aggregate: usize, active: usize, max_entry: usize) -> Arc<SemanticRet
 fn pin_pressure_is_reported_without_gating_admission() {
     let account = SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: 1_000,
-        active_ceiling_bytes: 1_000,
         max_entry_bytes: 1_000,
         pin_threshold_bytes: 100,
     });
@@ -73,7 +71,7 @@ fn pin_pressure_is_reported_without_gating_admission() {
 /// admits every one of these and overshoots by 10x.
 #[test]
 fn many_individually_legal_entries_stop_at_the_aggregate_ceiling() {
-    let account = account(1_000, 1_000, 1_000);
+    let account = account(1_000, 1_000);
     let mut held: Vec<RetentionCharge> = Vec::new();
     let mut refusals = 0usize;
     for _ in 0..100 {
@@ -100,7 +98,7 @@ fn many_individually_legal_entries_stop_at_the_aggregate_ceiling() {
 fn concurrent_admissions_never_jointly_overshoot_the_ceiling() {
     const THREADS: usize = 8;
     const PER_THREAD: usize = 40;
-    let account = account(4_000, 4_000, 4_000);
+    let account = account(4_000, 4_000);
     let barrier = Arc::new(Barrier::new(THREADS));
     let admitted = Arc::new(AtomicUsize::new(0));
     let overshoot = Arc::new(AtomicUsize::new(0));
@@ -154,7 +152,7 @@ fn concurrent_pins_limit_retained_admissions_to_their_headroom() {
     const CEILING: usize = 4_000;
     const PIN_BYTES: usize = 500;
 
-    let account = account(CEILING, CEILING, CEILING);
+    let account = account(CEILING, CEILING);
     let pins_ready = Arc::new(Barrier::new(PINNERS + 1));
     let release_pins = Arc::new(Barrier::new(PINNERS + 1));
     let admitted = Arc::new(AtomicUsize::new(0));
@@ -221,7 +219,7 @@ fn concurrent_pins_limit_retained_admissions_to_their_headroom() {
 /// live parse snapshots admits fewer discretionary cache entries.
 #[test]
 fn pinned_bytes_consume_headroom_for_refusable_admissions() {
-    let account = account(1_000, 1_000, 1_000);
+    let account = account(1_000, 1_000);
     let pin = account.pin(800);
     assert_eq!(account.snapshot().pinned_bytes, 800);
     assert!(matches!(
@@ -245,7 +243,7 @@ fn pinned_bytes_consume_headroom_for_refusable_admissions() {
 /// force a live artifact to re-parse or revoke a live handle.
 #[test]
 fn a_pin_is_never_refused_even_past_the_ceiling() {
-    let account = account(100, 100, 100);
+    let account = account(100, 100);
     let first = account.pin(90);
     let second = account.pin(90);
     assert_eq!(account.snapshot().pinned_bytes, 180);
@@ -267,7 +265,7 @@ fn a_pin_is_never_refused_even_past_the_ceiling() {
 /// one outlier can never evict an unbounded number of useful entries.
 #[test]
 fn an_oversized_entry_is_refused_on_an_empty_account() {
-    let account = account(10_000, 10_000, 500);
+    let account = account(10_000, 500);
     let refusal = account
         .reserve(ChargeClass::Retained, 501)
         .refusal()
@@ -282,16 +280,15 @@ fn an_oversized_entry_is_refused_on_an_empty_account() {
 }
 
 /// The per-entry cap is a rule about what a cache retains: an in-flight
-/// construction larger than one cache entry is admitted within the active
-/// sub-limit, while a retained entry of the same size is refused as
-/// oversized.
+/// construction larger than one cache entry is charged unconditionally,
+/// while a retained entry of the same size is refused as oversized.
 #[test]
 fn the_entry_cap_bounds_retention_not_construction() {
-    let account = account(10_000, 5_000, 500);
+    let account = account(10_000, 500);
     let construction = account
         .reserve(ChargeClass::Active, 4_000)
         .admitted()
-        .expect("an active construction past the entry cap fits the active sub-limit");
+        .expect("an active construction past the entry cap is charged unconditionally");
     let refusal = account
         .reserve(ChargeClass::Retained, 4_000)
         .refusal()
@@ -302,34 +299,73 @@ fn the_entry_cap_bounds_retention_not_construction() {
     assert_eq!(account.snapshot().active_bytes, 0);
 }
 
-/// Exhausted ACTIVE work reports its own typed outcome, distinct from
-/// ordinary retention pressure: the request is out of resource, not
-/// merely unable to warm a cache.
+/// Admitted computation is never refused or truncated for bytes: work
+/// whose in-flight bytes cross the process's whole aggregate ceiling —
+/// a figure far past the former ACTIVE sub-limit, which no longer
+/// exists — is still charged, still completes, and still releases
+/// exactly what it charged. The boundary this defends is the removal of
+/// the hard computation-byte cap: no ACTIVE reservation has a refusal
+/// outcome, and the crossing leaves no residue and no active-class
+/// refusal count.
 #[test]
-fn exhausted_active_work_reports_the_active_resource_outcome() {
-    let account = account(10_000, 500, 10_000);
+fn crossing_the_former_active_ceiling_cannot_abort_admitted_computation() {
+    let account = account(1_000, 1_000);
     let held = account
         .reserve(ChargeClass::Active, 400)
         .admitted()
-        .expect("the first active reservation fits");
-    let refusal = account
-        .reserve(ChargeClass::Active, 200)
-        .refusal()
-        .expect("the active sub-limit must refuse");
-    assert!(matches!(refusal, RetentionRefusal::ActiveExhausted { .. }));
-    // The refused reservation must leave NO residue on either the active
-    // class or the aggregate: a sub-limit rejection that forgot to unwind
-    // its aggregate charge would leak 200 B here.
+        .expect("the first active reservation is charged");
+    // Past the aggregate ceiling — the former ACTIVE sub-limit was a
+    // fraction of it — the reservation is still charged, never refused.
+    let over = account
+        .reserve(ChargeClass::Active, 2_000)
+        .admitted()
+        .expect("in-flight work past every ceiling is charged unconditionally");
     let snapshot = account.snapshot();
-    assert_eq!(snapshot.active_bytes, 400);
-    assert_eq!(snapshot.total_bytes(), 400);
-    // Retained work is unaffected by the active sub-limit.
+    assert_eq!(snapshot.active_bytes, 2_400);
+    assert_eq!(
+        snapshot.total_bytes(),
+        2_400,
+        "the account reports the real occupancy, not a truncated one"
+    );
+    assert_eq!(
+        snapshot.refusals_active, 0,
+        "no path refuses the active class any more"
+    );
+    // The over-ceiling ACTIVE bytes are genuine occupancy: discretionary
+    // retention is refused against them until they drop.
     assert!(matches!(
-        account.reserve(ChargeClass::Retained, 5_000),
-        RetentionAdmission::Admitted(_)
+        account.reserve(ChargeClass::Retained, 1),
+        RetentionAdmission::Refused(RetentionRefusal::Pressure { .. })
     ));
+    assert_eq!(account.snapshot().refusals_pressure, 1);
+    drop(over);
     drop(held);
-    assert_eq!(account.snapshot().active_bytes, 0);
+    let drained = account.snapshot();
+    assert_eq!(drained.active_bytes, 0);
+    assert_eq!(drained.total_bytes(), 0);
+    assert_eq!(drained.refusals_active, 0);
+}
+
+/// Retention headroom exhausted by pins cannot abort admitted
+/// computation either: with the whole ceiling pinned, in-flight work is
+/// still charged (past the ceiling, like the pins themselves) and still
+/// completes, while every discretionary retention is refused.
+#[test]
+fn exhausted_retention_headroom_cannot_abort_admitted_computation() {
+    let account = account(1_000, 1_000);
+    let pin = account.pin(1_000);
+    assert!(matches!(
+        account.reserve(ChargeClass::Retained, 1),
+        RetentionAdmission::Refused(RetentionRefusal::Pressure { .. })
+    ));
+    let work = account
+        .reserve(ChargeClass::Active, 500)
+        .admitted()
+        .expect("admitted computation is charged whatever the headroom");
+    assert_eq!(account.snapshot().active_bytes, 500);
+    drop(work);
+    drop(pin);
+    assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
 /// Every refusal maps onto the locally-confined cache-runtime reason: a
@@ -345,10 +381,6 @@ fn every_refusal_maps_to_a_locally_confined_non_admission_reason() {
             max_entry_bytes: 1,
         },
         RetentionRefusal::Pressure {
-            requested: 2,
-            headroom: 1,
-        },
-        RetentionRefusal::ActiveExhausted {
             requested: 2,
             headroom: 1,
         },
@@ -371,7 +403,7 @@ fn every_refusal_maps_to_a_locally_confined_non_admission_reason() {
 /// missed release would strand bytes forever.
 #[test]
 fn a_charge_releases_exactly_once_across_every_ending() {
-    let account = account(10_000, 10_000, 10_000);
+    let account = account(10_000, 10_000);
 
     // 1. Ordinary drop.
     {
@@ -416,7 +448,7 @@ fn a_charge_releases_exactly_once_across_every_ending() {
 #[test]
 #[should_panic(expected = "exceeds the 100 bytes this charge holds")]
 fn splitting_more_than_a_charge_holds_panics() {
-    let account = account(10_000, 10_000, 10_000);
+    let account = account(10_000, 10_000);
     let mut charge = account
         .reserve(ChargeClass::Retained, 100)
         .admitted()
@@ -430,7 +462,7 @@ fn splitting_more_than_a_charge_holds_panics() {
 /// pressure is released.
 #[test]
 fn committing_active_to_retained_never_drops_the_charge() {
-    let account = account(10_000, 150, 10_000);
+    let account = account(10_000, 10_000);
     let charge = account
         .reserve(ChargeClass::Active, 100)
         .admitted()
@@ -456,7 +488,7 @@ fn committing_active_to_retained_never_drops_the_charge() {
 /// its reference count.
 #[test]
 fn a_shared_charge_counts_once_and_frees_when_the_last_owner_drops() {
-    let account = account(10_000, 10_000, 10_000);
+    let account = account(10_000, 10_000);
     let shared = Arc::new(
         account
             .reserve(ChargeClass::Retained, 100)
@@ -504,7 +536,7 @@ fn every_project_store_shares_the_one_process_local_account() {
 /// are charged to the store's account and released with the store.
 #[test]
 fn the_project_store_charges_its_interned_identities() {
-    let account = account(10_000_000, 10_000_000, 10_000_000);
+    let account = account(10_000_000, 10_000_000);
     let store =
         crate::project_type_store::ProjectTypeStore::with_retention_account(Arc::clone(&account));
     let before = account.snapshot().retained_bytes;
@@ -537,7 +569,7 @@ fn a_retained_parse_snapshot_charges_its_pin_once_per_snapshot() {
     use verter_semantic_source::decl_lowering::DeclLoweringService;
     use verter_session_query::source::snapshot::SnapshotKey;
 
-    let account = account(usize::MAX, usize::MAX, usize::MAX);
+    let account = account(usize::MAX, usize::MAX);
     // ONE worker, so every job is serviced in submission order on a single
     // queue, and the worker applies every lease release recorded before a
     // job is enqueued ahead of that job. That ordering is what makes the
@@ -675,7 +707,7 @@ fn a_result_cache_under_pressure_stores_nothing_and_disturbs_nothing() {
 
     // Sized so the first entry fits and the second does not.
     let first_bytes = entry(1).retained_footprint_bytes();
-    let account = account(first_bytes + 1, first_bytes + 1, first_bytes + 1);
+    let account = account(first_bytes + 1, first_bytes + 1);
     let db = crate::component_meta_result_db::ComponentMetaResultDb::<u32>::with_account_for_test(
         Arc::clone(&account),
     );

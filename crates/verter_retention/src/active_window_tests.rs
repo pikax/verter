@@ -9,7 +9,6 @@ use std::sync::atomic::Ordering;
 fn account(ceiling: usize) -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: ceiling,
-        active_ceiling_bytes: ceiling,
         max_entry_bytes: ceiling,
         pin_threshold_bytes: ceiling,
     })
@@ -558,7 +557,6 @@ fn an_open_window_changes_no_admission_decision() {
     }
     let limits = RetentionLimits {
         aggregate_ceiling_bytes: 120,
-        active_ceiling_bytes: 80,
         max_entry_bytes: 100,
         pin_threshold_bytes: 120,
     };
@@ -573,5 +571,8 @@ fn an_open_window_changes_no_admission_decision() {
     );
     assert_eq!(run(&measured, Some(&measured_owner)), expected);
     assert_eq!(measured.snapshot(), plain.snapshot());
-    assert_eq!(window.finish().peak_active_bytes, 61);
+    // The ACTIVE class admits unconditionally, so the sequence's peak is
+    // every ACTIVE reservation it made (60 + 50 + 1); the discretionary
+    // refusals in `expected` are all retained-class.
+    assert_eq!(window.finish().peak_active_bytes, 111);
 }
