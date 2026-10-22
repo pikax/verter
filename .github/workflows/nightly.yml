@@ -132,22 +132,43 @@ jobs:
   # ---------------------------------------------------------------------------
   # Rust coverage. Moved off the PR path: `cargo llvm-cov` changes RUSTFLAGS, so
   # it cannot share the rust-cache with rust-test and is a FULLY SEPARATE
-  # instrumented compile + test run of the whole workspace — the longest job in
-  # CI, producing an lcov.info artifact with no threshold, no gate and no
-  # upload to a coverage service. As a nightly trend signal it costs nothing per
-  # PR. If you want coverage to influence review, add diff-coverage reporting on
-  # changed lines rather than moving this back onto every PR.
+  # instrumented compile + test run of the whole workspace, producing an
+  # lcov.info artifact with no threshold, no gate and no upload to a coverage
+  # service. As a nightly trend signal it costs nothing per PR. If you want
+  # coverage to influence review, add diff-coverage reporting on changed lines
+  # rather than moving this back onto every PR.
+  #
+  # Coverage measures the test partition CI runs, under the runners and
+  # settings it runs them with: the provider-free core under nextest with the
+  # `ci` profile (one process per test, which the process-wide retention and
+  # binding counters rely on), and each real-provider lane as serial libtest
+  # with its own require-provider switch. A single in-process
+  # `cargo llvm-cov --workspace` run is not that universe: it executes the
+  # profile-specific shipped-cfg canaries under the dev profile, skips the
+  # compile-fixture metadata the core suites read, and runs every test of a
+  # binary as concurrent threads of one process. Each lane is its own job, as
+  # in CI: instrumented, the three lanes together do not fit one job's limit.
   # ---------------------------------------------------------------------------
-  rust-coverage:
-    name: Rust Coverage
-
+  rust-coverage-lane:
+    name: Rust Coverage (${{ matrix.lane }})
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: core
+          - lane: tsgo
+            require: VERTER_REQUIRE_TSGO
+          - lane: tsserver
+            require: VERTER_REQUIRE_TSSERVER
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: llvm-tools-preview
+      # One instrumented build cache for every lane, as before: a cache per
+      # lane would crowd the 10 GB budget pull requests restore from.
       - uses: Swatinem/rust-cache@v2
         with:
           key: rust-coverage
@@ -156,50 +177,77 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
-      # REQUIRED for VERTER_REQUIRE_TSGO below. The TypeScript 7 engine is
-      # discovered as `node_modules/.bin/tsc` (see
-      # verter_tsgo_api::toolchain::platform::path_executable_names, which
-      # prefers `tsc` and treats `tsgo` as the legacy native-preview shim), so
-      # the lockfile install IS the tsgo source. This job previously had no
-      # install at all and leaned on an `npx @typescript/native-preview@latest`
-      # step that populated an npx cache nothing ever reads.
+      # The lockfile install provides the pinned project-local tsgo engine,
+      # discovered as `node_modules/.bin/tsc`, and the scripts every lane runs.
       - run: pnpm install --frozen-lockfile
-      # Coverage executes the real-provider suites too. The workspace install
-      # creates the plugin symlink but not its `dist` entry or the
-      # language-shared output it loads.
-      - name: Build real-tsserver test prerequisites
+      # The live provider tests resolve the tsserver plugin through its
+      # workspace probe location; the install creates the symlink but not its
+      # build outputs. CI's provider jobs build them for both engines.
+      - name: Build the language-shared and plugin prerequisites
+        if: matrix.lane != 'core'
         run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-      # Coverage measures the test partition CI runs, under the runners it
-      # runs them with: the provider-free core under nextest (one process per
-      # test, which the process-wide retention and binding counters rely on)
-      # and each real-provider lane as serial libtest. A single in-process
-      # `cargo llvm-cov --workspace` run is not that universe: it executes the
-      # profile-specific shipped-cfg canaries under the dev profile, skips the
-      # compile-fixture metadata the core suites read, and runs every test of a
-      # binary as concurrent threads of one process. `show-env` instruments the
-      # ordinary cargo commands; `report` merges every lane's profiles.
+      # `show-env` instruments the ordinary cargo commands. Its default profile
+      # file name carries the process id, so nextest's process per test would
+      # leave one multi-megabyte profile per test, tens of thousands in all:
+      # more than a runner's disk. The `%8m` pool merges each binary's
+      # processes online into at most eight files.
       - name: Generate coverage
         env:
-          VERTER_REQUIRE_TSGO: "1"
+          LANE: ${{ matrix.lane }}
+          REQUIRE: ${{ matrix.require }}
+          NEXTEST_PROFILE: ci
+          LLVM_PROFILE_FILE_NAME: verter-%8m.profraw
         run: |
           source <(cargo llvm-cov show-env --sh)
           cargo llvm-cov clean --workspace
           status=0
-          node scripts/compile-fixture-artifacts.mjs prepare --workspace || status=1
-          cargo nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)" || status=1
-          node scripts/provider-ci.mjs run tsgo || status=1
-          node scripts/provider-ci.mjs run tsserver || status=1
-          cargo llvm-cov report --lcov --output-path lcov.info
+          if [ "$LANE" = core ]; then
+            node scripts/compile-fixture-artifacts.mjs prepare --workspace || status=1
+            cargo nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)" || status=1
+          else
+            env "$REQUIRE=1" node scripts/provider-ci.mjs run "$LANE" || status=1
+          fi
+          cargo llvm-cov report --lcov --output-path "lcov-$LANE.info" || status=1
           exit "$status"
+      - name: Upload lane coverage
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: rust-coverage-${{ matrix.lane }}
+          path: lcov-${{ matrix.lane }}.info
+          if-no-files-found: warn
+
+  # The coverage result: one lcov.info over every lane (an lcov tracefile may
+  # carry several records for one source file; lcov tools sum them), failing
+  # when any lane did not succeed.
+  rust-coverage:
+    name: Rust Coverage
+    needs: rust-coverage-lane
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: rust-coverage-*
+          path: lanes
+          merge-multiple: true
+      - name: Merge lane coverage
+        run: cat lanes/lcov-core.info lanes/lcov-tsgo.info lanes/lcov-tsserver.info > lcov.info
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v6
         with:
           name: rust-coverage
           path: lcov.info
+      - name: Fail unless every lane succeeded
+        if: needs.rust-coverage-lane.result != 'success'
+        run: |
+          echo "::error::a coverage lane did not succeed: ${{ needs.rust-coverage-lane.result }}"
+          exit 1
 
   # ---------------------------------------------------------------------------
   # Svelte compiler benchmark: Verter against the official compiler on the
