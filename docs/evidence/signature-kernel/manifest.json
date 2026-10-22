@@ -5,15 +5,15 @@
   "contract": {
     "path": "docs/arch/signature-kernel.md",
     "revision": "4.1",
-    "sha256": "b34322a298af10701fdd1363cf6b97eb507743da6f2f23d5f2d3b4fcd7e5d433"
+    "sha256": "7963a5202ecfa46c49f612c76cad1f07149c7d91ff11da84948ce21bee3192c5"
   },
   "oracle": {
-    "typescript": "7.0.2",
-    "engine_version_report": "Version 7.0.2",
+    "typescript": "7.1.0-beta",
+    "engine_version_report": "Version 7.1.0-beta",
     "harness_pin": "crates/verter_session/src/typeinfo/oracle_core/identity.rs::TSGO_VERSION",
     "toolchain_record": {
       "path": "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_toolchain.json",
-      "sha256": "da2be8884c02eff402fce3acd430e67097ebc0b09c31a1ab0fb6086cd6451c59",
+      "sha256": "c5ee2782c01de9b5b6a8f724c2cfbb680ab14f505bb744e25736afb50fb2bed8",
       "platforms": [
         "darwin-arm64",
         "darwin-x64",
@@ -22,7 +22,7 @@
         "win32-arm64",
         "win32-x64"
       ],
-      "per_platform": "executable + 108 lib/*.d.ts sha256 digests (see the record)"
+      "per_platform": "executable + 116 lib/*.d.ts sha256 digests (see the record)"
     },
     "verification": "oracle_core::identity tests + typeinfo_tests::oracle_toolchain_lock re-hash the installed platform package bytes against this record"
   },

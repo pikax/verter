@@ -8,7 +8,8 @@
 //! through the OWNED CCA1I `SvelteProjectionBackend` (`project_ide`, with an
 //! admission-carved consume-once execution grant), and the REAL generated
 //! carrier is checked on BOTH claimed engines: ts-js 6.0.3 (the STP1 pin at
-//! `packages/playground`) and ts-native 7.0.2 (the workspace root install).
+//! `packages/playground`) and ts-native at the workspace TypeScript pin (the
+//! root `package.json` `typescript` devDependency, the workspace root install).
 //! Corruption twins corrupt the evidence template AND the generated carrier
 //! itself — engine-checked rows must fail on both engines, js-unchecked rows
 //! must not report. Publication is consumed for real: the host declaration
@@ -68,6 +69,25 @@ fn workspace_root() -> PathBuf {
         .expect("crate is <ws>/crates/verter_session")
         .to_path_buf()
 }
+
+/// The workspace TypeScript pin: the root `package.json` `typescript`
+/// devDependency, which the native engine install must match.
+fn native_typescript_pin() -> &'static str {
+    static PIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PIN.get_or_init(|| {
+        let path = workspace_root().join("package.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let root: Value = serde_json::from_str(&text).expect("parse the workspace package.json");
+        root["devDependencies"]["typescript"]
+            .as_str()
+            .expect("the workspace package.json pins typescript")
+            .to_string()
+    })
+}
+
+/// An arbitrary pinned version for the synthetic store/hoisted fixtures below.
+const SYNTHETIC_PIN: &str = "7.1.0-beta";
 
 /// The STS0 node directory holding the ratified products and probes.
 fn sts0_dir() -> PathBuf {
@@ -251,7 +271,11 @@ fn claimed_engines() -> Vec<Engine> {
             "6.0.3",
             root.join("packages/playground/node_modules/typescript"),
         ),
-        Engine::resolve("ts-native", "7.0.2", root.join("node_modules/typescript")),
+        Engine::resolve(
+            "ts-native",
+            native_typescript_pin(),
+            root.join("node_modules/typescript"),
+        ),
     ]
     .into_iter()
     .flatten()
@@ -1378,9 +1402,9 @@ fn a_mismatched_hoisted_native_package_is_never_selected() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
     fake_hoisted_native_package(root, "0.0.0");
-    fake_native_store_entry(root, "7.0.2");
+    fake_native_store_entry(root, SYNTHETIC_PIN);
     let (launcher, _) =
-        resolve_native_tsc_under(root, "7.0.2").expect("the pinned store entry resolves");
+        resolve_native_tsc_under(root, SYNTHETIC_PIN).expect("the pinned store entry resolves");
     assert!(
         launcher.starts_with(root.join(".pnpm")),
         "a mismatched hoisted platform package must never supersede the pinned store binary: {}",
@@ -1392,9 +1416,9 @@ fn a_mismatched_hoisted_native_package_is_never_selected() {
 fn a_matching_hoisted_native_package_is_admitted() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
-    fake_hoisted_native_package(root, "7.0.2");
-    let (launcher, _) =
-        resolve_native_tsc_under(root, "7.0.2").expect("the matching hoisted package resolves");
+    fake_hoisted_native_package(root, SYNTHETIC_PIN);
+    let (launcher, _) = resolve_native_tsc_under(root, SYNTHETIC_PIN)
+        .expect("the matching hoisted package resolves");
     let (pkg_name, exe) = native_platform_package();
     assert_eq!(launcher, root.join(pkg_name).join("lib").join(exe));
 }
@@ -1405,7 +1429,7 @@ fn an_unpinned_hoisted_native_package_alone_is_refused() {
     let root = tmp.path();
     fake_hoisted_native_package(root, "0.0.0");
     assert!(
-        resolve_native_tsc_under(root, "7.0.2").is_none(),
+        resolve_native_tsc_under(root, SYNTHETIC_PIN).is_none(),
         "a version-mismatched hoisted launcher with no pinned store entry must not resolve"
     );
 }

@@ -261,13 +261,12 @@ fn oracle_consumption_path_has_no_tsgo_spawn() {
     }
 }
 
-/// The tsgo engine is the `typescript` package, pinned to the EXACT version the
-/// snapshots are validated against: the oracle toolchain record's `typescript`
-/// (which `oracle_toolchain_lock` ties to the harness pin
-/// `identity::TSGO_VERSION`). A floating `"latest"` would
-/// let an upgrade silently change tsgo answers without invalidating any
-/// snapshot. Discriminating: reverting the workspace `package.json` to
-/// `"latest"` (or any other version) FAILS this guard. The retired
+/// The tsgo engine is the GA `typescript` package, pinned to the EXACT version
+/// the snapshots are validated against — the version the oracle toolchain
+/// record (`oracle_toolchain.json`) names. A floating `"latest"` or a range
+/// would let an upgrade silently change tsgo answers without invalidating any
+/// snapshot. Discriminating: setting the workspace `package.json` to
+/// `"latest"` (or any version other than the record's) FAILS this guard. The
 /// `@typescript/native-preview` dev channel must NOT be declared.
 #[test]
 fn tsgo_version_is_pinned() {
@@ -280,7 +279,15 @@ fn tsgo_version_is_pinned() {
     .expect("parse the oracle toolchain record");
     let pinned_tsgo_version = record["typescript"]
         .as_str()
-        .expect("the oracle toolchain record names the typescript version");
+        .expect("the oracle toolchain record names its typescript version")
+        .to_string();
+    assert!(
+        pinned_tsgo_version
+            .split(['.', '-'])
+            .take(3)
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())),
+        "the oracle toolchain record must name an exact version, not `{pinned_tsgo_version}`"
+    );
 
     // MANIFEST_DIR is `crates/verter_session`; the workspace `package.json` is at
     // the repo root (two levels up).
@@ -311,7 +318,7 @@ fn tsgo_version_is_pinned() {
         "the tsgo pin must not be the floating `latest` tag"
     );
 
-    // NEGATIVE: the retired native-preview dev channel must be gone.
+    // NEGATIVE: the native-preview dev channel must not be declared.
     let np_dev = parsed
         .get("devDependencies")
         .and_then(|d| d.get("@typescript/native-preview"));
@@ -320,7 +327,7 @@ fn tsgo_version_is_pinned() {
         .and_then(|d| d.get("@typescript/native-preview"));
     assert!(
         np_dev.is_none() && np_dep.is_none(),
-        "the retired `@typescript/native-preview` dev channel must NOT be declared \
+        "the `@typescript/native-preview` dev channel must NOT be declared \
          in package.json"
     );
 }
