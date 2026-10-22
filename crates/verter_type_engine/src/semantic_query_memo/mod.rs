@@ -650,6 +650,12 @@ pub struct SemanticGraphStore {
     /// remains the semantic authority; candidate admission sequence identifies
     /// individual reverse-index registrations.
     dep_signature_interner: DepSignatureInterner,
+    /// The name every project-generation dependency entry of this store
+    /// carries, minted and charged once: each entry shares the one
+    /// allocation and its charge rather than copying the text per
+    /// signature ([`Self::project_dep_entry`]). Released once the store is
+    /// its last holder ([`Self::release_drained_storage`]).
+    project_dep_name: parking_lot::Mutex<Option<verter_type_expr::OwnedStr>>,
     /// Global insertion-ordered total-size budget for the family memo.
     /// Each `FamilyKey` is built from content-derived `SemanticNodeId`s
     /// / a `DeclIdentity` embedding the file whole-hash, so a content
@@ -819,6 +825,44 @@ impl AsRef<SemanticGraphStore> for SemanticGraphStore {
 }
 
 impl SemanticGraphStore {
+    /// A project-generation dependency entry at `version`: its name is this
+    /// store's one `"<project>"` allocation, shared by every such entry, so
+    /// a signature that records only the project generation copies no text.
+    ///
+    /// The store keeps the name between entries, so it pins the name's cell
+    /// to its account when it mints it: the allocation is charged once, from
+    /// the moment the store holds it until the store lets it go — when it
+    /// is the name's last holder ([`Self::release_drained_storage`]) or
+    /// drops — and the last entry naming it drops. A cache retaining an
+    /// entry holds the same cell, as it would any owned name.
+    pub(crate) fn project_dep_entry(
+        &self,
+        version: crate::semantic_query::DepVersion,
+    ) -> crate::semantic_query::DepEntry {
+        let mut held = self.project_dep_name.lock();
+        let name = held.get_or_insert_with(|| {
+            let name = verter_type_expr::OwnedStr::from("<project>");
+            name.pin(verter_session_query::retention::owned::ChargeCtx::new(
+                self.retention_account(),
+            ));
+            name
+        });
+        crate::semantic_query::DepEntry(name.clone(), version)
+    }
+
+    /// Let the project dependency name go when no entry names it any more:
+    /// the store's handle is its last. Entries are minted under the same
+    /// lock, so none can take the name while it is being released.
+    pub(super) fn release_idle_project_dep_name(&self) {
+        let mut held = self.project_dep_name.lock();
+        if held
+            .as_ref()
+            .is_some_and(|name| verter_type_expr::OwnedStr::strong_count(name) == 1)
+        {
+            *held = None;
+        }
+    }
+
     /// The one store constructor: the store and its graph storage charge
     /// the same account, bound before the first node is interned. Binds
     /// signature-token ownership to the final arena before publishing the
@@ -890,6 +934,7 @@ impl SemanticGraphStore {
             joiner_on_condvar_count: Default::default(),
             canonical_to_entries,
             dep_signature_interner,
+            project_dep_name: parking_lot::Mutex::new(None),
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
             structural_domains: Default::default(),

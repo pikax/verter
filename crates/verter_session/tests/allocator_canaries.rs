@@ -797,3 +797,6 @@ mod key_remap_allocation;
 
 #[path = "allocation_cases/partial_print.rs"]
 mod partial_print_allocation;
+
+#[path = "allocation_cases/canonical_identity.rs"]
+mod canonical_identity_allocation;

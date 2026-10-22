@@ -5,19 +5,27 @@
 //! values compare equal. Hashing/ordering use the digest; equal bytes
 //! always share a digest, so `Hash`/`Eq` stay consistent.
 
+use std::sync::Arc;
+
 use crate::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 
 /// Digest-plus-full-bytes canonical identity payload.
+///
+/// The bytes are shared: an identity is cloned into every record that
+/// carries it (a flow demand basis, an obligation state, a cache key), and
+/// a clone is a reference-count bump rather than a copy of the canonical
+/// bytes. The bytes are immutable once encoded, so sharing them changes no
+/// comparison.
 #[derive(Clone)]
 pub struct Canonical {
     digest: CanonicalDigest,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
 }
 
 impl Canonical {
     /// Builds from a finished [`CanonicalEncoder`].
     pub fn from_encoder(encoder: &CanonicalEncoder) -> Self {
-        let bytes = encoder.finish();
+        let bytes = encoder.finish_shared();
         let digest = CanonicalDigest::of_bytes(&bytes);
         Self { digest, bytes }
     }
@@ -40,8 +48,10 @@ impl Canonical {
 
 impl PartialEq for Canonical {
     fn eq(&self, other: &Self) -> bool {
-        // Digest short-circuits the common not-equal case; bytes decide.
-        self.digest == other.digest && self.bytes == other.bytes
+        // Digest short-circuits the common not-equal case; bytes decide. Two
+        // handles on one allocation hold the same bytes.
+        self.digest == other.digest
+            && (Arc::ptr_eq(&self.bytes, &other.bytes) || self.bytes[..] == other.bytes[..])
     }
 }
 impl Eq for Canonical {}
@@ -62,7 +72,7 @@ impl Ord for Canonical {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.digest
             .cmp(&other.digest)
-            .then_with(|| self.bytes.cmp(&other.bytes))
+            .then_with(|| self.bytes[..].cmp(&other.bytes[..]))
     }
 }
 
@@ -114,6 +124,52 @@ mod tests {
         let a = Canonical::from_encodable(&Pair(1, 2));
         let b = Canonical::from_encodable(&Pair(1, 3));
         assert_ne!(a, b);
+    }
+
+    /// A clone names the same bytes rather than a copy of them, and still
+    /// compares, hashes and orders exactly as an independently encoded
+    /// equal identity does.
+    #[test]
+    fn clones_share_the_encoded_bytes() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let original = Canonical::from_encodable(&Pair(5, 8));
+        let clone = original.clone();
+        assert!(
+            std::ptr::eq(original.bytes().as_ptr(), clone.bytes().as_ptr()),
+            "a clone shares the original's bytes"
+        );
+        let separate = Canonical::from_encodable(&Pair(5, 8));
+        assert!(!std::ptr::eq(
+            original.bytes().as_ptr(),
+            separate.bytes().as_ptr()
+        ));
+        assert_eq!(clone, separate);
+        let hash = |value: &Canonical| {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&clone), hash(&separate));
+        assert_eq!(clone.cmp(&separate), core::cmp::Ordering::Equal);
+        assert_eq!(original.bytes(), &Pair(5, 8).canonical_bytes()[..]);
+    }
+
+    /// Identities order by digest, then by their bytes as byte strings.
+    #[test]
+    fn ordering_follows_digest_then_bytes() {
+        let mut values: Vec<Canonical> = (0..32)
+            .map(|index| Canonical::from_encodable(&Pair(index, index * 3)))
+            .collect();
+        values.sort();
+        for pair in values.windows(2) {
+            let (left, right) = (&pair[0], &pair[1]);
+            assert!(
+                (left.digest(), left.bytes()) < (right.digest(), right.bytes()),
+                "{left:?} sorts before {right:?}"
+            );
+        }
     }
 
     #[test]

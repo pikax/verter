@@ -492,19 +492,20 @@ impl SemanticGraphStore {
     /// Release the storage a drained workload leaves behind without
     /// touching anything still live: drop the sidecar entries of destroyed
     /// nodes, the dependency-rail interner's dead entries and drained
-    /// tables, and the dedup tables of arena shards that index no node.
+    /// tables, the dedup tables of arena shards that index no node, and the
+    /// project dependency name once no entry names it.
     ///
     /// Never revokes a node, a cached candidate or a reader's result: each
     /// step only frees storage whose last referent is already gone, so it
     /// is safe on a live store and idempotent. A host close runs it after
     /// its caches have released their owners.
     pub fn release_drained_storage(&self) -> DrainedStorageReport {
+        let sidecar_entries_dropped = self.reclaim_destroyed_sidecars();
+        self.dep_signature_interner.sweep();
+        self.release_idle_project_dep_name();
         DrainedStorageReport {
-            sidecar_entries_dropped: self.reclaim_destroyed_sidecars(),
-            dedup_tables_released: {
-                self.dep_signature_interner.sweep();
-                self.arena.release_idle_dedup_tables()
-            },
+            sidecar_entries_dropped,
+            dedup_tables_released: self.arena.release_idle_dedup_tables(),
         }
     }
 

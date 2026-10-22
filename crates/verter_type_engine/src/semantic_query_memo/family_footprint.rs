@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use verter_session_query::retention::allocation::{
-    arc_slice_block_bytes, arc_str_bytes, arc_str_list_bytes, box_bytes, heap_block_bytes, AliasSet,
+    arc_block_bytes, arc_slice_block_bytes, arc_str_bytes, arc_str_list_bytes, box_bytes, AliasSet,
 };
 use verter_type_expr::locators::{AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator};
 
@@ -915,7 +915,9 @@ fn flow_return_key_heap_bytes(key: &FlowReturnKey, aliases: &mut AliasSet) -> us
         + projection_demand_heap_bytes(projection, aliases)
         + eval_policy_heap_bytes(demand_policy)
         + copy_slice_bytes(contextual_parameters, aliases)
-        + heap_block_bytes(result_contract.canonical_bytes().len())
+        // The result contract's canonical bytes: one shared `Arc` block,
+        // counted in full.
+        + arc_block_bytes(result_contract.canonical_bytes().len())
         + inline(parse_env_hash)
         + inline(resolve_env_hash)
         + inline(type_env_hash)

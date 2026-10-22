@@ -119,8 +119,8 @@ impl OwnedHeap for FlowReturnKey {
             + context.owned_heap_bytes(aliases)
             + demand.owned_heap_bytes(aliases)
             + input.owned_heap_bytes(aliases)
-            // The canonical bytes' buffer, by the length it exposes.
-            + verter_session_query::retention::allocation::heap_block_bytes(
+            // The canonical bytes' shared `Arc` block, counted in full.
+            + verter_session_query::retention::allocation::arc_block_bytes(
                 result_contract.canonical_bytes().len(),
             )
     }

@@ -18,10 +18,19 @@
 
 /// Canonical-encoding builder. Callers push fields in schema order; this
 /// type does not reorder them.
+///
+/// Fields are appended straight into one buffer in their wire layout
+/// (`u16` tag, `u64` length, payload), so a descriptor of `n` fields costs
+/// one growing buffer rather than one allocation per field, and finishing
+/// it is one copy behind a fixed header.
 #[derive(Debug, Default)]
 pub struct CanonicalEncoder {
     domain_tag: &'static str,
-    fields: Vec<(u16, Vec<u8>)>,
+    /// Every field so far, each as `tag LE u16, payload_length LE u64,
+    /// payload`, in schema order.
+    body: Vec<u8>,
+    /// Fields in `body`.
+    field_count: u32,
 }
 
 impl CanonicalEncoder {
@@ -29,14 +38,20 @@ impl CanonicalEncoder {
     pub fn new(domain_tag: &'static str) -> Self {
         Self {
             domain_tag,
-            fields: Vec::new(),
+            body: Vec::new(),
+            field_count: 0,
         }
     }
 
     /// Append one raw field. Do not reuse `tag` for a different meaning
     /// in the same domain — bump the domain tag or compatibility epoch.
     pub fn field_bytes(&mut self, tag: u16, payload: &[u8]) -> &mut Self {
-        self.fields.push((tag, payload.to_vec()));
+        self.body.reserve(2 + 8 + payload.len());
+        self.body.extend_from_slice(&tag.to_le_bytes());
+        self.body
+            .extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        self.body.extend_from_slice(payload);
+        self.field_count += 1;
         self
     }
 
@@ -140,16 +155,28 @@ impl CanonicalEncoder {
     /// Finalizes the canonical byte encoding.
     pub fn finish(&self) -> Vec<u8> {
         let domain_bytes = self.domain_tag.as_bytes();
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(4 + domain_bytes.len() + 4 + self.body.len());
         out.extend_from_slice(&(domain_bytes.len() as u32).to_le_bytes());
         out.extend_from_slice(domain_bytes);
-        out.extend_from_slice(&(self.fields.len() as u32).to_le_bytes());
-        for (tag, payload) in &self.fields {
-            out.extend_from_slice(&tag.to_le_bytes());
-            out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-            out.extend_from_slice(payload);
-        }
+        out.extend_from_slice(&self.field_count.to_le_bytes());
+        out.extend_from_slice(&self.body);
         out
+    }
+
+    /// Finalizes the canonical byte encoding into a shared slice: the same
+    /// bytes as [`Self::finish`], built in one allocation for an identity
+    /// that will be cloned.
+    pub fn finish_shared(&self) -> std::sync::Arc<[u8]> {
+        let domain_bytes = self.domain_tag.as_bytes();
+        // Every link has an exact length, so the slice is allocated once at
+        // its final size and filled in order.
+        (domain_bytes.len() as u32)
+            .to_le_bytes()
+            .into_iter()
+            .chain(domain_bytes.iter().copied())
+            .chain(self.field_count.to_le_bytes())
+            .chain(self.body.iter().copied())
+            .collect()
     }
 
     /// Finalizes and hashes the canonical bytes into a [`CanonicalDigest`].
@@ -272,6 +299,32 @@ mod tests {
         // `golden_bytes_are_pinned` above; a change in this hex value with
         // no accompanying domain-tag bump is a silent encoding regression.
         assert_eq!(value.canonical_digest().to_hex(), GOLDEN_EXAMPLE_DIGEST_HEX,);
+    }
+
+    /// The shared finish writes exactly the bytes the owned finish writes,
+    /// for an encoder with no fields, one field, and many fields whose
+    /// payloads range from empty to larger than the buffer's first growth.
+    #[test]
+    fn shared_finish_writes_the_owned_finish_bytes() {
+        let empty = CanonicalEncoder::new("finish-test");
+        assert_eq!(&*empty.finish_shared(), &empty.finish()[..]);
+
+        let mut one = CanonicalEncoder::new("finish-test");
+        one.field_str(1, "only");
+        assert_eq!(&*one.finish_shared(), &one.finish()[..]);
+
+        let mut many = CanonicalEncoder::new("finish-test");
+        for tag in 0..64u16 {
+            many.field_bytes(tag, &vec![tag as u8; usize::from(tag) * 7]);
+        }
+        let owned = many.finish();
+        assert_eq!(&*many.finish_shared(), &owned[..]);
+        assert_eq!(
+            &owned[4 + "finish-test".len()..][..4],
+            &64u32.to_le_bytes(),
+            "the header counts every field"
+        );
+        assert_eq!(many.digest(), CanonicalDigest::of_bytes(&owned));
     }
 
     #[test]
