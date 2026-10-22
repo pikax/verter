@@ -1157,6 +1157,8 @@ pub enum FfiSurfacePartialReason {
     /// A type operation exhausted Verter's own budget for it; the value is
     /// the checker's recovery for that operation.
     OperationBudget,
+    /// A route or registry fan-out fuse stopped work outside the operation account.
+    FanoutLimit,
 }
 
 #[derive(Serialize, Clone)]

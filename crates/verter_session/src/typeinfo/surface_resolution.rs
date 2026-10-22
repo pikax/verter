@@ -104,6 +104,7 @@ pub(crate) fn metadata_guarantee(
                     PartialReason::UndecidedConditional => 18,
                     PartialReason::ConnectedMemoryLimit => 19,
                     PartialReason::OperationBudget => 20,
+                    PartialReason::FanoutLimit => 21,
                 })
                 .collect()
         })

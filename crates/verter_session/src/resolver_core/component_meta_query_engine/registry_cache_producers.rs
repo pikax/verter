@@ -313,7 +313,7 @@ impl<M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'_, M> {
                 // is a GENUINE PARTIAL — admitting it as a warm negative
                 // would poison subsequent identical requests that DO have
                 // budget. The tripped fuse already marked the request
-                // budget-partial, so the whole component-meta result refuses
+                // fan-out partial, so the whole component-meta result refuses
                 // to warm; the absent value routes through `ReturnOnly(None)`
                 // (NOT a cacheable negative).
                 return verter_type_engine::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {

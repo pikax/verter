@@ -2768,7 +2768,9 @@ pub(crate) fn surface_partial_reason_to_proto(
         FfiSurfacePartialReason::FlowReturnNoSurface => {
             proto::SurfacePartialReason::FlowReturnNoSurface
         }
-        FfiSurfacePartialReason::UndecidedConditional => proto::SurfacePartialReason::Propagated,
+        FfiSurfacePartialReason::UndecidedConditional | FfiSurfacePartialReason::FanoutLimit => {
+            proto::SurfacePartialReason::Propagated
+        }
     }
 }
 
@@ -3263,6 +3265,7 @@ mod tests {
             R::UndecidedConditional,
             R::ConnectedMemoryLimit,
             R::OperationBudget,
+            R::FanoutLimit,
         ];
 
         // `SURFACE_PARTIAL_REASON_UNSPECIFIED` -> the shared prefix, derived
@@ -3351,6 +3354,7 @@ mod tests {
                 R::UndecidedConditional,
                 R::ConnectedMemoryLimit,
                 R::OperationBudget,
+                R::FanoutLimit,
                 R::ProjectionWorkLimit,
             ],
         };

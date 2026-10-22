@@ -3422,23 +3422,26 @@ fn projection_gate_reads_the_request_operation_account() {
     assert_eq!(budget.projection_ops_executed_count(), 2);
 }
 
-/// A tripped imported-root or registry-deepening fan-out fuse leaves the
-/// request result partial with the named budget class; an in-budget call
-/// marks nothing.
+/// Every fan-out fuse records its own cause and vetoes retention, including
+/// beside an operation refusal; an in-budget call marks nothing.
 #[test]
-fn fanout_fuse_trips_mark_request_result_budget_partial() {
+fn fanout_fuse_trips_are_distinct_from_operation_refusals() {
+    use crate::component_meta_result_db::{
+        classify_final_component_retention, FinalComponentAdmissionProof, FinalComponentRetention,
+    };
     use verter_type_engine::request_context::{
         current_request_result_is_partial, current_request_result_reasons, RequestContext,
         RequestContextGuard,
     };
-    use verter_type_engine::semantic_query::PartialReason;
+    use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
 
-    for lane in ["imported_root", "registry_deepening"] {
+    for lane in ["wildcard_route", "imported_root", "registry_deepening"] {
         let host = build_route_only_reexport_host();
         let dispatch = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
             host.as_ref(),
         );
         let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &dispatch);
+        engine.fuse_budgets.wildcard_route_fanout = 1;
         engine.fuse_budgets.imported_root_fanout = 1;
         engine.fuse_budgets.registry_deepening_fanout = 1;
         let ctx = RequestContext::with_kind_timing_and_projection_budget(
@@ -3452,6 +3455,7 @@ fn fanout_fuse_trips_mark_request_result_budget_partial() {
         );
         let _guard = RequestContextGuard::install(ctx);
         let allow = |e: &mut ComponentMetaQueryEngine<'_>| match lane {
+            "wildcard_route" => e.allow_wildcard_route(),
             "imported_root" => e.allow_imported_root(),
             _ => e.allow_registry_deepening(),
         };
@@ -3462,30 +3466,40 @@ fn fanout_fuse_trips_mark_request_result_budget_partial() {
         assert!(
             current_request_result_reasons()
                 .iter()
-                .any(|r| r == PartialReason::BudgetExceeded),
+                .any(|r| r.name() == "fanoutLimit"),
             "{lane}"
         );
+        for operation in [
+            PartialReasonSet::empty(),
+            PartialReasonSet::BUDGET_EXCEEDED,
+            PartialReasonSet::OPERATION_BUDGET,
+        ] {
+            assert_eq!(
+                classify_final_component_retention(
+                    ResultCompleteness::partial(current_request_result_reasons().union(operation)),
+                    FinalComponentAdmissionProof::isolated(false)
+                ),
+                FinalComponentRetention::NotAdmitted,
+                "{lane}: {operation:?}"
+            );
+        }
     }
 }
 
-/// A tripped wildcard-route fan-out fuse records the same budget class as its
-/// imported-root and registry-deepening siblings, so the final component
-/// result classifies as an operation-profile refusal rather than an
-/// unclassified partial, and the symbol it never looked up admits no warm
-/// negative. The below-cap control resolves the same symbol complete and
+/// A tripped wildcard-route fan-out fuse records its own non-retained cause,
+/// and the symbol it never looked up admits no warm negative. The below-cap control resolves the same symbol complete and
 /// warms it, and a later request with the fuse exhausted is served from that
 /// warm entry without ticking the fuse.
 #[test]
-fn wildcard_route_fuse_trip_records_budget_class_beside_below_cap_control() {
+fn wildcard_route_fuse_trip_records_fanout_class_beside_below_cap_control() {
     use crate::component_meta_result_db::{
-        classify_final_component_retention, ComponentMetaRefusalClass,
-        FinalComponentAdmissionProof, FinalComponentRetention,
+        classify_final_component_retention, FinalComponentAdmissionProof, FinalComponentRetention,
     };
     use verter_type_engine::request_context::{
         current_request_result_is_partial, current_request_result_reasons, RequestContext,
         RequestContextGuard,
     };
-    use verter_type_engine::semantic_query::{PartialReason, ResultCompleteness};
+    use verter_type_engine::semantic_query::ResultCompleteness;
 
     let host = build_route_only_reexport_host();
     assert!(host.ensure_indexed_ready("/m4_src/index.ts").is_some());
@@ -3532,19 +3546,16 @@ fn wildcard_route_fuse_trip_records_budget_class_beside_below_cap_control() {
     };
 
     // Tripped: the symbol is never looked up and the request records the
-    // budget class alone.
+    // fan-out class alone.
     let (resolved, reasons, retention, ticks) = run(0);
     assert_eq!(resolved, None);
     assert_eq!(ticks, 1);
     assert_eq!(
-        reasons.iter().collect::<Vec<_>>(),
-        vec![PartialReason::BudgetExceeded],
-        "the trip records the budget class alone"
+        reasons.iter().map(|r| r.name()).collect::<Vec<_>>(),
+        vec!["fanoutLimit"],
+        "the trip records the fan-out class alone"
     );
-    assert_eq!(
-        retention,
-        FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile),
-    );
+    assert_eq!(retention, FinalComponentRetention::NotAdmitted,);
     assert_eq!(
         imported_db.live_count(),
         live_before,
@@ -3570,4 +3581,87 @@ fn wildcard_route_fuse_trip_records_budget_class_beside_below_cap_control() {
     assert!(reasons.is_empty());
     assert_eq!(retention, FinalComponentRetention::Complete);
     assert_eq!(ticks, 0, "the warm hit ticks no fuse");
+}
+
+/// Restores the test's fuse limits on assertion unwind too.
+struct FuseLimits(Option<[usize; 3]>);
+impl FuseLimits {
+    fn install(limits: [usize; 3]) -> Self {
+        Self(super::FUSE_BUDGETS_FOR_TESTS.with(|slot| slot.replace(Some(limits))))
+    }
+}
+impl Drop for FuseLimits {
+    fn drop(&mut self) {
+        super::FUSE_BUDGETS_FOR_TESTS.with(|slot| slot.set(self.0));
+    }
+}
+
+/// Warm registry entries spare cold-only fan-out work. A final refusal must
+/// not be retained under the unchanged operation profile: the next request
+/// recomputes and can heal with exactly the same fuse limits.
+#[test]
+fn public_wildcard_fanout_refusal_recomputes_and_heals_with_warm_dependencies() {
+    // The two undeclared helper names force the registry to prove absence
+    // through its wildcard route. An honest absent name is a complete negative;
+    // only the lookup the fuse prevented is partial. Warming the first negative
+    // leaves enough cold allowance to prove the second on the next request.
+    let build = || {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        for (file, source) in [
+            ("/w/props.ts", "export interface Props { first: First; second: Second }"),
+            ("/w/owner.vue", "<script setup lang=\"ts\">import type { Props } from './props'; defineProps<Props>()</script>"),
+        ] {
+            ws.inject_file(file.into(), Arc::from(source));
+        }
+        VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        )
+    };
+    let host = build();
+    let _limits = FuseLimits::install([1, 200, 300]);
+    let first = host
+        .get_component_meta("/w/owner.vue")
+        .expect("cold result");
+    assert_eq!(
+        match first.status() {
+            verter_type_engine::semantic_query::FactStatus::Unavailable(reasons)
+            | verter_type_engine::semantic_query::FactStatus::Approximate(reasons, _) =>
+                reasons.get().iter().map(|r| r.name()).collect::<Vec<_>>(),
+            status => panic!("expected refusal, got {status:?}"),
+        },
+        ["fanoutLimit"],
+        "{:?}",
+        first.status()
+    );
+    assert_eq!(host.project_type_store().component_meta_results().len(), 0);
+    let second = host
+        .get_component_meta("/w/owner.vue")
+        .expect("same-profile recompute");
+    assert!(second.is_complete(), "{:?}", second.status());
+    assert_eq!(host.project_type_store().component_meta_results().len(), 1);
+    let third = host
+        .get_component_meta("/w/owner.vue")
+        .expect("warm complete result");
+    assert!(third.is_complete());
+    assert_eq!(
+        second.props.iter().map(|p| &p.name).collect::<Vec<_>>(),
+        third.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+
+    let control = build();
+    let _below_cap = FuseLimits::install([2, 200, 300]);
+    let below = control
+        .get_component_meta("/w/owner.vue")
+        .expect("below-cap control");
+    assert!(below.is_complete(), "{:?}", below.status());
+    assert_eq!(
+        below.props.iter().map(|p| &p.name).collect::<Vec<_>>(),
+        second.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
 }

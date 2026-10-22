@@ -136,6 +136,7 @@ impl StructureBits {
     }
 
     /// Bytes the table's backing is pinned for.
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn storage_charge_bytes(&self) -> usize {
         self.storage.charged()
     }

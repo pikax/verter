@@ -8311,6 +8311,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Object))) => {
                 return Some(assignable(bindings));
             }
+            // Every construction program produces an object, independently of
+            // which spread alternatives it contains. A primitive target fails
+            // before object projection, just as for an ordinary object type.
+            (
+                _,
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol
+                    | PrimitiveKind::Null
+                    | PrimitiveKind::Undefined
+                    | PrimitiveKind::Void,
+                )),
+            ) if source_is_program => return Some(RelationResult::NotAssignable),
             _ => {}
         }
         let Some(source_branches) = self.projected_relation_branches(source) else {

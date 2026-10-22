@@ -579,6 +579,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/closure_narrowing_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_decision_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_operand_tests.rs",
+          "crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/connected_demand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_tail_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/homomorphic_mapped_tests.rs",

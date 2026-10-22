@@ -1927,21 +1927,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         context.checker_text(printed)
     }
 
-    /// `node` printed under a fresh context from `context`, every mapped
-    /// type the print meets settled first where it settles: the checker
-    /// prints a mapped type that is not generic as the object type it
-    /// resolves to (`createTypeNodeFromObjectType`), which display reads
-    /// but never materializes. A settled object can hold further mapped
-    /// types, so the print repeats until none it meets is new.
+    /// Prepare evaluated forms for a read-only print: closed mapped types,
+    /// spread alternatives and merged declarations. A prepared surface may
+    /// contain further unevaluated types, so repeat until none is new.
     fn print_diagnostic_type_text(
         &self,
         node: SemanticNodeId,
         context: impl Fn() -> crate::semantic_query::display::DisplayContext,
     ) -> (String, crate::semantic_query::display::DisplayContext) {
         let mut settled = FxHashMap::default();
+        let mut decisions = FxHashMap::default();
         let mut tried = FxHashSet::default();
         loop {
-            let mut printing = context().with_settled_mapped(settled);
+            let mut printing = context().with_settled_types(settled, decisions);
             let printed = crate::semantic_query::display::display_type_node(
                 self.graph().store(),
                 node,
@@ -1956,25 +1954,108 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             )
             .0;
             let newly_settled: Vec<(SemanticNodeId, SemanticNodeId)> = printing
-                .unsettled_mapped()
+                .unsettled_types()
                 .iter()
                 .copied()
                 .filter(|mapped| tried.insert(*mapped))
-                .filter_map(|mapped| Some((mapped, self.settled_mapped_object(mapped)?)))
+                .filter_map(|mapped| Some((mapped, self.settled_diagnostic_type(mapped)?)))
                 .collect();
-            if newly_settled.is_empty() {
+            let newly_decided: Vec<_> = printing
+                .unsettled_infer_constraints()
+                .iter()
+                .map(|request| {
+                    (
+                        request.clone(),
+                        self.omit_diagnostic_infer_constraint(request),
+                    )
+                })
+                .collect();
+            if newly_settled.is_empty() && newly_decided.is_empty() {
                 return (printed, printing);
             }
-            settled = printing.into_settled_mapped();
+            (settled, decisions) = printing.into_settled_types();
             settled.extend(newly_settled);
+            decisions.extend(newly_decided);
         }
     }
 
-    /// The object type a mapped type that is not generic resolves to: the
-    /// object the relation decides it by. `None` while it stays a mapped
-    /// type.
-    fn settled_mapped_object(&self, mapped: SemanticNodeId) -> Option<SemanticNodeId> {
+    /// Infer constraints print only when they differ from the constraint
+    /// inferred from their declaration positions. Use the shared canonical
+    /// algebra and identity relation, including aliases and use-site frames.
+    fn omit_diagnostic_infer_constraint(
+        &self,
+        request: &crate::semantic_query::display::InferConstraintRequest,
+    ) -> bool {
+        use crate::semantic_query::display::ImplicitInferConstraint;
+        use crate::semantic_query::{PendingSubstitutionFrame, PrimitiveKind};
+        let primitive = |kind| self.graph().intern_node(SemanticNodeData::Primitive(kind));
+        let inferred: Vec<_> = request.inferred.iter().map(|constraint| match *constraint {
+            ImplicitInferConstraint::String => primitive(PrimitiveKind::String),
+            ImplicitInferConstraint::UnknownArray => self.graph().intern_node(SemanticNodeData::Array {
+                element: primitive(PrimitiveKind::Unknown), readonly: false,
+            }),
+            ImplicitInferConstraint::PropertyKey => {
+                let members = [primitive(PrimitiveKind::String), primitive(PrimitiveKind::Number), primitive(PrimitiveKind::Symbol)];
+                crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_charged(self.graph(), &members,
+                    verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                    self.construction_meter()).node
+            }
+            ImplicitInferConstraint::MappedValue { value, parameter, key_space } =>
+                self.substitute_semantic_type_param(value, parameter, key_space),
+        }).collect();
+        let inferred = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection_charged(
+            self.graph(), &inferred, self.construction_meter()).node;
+        let mut frame = PendingSubstitutionFrame::empty();
+        for &(parameter, argument) in &request.substitutions {
+            frame = frame.append(parameter, argument);
+        }
+        let actual = self.apply_pending_substitution_frame(request.actual, &frame);
+        let inferred = self.apply_pending_substitution_frame(inferred, &frame);
+        self.relate_type_identity(actual, inferred) == Some(true)
+    }
+
+    /// The evaluated form the checker prints. Use the shared mapped, spread
+    /// and peer-merge authorities; retain generic mapped types as such.
+    fn settled_diagnostic_type(&self, mapped: SemanticNodeId) -> Option<SemanticNodeId> {
         let data = self.graph().node_data(mapped)?;
+        if let SemanticNodeData::MergedDecl { contributors } = data.as_ref() {
+            return Some(self.reduce_merged_decl(contributors));
+        }
+        if let SemanticNodeData::ObjectSpreadProgram(program) = data.as_ref() {
+            let formula = match self.project_object_spread_for_consumer(
+                mapped,
+                crate::semantic_query::ObjectProjectionSelector::Surface,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            ) {
+                crate::semantic_query::QueryResult::Value(formula) => formula,
+                _ => return None,
+            };
+            let alternatives = self.object_spread_alternatives(&formula).ok()?;
+            let arms: Option<Vec<_>> = alternatives
+                .iter()
+                .map(|alternative| {
+                    let surface = alternative.closed()?.to_closed_surface_view()?;
+                    Some(
+                        self.graph()
+                            .intern_preserving_scope(mapped, SemanticNodeData::Object(surface)),
+                    )
+                })
+                .collect();
+            let Some(arms) = arms else {
+                return self.generic_spread_diagnostic_type(mapped, program);
+            };
+            return Some(
+                crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_charged(
+                    self.graph(),
+                    &arms,
+                    verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                        self.relation_strict_config().strict_null_checks,
+                    ),
+                    self.construction_meter(),
+                )
+                .node,
+            );
+        }
         let SemanticNodeData::Mapped { source, mapper } = data.as_ref() else {
             return None;
         };
@@ -1988,6 +2069,118 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::Object(_))
         )
         .then_some(object)
+    }
+
+    /// Generic spreads separate the closed property groups the checker prints
+    /// as an ordered intersection. Evaluate each closed group through the same
+    /// spread producer; never turn open positive evidence into a closed object.
+    fn generic_spread_diagnostic_type(
+        &self,
+        origin: SemanticNodeId,
+        program: &crate::semantic_query::ObjectSpreadProgram,
+    ) -> Option<SemanticNodeId> {
+        use crate::semantic_query::{ObjectConstructionEffect, ObjectSpreadProgram, PayloadArray};
+        let mut groups = Vec::new();
+        let mut effects = Vec::new();
+        let mut generic = false;
+        let flush = |effects: &mut Vec<ObjectConstructionEffect>,
+                     groups: &mut Vec<SemanticNodeId>|
+         -> Option<()> {
+            if effects.is_empty() {
+                return Some(());
+            }
+            let fragment = self.graph().intern_preserving_scope(
+                origin,
+                SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+                    is_literal: program.is_literal,
+                    effects: PayloadArray::from(std::mem::take(effects).into_boxed_slice()),
+                }),
+            );
+            groups.push(self.settled_diagnostic_type(fragment)?);
+            Some(())
+        };
+        let mut pending: Vec<_> = program
+            .effects
+            .iter()
+            .rev()
+            .map(ObjectConstructionEffect::copy)
+            .collect();
+        while let Some(effect) = pending.pop() {
+            if let ObjectConstructionEffect::Spread(operand) = &effect {
+                let operand = self.normalize_spread_operand_node(*operand);
+                if let Some(chain) = self.property_spread_chain(operand).ok()? {
+                    // Reuse the evaluator's validated property-only chain. Its
+                    // tails remain SPREAD operands, preserving copied facets
+                    // while closed groups merge across a nested literal.
+                    for program in chain.programs {
+                        let data = self.graph().node_data(program)?;
+                        let SemanticNodeData::ObjectSpreadProgram(body) = data.as_ref() else {
+                            return None;
+                        };
+                        let tail: Vec<_> = body
+                            .effects
+                            .iter()
+                            .skip(1)
+                            .map(ObjectConstructionEffect::copy)
+                            .collect();
+                        if !tail.is_empty() {
+                            let tail = self.graph().intern_preserving_scope(
+                                program,
+                                SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+                                    is_literal: false,
+                                    effects: PayloadArray::from(tail.into_boxed_slice()),
+                                }),
+                            );
+                            pending.push(ObjectConstructionEffect::Spread(tail));
+                        }
+                    }
+                    pending.push(ObjectConstructionEffect::Spread(chain.base));
+                    continue;
+                }
+                let generic_operand = if self.type_is_generic(operand) {
+                    true
+                } else if matches!(
+                    self.graph().node_data(operand).as_deref(),
+                    Some(SemanticNodeData::ObjectSpreadProgram(_))
+                ) {
+                    // Leave a nested generic program for the print's preparation
+                    // worklist; do not recurse through its construction chain.
+                    let formula = match self.project_object_spread_for_consumer(
+                        operand,
+                        crate::semantic_query::ObjectProjectionSelector::Surface,
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    ) {
+                        crate::semantic_query::QueryResult::Value(formula) => formula,
+                        _ => return None,
+                    };
+                    self.object_spread_alternatives(&formula)
+                        .ok()?
+                        .iter()
+                        .any(|alternative| {
+                            matches!(
+                                alternative.excess(),
+                                crate::semantic_query::ExcessEligibility::SuppressedByGenericSpread
+                            )
+                        })
+                } else {
+                    false
+                };
+                if generic_operand {
+                    generic = true;
+                    flush(&mut effects, &mut groups)?;
+                    groups.push(operand);
+                    continue;
+                }
+            }
+            effects.push(effect);
+        }
+        if !generic {
+            return None;
+        }
+        flush(&mut effects, &mut groups)?;
+        Some(crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection_charged(
+            self.graph(), &groups, self.construction_meter(),
+        ).node)
     }
 
     /// The properties `target` requires that `source` lacks, named as the

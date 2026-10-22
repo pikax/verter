@@ -757,7 +757,21 @@ impl<'a, M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'a, M> 
             prepared_type_decls: FxHashMap::default(),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
-            fuse_budgets: FuseBudgets::default(),
+            fuse_budgets: {
+                let budgets = FuseBudgets::default();
+                #[cfg(test)]
+                let budgets = FUSE_BUDGETS_FOR_TESTS.with(|limits| match limits.get() {
+                    Some(
+                        [wildcard_route_fanout, imported_root_fanout, registry_deepening_fanout],
+                    ) => FuseBudgets {
+                        wildcard_route_fanout,
+                        imported_root_fanout,
+                        registry_deepening_fanout,
+                    },
+                    None => budgets,
+                });
+                budgets
+            },
             fuse_state: FuseState::default(),
             builder: dispatch.enter_construction_scope(),
         }
@@ -930,3 +944,9 @@ fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+thread_local! {
+    /// Lower the real fuse boundaries for public-request regression tests.
+    static FUSE_BUDGETS_FOR_TESTS: std::cell::Cell<Option<[usize; 3]>> = const { std::cell::Cell::new(None) };
+}

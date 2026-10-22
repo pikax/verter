@@ -3101,3 +3101,72 @@ fn an_assertion_every_conditional_arm_applies_narrows_past_it() {
     }
     check_rows(CONDITIONAL_ASSERTIONS, &rows);
 }
+
+/// Printable residual kinds retain the call's diagnostic through cold and warm reads.
+#[test]
+fn printable_residual_types_keep_call_diagnostics() {
+    let source = r#"declare function one(x: string): number;
+interface Merged { a: number }
+interface Merged { b: string }
+export function merged(x: Merged) { return one(x); }
+export function spread(x: { a: number; b: string }) { const y = { ...x }; return one(y); }
+export function constrained<T>(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; value: T extends { v: infer U extends string } ? U : number; tail: boolean }) { return one(x); }
+declare const key: unique symbol;
+export function symbol_short(x: { [key]: number }) { return one(x); }
+export function symbol_wide(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; [key]: number; tail: boolean; last: string }) { return one(x); }
+export function mapped<T>(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; value: { [K in keyof T]: string }; tail: boolean }) { return one(x); }
+export function constrained_short<T>(x: { value: T extends { v: infer U extends string } ? U : number }) { return one(x); }
+export function template_infer<T>(x: { value: T extends `${infer U extends string}` ? U : number }) { return one(x); }
+export function rest_infer<T>(x: { value: T extends [...infer U extends unknown[]] ? U : number }) { return one(x); }
+export function indexed<T extends { [key]: number }>(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; value: T[typeof key]; tail: boolean }) { return one(x); }
+export function mapped_template<T>(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; value: { [K in keyof T]: { p0: 0; p1: 1; p2: 2; p3: 3; p4: 4; p5: 5; p6: 6; p7: 7; p8: 8; p9: 9 } }; tail: boolean }) { return one(x); }
+declare namespace ns { const key: unique symbol; }
+export function qualified_symbol(x: { [ns.key]: number }) { return one(x); }
+export function computed_literal(x: { ["a-b"]: number }) { return one(x); }
+export function generic_spread<T extends object>(x: T) { const y = { ...x, extra: 1 }; return one(y); }
+export function generic_between<T extends object>(x: T) { const y = { before: "a", ...x, after: true }; return one(y); }
+export function nested_generic<T extends object>(x: T) { const y = { ...{ ...x, inner: 1 }, outer: true }; return one(y); }
+type StringAlias = string;
+export function infer_alias<T>(x: { value: T extends `${infer U extends StringAlias}` ? U : number }) { return one(x); }
+export function infer_repeated<T>(x: { value: T extends [`${infer U extends string}`, { [K in infer U extends string]: number }] ? U : number }) { return one(x); }
+export function mapped_infer<T>(x: { value: { [K in keyof T]: string } extends { [K in keyof T]: infer U extends string } ? U : number }) { return one(x); }
+"#;
+    let rows = [
+        ("merged", "(4,48): error TS2345: Argument of type 'Merged' is not assignable to parameter of type 'string'."),
+        ("spread", "(5,86): error TS2345: Argument of type '{ a: number; b: string; }' is not assignable to parameter of type 'string'."),
+        ("constrained", "(6,271): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T extends { ...; } ? U : number; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("symbol_short", "(8,65): error TS2345: Argument of type '{ [key]: number; }' is not assignable to parameter of type 'string'."),
+        ("symbol_wide", "(9,236): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; [key]: number; tail: boolean; last: string; }' is not assignable to parameter of type 'string'."),
+        ("mapped", "(10,240): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: { [K in keyof T]: string; }; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("constrained_short", "(11,119): error TS2345: Argument of type '{ value: T extends { v: infer U extends string; } ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("template_infer", "(12,114): error TS2345: Argument of type '{ value: T extends `${infer U}` ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("rest_infer", "(13,113): error TS2345: Argument of type '{ value: T extends [...infer U] ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("indexed", "(14,254): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T[unique symbol]; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("mapped_template", "(15,315): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: { [K in keyof T]: { p0: 0; p1: 1; p2: 2; ... 6 more ...; p9: 9; }; }; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("qualified_symbol", "(17,72): error TS2345: Argument of type '{ [ns.key]: number; }' is not assignable to parameter of type 'string'."),
+        ("computed_literal", "(18,71): error TS2345: Argument of type '{ \"a-b\": number; }' is not assignable to parameter of type 'string'."),
+        ("generic_spread", "(19,99): error TS2345: Argument of type 'T & { extra: number; }' is not assignable to parameter of type 'string'."),
+        ("generic_between", "(20,116): error TS2345: Argument of type '{ before: string; } & T & { after: boolean; }' is not assignable to parameter of type 'string'."),
+        ("nested_generic", "(21,119): error TS2345: Argument of type 'T & { inner: number; outer: boolean; }' is not assignable to parameter of type 'string'."),
+        ("infer_alias", "(23,116): error TS2345: Argument of type '{ value: T extends `${infer U}` ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("infer_repeated", "(24,159): error TS2345: Argument of type '{ value: T extends [`${infer U}`, { [K in infer U]: number; }] ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("mapped_infer", "(25,152): error TS2345: Argument of type '{ value: { [K in keyof T]: string; } extends { [K in keyof T]: infer U; } ? U : number; }' is not assignable to parameter of type 'string'."),
+    ];
+    let host = host_with(source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in rows {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, source,
+                );
+                if reported != [expected] {
+                    mismatches.push(format!(
+                        "{pass} {root} {function}: expected {expected:?}, got {reported:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}

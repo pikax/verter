@@ -476,7 +476,10 @@ struct Backing {
 fn backing(host: &ClosingHost) -> Backing {
     let snapshot = host.retention_snapshot();
     Backing {
-        pinned: snapshot.semantic_graph_storage_bytes + snapshot.semantic_bookkeeping_storage_bytes,
+        pinned: host
+            .project_type_store()
+            .semantic_graph()
+            .store_storage_pins_for_tests(),
         retained: snapshot.identity_pool_bytes,
     }
 }

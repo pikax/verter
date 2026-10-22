@@ -116,7 +116,7 @@ impl EvalState {
     }
 }
 
-enum EvalFailure {
+pub(super) enum EvalFailure {
     /// An operand or nested query failed with its own typed reason. The
     /// reason is propagated unchanged so operational partials stay
     /// distinguishable from a genuine miss.
@@ -137,10 +137,10 @@ impl From<NarrowFailure> for EvalFailure {
     }
 }
 
-struct PropertySpreadChain {
-    base: SemanticNodeId,
+pub(super) struct PropertySpreadChain {
+    pub(super) base: SemanticNodeId,
     /// The chain's programs, outermost first.
-    programs: Vec<SemanticNodeId>,
+    pub(super) programs: Vec<SemanticNodeId>,
     /// How many tail writes the programs hold together.
     writes: usize,
 }
@@ -1042,7 +1042,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// surface, so a named interface or alias spreads its real closed
     /// surface instead of staying an open residual. Unresolvable carriers
     /// stay as-is and classify as open residuals downstream.
-    fn normalize_spread_operand_node(&self, operand: SemanticNodeId) -> SemanticNodeId {
+    pub(super) fn normalize_spread_operand_node(&self, operand: SemanticNodeId) -> SemanticNodeId {
         let mut current = operand;
         let mut seen = rustc_hash::FxHashSet::default();
         while seen.insert(current) {
@@ -1193,7 +1193,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the existing correlated evaluator. No prefix is projected or rebuilt.
     /// Optional writes, computed keys and non-public members need the complete
     /// inner-object fold before copying and cannot use this composition rule.
-    fn property_spread_chain(
+    pub(super) fn property_spread_chain(
         &self,
         mut operand: SemanticNodeId,
     ) -> Result<Option<PropertySpreadChain>, EvalFailure> {

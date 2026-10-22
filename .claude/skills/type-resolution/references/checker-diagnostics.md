@@ -83,12 +83,32 @@ declared parameter name (`IndexSignature::key_name`; `x` for one no declaration 
 `strictNullChecks` an optional tuple element's type with `undefined` added. A query (`typeof a.b`) and a class-expression instance (`(Anonymous class)`)
 count their symbol chain — each name and separator, the first twice — after their type arguments; an
 import type its specifier and ten, then each qualifier name and separator; a type predicate its type
-alone. A part with no checker type (an `Opaque` error carrier) is cut. A node kind whose count is
-not modelled (generic mapped types, whose template the checker may reuse from its declaration unelided;
-spread programs, merged declarations, `infer` constraints, computed and unique-symbol property names and
-indexed-access keys, whose escaped names carry checker symbol ids) bounds its count by twice its printed text; a type whose bound could reach the truncation
-length, or whose depth-cap cut lands inside the kept text, is not reported rather than abbreviated where
-the checker's is not.
+alone. A part with no checker type (an `Opaque` error carrier) is cut. Generic mapped types count their key constraint, parameter name, remap and template
+in builder order, then ten bytes for the mapping. Closed mappings, spread
+alternatives and anonymous peer-merged declarations are prepared by the consumer
+before display; display itself never evaluates. Generic spreads separate closed
+property groups, each evaluated by the shared spread producer, and print their
+ordered intersection with the type parameters; open positive evidence is never
+interned as a closed object. An authored `infer` constraint
+prints with `extends` unless its position already infers that constraint (a
+template span, rest element/parameter, mapped key or a mapped value matched
+against a mapped check type). Multiple inference sites contribute their
+intersection. The consumer compares that canonical inferred constraint with the
+authored constraint through the shared identity relation after ordered use-site
+substitution; display only reads the resulting decision. Its name is counted again
+as a parameter declaration, once rather than as a reference. Unique-symbol
+indexed-access types print `unique symbol`.
+
+A symbol-keyed property's internal name includes the native checker's decimal,
+process-global symbol id. Its count is bounded by that id's possible digit count;
+a message is withheld only when an actual abbreviation decision depends on it.
+This remains a compatibility limitation, not an allowed conformance exception:
+the same source and options can produce different abbreviation text after an
+unrelated project is checked in the native compiler process. Non-abbreviating
+symbol-keyed objects print their ordinary `[symbol]` names and are reported.
+Unresolved computed keys and non-type error carriers likewise remain outside a
+faithful print. A depth-cap cut inside the kept text still withholds the message.
+
 
 Decided by the recipe's producer: arity errors from `ArityEvidence` (`getArgumentArityError`) — TS2575
 for a count in a gap between the candidates' arities, else TS2554/TS2555 with `min`, `min-max` or the
