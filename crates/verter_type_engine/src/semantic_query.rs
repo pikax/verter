@@ -851,10 +851,17 @@ impl BinderScopeId {
         let mut buf: Vec<u8> = Vec::with_capacity(32 + name.len());
         buf.extend_from_slice(Self::SALT);
         buf.push(tag);
-        buf.push(match owner.kind() {
+        let kind = match owner.kind() {
             verter_type_expr::TopLevelOwnerKind::Module => b'M',
             verter_type_expr::TopLevelOwnerKind::Instance => b'I',
             verter_type_expr::TopLevelOwnerKind::Frontmatter => b'F',
+        };
+        // A `declare global` contribution's owner encodes its kind in lower
+        // case, so no lexical owner's bytes change.
+        buf.push(if owner.is_global_augmentation() {
+            kind.to_ascii_lowercase()
+        } else {
+            kind
         });
         buf.extend_from_slice(&owner.ordinal().to_le_bytes());
         buf.extend_from_slice(name.as_bytes());
@@ -4845,6 +4852,132 @@ pub(crate) fn accessor_property_slots(
         })
         .collect();
     Some(slots)
+}
+
+/// An object literal's `members`, in authored order, with every spelling
+/// two or more of them share read as the ONE property the checker gives it
+/// (an error, which the checker still types). The binder merges a plain
+/// property into the spelling's symbol whatever it holds, and an accessor
+/// only into a symbol that holds no property, method or accessor of its own
+/// kind; `checkObjectLiteral` then keeps the LAST member, at the first
+/// one's position. A last plain property or method stands as declared, a
+/// plain property `readonly` too when its symbol holds a getter and no
+/// setter (`{ get b() { … }, b: "s" }` is `{ readonly b: string }`); a
+/// last accessor stands with the accessors of its own symbol, which
+/// [`members_with_accessors_as_properties`] reads as one property
+/// (`{ b: "s", get b() { return 1; } }` is `{ readonly b: number }`).
+/// Members untouched when no spelling repeats.
+pub(crate) fn object_literal_members_last_wins(members: Vec<SurfaceMember>) -> Vec<SurfaceMember> {
+    use verter_type_expr::ObjectMethodKind;
+    if members.len() < 2 {
+        return members;
+    }
+    let spelling = |member: &SurfaceMember| member.key.cloned_known().map(property_spelling);
+    let mut by_spelling: std::collections::HashMap<PropertyKey, Vec<usize>> =
+        std::collections::HashMap::with_capacity(members.len());
+    let mut repeats = false;
+    for (ordinal, member) in members.iter().enumerate() {
+        if let Some(key) = spelling(member) {
+            let ordinals = by_spelling.entry(key).or_default();
+            ordinals.push(ordinal);
+            repeats |= ordinals.len() > 1;
+        }
+    }
+    if !repeats {
+        return members;
+    }
+    let is_accessor = |kind: Option<ObjectMethodKind>| {
+        matches!(kind, Some(ObjectMethodKind::Get | ObjectMethodKind::Set))
+    };
+    // The members each repeated spelling keeps, by the ordinal of its first
+    // member, and whether a kept plain property reads `readonly` through
+    // its symbol's getter.
+    let mut kept_by_first: std::collections::HashMap<usize, (Vec<usize>, bool)> =
+        std::collections::HashMap::new();
+    let mut repeated = vec![false; members.len()];
+    for ordinals in by_spelling.values().filter(|ordinals| ordinals.len() > 1) {
+        // The binder symbol each member declares: `0` the spelling's table
+        // symbol, `n` the `n`th detached one a conflicting accessor or
+        // method mints. A plain property conflicts with nothing and joins
+        // the table symbol; an accessor conflicts with its own kind and a
+        // method, never with a plain property; a method conflicts with
+        // every other member.
+        let (mut table_get, mut table_set, mut table_method, mut table_plain) =
+            (false, false, false, false);
+        let mut detached = 0usize;
+        let symbols: Vec<usize> = ordinals
+            .iter()
+            .map(|ordinal| match members[*ordinal].method_kind {
+                None => {
+                    table_plain = true;
+                    0
+                }
+                Some(ObjectMethodKind::Get) if !table_get && !table_method => {
+                    table_get = true;
+                    0
+                }
+                Some(ObjectMethodKind::Set) if !table_set && !table_method => {
+                    table_set = true;
+                    0
+                }
+                Some(ObjectMethodKind::Method)
+                    if !table_get && !table_set && !table_method && !table_plain =>
+                {
+                    table_method = true;
+                    0
+                }
+                Some(_) => {
+                    detached += 1;
+                    detached
+                }
+            })
+            .collect();
+        let last = ordinals.len() - 1;
+        let last_kind = members[ordinals[last]].method_kind;
+        let kept = if is_accessor(last_kind) {
+            // The accessors of the last member's symbol stand together.
+            (
+                ordinals
+                    .iter()
+                    .zip(&symbols)
+                    .filter(|(ordinal, symbol)| {
+                        **symbol == symbols[last] && is_accessor(members[**ordinal].method_kind)
+                    })
+                    .map(|(ordinal, _)| *ordinal)
+                    .collect(),
+                false,
+            )
+        } else {
+            (
+                vec![ordinals[last]],
+                last_kind.is_none() && table_get && !table_set,
+            )
+        };
+        for ordinal in ordinals {
+            repeated[*ordinal] = true;
+        }
+        kept_by_first.insert(ordinals[0], kept);
+    }
+    let mut placed: Vec<Option<SurfaceMember>> = members.into_iter().map(Some).collect();
+    let mut out = Vec::with_capacity(placed.len());
+    for ordinal in 0..placed.len() {
+        if !repeated[ordinal] {
+            out.push(placed[ordinal].take().expect("each member placed once"));
+            continue;
+        }
+        // A repeated spelling's kept members stand at its first position.
+        let Some((kept, readonly_by_getter)) = kept_by_first.remove(&ordinal) else {
+            continue;
+        };
+        for kept_ordinal in kept {
+            let mut member = placed[kept_ordinal]
+                .take()
+                .expect("each kept member placed once");
+            member.readonly |= readonly_by_getter;
+            out.push(member);
+        }
+    }
+    out
 }
 
 /// The `keyof` key that selects each accessor of a source's members: the

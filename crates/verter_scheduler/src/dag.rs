@@ -281,9 +281,29 @@ impl std::fmt::Debug for RequestGroup {
 }
 
 impl RequestGroup {
-    fn signal_all(&mut self, state: CompletionState<RequestResult>) {
+    fn signal_all(
+        &mut self,
+        state: CompletionState<RequestResult>,
+        deferred: &mut Option<Vec<verter_execution::wake::TakenWakers>>,
+    ) {
         for sender in self.senders.drain(..) {
-            sender.send(state.clone());
+            send_completion(&sender, state.clone(), deferred);
+        }
+    }
+}
+
+fn send_completion(
+    sender: &CompletionSender<RequestResult>,
+    state: CompletionState<RequestResult>,
+    deferred: &mut Option<Vec<verter_execution::wake::TakenWakers>>,
+) {
+    if let Some(wakers) = sender.send_deferred(state) {
+        if !wakers.is_empty() {
+            if let Some(batch) = deferred {
+                batch.push(wakers);
+            } else {
+                wakers.wake();
+            }
         }
     }
 }
@@ -716,6 +736,10 @@ pub struct DependencyOccupancy {
 }
 
 pub struct SchedulerDag {
+    /// The scheduler's lock owner takes these callbacks before unlock and
+    /// delivers them afterwards. Standalone, exclusively owned DAGs deliver
+    /// directly because no enclosing lock exists.
+    completion_wakes: Option<Vec<verter_execution::wake::TakenWakers>>,
     /// Per-token node bookkeeping. Visibility is narrowed to
     /// `pub(in crate::dag)` because the `terminal_failures` child
     /// module mutates `DagNode.failed_blocker_deps` directly when
@@ -1165,6 +1189,7 @@ impl SchedulerDag {
     /// Create a new empty DAG with an explicit capacity budget.
     pub fn with_budget(budget: DagCapacityBudget) -> Self {
         Self {
+            completion_wakes: None,
             nodes: FxHashMap::default(),
             by_identity: FxHashMap::default(),
             dep_edges: DepEdges::default(),
@@ -1189,6 +1214,25 @@ impl SchedulerDag {
             #[cfg(test)]
             cache_node_cancelled: 0,
         }
+    }
+
+    pub(crate) fn defer_completion_wakes(&mut self) {
+        self.completion_wakes = Some(Vec::new());
+    }
+
+    pub(crate) fn take_completion_wakes(&mut self) -> Vec<verter_execution::wake::TakenWakers> {
+        self.completion_wakes
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn send_completion(
+        &mut self,
+        sender: &CompletionSender<RequestResult>,
+        state: CompletionState<RequestResult>,
+    ) {
+        send_completion(sender, state, &mut self.completion_wakes);
     }
 
     /// Cumulative dependency-edge work counters.
@@ -1797,7 +1841,7 @@ impl SchedulerDag {
             };
             if let Some(mut state) = self.file_waiters.remove(&key) {
                 for mut group in state.groups.drain(..) {
-                    group.signal_all(CompletionState::Superseded);
+                    group.signal_all(CompletionState::Superseded, &mut self.completion_wakes);
                 }
             }
             self.canonical_index.remove_file_waiter(&key);
@@ -2561,7 +2605,7 @@ impl SchedulerDag {
         // hang across reset.
         for (_, mut state) in self.file_waiters.drain() {
             for mut group in state.groups.drain(..) {
-                group.signal_all(CompletionState::Shutdown);
+                group.signal_all(CompletionState::Shutdown, &mut self.completion_wakes);
             }
         }
         self.artifact_blocker_deps.clear();
@@ -2700,7 +2744,10 @@ impl SchedulerDag {
         if let Some(state) = self.file_waiters.get_mut(&key) {
             state.groups.retain_mut(|group| {
                 if group.target.is_satisfied_by(completed) {
-                    group.signal_all(CompletionState::Ready(result.clone()));
+                    group.signal_all(
+                        CompletionState::Ready(result.clone()),
+                        &mut self.completion_wakes,
+                    );
                     false
                 } else {
                     true
@@ -2753,7 +2800,10 @@ impl SchedulerDag {
         };
         if let Some(mut state) = self.file_waiters.remove(&key) {
             for mut group in state.groups.drain(..) {
-                group.signal_all(CompletionState::Failed(error.clone()));
+                group.signal_all(
+                    CompletionState::Failed(error.clone()),
+                    &mut self.completion_wakes,
+                );
             }
         }
         self.canonical_index.remove_file_waiter(&key);
@@ -2777,7 +2827,10 @@ impl SchedulerDag {
         if let Some(state) = self.file_waiters.get_mut(&key) {
             state.groups.retain_mut(|group| {
                 if group.target.is_satisfied_by(failed_stage) {
-                    group.signal_all(CompletionState::Failed(error.clone()));
+                    group.signal_all(
+                        CompletionState::Failed(error.clone()),
+                        &mut self.completion_wakes,
+                    );
                     false
                 } else {
                     true
@@ -2804,7 +2857,7 @@ impl SchedulerDag {
         };
         if let Some(mut state) = self.file_waiters.remove(&key) {
             for mut group in state.groups.drain(..) {
-                group.signal_all(CompletionState::Shutdown);
+                group.signal_all(CompletionState::Shutdown, &mut self.completion_wakes);
             }
         }
         self.canonical_index.remove_file_waiter(&key);
@@ -2829,7 +2882,7 @@ impl SchedulerDag {
             };
             if let Some(mut state) = self.file_waiters.remove(&key) {
                 for mut group in state.groups.drain(..) {
-                    group.signal_all(CompletionState::Shutdown);
+                    group.signal_all(CompletionState::Shutdown, &mut self.completion_wakes);
                 }
             }
             self.canonical_index.remove_file_waiter(&key);
@@ -2841,7 +2894,7 @@ impl SchedulerDag {
     pub fn signal_all_shutdown(&mut self) {
         for (_, mut state) in self.file_waiters.drain() {
             for mut group in state.groups.drain(..) {
-                group.signal_all(CompletionState::Shutdown);
+                group.signal_all(CompletionState::Shutdown, &mut self.completion_wakes);
             }
         }
         self.canonical_index.clear_file_waiters();

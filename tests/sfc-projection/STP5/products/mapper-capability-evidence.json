@@ -1,16 +1,85 @@
 {
   "schema": "MapperCapabilityEvidence",
-  "version": 1,
+  "version": 2,
   "product": "MapperCapabilityEvidence",
   "selectedMapperProtocol": {
+    "sources": [
+      "https://github.com/microsoft/typescript-go/pull/4712",
+      "https://github.com/microsoft/TypeScript/pull/63936"
+    ],
     "transport": "json-rpc-stdio",
+    "framing": "content-length",
+    "requestDirection": "typescript-to-mapper-only",
     "methods": ["initialize", "openProject", "transform", "closeProject"],
+    "cliFlag": "--runExternalCode",
+    "tsconfigField": "contentMappers",
+    "tsconfigEntry": ["package", "extensions", "options"],
+    "manifestField": "typescript.contentMapper",
+    "manifestFields": ["exec", "compilerOptions", "dynamicConfig"],
+    "initialize": {
+      "params": ["positionEncodings", "locale?"],
+      "result": ["positionEncoding", "diagnosticSource"],
+      "reservedDiagnosticSources": "typescript, tsc, and every TypeScript-understood extension without its dot"
+    },
+    "openProject": {
+      "params": ["configFileName", "projectHandle", "options?", "compilerOptions"],
+      "result": ["configIdentity?", "watchedFiles?", "optionDiagnostics?"],
+      "configIdentity": "required with dynamicConfig, forbidden without it",
+      "watchedFiles": "absolute paths, allowed only with dynamicConfig",
+      "optionDiagnostic": ["path", "messageText", "code"]
+    },
+    "transform": {
+      "params": ["fileName", "content", "projectHandle"],
+      "result": [
+        "text",
+        "extension",
+        "mappings?",
+        "diagnosticDirectives?",
+        "diagnostics?",
+        "supplemental?"
+      ],
+      "mapperDiagnostic": ["messageText", "start", "length", "code"]
+    },
+    "closeProject": { "params": ["projectHandle"] },
+    "virtualExtensions": [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".json"],
+    "spanMapping": [
+      "virtualStart",
+      "virtualLength",
+      "originalStart",
+      "originalLength",
+      "kind",
+      "features?"
+    ],
+    "spanMapKinds": { "Verbatim": 0, "Atom": 1, "Alias": 2 },
+    "featuresDefault": "All",
+    "virtualSpansOverlap": false,
+    "originalSpansOverlap": true,
+    "diagnosticDirectives": {
+      "shape": "object",
+      "fields": ["unusedExpectDirectiveDiagnostics", "directives"],
+      "tuple": [
+        "originalStart",
+        "originalLength",
+        "virtualStart",
+        "virtualEnd",
+        "policy",
+        "unusedExpectDirectiveIndex?"
+      ],
+      "policies": { "Ignore": 0, "Expect": 1 },
+      "unusedExpectDirectiveIndex": "required for Expect unless exactly one unusedExpectDirectiveDiagnostics entry exists",
+      "virtualRangesOverlap": false
+    },
     "positionEncodings": ["utf-8", "utf-16"],
     "projectHandleKeyed": true,
     "fullContentTransform": true,
     "closeProjectReleasesState": true,
     "versionLabelIsNotProof": true,
-    "dormantProductIsNotComplete": "TCM2"
+    "dormantProductIsNotComplete": "TCM2",
+    "removedByTypeScript63936": ["initialize.protocolVersion"],
+    "notModeled": {
+      "outputExtensions": "typescript.contentMapper.outputExtensions / contentMappers[].outputExtensions ship in 7.1.0-beta but are not part of #4712 or #63936; STP5 does not exercise them",
+      "supplemental": "validated as MappedOutput shape only; the fixture emits none"
+    }
   },
   "requiredOperations": [
     "initialize",
@@ -18,6 +87,20 @@
     "transform",
     "closeProject",
     "encoding-negotiation",
+    "locale",
+    "diagnostic-source",
+    "option-diagnostics",
+    "dynamic-config-identity",
+    "watched-files",
+    "virtual-extension",
+    "span-mappings",
+    "alias-display",
+    "synthesized-diagnostics",
+    "mapper-diagnostics",
+    "diagnostic-directive-ignore",
+    "diagnostic-directive-expect",
+    "unused-expect-diagnostic",
+    "unused-expect-index",
     "diagnostics",
     "hover",
     "definition",
@@ -25,15 +108,12 @@
     "edits"
   ],
   "proofRule": "executable-selected-build-or-blocking-upstream-defect",
-  "forbiddenClaims": [
-    "7.1.0-dev-label",
-    "version-label",
-    "dormant-tcm2",
-    "silent-degrade"
-  ],
+  "forbiddenClaims": ["7.1.0-dev-label", "version-label", "dormant-tcm2", "silent-degrade"],
   "hostProbe": {
     "engines": ["ts-js", "ts-native"],
-    "method": "tsc --help",
-    "flags": ["runExternalCode", "contentMappers"]
+    "method": "tsc --help --all",
+    "flags": ["runExternalCode", "contentMappers"],
+    "execution": "when the help lists the host, tests/sfc-projection/STP5/mapper-host/e2e.mjs runs the engine's own tsc --runExternalCode end-to-end against the fixture mapper; each host operation is supported only from that run",
+    "absentHost": "no mapper host on <engine>@<version>, recorded as a blocking upstream defect"
   }
 }

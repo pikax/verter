@@ -64,18 +64,18 @@ pub enum TopLevelOwnerKind {
     Frontmatter,
 }
 
-/// Neutral top-level declaration/import owner. Framework adapters map their
-/// authored regions into this identity once during cold indexing; semantic
-/// caches never infer ownership from names, spans, or source text.
+/// Which declaration scope of a top-level owner an identity addresses.
 ///
-/// Ordinary JavaScript/TypeScript files use [`Self::ordinary_file`], which is
-/// exactly `Module(0)`. There is intentionally no special `File` owner: a file
-/// is the first module owner, so plain and carrier-backed sources share one
-/// identity model.
+/// A module's `declare global { … }` block declares into the GLOBAL scope,
+/// not the module's own: when the module also declares a module-scope
+/// namesake, `(canonical, owner, name)` names that namesake, and the block's
+/// contribution to the global is addressed by the same owner in its
+/// [`Self::GlobalAugmentation`] scope instead.
 #[derive(
     Debug,
     Clone,
     Copy,
+    Default,
     PartialEq,
     Eq,
     PartialOrd,
@@ -88,15 +88,102 @@ pub enum TopLevelOwnerKind {
     verter_retention::heap_size::HeapSize,
     verter_retention::unshared::Unshared,
 )]
+pub enum OwnerDeclarationScope {
+    /// The owner's own lexical scope: its file-scope declarations, and an
+    /// ambient block member the file surface does not shadow.
+    #[default]
+    Lexical,
+    /// The owner's `declare global { … }` contribution.
+    GlobalAugmentation,
+}
+
+impl OwnerDeclarationScope {
+    #[must_use]
+    pub const fn is_lexical(&self) -> bool {
+        matches!(self, Self::Lexical)
+    }
+
+    /// The scope's byte in every hand-written identity encoding.
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        match self {
+            Self::Lexical => 0,
+            Self::GlobalAugmentation => 1,
+        }
+    }
+}
+
+/// Neutral top-level declaration/import owner. Framework adapters map their
+/// authored regions into this identity once during cold indexing; semantic
+/// caches never infer ownership from names, spans, or source text.
+///
+/// Ordinary JavaScript/TypeScript files use [`Self::ordinary_file`], which is
+/// exactly `Module(0)`. There is intentionally no special `File` owner: a file
+/// is the first module owner, so plain and carrier-backed sources share one
+/// identity model.
+///
+/// An owner also carries the [`OwnerDeclarationScope`] a declaration identity
+/// addresses ([`Self::global_augmentation`]); every owner a file's tables are
+/// keyed by is [`OwnerDeclarationScope::Lexical`] ([`Self::lexical`]).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
+)]
 pub struct TopLevelOwnerId {
     kind: TopLevelOwnerKind,
     ordinal: u32,
+    #[serde(default, skip_serializing_if = "OwnerDeclarationScope::is_lexical")]
+    scope: OwnerDeclarationScope,
 }
 
 impl TopLevelOwnerId {
     #[must_use]
     pub const fn new(kind: TopLevelOwnerKind, ordinal: u32) -> Self {
-        Self { kind, ordinal }
+        Self {
+            kind,
+            ordinal,
+            scope: OwnerDeclarationScope::Lexical,
+        }
+    }
+
+    /// This owner's `declare global { … }` contribution.
+    #[must_use]
+    pub const fn global_augmentation(self) -> Self {
+        Self {
+            scope: OwnerDeclarationScope::GlobalAugmentation,
+            ..self
+        }
+    }
+
+    /// The lexical owner this owner's declarations are written in — the key
+    /// of every per-file owner table.
+    #[must_use]
+    pub const fn lexical(self) -> Self {
+        Self {
+            scope: OwnerDeclarationScope::Lexical,
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub const fn scope(self) -> OwnerDeclarationScope {
+        self.scope
+    }
+
+    #[must_use]
+    pub const fn is_global_augmentation(self) -> bool {
+        matches!(self.scope, OwnerDeclarationScope::GlobalAugmentation)
     }
 
     #[must_use]
@@ -127,6 +214,19 @@ impl TopLevelOwnerId {
     #[must_use]
     pub const fn ordinal(self) -> u32 {
         self.ordinal
+    }
+}
+
+/// A lexical owner hashes exactly as its `(kind, ordinal)` pair always has,
+/// so every stable digest over lexical owners keeps its value; only a
+/// global-augmentation owner feeds its scope.
+impl std::hash::Hash for TopLevelOwnerId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.ordinal.hash(state);
+        if !self.scope.is_lexical() {
+            self.scope.hash(state);
+        }
     }
 }
 
@@ -576,6 +676,35 @@ mod top_level_owner_identity_tests {
         let json = serde_json::to_string(&frontmatter).expect("serialize owner");
         let round_trip: TopLevelOwnerId = serde_json::from_str(&json).expect("deserialize owner");
         assert_eq!(round_trip, frontmatter);
+    }
+
+    #[test]
+    fn global_augmentation_scope_is_a_distinct_owner_identity() {
+        let lexical = TopLevelOwnerId::ordinary_file();
+        let global = lexical.global_augmentation();
+
+        assert_ne!(global, lexical);
+        assert_ne!(hash_of(&global), hash_of(&lexical));
+        assert_ne!(
+            DeclBindingKey::new(global, "ThisType"),
+            DeclBindingKey::new(lexical, "ThisType")
+        );
+        assert!(global.is_global_augmentation() && !lexical.is_global_augmentation());
+        assert_eq!(global.lexical(), lexical);
+        assert_eq!(
+            (global.kind(), global.ordinal()),
+            (lexical.kind(), lexical.ordinal())
+        );
+
+        // A lexical owner serializes as it always has; a scoped one
+        // round-trips with its scope.
+        assert_eq!(
+            serde_json::to_string(&lexical).expect("serialize owner"),
+            r#"{"kind":"Module","ordinal":0}"#
+        );
+        let json = serde_json::to_string(&global).expect("serialize owner");
+        let round_trip: TopLevelOwnerId = serde_json::from_str(&json).expect("deserialize owner");
+        assert_eq!(round_trip, global);
     }
 
     #[test]

@@ -35,3 +35,8 @@ pub fn append_line(path: impl AsRef<Path>, text: &str) -> std::io::Result<()> {
     writeln!(file, "{text}")?;
     file.sync_data()
 }
+
+/// Create `path` and every missing parent directory.
+pub fn create_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}

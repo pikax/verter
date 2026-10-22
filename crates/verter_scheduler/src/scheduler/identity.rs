@@ -19,114 +19,6 @@ pub(super) fn identity_canonical(identity: &crate::dag::WorkNodeIdentity) -> Str
 }
 
 impl Scheduler {
-    pub(super) fn wait_for_scoped_cache_node<T, F>(
-        self: &Arc<Self>,
-        identity: &WorkNodeIdentity,
-        flight: &Arc<ScopedCacheFlight>,
-        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
-        request_token: Option<CancellationToken>,
-        build: F,
-    ) -> Result<Arc<T>, ScopedCacheNodeError>
-    where
-        T: Send + Sync + 'static,
-        F: FnOnce(&CancellationToken) -> T + Send,
-    {
-        let mut build = Some(build);
-        loop {
-            if request_token
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
-            {
-                return Err(ScopedCacheNodeError::Cancelled);
-            }
-            if self.shutdown.load(Ordering::Acquire) {
-                self.terminalize_scoped_cache_flight(
-                    identity,
-                    flight,
-                    ScopedCacheTerminal::Shutdown,
-                    false,
-                );
-            }
-
-            if let Some(terminal) = flight.terminal() {
-                return match terminal {
-                    ScopedCacheTerminal::Value(value) => {
-                        Arc::downcast::<T>(value).map_err(|_| ScopedCacheNodeError::TypeMismatch)
-                    }
-                    ScopedCacheTerminal::Cancelled => Err(ScopedCacheNodeError::Cancelled),
-                    ScopedCacheTerminal::Shutdown => Err(ScopedCacheNodeError::Shutdown),
-                    ScopedCacheTerminal::Panicked => Err(ScopedCacheNodeError::Panicked),
-                };
-            }
-
-            if let Some(aggregate) = flight.try_claim_builder() {
-                let operation = build
-                    .take()
-                    .expect("only the caller that supplied this closure can claim it once");
-                let identity_for_path = identity.clone();
-                let identity_for_publication = identity.clone();
-                let context_for_worker = request_context.clone();
-                let aggregate_for_worker = aggregate.clone();
-                let flight_for_worker = Arc::clone(flight);
-                let scheduler_for_worker = Arc::clone(self);
-                let run = move || {
-                    let _request_guard =
-                        context_for_worker.map(|context| Arc::clone(&context.0).install_tls());
-                    let _job_guard = verter_execution::cancellation::JobCancellationGuard::install(
-                        aggregate_for_worker.clone(),
-                    );
-                    let outcome = caller_kind::with_active_path(identity_for_path, || {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            operation(&aggregate_for_worker)
-                        }))
-                    });
-                    match outcome {
-                        Ok(value) => {
-                            let value: Arc<dyn Any + Send + Sync> = Arc::new(value);
-                            let terminal = if aggregate_for_worker.is_cancelled() {
-                                ScopedCacheTerminal::Cancelled
-                            } else {
-                                ScopedCacheTerminal::Value(value)
-                            };
-                            let success = matches!(terminal, ScopedCacheTerminal::Value(_));
-                            scheduler_for_worker.terminalize_scoped_cache_flight(
-                                &identity_for_publication,
-                                &flight_for_worker,
-                                terminal,
-                                success,
-                            );
-                        }
-                        Err(_) => scheduler_for_worker.terminalize_scoped_cache_flight(
-                            &identity_for_publication,
-                            &flight_for_worker,
-                            ScopedCacheTerminal::Panicked,
-                            false,
-                        ),
-                    }
-                };
-                #[cfg(not(target_arch = "wasm32"))]
-                self.cpu_pool.install(run);
-                #[cfg(target_arch = "wasm32")]
-                run();
-                continue;
-            }
-
-            // Cooperatively admit/dispatch for sync schedulers while remaining
-            // safe with the native driver: the DAG lock is the sole dequeue
-            // authority, so concurrent pumps cannot dispatch the same node.
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let _ =
-                    self.pump_ready(PumpReason::WaitOrDrive, caller_kind::CallerKind::current());
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                let _ = self.drive_one();
-            }
-            flight.wait_for_change(std::time::Duration::from_millis(2));
-        }
-    }
-
     /// Is `flight` still the registry's CURRENT incarnation for `identity`?
     ///
     /// The scoped-cache rendezvous is per-incarnation but the DAG node it
@@ -136,7 +28,7 @@ impl Scheduler {
     /// aggregate token latches cancelled, its `by_identity` entry disappears,
     /// and — when the cancel lands before the successor's dispatch — no
     /// `mark_dispatched` ever arrives, so every caller parked in
-    /// [`Self::wait_for_scoped_cache_node`] waits forever. Every teardown that
+    /// [`ScopedCacheNodeHandoff::poll`] waits forever. Every teardown that
     /// can run on a superseded flight gates its DAG cancel on this predicate.
     ///
     /// The caller holds `scoped_cache_gate`, which serializes incarnation
@@ -175,6 +67,7 @@ impl Scheduler {
         flight: Arc<ScopedCacheFlight>,
         request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) {
+        let _wakes = self.dag.defer_wakes();
         let _gate = self.scoped_cache_gate.lock();
         let is_current = self
             .scoped_cache_flights

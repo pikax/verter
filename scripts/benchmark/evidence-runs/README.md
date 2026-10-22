@@ -34,7 +34,7 @@ and peak memory beside whole-program TypeScript wall time),
 and a module interface augmented by 2,000 unimported modules; cold Verter time
 and peak memory, and each reproduction's retention proof: one engine answering
 500 then 2,000 contributors against a 2,000-only baseline session),
-`skr-scale-answers`, `skr-mapped-expand`.
+`skr-scale-answers`, `skr-mapped-expand`, `rev11-l1-soak`.
 
 `skr-mapped-indexb` demands conditional mapped values through the entire source
 key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
@@ -67,6 +67,88 @@ deep. TypeScript 7.0.2 answers each with the resolved object type. The run sets
 `requireAllMatched`, so every Verter answer must match the measured reference
 exactly; its required cells are the largest sizes' cold Verter `coldMs` and
 `peakBytes`.
+
+`rev11-l1-soak` is a soak manifest (`"kind": "soak"`): it registers the
+long-churn soak runner (`crates/verter_bench/src/soak/`, binary
+`verter-soak`) rather than a semantic-perf invocation. The runner exists only
+in the declared `soak.build` (`verter_bench` with its default-off
+`soak-support` feature, which forwards only the narrow soak seams: the
+engine's flight rendezvous, the retention account's ACTIVE-occupancy window,
+a held answer's allocation charge witness, a delivered flow return's
+materialization, and the capture-off work counters — never general
+`test-support`, `semantic-observe` or audit capture); the driver
+builds exactly that configuration and the validator rejects any other. Its
+two workloads, `normal` and `pressure`, are 100 tranches of one 100-action
+template (10,000 actions, at least 3,000 distinct query identities, every
+lifecycle class, both typed refusal classes), frozen by the digests under
+`soak.workloads`. A digest covers the action list, the digest of the path
+and exact bytes of every publication of every action and of the setup, and
+the registered surge shapes' frozen bounds (`soak.surgeLimits`: each shape's
+module count, props and oversized props, its largest published input bytes,
+the components whose results it holds live at once, its absolute
+live-artifact, registered-source and snapshot-lease maxima, and its finite
+retained-byte bound — fixed figures a larger request never enlarges; the
+full surge's retained bound is the ratified aggregate ceiling). The driver
+requires both complete shapes with finite positive integer limits, rejects
+requests larger than their declared populations, and checks each retained
+bound against the applicable retention policy. The
+runner records what it actually published and the verdict fails any action
+whose publications differ, so a fixture the freeze omits fails the run. The
+runner's test (`cargo nextest run -p verter_bench --features soak-support -E
+'test(soak::)'`) regenerates the digests and compares, and runs the
+one-tranche smoke manifests (`soak.smoke`) and the negative controls on any
+worker. Each mode's verdict comes from the runner's own judgement of its
+written summary: action, result and publication inventories, the per-class
+answer rules, sampling at least every `sampleEvery` actions, the envelope the
+first `envelopeActions` actions set, and the drain to baseline (object
+counts, content pins and retained account bytes at the host's close route;
+pinned account bytes and store storage once the host is dropped). Ordinary
+action samples wait on the public queued-release completion boundary; live
+external readers remain charged. Overlapping
+cold demands are scheduled by the flight rendezvous and judged by one shared
+producer, a subscriber registered on its flight and a positive `joined_waits`
+delta. A cancellation's uncancelled retry is materialized through its own
+return root and must equal a fresh cold host's answer over the same
+configuration and sources; that host's publications are part of the action's
+frozen inventory. Held answers are flow returns whose acquisitions (cold, and
+warm after a precharge), public copies and releases in both orders are
+judged by each surviving reader's allocation-specific charge witness: the
+cache's retirement transfers exactly each allocation's measured charge to the
+readers, the first release moves nothing, the last reader's release gives
+back exactly the bytes its witness names while an external reader keeps the
+return node live, and an unrelated reader's charges never move. Every
+pressure manifest runs a bounded surge in its first tranche; the
+full manifest also freezes surges that hold component-meta results past the
+account's aggregate ceiling and entry cap, and its verdict requires positive,
+surge-attributed aggregate-pressure and oversized refusal deltas, an answer
+delivered complete but not retained, complete delivery of every surge answer,
+no ACTIVE refusal, and each full surge's own ACTIVE window reaching the
+former advisory active target. `work` cells (`surge*` cells are the surges'
+own deltas and window peaks, never lifetime counters) are read on every
+worker; wall time, peak RSS and the process-tree peak are `benchM3Only`
+cells. A soak manifest carries `name`, `kind`, `description`, `modes`,
+`noise`, `soak` and `requiredCells` (`mode`, `metrics`, `benchM3Only`).
+
+The surge holds every delivered reader, including uncached results, until
+after its population and ACTIVE-window samples. Its `liveDigests` re-read
+those payloads at the sample and must match the delivered inventory and
+registered concurrency. The bounded oversized-entry test exercises the same
+holder with the frozen oversized source and two small retained controls.
+
+Candidate churn records the demanded slot's admission tokens and declared
+cap: an old token leaving while a new one enters at the cap proves displacement.
+An unchanged aggregate candidate count alone does not. Concurrent refusal
+demands report `null` for unmeasured work counters; only measured zero counters
+can prove a replay without recomputation. A demand's work is the host's
+component-meta producer entries (early returns included) and its resolver
+request results, read through the host's narrow work reader; graph misses or
+queries never stand in for either. Paid-context controls also record and
+check their equal entry allowance. Separate operation-refusal controls hold
+the root, profile and empty paid context fixed while changing only a positive
+entry spend. They require computation at the changed allowance and retained
+replay at the original allowance. Both entry spends and the alternate depth
+profile are serialized in the action inventory and hashed; refusal evidence
+must match the manifest action's variant.
 
 | Field                             | Meaning                                                                                                                                                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

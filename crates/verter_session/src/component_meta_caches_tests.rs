@@ -468,6 +468,16 @@ impl LeaderGate {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
+struct ReleaseLeader(Arc<LeaderGate>);
+
+#[cfg(feature = "semantic-observe")]
+impl Drop for ReleaseLeader {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 /// Delegating [`ComponentMetaRequestHost`] that wraps the REAL
 /// [`ViewBoundRequestHost`] and forwards every trait method untouched
 /// EXCEPT `compute_component_meta`, which signals "Leader entered" and
@@ -685,6 +695,9 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
     };
 
     let (leader_result, follower_results) = std::thread::scope(|scope| {
+        // Drop before the scope joins its threads, including on assertion
+        // failure, so a failed ownership check never strands the producer.
+        let _release_on_unwind = ReleaseLeader(Arc::clone(&gate));
         // Spawn the Leader ALONE and wait until it is provably parked
         // inside `compute` (it has already claimed the flight, so it is
         // deterministically the Leader — no other thread exists yet).
@@ -712,8 +725,8 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
             })
             .collect();
 
-        // Wait until every Follower has parked on the Leader's condvar.
-        // The joiner-park send fires immediately before that wait, so
+        // Wait until every Follower has subscribed to the Leader's flight.
+        // The joiner-park send fires after the pending poll, so
         // FOLLOWERS receipts are the exact occupancy proof.
         for i in 0..FOLLOWERS {
             follower_parked

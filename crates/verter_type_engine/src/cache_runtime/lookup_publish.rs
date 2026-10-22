@@ -81,7 +81,7 @@ use std::sync::Arc;
 
 use super::singleflight::{
     retire_slot_if_current, ComputeAdmission, InflightFailureKind, InflightPanicGuard,
-    InflightSlot, InflightTable,
+    InflightSlot, InflightTable, SlotJoin,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -224,7 +224,9 @@ where
             // Joiner — wait for the winner to publish or fail.
             #[cfg(any(test, feature = "test-support"))]
             inflight.notify_joiner_park();
-            slot.ready.wait_while(&mut state, |s| !s.completed);
+            drop(state);
+            SlotJoin::new(&slot).wait();
+            let state = slot.state.lock();
             match state.failure {
                 // Deterministic compute failure — surface `None` (the
                 // caller's fallback owns retry policy).
@@ -280,7 +282,7 @@ where
             .take()
             .expect("compute is taken exactly once by the cold winner")();
 
-        let value = match admission {
+        let (value, joiners) = match admission {
             ComputeAdmission::Cacheable(entry) => {
                 // Hold the cache's retention gate (shared read) across the
                 // WHOLE publish lifecycle — `revalidate_after_compute`, the
@@ -309,19 +311,19 @@ where
                         .expect("project_unadmitted is taken exactly once by the cold winner")(
                         &entry,
                     );
-                    {
-                        let mut state = slot.state.lock();
-                        state.completed = true;
+                    let joiners = slot.complete(|state| {
                         if unadmitted.is_some() {
                             state.non_cacheable_winner = true;
                         } else {
                             state.failure = Some(InflightFailureKind::AdmissionRejected);
                         }
-                    }
-                    slot.ready.notify_all();
+                    });
                     panic_guard.mark_finished();
                     drop(panic_guard);
                     retire_slot_if_current(&inflight.table, &flight_key, &slot);
+                    // Wake the joiners only once the publish fence is released.
+                    drop(_retention);
+                    joiners.wake();
                     return unadmitted;
                 }
                 let value = project
@@ -357,36 +359,24 @@ where
                     .expect("evict_deferred is taken exactly once by the cold winner")(
                     victims
                 );
-                {
-                    let mut state = slot.state.lock();
-                    state.completed = true;
-                    // Joiners fall through to the `lookup()` path and
-                    // validate the published candidate against their own
-                    // view.
-                }
-                slot.ready.notify_all();
-                Some(value)
+                // Joiners fall through to the `lookup()` path and validate
+                // the published candidate against their own view. They wake
+                // below, once the publish fence is released.
+                (Some(value), slot.complete(|_| {}))
             }
             ComputeAdmission::ReturnOnly { value, reason } => {
                 crate::cache_runtime::admission::propagate_non_admission(reason);
-                {
-                    let mut state = slot.state.lock();
-                    state.completed = true;
-                    state.non_cacheable_winner = true;
-                }
-                slot.ready.notify_all();
-                Some(value)
+                let joiners = slot.complete(|state| state.non_cacheable_winner = true);
+                (Some(value), joiners)
             }
             ComputeAdmission::Failed => {
-                {
-                    let mut state = slot.state.lock();
-                    state.completed = true;
+                let joiners = slot.complete(|state| {
                     state.failure = Some(InflightFailureKind::ComputeFailed);
-                }
-                slot.ready.notify_all();
-                None
+                });
+                (None, joiners)
             }
         };
+        joiners.wake();
 
         panic_guard.mark_finished();
         drop(panic_guard);

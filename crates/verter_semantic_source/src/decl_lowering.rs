@@ -82,6 +82,8 @@ use verter_session_query::source::snapshot::SnapshotKey;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use verter_execution::wake::{WakeRegistration, WakerSet};
 
 /// One lowering-service call's result: the job's owned value plus
 /// whether the service had to parse (vs. serving the retained snapshot).
@@ -492,7 +494,7 @@ struct DeclWorker {
     jobs: crossbeam_channel::Sender<WorkerJob>,
     /// The pollable submitters whose job found `jobs` full, woken once the
     /// worker dequeues a job and so frees a slot.
-    space: Arc<parking_lot::Mutex<SpaceWaiters>>,
+    space: Arc<parking_lot::Mutex<WakerSet>>,
     /// A coalesced notification, separate from the bounded job queue.
     wake: crossbeam_channel::Sender<()>,
     /// Lease releases not yet applied, coalesced per key. Dropping a lease
@@ -534,7 +536,7 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
         let releases = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
         let pending = Arc::clone(&releases);
         let (alive_tx, alive) = crossbeam_channel::bounded::<()>(0);
-        let space = Arc::new(parking_lot::Mutex::new(SpaceWaiters::default()));
+        let space = Arc::new(parking_lot::Mutex::new(WakerSet::default()));
         let freed = Arc::clone(&space);
         let thread = std::thread::Builder::new()
             .name(format!("verter-decl-lower-{index}"))
@@ -553,10 +555,8 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
                     // A dequeued job freed a queue slot: wake every
                     // submitter waiting for one, after releasing the lock.
                     if job.is_some() {
-                        let waiting = std::mem::take(&mut freed.lock().wakers);
-                        for (_, waker) in waiting {
-                            waker.wake();
-                        }
+                        let waiting = freed.lock().take();
+                        waiting.wake();
                     }
                     // Drain after receiving a job: a release recorded
                     // before that job was sent must take effect first.
@@ -580,42 +580,6 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
         });
     }
     workers
-}
-
-/// The pollable submitters waiting for space in one worker's bounded job
-/// queue, each under the registration it withdraws by.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Default)]
-struct SpaceWaiters {
-    wakers: Vec<(u64, std::task::Waker)>,
-    next_registration: u64,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl SpaceWaiters {
-    /// Keep `registration` for `waker`, registering it anew when the worker
-    /// already took it or it wakes another task.
-    fn register(&mut self, registration: &mut Option<u64>, waker: &std::task::Waker) {
-        let held = registration.is_some_and(|id| {
-            self.wakers
-                .iter()
-                .any(|(registered, existing)| *registered == id && existing.will_wake(waker))
-        });
-        if held {
-            return;
-        }
-        if let Some(previous) = registration.take() {
-            self.withdraw(previous);
-        }
-        let id = self.next_registration;
-        self.next_registration += 1;
-        self.wakers.push((id, waker.clone()));
-        *registration = Some(id);
-    }
-
-    fn withdraw(&mut self, registration: u64) {
-        self.wakers.retain(|(id, _)| *id != registration);
-    }
 }
 
 /// Where one worker job's answer lands: written once by the owning worker,
@@ -728,9 +692,10 @@ pub(crate) struct ShardHandoff<T> {
     /// The job, until the worker's queue admits it.
     job: Option<WorkerJob>,
     jobs: crossbeam_channel::Sender<WorkerJob>,
-    space: Arc<parking_lot::Mutex<SpaceWaiters>>,
+    /// The submitters waiting for space in the worker's bounded queue.
+    space: Arc<parking_lot::Mutex<WakerSet>>,
     /// This handoff's registration among the queue's space waiters.
-    space_registration: Option<u64>,
+    space_registration: WakeRegistration,
     reply: Arc<ShardReply<T>>,
     /// Keeps the service, and so its workers, alive while the handoff is
     /// outstanding.
@@ -755,7 +720,7 @@ impl<T> ShardHandoff<T> {
             job: Some(job),
             jobs: worker.jobs.clone(),
             space: Arc::clone(&worker.space),
-            space_registration: None,
+            space_registration: WakeRegistration::default(),
             reply,
             _service: service,
         }
@@ -767,11 +732,7 @@ impl<T> ShardHandoff<T> {
         if let Some(job) = self.job.take() {
             let mut space = self.space.lock();
             match self.jobs.try_send(job) {
-                Ok(()) => {
-                    if let Some(registration) = self.space_registration.take() {
-                        space.withdraw(registration);
-                    }
-                }
+                Ok(()) => space.withdraw(&mut self.space_registration),
                 Err(crossbeam_channel::TrySendError::Full(job)) => {
                     space.register(&mut self.space_registration, waker);
                     self.job = Some(job);
@@ -814,8 +775,8 @@ impl<T> ShardHandoff<T> {
 #[cfg(not(target_arch = "wasm32"))]
 impl<T> Drop for ShardHandoff<T> {
     fn drop(&mut self) {
-        if let Some(registration) = self.space_registration.take() {
-            self.space.lock().withdraw(registration);
+        if self.space_registration.is_registered() {
+            self.space.lock().withdraw(&mut self.space_registration);
         }
         if self.job.is_some() {
             // Never admitted: the job, and its reply sender, drop here.

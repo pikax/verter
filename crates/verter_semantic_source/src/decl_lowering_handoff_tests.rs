@@ -112,7 +112,7 @@ fn run_leased(service: &Arc<DeclLoweringService>, key: &SnapshotKey) -> Option<b
 }
 
 fn space_waiters(service: &DeclLoweringService) -> usize {
-    service.workers()[0].space.lock().wakers.len()
+    service.workers()[0].space.lock().len()
 }
 
 /// Poll to completion, failing — never hanging — when a pending poll is not

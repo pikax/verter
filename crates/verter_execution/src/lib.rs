@@ -14,6 +14,8 @@
 //!   construction.
 //! - [`request_context`]: the opaque request-context carrier, its TLS slots
 //!   and the installation/restoration guards.
+//! - [`wake`]: the per-subscriber waker registrations a producer keeps for
+//!   the pollable computations waiting on it.
 //!
 //! Concrete queues, worker pools, admission and priorities stay in
 //! `verter_scheduler`.
@@ -28,3 +30,4 @@ pub mod cancellation;
 pub mod pool_size;
 pub mod request_context;
 pub mod tasks;
+pub mod wake;
