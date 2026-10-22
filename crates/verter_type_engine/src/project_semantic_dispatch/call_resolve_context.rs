@@ -1896,12 +1896,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// part, clipped where `typeToString` clips.
     fn print_diagnostic_type_clipped(&self, node: SemanticNodeId) -> String {
         self.print_diagnostic_type(node).unwrap_or_else(|| {
-            let context = crate::semantic_query::display::DisplayContext::for_checker(
-                self.relation_strict_config().strict_null_checks,
-            )
-            .unabbreviated();
+            let strict_null_checks = self.relation_strict_config().strict_null_checks;
             crate::semantic_query::display::clip_checker_text(
-                self.print_diagnostic_type_text(node, context).0,
+                self.print_diagnostic_type_text(node, || {
+                    crate::semantic_query::display::DisplayContext::for_checker(strict_null_checks)
+                        .unabbreviated()
+                })
+                .0,
             )
         })
     }
@@ -1919,32 +1920,74 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         node: SemanticNodeId,
     ) -> Option<String> {
-        let context = crate::semantic_query::display::DisplayContext::for_checker(
-            self.relation_strict_config().strict_null_checks,
-        );
-        let (printed, context) = self.print_diagnostic_type_text(node, context);
+        let strict_null_checks = self.relation_strict_config().strict_null_checks;
+        let (printed, context) = self.print_diagnostic_type_text(node, || {
+            crate::semantic_query::display::DisplayContext::for_checker(strict_null_checks)
+        });
         context.checker_text(printed)
     }
 
+    /// `node` printed under a fresh context from `context`, every mapped
+    /// type the print meets settled first where it settles: the checker
+    /// prints a mapped type that is not generic as the object type it
+    /// resolves to (`createTypeNodeFromObjectType`), which display reads
+    /// but never materializes. A settled object can hold further mapped
+    /// types, so the print repeats until none it meets is new.
     fn print_diagnostic_type_text(
         &self,
         node: SemanticNodeId,
-        mut context: crate::semantic_query::display::DisplayContext,
+        context: impl Fn() -> crate::semantic_query::display::DisplayContext,
     ) -> (String, crate::semantic_query::display::DisplayContext) {
-        let printed = crate::semantic_query::display::display_type_node(
-            self.graph().store(),
-            node,
-            crate::semantic_query::DisplayNeeds::single(
-                crate::semantic_query::DisplayFacet::CheckerSpelling,
+        let mut settled = FxHashMap::default();
+        let mut tried = FxHashSet::default();
+        loop {
+            let mut printing = context().with_settled_mapped(settled);
+            let printed = crate::semantic_query::display::display_type_node(
+                self.graph().store(),
+                node,
+                crate::semantic_query::DisplayNeeds::single(
+                    crate::semantic_query::DisplayFacet::CheckerSpelling,
+                )
+                .union(crate::semantic_query::DisplayNeeds::single(
+                    crate::semantic_query::DisplayFacet::IncludeReadonlyModifier,
+                )),
+                crate::semantic_query::display::MAX_DISPLAY_DEPTH,
+                &mut printing,
             )
-            .union(crate::semantic_query::DisplayNeeds::single(
-                crate::semantic_query::DisplayFacet::IncludeReadonlyModifier,
-            )),
-            crate::semantic_query::display::MAX_DISPLAY_DEPTH,
-            &mut context,
+            .0;
+            let newly_settled: Vec<(SemanticNodeId, SemanticNodeId)> = printing
+                .unsettled_mapped()
+                .iter()
+                .copied()
+                .filter(|mapped| tried.insert(*mapped))
+                .filter_map(|mapped| Some((mapped, self.settled_mapped_object(mapped)?)))
+                .collect();
+            if newly_settled.is_empty() {
+                return (printed, printing);
+            }
+            settled = printing.into_settled_mapped();
+            settled.extend(newly_settled);
+        }
+    }
+
+    /// The object type a mapped type that is not generic resolves to: the
+    /// object the relation decides it by. `None` while it stays a mapped
+    /// type.
+    fn settled_mapped_object(&self, mapped: SemanticNodeId) -> Option<SemanticNodeId> {
+        let data = self.graph().node_data(mapped)?;
+        let SemanticNodeData::Mapped { source, mapper } = data.as_ref() else {
+            return None;
+        };
+        let object = self.mapped_object_for_relation(
+            *source,
+            mapper,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        matches!(
+            self.graph().node_data(object).as_deref(),
+            Some(SemanticNodeData::Object(_))
         )
-        .0;
-        (printed, context)
+        .then_some(object)
     }
 
     /// The properties `target` requires that `source` lacks, named as the

@@ -242,6 +242,13 @@ pub(crate) struct DisplayContext {
     /// for a message ([`Self::for_checker`]) so its abbreviation is the
     /// checker's.
     length: Option<NodeBuilderLength>,
+    /// What each mapped type a message prints settled to, materialized by
+    /// the consumer ([`Self::with_settled_mapped`]): the checker prints a
+    /// mapped type that is not generic as the object type it resolves to.
+    settled_mapped: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    /// The mapped types a message print met with no settled form, for the
+    /// consumer to materialize ([`Self::unsettled_mapped`]).
+    unsettled_mapped: Vec<SemanticNodeId>,
 }
 
 /// `typeToString`'s clip of a message's type text: a text of at least twice
@@ -320,6 +327,30 @@ impl DisplayContext {
     pub(crate) fn unabbreviated(mut self) -> Self {
         self.length = None;
         self
+    }
+
+    /// This context printing each mapped type `settled` names as the object
+    /// type it settled to, as the checker prints a mapped type that is not
+    /// generic (`createTypeNodeFromObjectType`).
+    pub(crate) fn with_settled_mapped(
+        mut self,
+        settled: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    ) -> Self {
+        self.settled_mapped = settled;
+        self
+    }
+
+    /// The mapped types a checker print met that its settled forms did not
+    /// name, in the order it met them.
+    pub(crate) fn unsettled_mapped(&self) -> &[SemanticNodeId] {
+        &self.unsettled_mapped
+    }
+
+    /// The settled forms this context prints mapped types by.
+    pub(crate) fn into_settled_mapped(
+        self,
+    ) -> rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> {
+        self.settled_mapped
     }
 
     fn measuring(&self) -> bool {
@@ -576,10 +607,12 @@ pub(crate) fn display_type_node(
 
 /// Where a checker-spelled union print places one constituent: the
 /// intrinsic primitives in their creation order — `any`-class first, then
-/// `string`, `number`, `bigint`, `symbol`, `boolean`, `null`, `undefined` —
-/// before the types a program declares, with the literals a check interned
-/// last. Measured on TypeScript 7.0.2, whose unions sort by type id
-/// (`sortAndDeduplicateTypes`) and intern those classes in this order.
+/// `string`, `number`, `bigint`, `symbol`, `boolean` — before the types a
+/// program declares, with the literals a check interned after them, and
+/// `null` then `undefined` last of all, where the printer moves them
+/// (`formatUnionTypes`): `"q" | undefined`. Measured on TypeScript 7.0.2,
+/// whose unions sort by type id (`sortAndDeduplicateTypes`) and intern
+/// those classes in this order.
 fn checker_union_constituent_rank(
     store: &SemanticGraphStore,
     arm: &crate::semantic_query::PrintedUnionArm,
@@ -600,13 +633,13 @@ fn checker_union_constituent_rank(
         Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => 3,
         Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => 4,
         Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 5,
-        Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => 6,
-        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => 7,
         Some(
             SemanticNodeData::Literal(_)
             | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::TemplateLiteral { .. },
         ) => 9,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => 10,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => 11,
         _ => 8,
     }
 }
@@ -859,6 +892,16 @@ fn display_resolved_type_node(
                             &display_type_node(store, el.value, needs, child_depth, visited).0,
                         );
                     }
+                } else if adds_undefined && settles_to_never(store, el.value, visited) {
+                    // `never` with `undefined` added is `undefined`, no union.
+                    s.push_str(&render_with_undefined(
+                        store,
+                        el.value,
+                        needs,
+                        child_depth,
+                        visited,
+                    ));
+                    s.push('?');
                 } else if adds_undefined {
                     let value = render_with_undefined(store, el.value, needs, child_depth, visited);
                     s.push_str(&format!("({value})?"));
@@ -935,7 +978,16 @@ fn display_resolved_type_node(
             visited.add_length(2);
             format!("{obj}[{key}]")
         }
+        // A mapped type that is not generic prints as the object type it
+        // resolves to, which the consumer settled.
+        SemanticNodeData::Mapped { .. } if visited.settled_mapped.contains_key(&id) => {
+            let settled = visited.settled_mapped[&id];
+            display_type_node(store, settled, needs, child_depth, visited).0
+        }
         SemanticNodeData::Mapped { source: _, mapper } => {
+            if visited.measuring() && !visited.unsettled_mapped.contains(&id) {
+                visited.unsettled_mapped.push(id);
+            }
             unmodeled = true;
             let param = visited.scoped(DisplaySubstitution::default(), |visited| {
                 display_type_node(store, mapper.parameter_node, needs, child_depth, visited).0
@@ -1423,7 +1475,7 @@ fn render_object_surface(
 
 /// `value` with `undefined` added, as the checker prints an optional
 /// property's type under `strictNullChecks`: a union's members then
-/// `undefined`, as one list.
+/// `undefined`, as one list, and `never` with it added `undefined` alone.
 fn render_with_undefined(
     store: &SemanticGraphStore,
     value: SemanticNodeId,
@@ -1431,6 +1483,10 @@ fn render_with_undefined(
     depth: usize,
     visited: &mut DisplayContext,
 ) -> String {
+    if settles_to_never(store, value, visited) {
+        visited.add_length(primitive_length(PrimitiveKind::Undefined));
+        return primitive_keyword(PrimitiveKind::Undefined).to_owned();
+    }
     let (resolved, substitution) = follow_alias_chain(store, value, &visited.substitution);
     let arms = match store.node_data(resolved).as_deref() {
         Some(SemanticNodeData::Union(arms)) if !visited.contains(&resolved) => {
@@ -2207,6 +2263,19 @@ fn element_renders_leading_readonly(
 /// operand wraps and a string literal whose TEXT contains `" | "` does not.
 /// Whether `node` already holds `undefined` (or absorbs it), so adding it
 /// as an optional property's type changes nothing.
+/// Whether `node` is `never` through its transparent alias chain.
+fn settles_to_never(
+    store: &SemanticGraphStore,
+    node: SemanticNodeId,
+    visited: &DisplayContext,
+) -> bool {
+    let (resolved, _) = follow_alias_chain(store, node, &visited.substitution);
+    matches!(
+        store.node_data(resolved).as_deref(),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+    )
+}
+
 fn holds_undefined(store: &SemanticGraphStore, node: SemanticNodeId) -> bool {
     let absorbs = |node: SemanticNodeId| {
         matches!(

@@ -1607,8 +1607,9 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
 /// printed type of twice that length is clipped to its first 317 bytes and
 /// `...`; and a failure through a property path of 70 nested object types
 /// is explained on one path line, never cut. A reference's type arguments
-/// are counted before its name, a tuple label adds nothing, and an index
-/// signature counts its authored parameter name, so each is elided exactly
+/// are counted before its name, a tuple label adds nothing, an index
+/// signature counts its authored parameter name, and a mapped type that is
+/// not generic counts as the object type it resolves to, so each is elided exactly
 /// where the checker elides it, and never withheld. Each is reported at its own
 /// call, two calls of one body in source order, cold and warm. Every
 /// expected line is TypeScript 7.0.2's on this fixture, identical with
@@ -1649,7 +1650,9 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
          export function references() {{ return [one(near), one(past)]; }}\n\
          export function index_counts() {{ return [one(index_near), one(index_past)]; }}\n\
          export function labelled_tuple() {{ return one(labelled); }}\n\
-         export function index_signature() {{ return one(indexed); }}\n",
+         export function index_signature() {{ return one(indexed); }}\n\
+         declare const mapped: {{ [P in string]: {{ {indexed} }} }};\n\
+         export function mapped_index() {{ return one(mapped); }}\n",
         nest("number", 70),
         arms.join(" | "),
         nest("string", 70),
@@ -1749,6 +1752,16 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
                 ),
             )],
         ),
+        (
+            "mapped_index",
+            vec![at(
+                "(24,45)",
+                &format!(
+                    "Argument of type '{{ [x: string]: {{ {}; }}; }}' {ARG}",
+                    properties[..20].join("; ")
+                ),
+            )],
+        ),
     ];
     let host = host_with(&source);
     let mut mismatches = Vec::new();
@@ -1774,8 +1787,10 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
 /// added, which also counts toward where the node builder abbreviates; an
 /// object's call, construct and index signatures before its properties; and
 /// an index signature by its authored parameter name, or `x` for one no
-/// declaration wrote. Every expected line is TypeScript 7.0.2's on this
-/// fixture.
+/// declaration wrote; and a mapped type that is not generic, at the top or
+/// nested, as the object type it resolves to, `undefined` printed last; and
+/// an optional `never` element or property as `undefined`.
+/// Every expected line is TypeScript 7.0.2's on this fixture.
 #[test]
 fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
     let source = format!(
@@ -1789,7 +1804,15 @@ fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
          declare const o2: {{ [k: string]: number; (): void; new (): void; p: 1 }};\n\
          declare const m1: {{ [P in keyof IX]: IX[P] }};\n\
          export function tuples() {{ return [one(t1), one(t2), one(t3)]; }}\n\
-         export function members() {{ return [one(o1), one(o2), one(m1)]; }}\n",
+         export function members() {{ return [one(o1), one(o2), one(m1)]; }}\n\
+         declare const m2: {{ [P in string]: 1 }};\n\
+         declare const m3: {{ readonly [P in number]?: \"q\" }};\n\
+         declare const m4: {{ a: {{ [P in \"a\" | \"b\"]?: 1 }} }};\n\
+         export function mapped() {{ return [one(m2), one(m3), one(m4)]; }}\n\
+         declare const n1: [lab?: never];\n\
+         declare const n2: [never?];\n\
+         declare const n3: {{ a?: never }};\n\
+         export function nevers() {{ return [one(n1), one(n2), one(n3)]; }}\n",
         long = "x".repeat(140),
     );
     let at = |position: &str, printed: &str| {
@@ -1832,11 +1855,52 @@ fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
         ),
         at("(12,59)", "{ [x: string]: number; }"),
     ];
+    let mapped = |strict: bool| {
+        vec![
+            at("(16,40)", "{ [x: string]: 1; }"),
+            at(
+                "(16,49)",
+                if strict {
+                    "{ readonly [x: number]: \"q\" | undefined; }"
+                } else {
+                    "{ readonly [x: number]: \"q\"; }"
+                },
+            ),
+            at(
+                "(16,58)",
+                if strict {
+                    "{ a: { a?: 1 | undefined; b?: 1 | undefined; }; }"
+                } else {
+                    "{ a: { a?: 1; b?: 1; }; }"
+                },
+            ),
+        ]
+    };
+    let nevers = |strict: bool| {
+        if strict {
+            vec![
+                at("(20,40)", "[lab?: undefined]"),
+                at("(20,49)", "[undefined?]"),
+                at("(20,58)", "{ a?: undefined; }"),
+            ]
+        } else {
+            vec![
+                at("(20,40)", "[lab?: never]"),
+                at("(20,49)", "[never?]"),
+                at("(20,58)", "{ a?: never; }"),
+            ]
+        }
+    };
     let host = host_with(&source);
     let mut mismatches = Vec::new();
     for pass in ["cold", "warm"] {
         for (root, strict) in [(STRICT_ROOT, true), (LOOSE_ROOT, false)] {
-            for (function, expected) in [("tuples", tuples(strict)), ("members", members.clone())] {
+            for (function, expected) in [
+                ("tuples", tuples(strict)),
+                ("members", members.clone()),
+                ("mapped", mapped(strict)),
+                ("nevers", nevers(strict)),
+            ] {
                 let reported = super::signature_predicate_inference_tests::checker_report(
                     &host, root, function, &source,
                 );
