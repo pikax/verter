@@ -174,6 +174,10 @@ pub(crate) enum InferPosition {
     BivariantParam,
     /// Function return — the enclosing occurrence's rung and orientation.
     Return,
+    /// A callback parameter's own parameter, related from the enclosing
+    /// signature — the `Argument` rung, the enclosing orientation: the two
+    /// parameter positions' flips cancel.
+    CallbackParam,
 }
 
 fn inference_occurrence_for_position(
@@ -202,7 +206,31 @@ fn inference_occurrence_for_position(
         // alone, and a receiver's function member infers beside the
         // arguments the same way.
         InferPosition::Return => ambient,
+        InferPosition::CallbackParam => InferenceOccurrence {
+            priority: InferenceCandidatePriority::Argument,
+            variance: ambient.variance,
+            bivariant: ambient.bivariant,
+        },
     }
+}
+
+/// How a signature relation relates its parameters and return — the
+/// variance half of the checker's `compareSignaturesRelated` check mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignatureCheckMode {
+    /// Parameters strictly contravariant under `strictFunctionTypes`,
+    /// bivariant otherwise.
+    Ordinary,
+    /// A target declared as a method: parameters bivariant whatever
+    /// `strictFunctionTypes` says (`strictVariance` excludes methods).
+    Method,
+    /// A callback parameter's signature, related from its enclosing
+    /// signature with the target's callback as the source: parameters
+    /// strictly contravariant and never read as callbacks again; the return
+    /// related in either direction when `bivariant_return` (the checker's
+    /// `BivariantCallback`, under an enclosing relation without
+    /// `strictVariance`), covariantly otherwise (`StrictCallback`).
+    Callback { bivariant_return: bool },
 }
 
 /// What the members of a source infer to a union target's one naked type
@@ -1364,8 +1392,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .dispatch_txn
             .borrow()
             .relation
-            .settled
-            .get(key)
+            .completed_members
+            .settled(key)
             .cloned();
         if let Some(payload) = settled {
             if self.relation_replays_cold(&payload.recursion) {
@@ -3989,14 +4017,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 for (session, _) in deferred_relation_sessions {
                     let _ = txn.relation.session_admission.drain(session);
                 }
-                for (member, settles) in completed.iter().zip(settles) {
-                    if settles && member.key.inference_context.is_none() {
-                        txn.relation
-                            .settled
-                            .insert(member.key.clone(), member.payload.clone());
-                    }
+                for (member, settles) in completed.into_iter().zip(settles) {
+                    let settles = settles && member.key.inference_context.is_none();
+                    txn.relation.completed_members.push(member, settles);
                 }
-                txn.relation.completed_members.extend(completed);
                 txn.flow.completed_members.extend(proven_flow_members);
                 for (key, state, result) in call_members {
                     // Incomplete proof stays transaction-local. Origin is
@@ -4404,10 +4428,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             txn.flow.closed_values.clear();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
@@ -4445,10 +4466,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             txn.flow.closed_values.clear();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
@@ -4527,13 +4545,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn relation_publication_roots(
         &self,
         root_key: &RelateMemoKey,
-        member_keys: impl IntoIterator<Item = RelateMemoKey>,
+        member_pairs: impl IntoIterator<Item = [SemanticNodeId; 2]>,
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
         let mut nodes = vec![root_key.source, root_key.target];
-        for member in member_keys {
-            nodes.push(member.source);
-            nodes.push(member.target);
-        }
+        nodes.extend(member_pairs.into_iter().flatten());
         self.observed_self_roots_from_nodes(nodes)
     }
 
@@ -4541,13 +4556,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         root_key: &RelateMemoKey,
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
-        let (member_keys, flow_self_roots, call_self_roots) = {
+        let (member_pairs, flow_self_roots, call_self_roots) = {
             let txn = self.dispatch_txn.borrow();
             (
                 txn.relation
                     .completed_members
                     .iter()
-                    .map(|member| member.key.clone())
+                    .map(|member| [member.key.source, member.key.target])
                     .collect::<Vec<_>>(),
                 txn.flow
                     .completed_members
@@ -4565,7 +4580,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // drained member's roots across BOTH domains: a flow member's file
         // roots ride the relation-rooted carrier, so a cross-file edit
         // invalidates the whole component.
-        let mut roots = self.relation_publication_roots(root_key, member_keys);
+        let mut roots = self.relation_publication_roots(root_key, member_pairs);
         for root in flow_self_roots {
             if !roots.iter().any(|(canonical, _)| canonical == &root.0) {
                 roots.push(root);
@@ -4585,7 +4600,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         root_key: &RelateMemoKey,
         member_keys: &[RelateMemoKey],
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
-        self.relation_publication_roots(root_key, member_keys.iter().cloned())
+        self.relation_publication_roots(
+            root_key,
+            member_keys.iter().map(|key| [key.source, key.target]),
+        )
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -4613,6 +4631,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     inline_flight: Some(inline_flight),
                 }
                 .held(self.graph()),
+                false,
             );
         self.execute_relate_root(root_key)
     }
@@ -4634,10 +4653,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             txn.flow.closed_values.clear();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
@@ -5267,6 +5283,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<RelationResult> {
         const MAX_DISCRIMINATED_COMBINATIONS: usize = 25;
         let graph = self.graph();
+        let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(source) => source,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
         let source_view = match graph.node_data(source)?.as_ref() {
             SemanticNodeData::Object(view) => view.clone(),
             _ => return None,
@@ -5751,16 +5771,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !self.relation_session_active()
             || (self.signature_is_generic(target) && !self.relation_session_reads_candidates_only())
         {
-            let target = if self.signature_is_generic(source) {
-                self.canonical_signature(target)?
-            } else {
-                target
+            if !self.signature_is_generic(source) {
+                return Some((source, target));
+            }
+            let canonical = self.canonical_signature(target)?;
+            return match self.in_context_instantiation(source, canonical, kind) {
+                super::signature_instantiation::InContextInstantiation::Instantiated(
+                    instantiated,
+                ) => Some((instantiated, canonical)),
+                // A target naming a conditional's `infer` declaration
+                // (`then`'s callback reading the `U` of
+                // `PromiseLike<infer U>`) gives the instantiation's own
+                // session an inference only the conditional's takes, so
+                // the uninstantiated pair would decide what it never
+                // related: undecided.
+                super::signature_instantiation::InContextInstantiation::Unsettled
+                    if self.relation_session_active() && self.subtree_contains_infer(canonical) =>
+                {
+                    None
+                }
+                _ => Some((source, canonical)),
             };
-            return Some((
-                self.instantiate_signature_in_context_of(source, target, kind)
-                    .unwrap_or(source),
-                target,
-            ));
         }
         // inferFromSignatures compares the source's base signature with
         // the target's erased signature. Target-local parameters are not
@@ -9252,7 +9283,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // throughout: `[marker]` is no more `[marker]` than the marker is
         // itself.
         let identical_unread = source == target && self.graph().node_reaches_unresolved(source);
-        (marker(source) || marker(target) || identical_unread) && !top(target)
+        let source_marker = marker(source);
+        // A declaration carrier against composition is a plan to read that
+        // declaration in each arm, rather than a fact about an unread value.
+        let source_distributes = source_marker
+            && self.graph().node_data(source).is_some_and(|source| {
+                self.graph()
+                    .node_data(target)
+                    .is_some_and(|target| declaration_source_distributes(&source, &target))
+            });
+        ((source_marker && !source_distributes) || marker(target) || identical_unread)
+            && !top(target)
     }
 
     /// The O(tag) fast-reject prefilter (RI-5): decides the trivial
@@ -9466,16 +9507,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let _ = concrete_read.discard();
             return result;
         }
-        // An alias application on one side stands for the type its body
-        // instantiates to: a reference to the other side's declaration
-        // relates by type arguments as that reference would.
-        let through_alias = [
-            self.alias_application_reference_to(source, target)
-                .map(|resolved| (resolved, target)),
-            self.alias_application_reference_to(target, source)
-                .map(|resolved| (source, resolved)),
-        ];
-        for (source, target) in through_alias.into_iter().flatten() {
+        // Alias applications on either side stand for the references their
+        // bodies instantiate to. Normalize both before comparing arguments.
+        let through_alias = (
+            self.declaration_reference_for_relation(source)
+                .unwrap_or(source),
+            self.declaration_reference_for_relation(target)
+                .unwrap_or(target),
+        );
+        if through_alias != (source, target) {
+            let (source, target) = through_alias;
             if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
                 let _ = concrete_read.discard();
                 return result;
@@ -9510,6 +9551,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
         };
         let (source_is_binder, target_is_binder) = (is_binder(source), is_binder(target));
+        // A target composition still needs the source's declaration at each
+        // arm: unwrapping it now would bypass same-generic variance there.
+        // A source composition keeps its existing distribution order.
+        let target_composition = source != concrete[0]
+            && matches!(
+                self.graph().node_data(concrete[1]).as_deref(),
+                Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+            );
+        let source_reference = if target_composition {
+            self.reference_operand_for_relation(source)
+                .unwrap_or(source)
+        } else {
+            source
+        };
+        let preserve_source_reference = target_composition
+            && self
+                .graph()
+                .node_data(source_reference)
+                .as_deref()
+                .is_some_and(is_declaration_reference)
+            && matches!(
+                self.graph().node_data(concrete[0]).as_deref(),
+                Some(
+                    SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Signature { .. }
+                )
+            );
         // A binder takes the other operand as written, a carrier the lane
         // cannot resolve included (an inference candidate is recorded
         // verbatim and resolves at the bound's own demand points). The
@@ -9526,6 +9596,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
+        };
+        let source = if preserve_source_reference {
+            source_reference
+        } else {
+            source
         };
         // A declaration naming a homomorphic mapped type over a parameter
         // the session infers reverse-maps where it is unwrapped.
@@ -10899,6 +10974,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(targets) = self.weak_target_surfaces(target) else {
             return false;
         };
+        // Constituent relations retain declaration identity for variance, but
+        // this whole-target guard reads the properties of its surface.
+        let source = if self
+            .graph()
+            .node_data(source)
+            .as_deref()
+            .is_some_and(is_declaration_reference)
+        {
+            let IdentityCarrierUnwrap::Concrete(source) =
+                self.unwrap_identity_carrier_for_relation(source)
+            else {
+                return false;
+            };
+            source
+        } else {
+            source
+        };
         self.weak_surfaces_reject(source, target, &targets)
     }
 
@@ -11259,6 +11351,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
+    /// The declaration a relation reads the reference `node` — whose
+    /// declaration identity is `identity` — as: a runtime nominal's builtin
+    /// carrier (`Promise<2>`, `Map<1, 2>`) is the project's global interface
+    /// of that name ([`Self::runtime_nominal_declaration`]), so two
+    /// applications of it relate by their arguments under its variances and
+    /// either expands to its members, as the checker's `Promise<2>` does.
+    /// Every other identity, and a runtime nominal the project declares no
+    /// interface for, is itself.
+    pub(super) fn relation_declaration_identity(
+        &self,
+        identity: DeclIdentity,
+        node: SemanticNodeId,
+    ) -> DeclIdentity {
+        self.runtime_nominal_declaration(node, &identity)
+            .unwrap_or(identity)
+    }
+
     /// Expand a single relate pair into direct result(s) or sub-work
     /// items. Pushes exactly one net result onto `results` by the time all
     /// sub-work drains.
@@ -11503,6 +11612,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         drop(data);
         let transit = ProjectionReductionContext::structural_transit();
+        let identity = self.relation_declaration_identity(identity, id);
         // The lib `Function` global's carrier is its own terminal
         // identity: the `__builtin__` base names no declaration the
         // Instantiate dispatch can serve, so the dispatch would MISS
@@ -11516,9 +11626,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return IdentityCarrierUnwrap::Concrete(id);
         }
-        let identity = self
-            .runtime_nominal_declaration(id, &identity)
-            .unwrap_or(identity);
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
                 identity.canonical_id.clone(),
@@ -11682,24 +11789,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &self,
             id: SemanticNodeId,
         ) -> IdentityCarrierUnwrap {
-            self.unwrap_identity_carrier_walk(id, &mut |_| {})
+            self.unwrap_identity_carrier_walk(CarrierWalkPoint { node: id, depth: 0 }, &mut |_| {})
         }
     }
 
-    /// [`Self::unwrap_identity_carrier_for_relation`], reporting each node
-    /// the walk reaches to `on_step` before it reads anything for that node:
-    /// a reached node is where a walk that stopped there resumes.
+    /// [`Self::unwrap_identity_carrier_for_relation`] from `start`, reporting
+    /// each point the walk reaches to `on_step` before it reads anything for
+    /// that node: a reached point is where a walk that stopped there resumes.
+    ///
+    /// Each declaration step instantiates the declaration the carrier names,
+    /// nested in the instantiations of the steps before it, so a walk stops
+    /// at the instantiation budget with the checker's TS2589 recovery: an
+    /// alias that re-applies itself on a growing argument
+    /// (`type Wrap<T> = Grow<T>`, `type Grow<T> = T extends never ? 0 :
+    /// Wrap<[T]>`) mints a fresh application at every step and never meets a
+    /// node it has seen.
     pub(super) fn unwrap_identity_carrier_walk(
         &self,
-        id: SemanticNodeId,
-        on_step: &mut dyn FnMut(SemanticNodeId),
+        start: CarrierWalkPoint,
+        on_step: &mut dyn FnMut(CarrierWalkPoint),
     ) -> IdentityCarrierUnwrap {
         let graph = self.graph();
         let transit = ProjectionReductionContext::structural_transit();
-        let mut current = id;
+        let mut current = start.node;
+        let mut depth = start.depth;
         let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         while seen.insert(current) {
-            on_step(current);
+            on_step(CarrierWalkPoint {
+                node: current,
+                depth,
+            });
             let Some(data) = graph.node_data(current) else {
                 return IdentityCarrierUnwrap::Unresolvable;
             };
@@ -11888,6 +12007,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => return IdentityCarrierUnwrap::Concrete(current),
             };
             drop(data);
+            // Another runtime nominal's carrier is the project's global
+            // interface of that name applied to its arguments, and
+            // expands to that interface's members.
+            let identity = self.relation_declaration_identity(identity, current);
             // The lib `Function` global's carrier is its own terminal
             // identity for relations: the `__builtin__` base names no
             // declaration the Instantiate dispatch can serve, so the
@@ -11896,10 +12019,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // checker publishes as an ordinary type (`typeof x ===
             // "function"` over `object` narrows to `Function`). Relations
             // decide it by identity / tag, never by a body it does not
-            // have. Every OTHER non-file base (the remaining runtime
-            // nominals, the global sentinel) keeps dispatching — its
-            // Unresolvable verdict is the measured relation behavior
-            // those carriers' consumers pin.
+            // have. Every OTHER non-file base (a runtime nominal the
+            // project declares no interface for, the global sentinel)
+            // keeps dispatching — its Unresolvable verdict is the
+            // measured relation behavior those carriers' consumers pin.
             if self.runtime_nominal_identity(&identity)
                 == Some(crate::intrinsic_registry::RuntimeNominal::Function)
             {
@@ -11912,11 +12035,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if self.string_mapping_of(current).is_some() {
                 return IdentityCarrierUnwrap::Concrete(current);
             }
-            // A runtime nominal the project declares is a reference to
-            // that global declaration: it relates through its members.
-            let identity = self
-                .runtime_nominal_declaration(current, &identity)
-                .unwrap_or(identity);
+            if self.cancellation.is_cancelled() {
+                return IdentityCarrierUnwrap::Unresolvable;
+            }
+            depth += 1;
+            if let Err(refusal) = crate::semantic_query::checker_policy::instantiation_budget(
+                self.connected_demand.instantiation_within_budget(depth),
+            ) {
+                return IdentityCarrierUnwrap::Concrete(
+                    self.recover_at_operation_budget(refusal, Some(current)),
+                );
+            }
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
                     identity.canonical_id.clone(),
@@ -13593,16 +13722,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_some_and(|(key, _)| {
                     key.policy.variance == crate::semantic_query::VariancePolicy::DeclaredMethod
                 });
-        let parameter_position = if method_target {
-            InferPosition::BivariantParam
+        let mode = if method_target {
+            SignatureCheckMode::Method
         } else {
-            InferPosition::ContravariantParam
+            SignatureCheckMode::Ordinary
         };
+        self.relate_signatures_in_mode(
+            source,
+            source_result,
+            target,
+            target_result,
+            kind,
+            mode,
+            bindings,
+        )
+    }
+
+    /// [`Self::relate_function`] under the check `mode`. A callback
+    /// relation ([`SignatureCheckMode::Callback`]) runs inside its enclosing
+    /// signature's relation frame, so its positions read the enclosing
+    /// occurrence across both parameter flips: its parameters
+    /// [`InferPosition::CallbackParam`], its return
+    /// [`InferPosition::ContravariantParam`].
+    #[allow(clippy::too_many_arguments)]
+    fn relate_signatures_in_mode(
+        &self,
+        source: SemanticNodeId,
+        source_result: FunctionResult,
+        target: SemanticNodeId,
+        target_result: FunctionResult,
+        kind: crate::semantic_query::SignatureKind,
+        mode: SignatureCheckMode,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
         let candidates_only = self.relation_session_reads_candidates_only();
         let Ok(plan) =
             self.signature_comparison_plan(source, target, kind, self.strict_subtype_mode())
         else {
             return RelationResult::Unknown;
+        };
+        let callback = matches!(mode, SignatureCheckMode::Callback { .. });
+        // A method parameter keeps its candidates covariant however deep the
+        // inference reaches into it (the checker's sticky `bivariant`).
+        let (parameter_position, return_position) = match mode {
+            SignatureCheckMode::Callback { .. } => (
+                InferPosition::CallbackParam,
+                InferPosition::ContravariantParam,
+            ),
+            SignatureCheckMode::Method => (InferPosition::BivariantParam, InferPosition::Return),
+            SignatureCheckMode::Ordinary => {
+                (InferPosition::ContravariantParam, InferPosition::Return)
+            }
         };
         // The checker instantiates a rest parameter's type with its
         // unreliable-marker reporter (`compareSignaturesRelated`).
@@ -13623,11 +13793,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !candidates_only && plan.source_has_more_parameters {
             return RelationResult::NotAssignable;
         }
-        let bivariant = {
-            let txn = self.dispatch_txn.borrow();
-            let strict = txn.relation.strict.unwrap_or(StrictFamilyConfig::TS_STRICT);
-            method_target || !strict.strict_function_types
+        // The checker's `strictVariance`: a callback relation and a method
+        // target are never strict, and only an ordinary relation reads
+        // `strictFunctionTypes`.
+        let strict_variance = match mode {
+            SignatureCheckMode::Ordinary => {
+                let txn = self.dispatch_txn.borrow();
+                txn.relation
+                    .strict
+                    .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                    .strict_function_types
+            }
+            SignatureCheckMode::Method | SignatureCheckMode::Callback { .. } => false,
         };
+        // A callback's own parameters relate strictly contravariantly.
+        let bivariant = !strict_variance && !callback;
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
@@ -13642,6 +13822,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             positions.truncate(fixed);
         }
         for (s_param, t_param) in positions {
+            // Two callback parameters relate as the checker's
+            // `compareSignaturesRelated` relates them: the target's callback
+            // to the source's, its parameters strictly contravariant. A
+            // callback's parameters are output positions, so a method does
+            // not make them bivariant: `then(f: (v: T) => void)` is
+            // covariant in `T`. Without `strictVariance` its return relates
+            // in either direction: `add(cb: () => T)` is bivariant in `T`.
+            // Inference reads no callback check: it infers from the two
+            // parameter types whole (`inferFromSignatures`).
+            if let Some((target_callback, source_callback)) = (!callback && !candidates_only)
+                .then(|| self.callback_parameter_pair(s_param, t_param))
+                .flatten()
+            {
+                let related = self.relate_callback_signatures(
+                    target_callback,
+                    source_callback,
+                    !strict_variance,
+                    parameter_position,
+                    bindings,
+                );
+                acc = result_and(acc, related);
+                if matches!(acc, RelationResult::NotAssignable) {
+                    return RelationResult::NotAssignable;
+                }
+                continue;
+            }
             // Contravariant: target param ≤ source param. Under the
             // bivariant regime either direction discharges the pair.
             let checkpoint = self.relation_session_checkpoint();
@@ -13650,7 +13856,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let pair = if !candidates_only
                 && bivariant
                 && !matches!(contravariant, RelationResult::Assignable { .. })
-                && !self.parameters_relate_as_callbacks(s_param, t_param)
             {
                 self.relation_session_rollback(&checkpoint);
                 bindings.truncate(bindings_len);
@@ -13696,12 +13901,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         && source_predicate.subject == target_predicate.subject =>
                 {
                     match (source_predicate.ty, target_predicate.ty) {
-                        (Some(source_ty), Some(target_ty)) => self.relate_member(
-                            source_ty,
-                            target_ty,
-                            bindings,
-                            InferPosition::Return,
-                        ),
+                        (Some(source_ty), Some(target_ty)) => {
+                            self.relate_member(source_ty, target_ty, bindings, return_position)
+                        }
                         _ => RelationResult::NotAssignable,
                     }
                 }
@@ -13709,51 +13911,122 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             return result_and(acc, related);
         }
-        // Covariant return.
-        let r = self.relate_member(
+        // Covariant return; a bivariant callback's either way round.
+        let checkpoint = self.relation_session_checkpoint();
+        let bindings_len = bindings.len();
+        let covariant = self.relate_member(
             source_result.return_type,
             target_result.return_type,
             bindings,
-            InferPosition::Return,
+            return_position,
         );
+        let r = if !candidates_only
+            && mode
+                == (SignatureCheckMode::Callback {
+                    bivariant_return: true,
+                })
+            && !matches!(covariant, RelationResult::Assignable { .. })
+        {
+            self.relation_session_rollback(&checkpoint);
+            bindings.truncate(bindings_len);
+            let fallback_checkpoint = self.relation_session_checkpoint();
+            let fallback_bindings_len = bindings.len();
+            let fallback = self.relate_member(
+                target_result.return_type,
+                source_result.return_type,
+                bindings,
+                parameter_position,
+            );
+            if !matches!(fallback, RelationResult::Assignable { .. }) {
+                self.relation_session_rollback(&fallback_checkpoint);
+                bindings.truncate(fallback_bindings_len);
+            }
+            result_or(covariant, fallback)
+        } else {
+            covariant
+        };
         result_and(acc, r)
     }
 
-    /// Whether a signature pair's parameters `source` and `target` relate as
-    /// callbacks (`compareSignaturesRelated`'s callback check): each is one
-    /// call signature declaring no type predicate, `null` and `undefined`
-    /// aside, and under `strictNullChecks` both admit `null` alike and
-    /// `undefined` alike (without it neither is a member of a type). Such a
-    /// pair relates the target's callback to the source's alone, never the
-    /// reverse, under a method target or without `strictFunctionTypes` too:
-    /// `then`'s `onfulfilled` callback makes `PromiseLike` covariant in `T`,
-    /// never bivariant.
-    fn parameters_relate_as_callbacks(
+    /// Relate the target's callback `target_callback` to the source's
+    /// `source_callback` (both one non-generic call signature without a
+    /// predicate, [`Self::callback_parameter_pair`]) as the checker's
+    /// `compareSignaturesRelated` does under `StrictCallback` or, with
+    /// `bivariant_return`, `BivariantCallback`.
+    ///
+    /// Under `strictFunctionTypes` the pair's own relation — a memoized
+    /// frame relating the parameters strictly and the return covariantly —
+    /// already is that verdict when it holds or when the return is not
+    /// bivariant; only a bivariant return it does not discharge relates the
+    /// pair again in the callback mode. `position` is the enclosing
+    /// signature's parameter position, which a method target keeps
+    /// bivariant for inference.
+    fn relate_callback_signatures(
+        &self,
+        target_callback: SemanticNodeId,
+        source_callback: SemanticNodeId,
+        bivariant_return: bool,
+        position: InferPosition,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let strict_function_types = {
+            let txn = self.dispatch_txn.borrow();
+            txn.relation
+                .strict
+                .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                .strict_function_types
+        };
+        if strict_function_types {
+            let checkpoint = self.relation_session_checkpoint();
+            let bindings_len = bindings.len();
+            let related = self.relate_member(target_callback, source_callback, bindings, position);
+            if !bivariant_return || matches!(related, RelationResult::Assignable { .. }) {
+                return related;
+            }
+            self.relation_session_rollback(&checkpoint);
+            bindings.truncate(bindings_len);
+        }
+        let result_of = |node: SemanticNodeId| match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Signature {
+                return_type,
+                predicate,
+                ..
+            }) => Some(FunctionResult {
+                return_type: *return_type,
+                predicate: *predicate,
+            }),
+            _ => None,
+        };
+        let (Some(target_result), Some(source_result)) =
+            (result_of(target_callback), result_of(source_callback))
+        else {
+            return RelationResult::Unknown;
+        };
+        self.relate_signatures_in_mode(
+            target_callback,
+            target_result,
+            source_callback,
+            source_result,
+            crate::semantic_query::SignatureKind::Call,
+            SignatureCheckMode::Callback { bivariant_return },
+            bindings,
+        )
+    }
+
+    /// `(target callback, source callback)` when the parameter types
+    /// `source` and `target` of one position are both callbacks, as the
+    /// checker's `compareSignaturesRelated` finds them: each, `null` and
+    /// `undefined` aside, a function type of one non-generic call signature
+    /// without a type predicate, and the two nullable alike — under
+    /// `strictNullChecks`; without it neither `null` nor `undefined` is a
+    /// member of a type. `None` for any other pair.
+    fn callback_parameter_pair(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> bool {
-        let callback = |node: SemanticNodeId| -> Option<(bool, bool)> {
-            let graph = self.graph();
-            let members: Arc<[SemanticNodeId]> = match graph.node_data(node).as_deref() {
-                Some(SemanticNodeData::Union(members)) => members.members_arc(),
-                _ => Arc::from([node]),
-            };
-            let (mut null, mut undefined, mut signature) = (false, false, None);
-            for member in members.iter() {
-                match graph.node_data(*member).as_deref()? {
-                    SemanticNodeData::Primitive(PrimitiveKind::Null) => null = true,
-                    SemanticNodeData::Primitive(PrimitiveKind::Undefined) => undefined = true,
-                    SemanticNodeData::Signature {
-                        kind: crate::semantic_query::SignatureKind::Call,
-                        predicate: None,
-                        ..
-                    } if signature.is_none() => signature = Some(*member),
-                    _ => return None,
-                }
-            }
-            signature.map(|_| (null, undefined))
-        };
+    ) -> Option<(SemanticNodeId, SemanticNodeId)> {
+        let (source_callback, source_nullable) = self.single_callback_signature(source)?;
+        let (target_callback, target_nullable) = self.single_callback_signature(target)?;
         let strict_null_checks = self
             .dispatch_txn
             .borrow()
@@ -13761,10 +14034,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .strict
             .unwrap_or(StrictFamilyConfig::TS_STRICT)
             .strict_null_checks;
-        matches!(
-            (callback(source), callback(target)),
-            (Some(a), Some(b)) if a == b || !strict_null_checks
-        )
+        (source_nullable == target_nullable || !strict_null_checks)
+            .then_some((target_callback, source_callback))
+    }
+
+    /// The one call signature of a callback parameter type, and whether the
+    /// type holds `undefined` and `null` (the checker's `getSingleCallSignature`
+    /// over `getNonNullableType`): a non-generic call signature without a
+    /// type predicate, written alone or as an object type with nothing else.
+    fn single_callback_signature(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(SemanticNodeId, (bool, bool))> {
+        let graph = self.graph();
+        let (mut undefined, mut null) = (false, false);
+        let arms: Vec<SemanticNodeId> = match graph.node_data(node)?.as_ref() {
+            SemanticNodeData::Union(members) => members.iter().copied().collect(),
+            _ => vec![node],
+        };
+        let mut callable = None;
+        for arm in arms {
+            match graph.node_data(arm)?.as_ref() {
+                SemanticNodeData::Primitive(PrimitiveKind::Undefined) => undefined = true,
+                SemanticNodeData::Primitive(PrimitiveKind::Null) => null = true,
+                _ if callable.is_none() => callable = Some(arm),
+                _ => return None,
+            }
+        }
+        let callable = callable?;
+        let signature = match graph.node_data(callable)?.as_ref() {
+            SemanticNodeData::Signature { .. } => callable,
+            SemanticNodeData::Object(view)
+                if view.closed().is_empty()
+                    && view.construct_signatures.is_empty()
+                    && view.index_signatures.is_empty() =>
+            {
+                match view.call_signatures.as_ref() {
+                    [signature] => *signature,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        match graph.node_data(signature)?.as_ref() {
+            SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Call,
+                type_parameters,
+                predicate: None,
+                ..
+            } if type_parameters.is_empty() => Some((signature, (undefined, null))),
+            _ => None,
+        }
     }
 
     /// When the active session infers through `target`'s rest parameter —
@@ -13830,19 +14150,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// are followed (`type V = void` is `void` itself); a union such as
     /// `void | undefined` is not `void`, and a carrier that cannot be
     /// resolved is not assumed to be.
+    fn signature_result_accepts_any(&self, result: SemanticNodeId) -> bool {
+        self.resolves_to_primitive(result, |kind| {
+            matches!(kind, PrimitiveKind::Void | PrimitiveKind::Any)
+        })
+    }
+
+    /// Whether `node` is a primitive `accept` admits once transparent
+    /// aliases and declaration carriers are followed, as the checker reads a
+    /// type's flags: `type V = void` is `void` itself, a union containing
+    /// one is not, and a carrier that cannot be resolved is not assumed to be.
     ///
     /// The chain is followed to its end, however long: it ends at a node it
-    /// passed (a cycle is not `void`), and a carrier read the connected
+    /// passed (a cycle matches nothing), and a carrier read the connected
     /// ledger refuses resolves nothing.
-    fn signature_result_accepts_any(&self, result: SemanticNodeId) -> bool {
-        let mut current = result;
+    pub(super) fn resolves_to_primitive(
+        &self,
+        node: SemanticNodeId,
+        accept: impl Fn(PrimitiveKind) -> bool,
+    ) -> bool {
+        let mut current = node;
         let mut passed = FxHashSet::default();
         while passed.insert(current) {
             // The node read ends here, before any carrier resolution runs.
             let alias_target = match self.graph().node_data(current).as_deref() {
-                Some(SemanticNodeData::Primitive(PrimitiveKind::Void | PrimitiveKind::Any)) => {
-                    return true;
-                }
+                Some(SemanticNodeData::Primitive(kind)) => return accept(*kind),
                 Some(SemanticNodeData::Alias(inner)) => Some(*inner),
                 Some(
                     SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. },
@@ -14087,6 +14419,15 @@ enum FramePop {
 pub enum IdentityCarrierUnwrap {
     Concrete(SemanticNodeId),
     Unresolvable,
+}
+
+/// A point an identity-carrier walk reached: the node, and how many
+/// declaration instantiations, each nested in the one before, the walk took
+/// to reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CarrierWalkPoint {
+    pub(super) node: SemanticNodeId,
+    pub(super) depth: u32,
 }
 
 /// A PROOF that two nodes have no common inhabitant, carrying the CHECKER'S
@@ -17309,15 +17650,20 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                 && !(matches!(data, SemanticNodeData::TemplateLiteral { .. })
                     && self.template_is_settled(node))
         };
+        // The canonical frame retained this declaration so composition can
+        // distribute before each arm demands its arguments or structure.
+        let reference_source_distributes =
+            declaration_source_distributes(&source_data, &target_data);
         if !nominal_defers_gate
-            && (deferred(source, &source_data) || deferred(target, &target_data))
+            && ((deferred(source, &source_data) && !reference_source_distributes)
+                || deferred(target, &target_data))
         {
             results.push(RelationResult::Unknown);
             return;
         }
 
         // ── Remaining opaque carriers → Unknown ────────────────────────
-        if matches!(&*source_data, SemanticNodeData::Opaque(_))
+        if (matches!(&*source_data, SemanticNodeData::Opaque(_)) && !reference_source_distributes)
             || matches!(&*target_data, SemanticNodeData::Opaque(_))
         {
             results.push(RelationResult::Unknown);
@@ -17906,14 +18252,10 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> bool {
         let graph = self.graph();
         [source, target].into_iter().any(|node| {
-            matches!(
-                graph.node_data(node).as_deref(),
-                Some(
-                    SemanticNodeData::DeclRef { .. }
-                        | SemanticNodeData::InstantiationRef { .. }
-                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
-                )
-            )
+            graph
+                .node_data(node)
+                .as_deref()
+                .is_some_and(is_declaration_reference)
         })
     }
 }

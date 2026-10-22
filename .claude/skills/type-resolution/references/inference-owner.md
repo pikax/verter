@@ -73,3 +73,7 @@ Candidate-only recursion uses the same relation stack with its source/target ori
 A generic parameter not owned by the active collector remains rigid, including inside an enclosing conditional inference. Merely having an active session does not make another signature's local parameters pending inference variables.
 
 Candidate-only inference between references to the same declaration always walks their arguments, including rigid arguments. It reverses only an exactly contravariant argument; invariant, independent and uncertain variances infer forward once. Proof-only variance fallbacks do not select structural candidate discovery. The in-progress variance case restores physical operand orientation through the same adapter as a known variance. `contextual_invariant_reference_inference_uses_forward_candidates` guards this distinction with a blocked return fallback.
+
+## Fixed annotations during call inference
+
+A call collects candidates from open type arguments independently of the applicability of fixed arguments. Fixed annotated slots do not stop that collection: the instantiated signature's later applicability check owns their errors. For example, an argument of type `Mixed<'a', 1>` passed to `g<U>(x: Mixed<string, U>): U`, where `Mixed<in out T, U>` is invariant in its first parameter, still infers `U` as `1` despite the argument error. Conditional inference retains its fixed-slot precheck because its relation decides the selected branch.

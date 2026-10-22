@@ -3596,10 +3596,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // transaction-local value channel's work is done.
             txn.flow.closed_values.clear();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )

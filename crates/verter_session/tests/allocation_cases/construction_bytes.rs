@@ -9,7 +9,7 @@ use verter_session::for_tests::{RelationDemand, RelationDemandOutcome};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use super::{peak_live_bytes, reset_alloc_counter};
+use super::{live_bytes, peak_live_bytes, reset_alloc_counter};
 
 const FILE: &str = "/construction_bytes.ts";
 
@@ -95,44 +95,100 @@ fn repeated_callbacks_allocate_in_the_linear_class() {
     }
 }
 
+/// What one relation demand answered and charged, measured against the
+/// allocator on this thread: the peak live bytes while it ran (its active
+/// working state) and the live bytes it left behind (what stays resident).
+struct MeasuredRelation {
+    demand: RelationDemand,
+    peak: i64,
+    resident: i64,
+}
+
 /// Relate `S` to `T` over `count` arms each, with the declarations already
-/// read, under `limit` construction bytes when given: what the demand
-/// answered and charged, and the peak live bytes the allocator handed out on
-/// this thread meanwhile.
-fn relate_measured(count: usize, limit: Option<u64>) -> (RelationDemand, i64) {
+/// read, under `limit` construction bytes when given.
+fn relate_measured(count: usize, limit: Option<u64>) -> MeasuredRelation {
     let host = host_with(&reversed_unions(count));
     let _ = verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "S", "S", None);
     let _ = verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "T", "T", None);
     reset_alloc_counter();
     let demand =
         verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "S", "T", limit);
-    (demand, peak_live_bytes())
+    MeasuredRelation {
+        demand,
+        peak: peak_live_bytes(),
+        resident: live_bytes(),
+    }
 }
 
-/// Two hundred object arms against the same arms reversed relate about
-/// 20,100 structured pairs: under the default allowance the relation settles
-/// `assignable` without tripping the memory rail. The allocator's peak is
-/// reported beside the logical bytes the demand charged, but is advisory: the
-/// ledger's per-pair credit is a logical construction cost, not a bound on
-/// what the allocator hands out, so no inequality between the two is a
-/// contract here.
+/// Object arms against the same arms reversed relate `n(n+1)/2` structured
+/// pairs, each arm scanning the reversed target up to its partner: under the
+/// default allowance the relation settles `assignable` without tripping the
+/// memory rail. The pairs' working state — each decided pair's queued
+/// member, its relation flight and identity, the index its answer is read
+/// back through, the frames, bindings, receipts and connected-demand state
+/// the relation holds — is attributed here by the allocator, independently
+/// of the ledger's own figures. Its peak stays within the construction bytes
+/// the demand charged, so the charge never understates what the relation
+/// holds; it stays the same per pair as the pairs grow, and the relation
+/// leaves no per-pair record (no proof or explanation population) resident
+/// after it settles.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings agree): `[S] extends [T] ?
 /// 1 : 2` is `1` over 200 reversed arms.
 #[test]
-fn a_relation_settles_within_the_default_allowance() {
-    let (demand, peak) = relate_measured(200, None);
-    eprintln!(
-        "relation: {} logical construction bytes charged, allocator peak live {peak} bytes",
-        demand.bytes
+fn a_relation_holds_no_more_than_it_charges() {
+    // More sizes are measured on request (`VERTER_RELATION_PAIR_ARMS=600,1800`);
+    // the default two keep the canary fast.
+    let requested: Vec<usize> = std::env::var("VERTER_RELATION_PAIR_ARMS")
+        .map(|sizes| {
+            sizes
+                .split(',')
+                .filter_map(|size| size.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut active_per_pair = Vec::new();
+    for count in [100, 200].into_iter().chain(requested) {
+        let MeasuredRelation {
+            demand,
+            peak,
+            resident,
+        } = relate_measured(count, None);
+        let pairs = (count * (count + 1) / 2) as i64;
+        eprintln!(
+            "reversed-{count}: {:?}, {pairs} pairs, active {} bytes per pair (peak live {peak}), \
+             resident {} bytes per pair ({resident}), charged {} bytes per pair ({})",
+            demand.outcome,
+            peak / pairs,
+            resident / pairs,
+            demand.bytes as i64 / pairs,
+            demand.bytes
+        );
+        if count <= 200 {
+            assert_eq!(
+                demand.outcome,
+                RelationDemandOutcome::Assignable,
+                "every arm of S fits an arm of T"
+            );
+        }
+        assert!(!demand.memory_limit_tripped);
+        assert!(
+            peak <= demand.bytes as i64,
+            "{count} arms: the relation held {peak} live bytes but charged only {}",
+            demand.bytes
+        );
+        assert!(
+            resident < 128 * pairs,
+            "{count} arms: {resident} bytes stay resident after the relation settles"
+        );
+        active_per_pair.push(peak / pairs);
+    }
+    assert!(
+        active_per_pair
+            .iter()
+            .all(|per_pair| per_pair * 4 <= active_per_pair[0] * 5),
+        "the working state per pair grows with the pairs: {active_per_pair:?}"
     );
-    assert_eq!(
-        demand.outcome,
-        RelationDemandOutcome::Assignable,
-        "every arm of S fits an arm of T"
-    );
-    assert!(!demand.memory_limit_tripped);
-    assert!(demand.bytes > 0, "the relation charged its constructions");
 }
 
 /// The relation shape that charges the most per unit of work, 600 reversed
@@ -143,7 +199,7 @@ fn a_relation_settles_within_the_default_allowance() {
 #[test]
 fn the_worst_relation_shape_is_refused_by_the_construction_allowance() {
     let limit = 32 << 20;
-    let (demand, peak) = relate_measured(600, Some(limit));
+    let MeasuredRelation { demand, peak, .. } = relate_measured(600, Some(limit));
     eprintln!(
         "limited relation: {} logical construction bytes charged of {limit}, allocator peak live {peak} bytes",
         demand.bytes
