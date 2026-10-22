@@ -2,7 +2,7 @@ use super::*;
 
 fn file_whole_hash(id: &str) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: id.to_string(),
+        canonical_id: id.into(),
         hash: [1; 16],
     }
 }
@@ -17,7 +17,7 @@ fn compaction_domain_covers_every_variant_as_documented() {
     );
     assert_eq!(
         compaction_domain(&FactVersionRef::DerivedFactHash {
-            canonical_id: "/a.ts".to_string(),
+            canonical_id: "/a.ts".into(),
             kind: DerivedFactKind::Route,
             hash: [2; 16],
         }),
@@ -122,7 +122,7 @@ fn refined_by_completion_in_flight_names_no_population() {
 #[test]
 fn resolve_imports_fact_ref_semantic_reports_its_canonical_id() {
     let fact = ResolveImportsFactRef::Semantic {
-        canonical_id: "/a.ts".to_string(),
+        canonical_id: "/a.ts".into(),
         key: FactKey::SyntacticExportSet,
         lane: FactLane::Semantic,
         expected_hash: [0; 16],
@@ -177,7 +177,7 @@ fn strict_self_root_world_attributes_to_itself_not_a_canonical() {
 #[test]
 fn resolve_imports_semantic_attributes_to_its_canonical() {
     let fact = FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-        canonical_id: "/b.ts".to_string(),
+        canonical_id: "/b.ts".into(),
         key: FactKey::SyntacticExportSet,
         lane: FactLane::Semantic,
         expected_hash: [0; 16],

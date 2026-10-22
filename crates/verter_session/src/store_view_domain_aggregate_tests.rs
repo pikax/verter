@@ -775,7 +775,7 @@ fn request_signature_validation_refuses_a_population_straddle() {
         base.content_generation,
     );
     let late = FactVersionRef::FileWholeHash {
-        canonical_id: "/late.ts".to_string(),
+        canonical_id: "/late.ts".into(),
         hash: [0x77; 16],
     };
     let signature = vec![content, late];

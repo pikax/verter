@@ -59,7 +59,7 @@ fn component_meta_result_signature_carries_member_presence() {
     // per-domain dispatcher under a permissive view. Constructing
     // an entry requires the carrier's `facts` rail to be populated.
     let presence_fact = FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/src/types.ts".to_owned(),
+        canonical_id: "/src/types.ts".into(),
         key: FactKey::MemberPresence {
             exporter: InternedName::from("Foo"),
             name: verter_type_expr::facts::FactPropertyKey::identifier("a"),

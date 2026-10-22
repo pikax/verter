@@ -116,7 +116,7 @@ fn host_with_unrelated_file() -> VerterHost {
 /// `FileWholeHash` for `canonical` at [`PLANTED_HASH`].
 fn planted_self_root(canonical: &str) -> Arc<[FactVersionRef]> {
     Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: PLANTED_HASH,
     }])
 }
@@ -1757,7 +1757,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     assert!(
         !sig.iter().any(|f| matches!(
             f,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == dep
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == dep
         )),
         "the producer MUST NOT root a ProjectGeneration-observed dependency by a \
          FileWholeHash for {dep} — a ProjectGeneration dependency observed the \
@@ -1944,7 +1944,9 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
     .facts;
 
     let dep_fact_hash = sig.iter().find_map(|f| match f {
-        FactVersionRef::FileWholeHash { canonical_id, hash } if canonical_id == dep => Some(*hash),
+        FactVersionRef::FileWholeHash { canonical_id, hash } if &**canonical_id == dep => {
+            Some(*hash)
+        }
         _ => None,
     });
     let dep_fact_hash = dep_fact_hash.expect(
@@ -2063,7 +2065,7 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
     let scope_fact_hash = sig
         .iter()
         .find_map(|f| match f {
-            FactVersionRef::FileWholeHash { canonical_id, hash } if canonical_id == scope => {
+            FactVersionRef::FileWholeHash { canonical_id, hash } if &**canonical_id == scope => {
                 Some(*hash)
             }
             _ => None,
@@ -2325,7 +2327,7 @@ fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
     let observed_scope = observe_scope(ctx, scope);
     let mismatched_export_set = observed_scope_export_set(ctx, other, observed_other_hash);
     assert_eq!(
-        mismatched_export_set.canonical_id, other,
+        &*mismatched_export_set.canonical_id, other,
         "fixture invariant: the supplied parse fact describes `other`, not the keyed scope",
     );
 
@@ -2388,7 +2390,7 @@ fn signature_roots_whole_hash(
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == canonical && *hash == expected
+                if &**canonical_id == canonical && *hash == expected
         )
     })
 }
@@ -2928,7 +2930,7 @@ fn observe_materialize_scope_is_overlay_view_correct() {
         .clone()
         .expect("the overlay observation carries the scope's SyntacticExportSet parse fact");
     assert_eq!(
-        overlay_export_set.canonical_id, canonical,
+        &*overlay_export_set.canonical_id, canonical,
         "the observation's pinned parse fact MUST describe the keyed scope canonical",
     );
 }
@@ -3256,7 +3258,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
 
     // Base-view publish — self-roots the keyed canonical at its BASE hash.
     let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: base_hash,
     }]);
     {
@@ -3325,7 +3327,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
                             imported_symbol(canonical, "follower-overlay"),
                         )),
                         fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
-                            canonical_id: canonical.to_string(),
+                            canonical_id: canonical.into(),
                             hash: overlay_hash,
                         }]),
                         validated_at_generation: host
@@ -3416,7 +3418,7 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
 
     // Base publish.
     let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: base_hash,
     }]);
     {
@@ -3468,7 +3470,7 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
                             imported_symbol(canonical, "follower-overlay"),
                         )),
                         fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
-                            canonical_id: canonical.to_string(),
+                            canonical_id: canonical.into(),
                             hash: overlay_hash,
                         }]),
                         validated_at_generation: host
@@ -4653,7 +4655,7 @@ fn shape_member(
 /// authoritative self-root hash for the keyed canonical.
 fn self_root_at(canonical: &str, hash: [u8; 16]) -> Arc<[FactVersionRef]> {
     Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash,
     }])
 }

@@ -839,7 +839,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             crate::resolver_core::resolver_context::observe_fan_out(
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: file.to_string(),
+                    canonical_id: Arc::clone(&file),
                     hash: indexed.whole_hash,
                 },
             );

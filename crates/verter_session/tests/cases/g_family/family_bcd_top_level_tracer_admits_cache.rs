@@ -66,7 +66,7 @@ fn tracer_works_at_top_level_and_admits_non_empty_signature() {
     assert!(
         proof.fact_dep_signature.iter().any(|f| matches!(
             f,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == canonical
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == canonical
         )),
         "fact_dep_signature must contain the producer's FileWholeHash observation for the decl canonical. \
          Got: {:?}",

@@ -31,13 +31,13 @@ fn normalized_specifier_trims_trailing_slash_for_relative() {
 fn normalized_specifier_keeps_trailing_slash_for_bare_specifier() {
     // Only relative specifiers get the trailing-slash trim.
     let s = NormalizedSpecifier::new("vue/");
-    assert_eq!(s, NormalizedSpecifier("vue/".to_string()));
+    assert_eq!(s, NormalizedSpecifier("vue/".into()));
 }
 
 #[test]
 fn normalized_specifier_rewrites_backslashes_for_bare_specifier() {
     let s = NormalizedSpecifier::new("pkg\\sub");
-    assert_eq!(s, NormalizedSpecifier("pkg/sub".to_string()));
+    assert_eq!(s, NormalizedSpecifier("pkg/sub".into()));
 }
 
 // ── ResolveContextId ──

@@ -1430,7 +1430,7 @@ export interface Props { label: string }
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/types.vue"
+                if &**canonical_id == "/src/types.vue"
         )),
         "the direct-local proof must track the provider content hash",
     );
@@ -1492,7 +1492,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/index.ts"
+                if &**canonical_id == "/src/index.ts"
         )),
         "fast imported-root proof must track the provider file content hash",
     );
@@ -1500,7 +1500,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
-                if parse.canonical_id == "/src/index.ts"
+                if &*parse.canonical_id == "/src/index.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "fast imported-root proof must track the provider's parse-owned route interface",
@@ -1509,7 +1509,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/target.ts"
+                if &**canonical_id == "/src/target.ts"
         )),
         "fast imported-root proof must track the direct child file content hash",
     );
@@ -1517,7 +1517,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
         !facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
-                if parse.canonical_id == "/src/target.ts"
+                if &*parse.canonical_id == "/src/target.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "direct imported-root proof should not need the child's route interface when the parent directly names the target reexport",
@@ -1574,7 +1574,7 @@ fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/target.ts"
+                if &**canonical_id == "/src/target.ts"
         )),
         "store-view fast path must still track the cold child file content hash",
     );
@@ -1668,7 +1668,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/index.ts"
+                if &**canonical_id == "/src/index.ts"
         )),
         "fast imported-root proof must track the provider file content hash",
     );
@@ -1676,7 +1676,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
-                if parse.canonical_id == "/src/index.ts"
+                if &*parse.canonical_id == "/src/index.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "fast imported-root proof must track the provider's parse-owned route interface",
@@ -1685,7 +1685,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/target.ts"
+                if &**canonical_id == "/src/target.ts"
         )),
         "fast imported-root proof must track the direct child file content hash",
     );
@@ -1693,7 +1693,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
         !facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
-                if parse.canonical_id == "/src/target.ts"
+                if &*parse.canonical_id == "/src/target.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "direct imported-root proof should not need the child's route interface when the provider only re-exports the imported local binding",

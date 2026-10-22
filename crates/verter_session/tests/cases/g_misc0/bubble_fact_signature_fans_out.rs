@@ -17,7 +17,7 @@ fn make_host() -> VerterHost {
 
 fn sig_fact(n: u8) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: format!("bubble_fanout_{n}.ts"),
+        canonical_id: format!("bubble_fanout_{n}.ts").into(),
         hash: [n; 16],
     }
 }

@@ -4869,7 +4869,7 @@ defineProps<Props>()
         state1.fact_versions.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == "/types.ts" && hash == &initial_types_hash
+                if &**canonical_id == "/types.ts" && hash == &initial_types_hash
         )),
         "the dependency-backed identity/JSDoc read must root the exact imported file version; facts={:?}",
         state1.fact_versions
@@ -4970,7 +4970,7 @@ export interface Props { overlay: number }"#;
         resolved.fact_versions.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == "/types.ts" && hash == &overlay_hash
+                if &**canonical_id == "/types.ts" && hash == &overlay_hash
         )),
         "the JSDoc read must root the exact overlay source version; facts={:?}",
         resolved.fact_versions

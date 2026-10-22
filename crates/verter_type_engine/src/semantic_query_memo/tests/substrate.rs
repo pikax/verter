@@ -28,7 +28,7 @@ fn carrier_naming(
 ) -> verter_session_query::facts::fact_cache::ReadSetSignature {
     verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: [hash; 16],
         },
     ]))
@@ -1659,7 +1659,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let carrier_a =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
             FactVersionRef::FileWholeHash {
-                canonical_id: "/w/a.ts".to_string(),
+                canonical_id: "/w/a.ts".into(),
                 hash: [1u8; 16],
             },
         ]));
@@ -1681,7 +1681,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let carrier_b =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
             FactVersionRef::FileWholeHash {
-                canonical_id: "/w/b.ts".to_string(),
+                canonical_id: "/w/b.ts".into(),
                 hash: [2u8; 16],
             },
         ]));
@@ -1729,7 +1729,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let carrier_c =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
             FactVersionRef::FileWholeHash {
-                canonical_id: "/w/c.ts".to_string(),
+                canonical_id: "/w/c.ts".into(),
                 hash: [3u8; 16],
             },
         ]));
@@ -2783,7 +2783,7 @@ fn counter_taxonomy_matches_plan_covers_new_counters() {
 fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
     let facts = [
         verter_session_query::facts::fact_cache::FactVersionRef::FileSourceEnv {
-            canonical_id: "/contrib.d.ts".to_string(),
+            canonical_id: "/contrib.d.ts".into(),
             parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
                 [3u8; 16],
             ),
@@ -2812,7 +2812,7 @@ fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
 fn carrier_facts_reference_a_canonical_deep_in_a_receipt_chain() {
     use verter_session_query::facts::fact_cache::FactVersionRef;
     let whole = |canonical: String| FactVersionRef::FileWholeHash {
-        canonical_id: canonical,
+        canonical_id: canonical.into(),
         hash: [7u8; 16],
     };
     let mut receipt = verter_session_query::facts::fact_cache::ResultReceipt::new(vec![whole(

@@ -355,7 +355,7 @@ fn has_syntactic_route_fact(facts: &[FactVersionRef], canonical: &str) -> bool {
         matches!(
             f,
             FactVersionRef::Parse(parse)
-                if parse.canonical_id == canonical
+                if &*parse.canonical_id == canonical
                     && parse.key == verter_session_query::facts::FactKey::SyntacticRouteInterface
         )
     })
@@ -365,14 +365,14 @@ fn has_owner_whole_hash_fact(facts: &[FactVersionRef], owner: &str) -> bool {
     facts.iter().any(|f| {
         matches!(
             f,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == owner
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == owner
         )
     })
 }
 
 fn owner_whole_hash(facts: &[FactVersionRef], owner: &str) -> Option<Hash16> {
     facts.iter().find_map(|fact| match fact {
-        FactVersionRef::FileWholeHash { canonical_id, hash } if canonical_id == owner => {
+        FactVersionRef::FileWholeHash { canonical_id, hash } if &**canonical_id == owner => {
             Some(*hash)
         }
         _ => None,
@@ -382,7 +382,7 @@ fn owner_whole_hash(facts: &[FactVersionRef], owner: &str) -> Option<Hash16> {
 fn syntactic_route_hash(facts: &[FactVersionRef], owner: &str) -> Option<Hash16> {
     facts.iter().find_map(|fact| match fact {
         FactVersionRef::Parse(parse)
-            if parse.canonical_id == owner
+            if &*parse.canonical_id == owner
                 && parse.key == verter_session_query::facts::FactKey::SyntacticRouteInterface =>
         {
             Some(parse.expected_hash)

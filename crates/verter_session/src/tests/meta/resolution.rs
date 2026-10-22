@@ -58,7 +58,7 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
 
     assert!(facts.contains(
         &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/index.ts".to_string(),
+            canonical_id: "/index.ts".into(),
             hash: whole_hash,
         }
     ));

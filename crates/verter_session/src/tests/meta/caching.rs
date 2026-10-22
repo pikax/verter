@@ -593,7 +593,7 @@ defineProps<WidgetProps>()
             matches!(
                 fact,
                 FactVersionRef::FileWholeHash { canonical_id, .. }
-                    if canonical_id == canonical
+                    if &**canonical_id == canonical
             )
         })
     };
@@ -617,7 +617,7 @@ defineProps<WidgetProps>()
             .is_some_and(|facts| facts.iter().any(|fact| matches!(
                 fact,
                 FactVersionRef::FileWholeHash { canonical_id, .. }
-                    if canonical_id == "/src/utils.ts"
+                    if &**canonical_id == "/src/utils.ts"
             ))),
         "fallthrough extraction MUST publish the exact runtime root-spread dependency facts"
     );

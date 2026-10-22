@@ -177,7 +177,7 @@ fn resolved_fact_warm_read_requires_same_generation_and_fact_rail() {
     let key = resolved_fact_key("/a.ts");
     // Admit a Cacheable entry carrying a tracked cross-file fact at gen 5.
     let cross_file = FactVersionRef::FileWholeHash {
-        canonical_id: "/node_modules/fixture-fw/index.d.ts".to_string(),
+        canonical_id: "/node_modules/fixture-fw/index.d.ts".into(),
         hash: [9u8; 16],
     };
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(
@@ -239,7 +239,7 @@ fn cacheable_admission_warms_exactly_one_entry() {
 fn wide_cacheable_admission() -> SignatureAdmission {
     let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
         .map(|index| FactVersionRef::FileWholeHash {
-            canonical_id: format!("/wide/{index:05}.ts"),
+            canonical_id: format!("/wide/{index:05}.ts").into(),
             hash: [1u8; 16],
         })
         .collect();

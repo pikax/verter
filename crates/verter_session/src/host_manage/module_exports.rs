@@ -197,7 +197,7 @@ impl VerterHost {
             let mut inputs = ModuleInputs::default();
             let mut ambient_dispatch = None;
             let whole = FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_owned(),
+                canonical_id: canonical.into(),
                 hash: indexed.whole_hash,
             };
             inputs.facts.insert(whole.clone());

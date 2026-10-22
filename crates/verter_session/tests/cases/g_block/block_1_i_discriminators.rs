@@ -146,7 +146,7 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     // Build the carrier: a fact rail with one `Parse` fact naming
     // `/test/fact-dep.ts`.
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/test/fact-dep.ts".to_string(),
+        canonical_id: "/test/fact-dep.ts".into(),
         key: verter_session_query::facts::FactKey::SyntacticExportSet,
         lane: verter_session_query::facts::FactLane::Semantic,
         expected_hash: [0x22u8; 16],
@@ -315,11 +315,11 @@ fn read_set_signature_carrier_canonical_ids_covers_fact_rail() {
 
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![
         FactVersionRef::FileWholeHash {
-            canonical_id: "/whole.ts".to_string(),
+            canonical_id: "/whole.ts".into(),
             hash: [1u8; 16],
         },
         FactVersionRef::Parse(ParseFactRef {
-            canonical_id: "/parse.ts".to_string(),
+            canonical_id: "/parse.ts".into(),
             key: verter_session_query::facts::FactKey::SyntacticExportSet,
             lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: [2u8; 16],

@@ -148,7 +148,7 @@ impl ComponentApiProjectionWitness {
                 matches!(
                     fact,
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                        if canonical_id == augmenter_canonical
+                        if &**canonical_id == augmenter_canonical
                 )
             });
             (shape, contributor)

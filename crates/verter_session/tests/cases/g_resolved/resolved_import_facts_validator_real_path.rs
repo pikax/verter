@@ -80,7 +80,7 @@ fn validator_warms_then_invalidates_after_source_edit() {
     // fact lane. The validator must accept this against the warm
     // cache slot.
     let fact_ref = ResolveImportsFactRef::Semantic {
-        canonical_id: "/owner.ts".to_string(),
+        canonical_id: "/owner.ts".into(),
         key: FactKey::ResolvedImportClause {
             specifier: InternedSpecifier::from(entry.specifier.as_ref()),
             binding: InternedName::from(entry.binding.as_ref()),

@@ -558,7 +558,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for entry in contributors.entries.iter() {
             crate::resolver_core::resolver_context::observe_fan_out(
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: entry.artifact_key.canonical.to_string(),
+                    canonical_id: Arc::clone(&entry.artifact_key.canonical),
                     hash: entry.artifact_key.content_hash,
                 },
             );

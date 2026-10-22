@@ -321,11 +321,22 @@ impl Drop for AliasSet {
     }
 }
 
+/// Whether `text` is the empty text `Arc::<str>::default()` hands out. The
+/// standard library shares one static for it, so a handle to it keeps no
+/// allocation alive; an empty text built any other way is its own
+/// allocation and is charged like any other.
+#[must_use]
+pub fn is_shared_empty_str(text: &Arc<str>) -> bool {
+    static EMPTY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    text.is_empty() && Arc::ptr_eq(text, EMPTY.get_or_init(Arc::default))
+}
+
 /// Bytes an `Arc<str>` keeps alive, or `0` when this charge already counted
-/// its allocation.
+/// its allocation or it is the shared empty text
+/// ([`is_shared_empty_str`]).
 #[must_use]
 pub fn arc_str_bytes(value: &Arc<str>, aliases: &mut AliasSet) -> usize {
-    if !aliases.first(value) {
+    if is_shared_empty_str(value) || !aliases.first(value) {
         return 0;
     }
     match aliases.leaves.as_mut() {

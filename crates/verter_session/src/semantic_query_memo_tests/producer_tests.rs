@@ -389,7 +389,7 @@ fn keyed_output_of(
     let node = store.intern_node(data);
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         FactVersionRef::FileWholeHash {
-            canonical_id: KEYED.to_string(),
+            canonical_id: KEYED.into(),
             hash,
         },
     ]));

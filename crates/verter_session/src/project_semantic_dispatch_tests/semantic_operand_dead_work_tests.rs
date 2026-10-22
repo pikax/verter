@@ -224,7 +224,7 @@ fn dead_file_fact_reads<R>(host: &VerterHost, f: impl FnOnce() -> R) -> (R, usiz
     let dead = facts
         .iter()
         .filter(|fact| match fact {
-            FactVersionRef::FileWholeHash { canonical_id, .. } => canonical_id == DEAD,
+            FactVersionRef::FileWholeHash { canonical_id, .. } => &**canonical_id == DEAD,
             _ => false,
         })
         .count();

@@ -82,31 +82,31 @@ fn resolution_fact(key: ResolutionFactKey, version: u64) -> FactVersionRef {
 fn diverse_corpus() -> Vec<FactVersionRef> {
     vec![
         FactVersionRef::FileWholeHash {
-            canonical_id: "/p/b.ts".to_string(),
+            canonical_id: "/p/b.ts".into(),
             hash: hash16(1),
         },
         // Same canonical, different hash — discriminated only by the last field.
         FactVersionRef::FileWholeHash {
-            canonical_id: "/p/b.ts".to_string(),
+            canonical_id: "/p/b.ts".into(),
             hash: hash16(2),
         },
         FactVersionRef::FileWholeHash {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             hash: hash16(1),
         },
         FactVersionRef::DerivedFactHash {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             kind: DerivedFactKind::Route,
             hash: hash16(3),
         },
         // Same canonical + hash, different kind.
         FactVersionRef::DerivedFactHash {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             kind: DerivedFactKind::DirectSource,
             hash: hash16(3),
         },
         FactVersionRef::Parse(ParseFactRef {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::Export {
                 name: InternedName::from("Alpha"),
                 space: SymbolSpace::Type,
@@ -116,7 +116,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         }),
         // Same key + lane + hash, different SymbolSpace inside the key.
         FactVersionRef::Parse(ParseFactRef {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::Export {
                 name: InternedName::from("Alpha"),
                 space: SymbolSpace::Value,
@@ -126,7 +126,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         }),
         // Same everything but the lane.
         FactVersionRef::Parse(ParseFactRef {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::Export {
                 name: InternedName::from("Alpha"),
                 space: SymbolSpace::Value,
@@ -135,13 +135,13 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
             expected_hash: hash16(4),
         }),
         FactVersionRef::Parse(ParseFactRef {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::SyntacticExportSet,
             lane: FactLane::Semantic,
             expected_hash: hash16(5),
         }),
         FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::ImportRef {
                 specifier: InternedSpecifier::from("./dep"),
                 binding: InternedName::from("Dep"),
@@ -152,7 +152,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         }),
         // Same import fact, different resolved binding name.
         FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::ImportRef {
                 specifier: InternedSpecifier::from("./dep"),
                 binding: InternedName::from("Other"),
@@ -221,7 +221,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
             11,
         ),
         FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-            canonical_id: "/p/barrel.ts".to_string(),
+            canonical_id: "/p/barrel.ts".into(),
             key: FactKey::ModuleAugmentationIndexShape {
                 target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
                 external_specifier: Some(InternedSpecifier::from("vue")),
@@ -232,7 +232,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
             expected_hash: hash16(12),
         }),
         FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-            canonical_id: "/p/barrel.ts".to_string(),
+            canonical_id: "/p/barrel.ts".into(),
             key: FactKey::ModuleAugmentationIndexShape {
                 target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
                 external_specifier: Some(InternedSpecifier::from("vue")),
@@ -245,19 +245,19 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         // Four `FileSourceEnv` facts identical except for `file_language_id` —
         // the open-set field that used to be compared through its Debug form.
         FactVersionRef::FileSourceEnv {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
             parse_key: test_parse_key(3),
             file_language_id: FileLanguage::script(ScriptSourceType::Ts),
         },
         FactVersionRef::FileSourceEnv {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
             parse_key: test_parse_key(3),
             file_language_id: FileLanguage::script(ScriptSourceType::Tsx),
         },
         FactVersionRef::FileSourceEnv {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
             parse_key: test_parse_key(3),
             file_language_id: FileLanguage::Framework {
@@ -266,7 +266,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
             },
         },
         FactVersionRef::FileSourceEnv {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
             parse_key: test_parse_key(3),
             file_language_id: FileLanguage::Framework {
@@ -276,7 +276,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         },
         // Same adapter, different language id.
         FactVersionRef::FileSourceEnv {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
             parse_key: test_parse_key(3),
             file_language_id: FileLanguage::Framework {
@@ -285,7 +285,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
             },
         },
         FactVersionRef::FileSourceEnv {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
             parse_key: test_parse_key(3),
             file_language_id: FileLanguage::FrameworkTemplate {
@@ -294,7 +294,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
             },
         },
         FactVersionRef::FileSourceEnv {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(13)),
             parse_key: test_parse_key(3),
             file_language_id: FileLanguage::FrameworkTemplate {
@@ -419,13 +419,13 @@ fn canonical_order_is_by_variant_then_field() {
     let mut facts = vec![
         FactVersionRef::ProjectGeneration { generation: 1 },
         FactVersionRef::FileSourceEnv {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(0)),
             parse_key: test_parse_key(1),
             file_language_id: FileLanguage::script(ScriptSourceType::Ts),
         },
         FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::ModuleAugmentationIndexShape {
                 target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
                 external_specifier: Some(InternedSpecifier::from("vue")),
@@ -436,24 +436,24 @@ fn canonical_order_is_by_variant_then_field() {
             expected_hash: hash16(0),
         }),
         FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::SyntacticExportSet,
             lane: FactLane::Semantic,
             expected_hash: hash16(0),
         }),
         FactVersionRef::Parse(ParseFactRef {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             key: FactKey::SyntacticExportSet,
             lane: FactLane::Semantic,
             expected_hash: hash16(0),
         }),
         FactVersionRef::DerivedFactHash {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             kind: DerivedFactKind::Route,
             hash: hash16(0),
         },
         FactVersionRef::FileWholeHash {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             hash: hash16(0),
         },
     ];
@@ -489,7 +489,7 @@ fn open_set_ids_order_by_content_not_by_intern_or_allocation_order() {
     let mut facts: Vec<FactVersionRef> = names
         .iter()
         .map(|name| FactVersionRef::FileSourceEnv {
-            canonical_id: "/p/a.ts".to_string(),
+            canonical_id: "/p/a.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash(hash16(0)),
             parse_key: test_parse_key(1),
             file_language_id: FileLanguage::Framework {
@@ -550,7 +550,7 @@ fn canonical_ordering_is_free_of_transient_allocation() {
         for fact in &corpus {
             let mut fact = fact.clone();
             if let FactVersionRef::FileWholeHash { canonical_id, .. } = &mut fact {
-                *canonical_id = format!("/p/{round}/{canonical_id}");
+                *canonical_id = format!("/p/{round}/{canonical_id}").into();
             }
             large.push(fact);
         }
@@ -710,7 +710,7 @@ fn absorbed_runs_count_towards_the_signature_width() {
     // observed facts: an absorbed wide run pages, it is never truncated.
     let wide: Vec<FactVersionRef> = (0..=FACT_PAGE_WIDTH)
         .map(|index| FactVersionRef::FileWholeHash {
-            canonical_id: format!("/p/f-{index:05}.ts"),
+            canonical_id: format!("/p/f-{index:05}.ts").into(),
             hash: hash16(0),
         })
         .collect();
@@ -779,7 +779,7 @@ fn session_overlay_view() -> ViewPopulation {
 fn distinct_content_facts(count: usize) -> Vec<FactVersionRef> {
     (0..count)
         .map(|index| FactVersionRef::FileWholeHash {
-            canonical_id: format!("/p/content-{index:05}.ts"),
+            canonical_id: format!("/p/content-{index:05}.ts").into(),
             hash: hash16(0),
         })
         .collect()
@@ -1291,7 +1291,7 @@ impl crate::facts::fact_cache::FactVersionValidator for LiveWholeHashes {
     fn validates_fact_version(&self, fact: &FactVersionRef) -> bool {
         match fact {
             FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                self.0.get(canonical_id.as_str()) == Some(hash)
+                self.0.get(&**canonical_id) == Some(hash)
             }
             FactVersionRef::Receipt(receipt) => {
                 receipt.all_leaves(|leaf| self.validates_fact_version(leaf))
@@ -1314,7 +1314,7 @@ fn sorted_entries(signature: &[FactVersionRef]) -> Vec<FactVersionRef> {
 fn wide_whole_hashes(count: usize) -> Vec<FactVersionRef> {
     (0..count)
         .map(|index| FactVersionRef::FileWholeHash {
-            canonical_id: format!("/p/wide-{index:07}.ts"),
+            canonical_id: format!("/p/wide-{index:07}.ts").into(),
             hash: hash16(1),
         })
         .collect()
@@ -1326,7 +1326,7 @@ fn live_table(facts: &[FactVersionRef]) -> LiveWholeHashes {
             .iter()
             .map(|fact| match fact {
                 FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                    (canonical_id.as_str().to_owned(), *hash)
+                    (canonical_id.to_string(), *hash)
                 }
                 other => panic!("fixture holds whole-hash facts only, got {other:?}"),
             })
@@ -1412,7 +1412,7 @@ fn an_edit_on_every_page_including_the_last_invalidates() {
         let FactVersionRef::FileWholeHash { canonical_id, .. } = &facts[index] else {
             unreachable!("fixture holds whole-hash facts only");
         };
-        live.0.insert(canonical_id.as_str().to_owned(), hash16(2));
+        live.0.insert(canonical_id.to_string(), hash16(2));
         assert!(
             !signature.validates(&live),
             "an edit to fact {index} (page {}) must invalidate the signature",
@@ -1501,7 +1501,7 @@ fn long_named_whole_hashes(count: usize, name_len: usize) -> Vec<FactVersionRef>
         .map(|index| {
             let stem = format!("/p/{index:07}-");
             FactVersionRef::FileWholeHash {
-                canonical_id: format!("{stem}{}", "x".repeat(name_len - stem.len())),
+                canonical_id: format!("{stem}{}", "x".repeat(name_len - stem.len())).into(),
                 hash: hash16(1),
             }
         })

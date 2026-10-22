@@ -14,14 +14,14 @@ mod read_set_signature_unit_tests {
 
     fn fact_filewhole(canon: &str, byte: u8) -> FactVersionRef {
         FactVersionRef::FileWholeHash {
-            canonical_id: canon.to_string(),
+            canonical_id: canon.into(),
             hash: [byte; 16],
         }
     }
 
     fn fact_derived(canon: &str, byte: u8) -> FactVersionRef {
         FactVersionRef::DerivedFactHash {
-            canonical_id: canon.to_string(),
+            canonical_id: canon.into(),
             kind: DerivedFactKind::Route,
             hash: [byte; 16],
         }
@@ -29,7 +29,7 @@ mod read_set_signature_unit_tests {
 
     fn fact_parse(canon: &str, byte: u8) -> FactVersionRef {
         FactVersionRef::Parse(ParseFactRef {
-            canonical_id: canon.to_string(),
+            canonical_id: canon.into(),
             key: FactKey::SyntacticExportSet,
             lane: FactLane::Semantic,
             expected_hash: [byte; 16],
@@ -79,7 +79,7 @@ mod read_set_signature_unit_tests {
             fact_parse("/parse.ts", 3),
             FactVersionRef::ResolveImports(
                 verter_session_query::facts::fact_cache::ResolveImportsFactRef::Semantic {
-                    canonical_id: "/resolve.ts".to_string(),
+                    canonical_id: "/resolve.ts".into(),
                     key: FactKey::SyntacticExportSet,
                     lane: FactLane::Semantic,
                     expected_hash: [0u8; 16],
@@ -87,7 +87,7 @@ mod read_set_signature_unit_tests {
             ),
             FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
-                    canonical_id: "/route.ts".to_string(),
+                    canonical_id: "/route.ts".into(),
                     key: FactKey::SyntacticExportSet,
                     lane: FactLane::Semantic,
                     expected_hash: [0u8; 16],
@@ -175,7 +175,7 @@ mod file_source_env_observation_tests {
     #[test]
     fn canonical_ids_includes_file_source_env_contributor() {
         let fact = FactVersionRef::FileSourceEnv {
-            canonical_id: "/contrib.d.ts".to_string(),
+            canonical_id: "/contrib.d.ts".into(),
             parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
             parse_key: verter_session_query::source::toolchain::parse_key_for_test(
                 "/contrib.d.ts",
