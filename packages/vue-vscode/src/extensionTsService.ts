@@ -246,7 +246,7 @@ export class ExtensionTsService {
       throw unresolvable(cause);
     }
 
-    // The native-preview TypeScript layout (the `typescript` 7.x package) is a
+    // The native TypeScript 7 layout (the `typescript` 7.x package) is a
     // thin launcher: its entry exposes no `createLanguageService`, and its
     // libraries live in a separate platform package, NOT beside the entry. It is
     // a complete, correct install — so it must not be blamed for missing
