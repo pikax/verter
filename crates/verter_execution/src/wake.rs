@@ -45,6 +45,14 @@ impl WakeRegistration {
 #[must_use = "taken wakers must be woken once the producer lock is released"]
 pub struct TakenWakers(Vec<(u64, Waker)>);
 
+impl std::fmt::Debug for WakerSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WakerSet")
+            .field("registered", &self.wakers.len())
+            .finish()
+    }
+}
+
 impl WakerSet {
     /// Keep `registration` for `waker`: register it unless it is still on
     /// the set with a waker that wakes the same task, replacing any older
