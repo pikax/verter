@@ -3485,7 +3485,7 @@ fn wildcard_route_fuse_trip_records_budget_class_beside_below_cap_control() {
         current_request_result_is_partial, current_request_result_reasons, RequestContext,
         RequestContextGuard,
     };
-    use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+    use verter_type_engine::semantic_query::{PartialReason, ResultCompleteness};
 
     let host = build_route_only_reexport_host();
     assert!(host.ensure_indexed_ready("/m4_src/index.ts").is_some());
@@ -3536,7 +3536,11 @@ fn wildcard_route_fuse_trip_records_budget_class_beside_below_cap_control() {
     let (resolved, reasons, retention, ticks) = run(0);
     assert_eq!(resolved, None);
     assert_eq!(ticks, 1);
-    assert_eq!(reasons, PartialReasonSet::BUDGET_EXCEEDED);
+    assert_eq!(
+        reasons.iter().collect::<Vec<_>>(),
+        vec![PartialReason::BudgetExceeded],
+        "the trip records the budget class alone"
+    );
     assert_eq!(
         retention,
         FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile),

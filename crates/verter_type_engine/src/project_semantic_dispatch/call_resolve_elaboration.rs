@@ -151,7 +151,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match self.relation_report(reported, target, (site.point, site.end), head)? {
             RelationReport::Reported(occurrence) => Some(vec![occurrence]),
             RelationReport::StackOverflow => {
-                let types = vec![
+                let types = [
                     self.print_diagnostic_type(source)?,
                     self.print_diagnostic_type(target)?,
                 ];
