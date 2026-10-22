@@ -844,6 +844,7 @@ fn build_transform_output(
     source_name: Option<&str>,
     want_source_map: bool,
 ) -> Result<Option<(String, Option<SourceMap<'static>>)>, StyleRewriteFailure> {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     if edits.is_empty() {
         return Ok(None);
     }
@@ -862,7 +863,7 @@ fn build_transform_output(
     }
 
     let allocator = Allocator::new();
-    let mut transform = CodeTransform::new(code, &allocator);
+    let mut transform = CodeTransform::<M>::new_in(code, &allocator);
     let mut interned = Vec::new();
     let mut prepared = Vec::with_capacity(edits.len());
     let mut overwrite_count = 0usize;
@@ -932,6 +933,8 @@ fn build_transform_output(
             transform.generate_map(SourceMapOptions::new().with_source(source_name))
         });
     Ok(Some((output, source_map)))
+
+    })
 }
 
 /// `want_source_map` mirrors the caller's `RuntimeCompileOptions::source_map`

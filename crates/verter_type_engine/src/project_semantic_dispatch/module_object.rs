@@ -16,6 +16,8 @@
 //! it applies TypeScript 7's interop when X can be called or constructed:
 //! the object carries X's own properties and `default`, X itself.
 
+use crate::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
@@ -129,6 +131,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         use verter_session_query::inputs::shallow::LexicalValueBinding;
         let canonical = value_root.scope.canonical_id.as_ref();
         let owner = value_root.scope.owner;
+        if let Some(augmentation) = Self::ambient_value_scope(&value_root.scope, &shallow.headers) {
+            return self.namespace_object(
+                canonical,
+                owner,
+                Some(augmentation),
+                value_root.name.as_ref(),
+                context,
+            );
+        }
         match shallow.visible_value_binding(owner, value_root.name.as_ref()) {
             Some(LexicalValueBinding::Import(target)) if target.is_namespace => {
                 let interop = !target.is_import_equals();
@@ -390,9 +401,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
+        let (object, roots) =
+            self.global_namespace_object_observed(demand_canonical, name, context);
+        object.map(|object| (object, roots))
+    }
+
+    /// [`Self::global_namespace_object`] with the file of every script
+    /// declaring a namespace of the name it read, its object or not: an
+    /// edit making a type-only namespace declare a value misses a read
+    /// that found none.
+    fn global_namespace_object_observed(
+        &self,
+        demand_canonical: &str,
+        name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> (Option<SemanticNodeId>, Vec<ObservedGraphSelfRoot>) {
         use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if name.contains('.') {
-            return None;
+            return (None, Vec::new());
         }
         let population = self.global_contributors_in(
             demand_canonical,
@@ -415,7 +441,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             |entry| entry.artifact_key.canonical.as_ref(),
             |_, _| std::cmp::Ordering::Equal,
         );
-        let first = declarations.first()?;
+        let Some(first) = declarations.first() else {
+            return (None, Vec::new());
+        };
         let mut roots: Vec<ObservedGraphSelfRoot> = Vec::new();
         let mut members: Vec<(Arc<str>, ValueRootKey)> = Vec::new();
         let mut seen: FxHashSet<String> = FxHashSet::default();
@@ -449,25 +477,85 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         if !instantiated {
-            return None;
+            return (None, roots);
         }
         members.sort_by(|left, right| left.0.cmp(&right.0));
         let first_canonical: Arc<str> = Arc::clone(&first.artifact_key.canonical);
-        let hash = self
+        let Some(hash) = self
             .ctx
-            .ensure_indexed_ready_serve(first_canonical.as_ref())?
-            .indexed
-            .whole_hash;
+            .ensure_indexed_ready_serve(first_canonical.as_ref())
+            .map(|serve| serve.indexed.whole_hash)
+        else {
+            return (None, roots);
+        };
         let scope = NodeScopeId::File {
             canonical_id: verter_type_expr::OwnedStr::from(first_canonical.clone()),
             owner: first.owner,
             whole_hash: hash,
             local_scope: None,
         };
-        Some((
-            self.value_object(members, scope, first_canonical.as_ref(), context),
+        (
+            Some(self.value_object(members, scope, first_canonical.as_ref(), context)),
             roots,
-        ))
+        )
+    }
+
+    /// The object of the namespace a function or a class named `name` in
+    /// `canonical` merges with, when that namespace exports a value: the
+    /// namespace its own declaration scope declares (the file's, or the
+    /// ambient block's whose member the value is), or for a script's global
+    /// every script's namespace of that name. `None` when no such namespace
+    /// exports a value, so the value stays a single declaration. The roots
+    /// are every file whose namespace of the name was read, whether or not it
+    /// merges: a read that merged nothing still depends on those namespaces
+    /// exporting no value.
+    pub(super) fn namespace_merged_into_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> (Option<SemanticNodeId>, Vec<ObservedGraphSelfRoot>) {
+        // The declaration scope the value was read from: the file's own,
+        // else the ambient block its identity falls back to.
+        let own_scope = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .and_then(|serve| {
+                let state = &serve.indexed.shallow_state;
+                if state.headers.value_header_in(owner, name).is_some() {
+                    None
+                } else {
+                    state.value_fallback_augmentation_scope(owner, name)
+                }
+            });
+        let (object, roots) =
+            if own_scope.is_none() && !name.contains('.') && !self.canonical_is_module(canonical) {
+                self.global_namespace_object_observed(canonical, name, context)
+            } else {
+                match self.namespace_object(canonical, owner, own_scope.as_ref(), name, context) {
+                    Some((object, roots)) => (Some(object), roots),
+                    None => (
+                        None,
+                        self.ctx
+                            .ensure_indexed_ready_serve(canonical)
+                            .map(|serve| {
+                                vec![(
+                                    verter_type_expr::OwnedStr::from(canonical),
+                                    serve.indexed.whole_hash,
+                                )]
+                            })
+                            .unwrap_or_default(),
+                    ),
+                }
+            };
+        let object = object.filter(|object| {
+            matches!(
+                self.graph().node_data(*object).as_deref(),
+                Some(SemanticNodeData::Object(surface)) if !surface.positive_members().is_empty()
+            )
+        });
+        (object, roots)
     }
 
     /// The object of the namespace `name` declared in `canonical` (in its
@@ -493,10 +581,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .into_iter()
             .map(|member| {
                 let qualified = format!("{name}.{member}");
-                (
-                    Arc::from(member.as_str()),
-                    file_root(canonical, owner, &qualified),
-                )
+                let mut root = file_root(canonical, owner, &qualified);
+                if let Some(verter_session_query::declarations::AugmentationScopeKind::Module(
+                    specifier,
+                )) = scope
+                {
+                    root.scope.binder_scope_id =
+                        crate::semantic_query::BinderScopeId::augmentation_module_scope(
+                            owner,
+                            specifier.as_str().into(),
+                        );
+                }
+                (Arc::from(member.as_str()), root)
             })
             .collect();
         let node_scope = NodeScopeId::File {
@@ -644,7 +740,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             canonical_id: root.scope.canonical_id.clone(),
             owner: root.scope.owner,
             whole_hash: indexed.whole_hash,
-            local_scope: root.scope.local_scope,
+            local_scope: root
+                .scope
+                .local_scope
+                .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
         };
         Some(self.graph().intern_node_with_scope(
             SemanticNodeData::new_typeof(

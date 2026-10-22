@@ -14,6 +14,7 @@ use crate::types::{ExactResolution, ExactResolutionResult};
 // `component_meta_trace_*` span tree is replaced by the `VfsAuditSink`
 // registry below.
 thread_local! {
+    #[cfg(any(test, feature = "semantic-observe"))]
     static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     static RESOLUTION_DIRECTORY_OBSERVATIONS: RefCell<Vec<ResolutionDirectoryObservation>> = const { RefCell::new(Vec::new()) };
 }
@@ -56,12 +57,20 @@ struct ResolutionDirectoryObservation {
     value: ResolutionDirectoryValue,
 }
 
-fn set_last_read_file_trace_detail(canonical_id: &str, detail: impl Into<String>) {
+#[cfg(any(test, feature = "semantic-observe"))]
+fn set_last_read_file_trace_detail<M: verter_audit::observe::ObserveExec>(
+    canonical_id: &str,
+    detail: impl Into<String>,
+) {
+    if !M::CAPTURED && !cfg!(test) {
+        return;
+    }
     LAST_READ_FILE_TRACE_DETAIL.with(|last| {
         *last.borrow_mut() = Some((canonical_id.to_string(), detail.into()));
     });
 }
 
+#[cfg(any(test, feature = "semantic-observe"))]
 fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
     LAST_READ_FILE_TRACE_DETAIL.with(|last| {
         let mut last = last.borrow_mut();
@@ -1660,16 +1669,19 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
 
 // split into `WorkspaceRead` (read-only)
 // and `WorkspaceAccess` (mutators) per the trait hierarchy.
-impl crate::traits::WorkspaceRead for FilesystemWorkspace {
-    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
-    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+impl FilesystemWorkspace {
+    fn read_file_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        canonical_id: &str,
+        capture: Option<&crate::audit_sink::VfsReadCapture>,
+    ) -> Option<Arc<str>> {
         // Optional capture: the per-file read clock and the audit-sink
         // fan-out. Without `semantic-observe` the probe does nothing.
-        let probe = crate::audit_sink::VfsReadProbe::start();
+        let probe = crate::audit_sink::VfsReadProbe::<M>::start(capture);
 
         // 1. Overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
-            set_last_read_file_trace_detail(canonical_id, "layer=overlay cache=hit");
+            set_last_read_file_trace_detail::<M>(canonical_id, "layer=overlay cache=hit");
             probe.emit(
                 &self.sinks,
                 canonical_id,
@@ -1681,7 +1693,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         }
         // 2. Snapshot cache
         if let Some(content) = self.engine.snapshot.read().read(canonical_id) {
-            set_last_read_file_trace_detail(canonical_id, "layer=snapshot cache=hit");
+            set_last_read_file_trace_detail::<M>(canonical_id, "layer=snapshot cache=hit");
             probe.emit(
                 &self.sinks,
                 canonical_id,
@@ -1696,7 +1708,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         {
             let indexed_exists = self.ensure_parent_dir_indexed(canonical_id);
             if matches!(indexed_exists, Some(false)) {
-                set_last_read_file_trace_detail(canonical_id, "layer=dir_index cache=negative");
+                set_last_read_file_trace_detail::<M>(
+                    canonical_id,
+                    "layer=dir_index cache=negative",
+                );
                 probe.emit(
                     &self.sinks,
                     canonical_id,
@@ -1711,7 +1726,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     .snapshot
                     .write()
                     .inject(canonical_id.to_string(), content.clone());
-                set_last_read_file_trace_detail(canonical_id, "layer=disk cache=miss");
+                set_last_read_file_trace_detail::<M>(canonical_id, "layer=disk cache=miss");
                 probe.emit(
                     &self.sinks,
                     canonical_id,
@@ -1726,9 +1741,24 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                 .native_fs_read_file_miss_count
                 .fetch_add(1, Ordering::Relaxed);
         }
-        set_last_read_file_trace_detail(canonical_id, "layer=missing cache=miss");
+        set_last_read_file_trace_detail::<M>(canonical_id, "layer=missing cache=miss");
         probe.emit(&self.sinks, canonical_id, VfsAuditLayer::Missing, false, 0);
         None
+    }
+}
+
+impl crate::traits::WorkspaceRead for FilesystemWorkspace {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.read_file_in::<verter_audit::observe::Uncaptured>(canonical_id, None)
+    }
+
+    #[cfg(feature = "semantic-observe")]
+    fn read_file_captured(
+        &self,
+        canonical_id: &str,
+        capture: &crate::audit_sink::VfsReadCapture,
+    ) -> Option<Arc<str>> {
+        self.read_file_in::<verter_audit::observe::Captured>(canonical_id, Some(capture))
     }
 
     fn take_last_read_file_trace_detail(&self, canonical_id: &str) -> Option<String> {
@@ -2671,3 +2701,15 @@ mod tests;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "filesystem_external_corpus_tests.rs"]
 mod external_corpus_tests;
+
+#[cfg(not(any(test, feature = "semantic-observe")))]
+fn set_last_read_file_trace_detail<M: verter_audit::observe::ObserveExec>(
+    _canonical_id: &str,
+    _detail: impl Into<String>,
+) {
+}
+
+#[cfg(not(any(test, feature = "semantic-observe")))]
+fn take_last_read_file_trace_detail(_canonical_id: &str) -> Option<String> {
+    None
+}

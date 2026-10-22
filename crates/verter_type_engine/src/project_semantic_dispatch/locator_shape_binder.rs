@@ -353,6 +353,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
+        let scope = if let AuthoredBodyLocator::AugmentationBody(augmentation) = key.locator() {
+            let augmentation_scope = match &augmentation.scope {
+                verter_type_expr::locators::AuthoredAugmentationScope::Global => {
+                    verter_session_query::declarations::AugmentationScopeKind::Global
+                }
+                verter_type_expr::locators::AuthoredAugmentationScope::Module { specifier } => {
+                    verter_session_query::declarations::AugmentationScopeKind::Module(
+                        specifier.to_string(),
+                    )
+                }
+            };
+            Self::augmentation_body_scope(
+                scope,
+                &indexed.shallow_state.headers,
+                &augmentation_scope,
+                anchor.symbol.as_ref(),
+            )
+        } else {
+            scope
+        };
         let anchor_symbol = match key.locator() {
             AuthoredBodyLocator::DeclBody(slot) => slot.anchor.symbol.clone(),
             AuthoredBodyLocator::AugmentationBody(aug) => aug.anchor.symbol.clone(),
@@ -369,9 +389,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // import shadowing. Absence (no prepared declaration for the
         // anchor) degrades to the payload-aware in-scope resolver.
         let bundle = self.ctx.prepared_decl_bundle(canonical.as_ref());
-        let scope_payload = bundle
-            .as_ref()
-            .map(|bundle| DeclarationScopePayload::from_bundle(bundle, anchor.owner));
+        let scope_payload = bundle.as_ref().map(|bundle| match key.locator() {
+            AuthoredBodyLocator::DeclBody(_) => self.declaration_scope_payload(
+                bundle,
+                canonical.as_ref(),
+                anchor.owner,
+                anchor_symbol.as_ref(),
+            ),
+            _ => DeclarationScopePayload::from_bundle(bundle, anchor.owner),
+        });
         let prepared_anchor: Option<AnchorPreparedDecl> = match key.locator() {
             AuthoredBodyLocator::DeclBody(slot) => match slot.anchor.space {
                 verter_type_expr::locators::LocatorSymbolSpace::Type => bundle

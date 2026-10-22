@@ -769,10 +769,9 @@ pub struct PerRequestCacheCounters {
 /// each component-meta request emits its own delta (no host-global
 /// accumulation, no cross-request leakage).
 ///
-/// Atomic increments are negligible (~ns) compared with the µs–ms
-/// of work each bump observes, so the counters stay on in production
-/// builds — that is the only state in which the bench corpus surfaces
-/// the bypass leverage these counters measure.
+/// Only counters with live producers are retained. Their storage and
+/// snapshot reader compile only with `semantic-observe`; compatibility-only
+/// wire fields are emitted as literal zeros by the audit builder.
 #[derive(Debug, Default)]
 pub struct BypassDiagnosticCounters {
     /// Number of `HostStoreView::from_host` invocations on the
@@ -788,13 +787,6 @@ pub struct BypassDiagnosticCounters {
     /// Final-state invariant: `0` — every production engine is bound
     /// to a request-bound ctx.
     pub bare_engine_constructions: ObservedU64,
-    /// Number of `ResolverContext::resolver_store_view()` calls on
-    /// the current request. Each call rebuilds a full owned
-    /// `HostStoreView` via `HostStoreView::from_host`; warm-hit
-    /// validator paths in `fact_signature_helpers` now consult the
-    /// borrowed `store_view()` directly, so this counter trends to 0
-    /// in production.
-    pub resolver_store_view_calls: ObservedU64,
 }
 
 impl BypassDiagnosticCounters {
@@ -803,32 +795,12 @@ impl BypassDiagnosticCounters {
     /// observe every prior bump.
     #[cfg(feature = "semantic-observe")]
     #[must_use]
-    pub fn snapshot(&self) -> (u64, u64, u64) {
+    pub fn snapshot(&self) -> (u64, u64) {
         (
             self.host_store_view_from_host_builds
                 .load(Ordering::Relaxed),
             self.bare_engine_constructions.load(Ordering::Relaxed),
-            self.resolver_store_view_calls.load(Ordering::Relaxed),
         )
-    }
-}
-
-/// Bump the per-request `resolver_store_view_calls` diagnostic
-/// counter when a request context is installed. The bump is a noop
-/// outside an audited request (synthesised tests, non-audited
-/// callers). Called from every
-/// `impl ResolverContext::resolver_store_view()` so the counter
-/// observes all trait-dispatched owned-view rebuilds — the
-/// warm-hit validator path was the dominant consumer until the
-/// borrowed-view substitution landed.
-#[inline(always)]
-pub fn bump_resolver_store_view_call() {
-    #[cfg(feature = "semantic-observe")]
-    if let Some(ctx) = current_captured_request_context() {
-        ctx.cache_counters
-            .bypass_diagnostics
-            .resolver_store_view_calls
-            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -954,19 +926,10 @@ pub struct RequestContext {
     /// `ColdAbortSwept` — a cold entry reaped during generation
     /// reconciliation.
     pub cold_aborts_swept: ObservedU64,
-    /// Per-context structural-materialisation call counter. No
-    /// production producer bumps it (the projector pipeline publishes
-    /// structural surfaces without a separate materialiser); it stays
-    /// on the audit payload as a zero-valued field.
-    pub materialize_structure_calls: ObservedU64,
     /// Per-request projection-operation fuse used by semantic dispatch.
     /// Stored on the existing request context so scheduler worker TLS
     /// propagation carries the same budget state as audit/cache counters.
     pub projection_budget: Arc<RequestBudget>,
-    /// Per-context structural-materialisation warm-hit counter. No
-    /// production producer bumps it; it stays on the audit payload as a
-    /// zero-valued field.
-    pub materialize_structure_cache_hits: ObservedU64,
     /// Per-context counter — lock acquisitions on the per-scope
     /// `NodeArena` dedup index.
     pub node_arena_lock_acquisitions: ObservedU64,
@@ -1056,6 +1019,12 @@ pub struct RequestContext {
     /// ([`crate::request_route_memo::NormalizedCanonicalMemo`]):
     /// request-scoped, dropped with the context.
     pub normalized_canonicals: crate::request_route_memo::NormalizedCanonicalMemo,
+    /// The results the request's semantic dispatchers completed and may
+    /// serve again, shared by every dispatcher of the request
+    /// ([`crate::project_semantic_dispatch::request_completions`]):
+    /// request-scoped, dropped with the context, which releases them.
+    pub(crate) semantic_completions:
+        crate::project_semantic_dispatch::request_completions::RequestCompletions,
 
     // ─────── Type-resolution counters ───────
     //
@@ -1732,9 +1701,7 @@ impl RequestContext {
             sentinels: Default::default(),
             inflight_aborted_retries: Default::default(),
             cold_aborts_swept: Default::default(),
-            materialize_structure_calls: Default::default(),
             projection_budget: RequestBudget::new(projection_op_budget),
-            materialize_structure_cache_hits: Default::default(),
             node_arena_lock_acquisitions: Default::default(),
             family_map_lock_acquisitions: Default::default(),
             lock_wait_ns: Default::default(),
@@ -1751,6 +1718,7 @@ impl RequestContext {
             process_rss_peak_bytes: Arc::new(AtomicU64::new(0)),
             import_route_observations: Default::default(),
             normalized_canonicals: Default::default(),
+            semantic_completions: Default::default(),
             type_resolution_hops: Default::default(),
             type_resolution_navigations: Default::default(),
             type_resolution_expansions: Default::default(),
@@ -3068,6 +3036,16 @@ mod tests {
         RequestContext::new(id, Arc::from("/x.vue"), capture, None)
     }
 
+    #[cfg(feature = "semantic-observe")]
+    #[test]
+    fn bypass_diagnostics_retains_only_produced_counters() {
+        assert_eq!(
+            std::mem::size_of::<BypassDiagnosticCounters>(),
+            2 * std::mem::size_of::<ObservedU64>(),
+            "only host-view builds and bare-engine constructions have producers"
+        );
+    }
+
     // Reads optional capture state.
     #[cfg(feature = "semantic-observe")]
     #[test]
@@ -3077,44 +3055,24 @@ mod tests {
         // under an installed RequestContext must increment the counter.
         // Without an installed context the bump is a noop.
         let ctx = make_ctx(101, false);
-        let (_, bare_before, _) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        let (_, bare_before) = ctx.cache_counters.bypass_diagnostics.snapshot();
         assert_eq!(bare_before, 0, "fresh context starts at 0");
         {
             let _g = RequestContextGuard::install(Arc::clone(&ctx));
             bump_bare_engine_construction();
             bump_bare_engine_construction();
         }
-        let (_, bare_after, _) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        let (_, bare_after) = ctx.cache_counters.bypass_diagnostics.snapshot();
         assert_eq!(
             bare_after, 2,
             "counter must increment twice under an installed context"
         );
         // Outside the guard the bump is a noop.
         bump_bare_engine_construction();
-        let (_, bare_outside, _) = ctx.cache_counters.bypass_diagnostics.snapshot();
+        let (_, bare_outside) = ctx.cache_counters.bypass_diagnostics.snapshot();
         assert_eq!(
             bare_outside, 2,
             "bump outside an installed context must be a noop"
-        );
-    }
-
-    // Reads optional capture state.
-    #[cfg(feature = "semantic-observe")]
-    #[test]
-    fn bump_resolver_store_view_call_increments_on_installed_context() {
-        let ctx = make_ctx(102, false);
-        let (_, _, calls_before) = ctx.cache_counters.bypass_diagnostics.snapshot();
-        assert_eq!(calls_before, 0, "fresh context starts at 0");
-        {
-            let _g = RequestContextGuard::install(Arc::clone(&ctx));
-            bump_resolver_store_view_call();
-            bump_resolver_store_view_call();
-            bump_resolver_store_view_call();
-        }
-        let (_, _, calls_after) = ctx.cache_counters.bypass_diagnostics.snapshot();
-        assert_eq!(
-            calls_after, 3,
-            "counter must increment three times under an installed context"
         );
     }
 

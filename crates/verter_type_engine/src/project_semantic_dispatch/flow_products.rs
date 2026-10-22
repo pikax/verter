@@ -1421,12 +1421,188 @@ pub struct FlowNarrowingFact {
     /// The authored member path; empty means the binding itself.
     pub path: Arc<[Arc<str>]>,
     /// The type the guard narrows it to.
-    pub narrowed_to: SemanticNodeId,
+    pub narrowed_to: FlowNarrowed,
     /// The compared literal, when the narrow took it from the compared
     /// VALUE rather than from the reference's own constituents (`x ===
     /// "s"` over `x: string` reads `"s"`): the checker's fresh literal
     /// type, which widens wherever a bare literal would.
     pub fresh_literal: Option<SemanticNodeId>,
+}
+
+/// The type a guard fact narrows its reference to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowNarrowed {
+    /// A built type.
+    Node(SemanticNodeId),
+    /// A union some of whose arms the guards standing on the reference
+    /// excluded, held as the union's arms and the excluded set rather than
+    /// built ([`FlowArmRemainder`]).
+    Remainder(FlowArmRemainder),
+}
+
+impl FlowNarrowed {
+    /// The built type, when the narrowing holds one: a remainder answers
+    /// only once something has built it.
+    #[must_use]
+    pub fn built(&self) -> Option<SemanticNodeId> {
+        match self {
+            Self::Node(node) => Some(*node),
+            Self::Remainder(remainder) => remainder.built(),
+        }
+    }
+
+    /// The type, building a remainder's union with `build` on its first
+    /// read. Every later read of the same remainder, from any clone of it,
+    /// answers the node that read built — once a build proved its
+    /// construction canonical; an incomplete build is answered, never kept.
+    pub fn node_or_build(
+        &self,
+        build: impl FnOnce(&[SemanticNodeId]) -> FlowAlgebraComposite,
+    ) -> FlowAlgebraComposite {
+        match self {
+            Self::Node(node) => FlowAlgebraComposite {
+                node: *node,
+                incomplete: false,
+            },
+            Self::Remainder(remainder) => remainder.node_or_build(build),
+        }
+    }
+
+    /// A key that orders facts deterministically. Two narrowings with one
+    /// key need not be equal: a remainder keys by the union it came from.
+    pub(super) fn order_key(&self) -> u64 {
+        match self {
+            Self::Node(node) => node.0,
+            Self::Remainder(remainder) => remainder.base.0,
+        }
+    }
+}
+
+/// A union narrowed by excluding some of its arms, kept unbuilt.
+///
+/// A chain of guards over one union subject (`if (x instanceof A) …; if
+/// (x instanceof B) …`) excludes the arms each guard takes on its false
+/// edge. Building every intermediate union would cost the chain the sum of
+/// the arms each guard passes over — quadratic in the chain — even when no
+/// read ever needs those unions: the next guard of the chain reads only
+/// which arms remain. The remainder holds the union's arms once, shared by
+/// every remainder over it, and a persistent excluded set, so excluding an
+/// arm costs a logarithmic step and the union is built only for a read
+/// that needs the type itself, once.
+#[derive(Debug, Clone)]
+pub struct FlowArmRemainder {
+    /// The union the arms are enumerated from; every remainder over the
+    /// same arms names the same base.
+    base: SemanticNodeId,
+    /// The base's arms, in enumeration order. A position is an index here.
+    arms: Arc<[SemanticNodeId]>,
+    /// The positions the standing guards excluded.
+    excluded: imbl::OrdSet<u32>,
+    /// The remaining arms' union, once a read has built it.
+    node: Arc<std::sync::OnceLock<SemanticNodeId>>,
+}
+
+impl PartialEq for FlowArmRemainder {
+    fn eq(&self, other: &Self) -> bool {
+        self.base == other.base
+            && (self.excluded.ptr_eq(&other.excluded) || self.excluded == other.excluded)
+    }
+}
+
+impl Eq for FlowArmRemainder {}
+
+impl FlowArmRemainder {
+    /// Every arm of `base`, nothing excluded.
+    #[must_use]
+    pub fn whole(base: SemanticNodeId, arms: Arc<[SemanticNodeId]>) -> Self {
+        Self {
+            base,
+            arms,
+            excluded: imbl::OrdSet::new(),
+            node: Arc::default(),
+        }
+    }
+
+    /// The union the arms are enumerated from.
+    #[must_use]
+    pub fn base(&self) -> SemanticNodeId {
+        self.base
+    }
+
+    /// The base's arms, remaining or not, by position.
+    #[must_use]
+    pub fn arms(&self) -> &Arc<[SemanticNodeId]> {
+        &self.arms
+    }
+
+    /// Whether the arm at `position` remains.
+    #[must_use]
+    pub fn holds(&self, position: u32) -> bool {
+        (position as usize) < self.arms.len() && !self.excluded.contains(&position)
+    }
+
+    /// How many arms remain.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.arms.len() - self.excluded.len()
+    }
+
+    /// The remaining arms, in position order.
+    #[must_use]
+    pub fn remaining_arms(&self) -> Vec<SemanticNodeId> {
+        self.arms
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !self.excluded.contains(&(*position as u32)))
+            .map(|(_, arm)| *arm)
+            .collect()
+    }
+
+    /// This remainder with the arms at `positions` excluded too.
+    #[must_use]
+    pub fn excluding(&self, positions: &[u32]) -> Self {
+        let mut excluded = self.excluded.clone();
+        for position in positions {
+            excluded.insert(*position);
+        }
+        Self {
+            base: self.base,
+            arms: Arc::clone(&self.arms),
+            excluded,
+            node: Arc::default(),
+        }
+    }
+
+    /// The remaining arms' union, when a read has built it.
+    #[must_use]
+    pub fn built(&self) -> Option<SemanticNodeId> {
+        self.node.get().copied()
+    }
+
+    /// The remaining arms' union, built with `build` on the first read
+    /// whose construction is proven canonical. An incomplete construction
+    /// is returned to its reader and not kept: a later read rebuilds and
+    /// sees the incompleteness again, so a join that refuses it refuses it
+    /// every time.
+    pub fn node_or_build(
+        &self,
+        build: impl FnOnce(&[SemanticNodeId]) -> FlowAlgebraComposite,
+    ) -> FlowAlgebraComposite {
+        if let Some(node) = self.node.get() {
+            return FlowAlgebraComposite {
+                node: *node,
+                incomplete: false,
+            };
+        }
+        let built = build(&self.remaining_arms());
+        if built.incomplete {
+            return built;
+        }
+        FlowAlgebraComposite {
+            node: *self.node.get_or_init(|| built.node),
+            incomplete: false,
+        }
+    }
 }
 
 /// Identity-only ordering: display names and binding-kind metadata cannot
@@ -1436,7 +1612,7 @@ fn narrowing_order(fact: &FlowNarrowingFact) -> (&FunctionProgramKey, u32, &[Arc
         &fact.binding.defining_function,
         fact.binding.binding_slot,
         fact.path.as_ref(),
-        fact.narrowed_to.0,
+        fact.narrowed_to.order_key(),
     )
 }
 
@@ -1864,12 +2040,22 @@ pub fn join_product(
                     });
                     continue;
                 }
-                let united = algebra.union(&[fact.narrowed_to, other.narrowed_to]);
+                let mut incomplete = false;
+                let mut node = |narrowed: &FlowNarrowed| {
+                    let built = narrowed.node_or_build(|arms| algebra.union(arms));
+                    incomplete |= built.incomplete;
+                    built.node
+                };
+                let sides = [node(&fact.narrowed_to), node(&other.narrowed_to)];
+                if incomplete {
+                    return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
+                }
+                let united = algebra.union(&sides);
                 if united.incomplete {
                     return FlowTransferOutcome::Gap(FlowGap::UnmodeledExpression);
                 }
                 common.push(FlowNarrowingFact {
-                    narrowed_to: united.node,
+                    narrowed_to: FlowNarrowed::Node(united.node),
                     fresh_literal: None,
                     ..fact.clone()
                 });

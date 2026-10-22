@@ -50,6 +50,19 @@ export function allScenarios() {
 
   out.push(
     scenario(
+      "edge-array-literal-normalization",
+      "literal-union",
+      "fresh object literal siblings gain optional undefined properties for absent keys",
+      "type Exclude<T, U> = T extends U ? never : T;\n" +
+        "type Extract<T, U> = T extends U ? T : never;\n" +
+        "type Uppercase<S extends string> = intrinsic;\n" +
+        "type Lowercase<S extends string> = intrinsic;\n" +
+        "type Capitalize<S extends string> = intrinsic;\n" +
+        "type Uncapitalize<S extends string> = intrinsic;\n" +
+        'const arr = [{ a: 1 }, { b: "x" }];\n',
+      "typeof arr",
+    ),
+    scenario(
       "edge-equal-identity-idiom",
       "conditional",
       "generic signatures with identical deferred conditional returns",
@@ -74,6 +87,20 @@ export function allScenarios() {
       "fixed cost: a trivial module and a trivial probe (reported alone, never subtracted)",
       "",
       "1",
+    ),
+  );
+
+  out.push(
+    scenario(
+      "core-variance-annotations",
+      "variance",
+      "authored invariance takes precedence over the variance of the members",
+      "type __Flat<T> = [T] extends [infer U] ? U : never;\n" +
+        "type __D<T> = T extends unknown ? T : never;\n" +
+        "type __Obj<T> = { [K in keyof T]: T[K] };\n" +
+        "interface Cell<in out T> { get(): T }\n" +
+        "interface Cons<in T> { set(x: T): void }\n",
+      "Cell<'a'> extends Cell<string> ? 1 : 0",
     ),
   );
 
@@ -728,6 +755,22 @@ export function allScenarios() {
     );
   }
 
+  out.push(
+    scenario(
+      "scale-ambient-export-equals",
+      "ambient-module",
+      "read a named type exported by an ambient module's assigned namespace",
+      'import type { Opt } from "pkg";\n',
+      'Opt["k"]',
+      {
+        files: {
+          "pkg.d.ts":
+            'declare module "pkg" { namespace NS { interface Opt { k: 99 } } export = NS; }\n',
+        },
+      },
+    ),
+  );
+
   // Declaration merging: one interface merged from many contributing files.
   for (const n of [100, 500, 2000]) {
     out.push(
@@ -849,6 +892,7 @@ export const UNCOVERED = [
  * Tiers nest: standard includes quick, stress includes both.
  */
 export const SCENARIO_TIERS = {
+  "edge-array-literal-normalization": "quick",
   "scale-path-depth-22": "standard",
   "scale-path-depth-23": "quick",
   "scale-path-depth-200": "standard",
@@ -877,6 +921,7 @@ export const SCENARIO_TIERS = {
   "return-chain-20": "quick",
   "return-chain-100": "standard",
   "return-chain-300": "standard",
+  "scale-ambient-export-equals": "quick",
   "augment-global-100": "quick",
   "augment-global-500": "standard",
   "augment-global-2000": "standard",
@@ -887,6 +932,7 @@ export const SCENARIO_TIERS = {
   "contextual-this-100": "standard",
   "contextual-this-400": "standard",
   "baseline-empty": "quick",
+  "core-variance-annotations": "quick",
   "switch-discriminated-128": "quick",
   "switch-discriminated-512": "standard",
   "switch-discriminated-1000": "standard",

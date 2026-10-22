@@ -229,6 +229,10 @@ pub(crate) enum BinderSlot {
 pub struct LocatorBinderFrame {
     names: FxHashMap<Arc<str>, BinderSlot>,
     infer_declarations: FxHashMap<Arc<str>, SemanticNodeId>,
+    /// `infer` declarations of an enclosing conditional this position is
+    /// outside the scope of: a reference to one that nothing else binds is
+    /// the checker's TS2304.
+    out_of_scope_infers: Vec<Arc<str>>,
 }
 
 impl Clone for LocatorBinderFrame {
@@ -238,6 +242,7 @@ impl Clone for LocatorBinderFrame {
         Self {
             names: self.names.clone(),
             infer_declarations: self.infer_declarations.clone(),
+            out_of_scope_infers: self.out_of_scope_infers.clone(),
         }
     }
 }
@@ -276,6 +281,27 @@ impl LocatorBinderFrame {
 
     fn lookup_infer_declaration(&self, name: &str) -> Option<SemanticNodeId> {
         self.infer_declarations.get(name).copied()
+    }
+
+    /// A frame over a position outside the scope of the `infer`
+    /// declarations `names`.
+    fn out_of_scope_of(names: Vec<Arc<str>>) -> Self {
+        Self {
+            out_of_scope_infers: names,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this frame binds `name` (`Some(false)`) or puts it out of
+    /// an `infer` declaration's scope (`Some(true)`).
+    fn reads_out_of_scope_infer(&self, name: &str) -> Option<bool> {
+        if self.names.contains_key(name) {
+            return Some(false);
+        }
+        self.out_of_scope_infers
+            .iter()
+            .any(|out| out.as_ref() == name)
+            .then_some(true)
     }
 }
 
@@ -515,6 +541,15 @@ impl<'a> ShapeLowerCtx<'a> {
             .innermost_first()
             .find_map(|frame| frame.lookup_infer_declaration(name))
     }
+
+    /// Whether `name`, bound by no frame, names an `infer` declaration of an
+    /// enclosing conditional this position is outside the scope of.
+    fn reads_out_of_scope_infer(&self, name: &str) -> bool {
+        self.binders
+            .innermost_first()
+            .find_map(|frame| frame.reads_out_of_scope_infer(name))
+            == Some(true)
+    }
 }
 
 #[path = "locator_shape_binder.rs"]
@@ -711,6 +746,8 @@ enum LocatorConditionalStage {
     True {
         check_id: SemanticNodeId,
         extends_id: SemanticNodeId,
+        /// The pattern's `infer` names, out of scope in the false branch.
+        declared: Vec<Arc<str>>,
     },
     False {
         check_id: SemanticNodeId,
@@ -1051,6 +1088,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> LocatorStep<'e, 'r> {
         let ctx = entry.with_binders(binders.frames());
         let scope = ctx.scope;
+        if object.empty_literal && object.properties.is_empty() {
+            return LocatorStep::Value(self.graph().intern_node_with_scope(
+                SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
+                    effects: crate::semantic_query::PayloadArray::from(
+                        Vec::new().into_boxed_slice(),
+                    ),
+                }),
+                scope.clone(),
+            ));
+        }
         while let Some(member) = object.properties.get(next) {
             let member_ordinal = u32::try_from(next).unwrap_or(u32::MAX);
             match member {
@@ -1089,9 +1137,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         method_kind: Some(method.method_kind),
                         has_implementation_body: method.has_implementation_body,
                         visibility: method.visibility,
-                        // Declaration materialization is never a
-                        // literal origin (see the property's resume).
-                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                        excess_origin: method.excess_origin,
                         spans: method.spans,
                         declaration_origin: scope.canonical_file(),
                         declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
@@ -1388,13 +1434,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             method_kind: None,
                             has_implementation_body: false,
                             visibility: prop.visibility,
-                            // The locator path materializes DECLARATION
-                            // bodies: a member reached through a
-                            // variable/declaration deref is `NonLiteral`
-                            // regardless of the origin the producer recorded
-                            // on the authored literal — freshness never
-                            // survives declaration materialization.
-                            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                            // Inferred literal unions normalize before the
+                            // completed declaration type becomes regular.
+                            excess_origin: prop.excess_origin,
                             spans: prop.spans,
                             declaration_origin: scope.canonical_file(),
                             // ROLE-FREE shape identity: the locator shape
@@ -1476,15 +1518,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     );
                 let mut declaration_frame = LocatorBinderFrame::default();
                 let mut declarations = Vec::with_capacity(infer_sites.len());
+                // A declared constraint is read where the conditional is
+                // written: no `infer` of the pattern is in scope there
+                // (`[infer A, infer B extends A]` reports TS2304 for `A`).
+                let constraint_binders = binders.extended(LocatorBinderFrame::out_of_scope_of(
+                    infer_sites
+                        .iter()
+                        .map(|site| Arc::clone(&site.name))
+                        .collect(),
+                ));
                 for site in infer_sites {
                     let binder = entry.infer_binders.binder_at(&site.path);
-                    // A declared constraint is read where the conditional is
-                    // written: no `infer` of the pattern is in scope there
-                    // (`[infer A, infer B extends A]` reports TS2304 for `A`).
                     let constraint = site.constraint.map(|constraint| {
                         self.lower_locator_shape_node(
                             constraint,
-                            &entry.with_binders(binders.frames()),
+                            &entry.with_binders(constraint_binders.frames()),
                         )
                     });
                     let declaration = graph.intern_node_with_scope(
@@ -1514,6 +1562,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 declarations,
             } => {
                 let extends_id = value;
+                let declared: Vec<Arc<str>> = declarations
+                    .iter()
+                    .map(|(name, _)| Arc::clone(name))
+                    .collect();
                 let true_binders = if declarations.is_empty() {
                     binders.clone()
                 } else {
@@ -1536,6 +1588,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     stage: LocatorConditionalStage::True {
                         check_id,
                         extends_id,
+                        declared,
                     },
                 });
                 LocatorStep::Descend(true_type, true_binders)
@@ -1543,17 +1596,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             LocatorConditionalStage::True {
                 check_id,
                 extends_id,
+                declared,
             } => {
+                let false_binders = if declared.is_empty() {
+                    binders.clone()
+                } else {
+                    binders.extended(LocatorBinderFrame::out_of_scope_of(declared))
+                };
                 frames.push(LocatorFrame::Conditional {
                     conditional,
-                    binders: binders.clone(),
+                    binders,
                     stage: LocatorConditionalStage::False {
                         check_id,
                         extends_id,
                         true_id: value,
                     },
                 });
-                LocatorStep::Descend(false_type, binders)
+                LocatorStep::Descend(false_type, false_binders)
             }
             LocatorConditionalStage::False {
                 check_id,
@@ -1964,9 +2023,48 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
+                // A path written inside a `declare module` namespace block
+                // heads at the innermost enclosing ambient namespace member
+                // it names; otherwise a name an enclosing namespace declares
+                // heads the path at that namespace's member.
+                let (root_scope, root_name, rest) = match self.ambient_namespace_target(
+                    scope,
+                    root,
+                    super::build::GlobalSpace::Value,
+                ) {
+                    Some((specifier, qualified)) => {
+                        let mut root_scope = root_scope;
+                        root_scope.binder_scope_id =
+                            crate::semantic_query::BinderScopeId::augmentation_module_scope(
+                                root_scope.owner,
+                                verter_type_expr::OwnedStr::from(specifier.as_str()),
+                            );
+                        (
+                            root_scope,
+                            verter_type_expr::OwnedStr::from(qualified),
+                            rest,
+                        )
+                    }
+                    None => match self.namespace_scoped_value_root(
+                        ctx.name_resolution,
+                        ctx.scope_payload,
+                        root_scope.canonical_id.as_ref(),
+                        root_scope.owner,
+                        &value_ref.path,
+                    ) {
+                        Some((qualified, consumed)) => {
+                            (root_scope, qualified, &value_ref.path[consumed..])
+                        }
+                        None => (
+                            root_scope,
+                            verter_type_expr::OwnedStr::from(root.as_str()),
+                            rest,
+                        ),
+                    },
+                };
                 let value_root = ValueRootKey {
                     scope: root_scope,
-                    name: verter_type_expr::OwnedStr::from(root.as_str()),
+                    name: root_name,
                 };
                 let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
                 let type_args = self.lower_locator_shape_args(&value_ref.type_args, ctx);
@@ -2031,6 +2129,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             return;
                         }
                         let run_obj = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                            empty_literal: false,
                             properties: run.iter().map(|member| (*member).clone()).collect(),
                         }));
                         if let TypeExpr::Object(alias_object) = &run_obj {
@@ -2077,6 +2176,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return graph.intern_node_with_scope(
                         SemanticNodeData::ObjectSpreadProgram(
                             crate::semantic_query::ObjectSpreadProgram {
+                                is_literal: true,
                                 effects: crate::semantic_query::PayloadArray::from(effects),
                             },
                         ),
@@ -2563,6 +2663,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None => {}
         }
 
+        // A module namespace's sibling has an augmentation-scoped identity,
+        // not a file slot. Keep its scope on the carrier for the shared fold.
+        if self.ambient_namespace_type_target(scope, name).is_some() {
+            return LocatorRefPlan::Carrier(
+                crate::project_semantic_dispatch::carrier::RefHeadResolution::Unresolved,
+            );
+        }
+
         // A script-setup generic parameter is NOT a declaration: its bare
         // name stays a `BareRef` carrier so the view projection resolves it
         // to the rich `TypeParam` shell from the scope payload's type
@@ -2591,69 +2699,84 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // shadowing wins over the global lib heads below by resolution
         // order. This resolves WHO the name is (a slot), never WHAT it
         // means (no `ResolveDecl` / `Instantiate` execution).
-        let resolved: Option<(ResolvedRootIdentity, HashValue)> = ctx
-            .name_resolution
-            .and_then(|map| map.get(name.as_ref()))
-            .and_then(|direct| {
-                // A map entry whose canonical does not name a live file is
-                // not a usable identity — e.g. an empty canonical, or an
-                // ambient string-literal module SPECIFIER the bundle
-                // canonicalization stored verbatim at prep time. Fall
-                // through to the full in-scope resolver, which resolves the
-                // specifier through the live dependency/ambient-module
-                // authority.
-                if direct.canonical_id.is_empty() {
-                    return None;
-                }
-                // Facts-returning form + tracer record: the route-chain
-                // facts (every barrel/re-export participant's version) enter
-                // the active fact tracer and land in the enclosing
-                // `LowerLocator` entry's `ReadSetSignature`, so a barrel
-                // retarget with the owner unchanged MISSES the warm shape.
-                let final_identity =
-                    if direct.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
-                        let (routed, route_facts) = self.ctx.resolve_imported_type_root_with_facts(
-                            &direct.canonical_id,
-                            &direct.symbol_name,
-                        );
-                        self.ctx.observe_borrowed_signature(&route_facts);
-                        routed.unwrap_or_else(|| direct.clone())
-                    } else {
-                        direct.clone()
-                    };
-                // ONE leaf shallow-state retrieval: this read is BOTH the
-                // liveness gate (the permitted first canonical shallow
-                // materialization — at most once per content generation)
-                // AND the versioned-identity hash source. It builds the
-                // versioned `DeclIdentity` + correct invalidation facts;
-                // it never lowers the target's declaration bodies.
-                let state = self.ctx.shallow_file_state(&final_identity.canonical_id)?;
-                Some((final_identity, state.whole_hash))
-            })
-            .or_else(|| match scope {
-                NodeScopeId::File { canonical_id, .. } => {
-                    let ri = resolve_bare_name_in_scope(
-                        self.ctx,
-                        self,
-                        canonical_id.as_ref(),
-                        scope
-                            .top_level_owner()
-                            .expect("file scope carries an authored owner"),
-                        ctx.scope_payload,
-                        name.as_ref(),
-                    )?;
-                    // Same single retrieval on the bare-name path: one
-                    // state read supplies the versioned-identity hash (an
-                    // unknown file keeps the default hash — the identity
-                    // is still deterministic within the generation).
-                    let whole_hash = self
-                        .ctx
-                        .shallow_file_state(ri.canonical_id.as_ref())
-                        .map_or(HashValue::default(), |s| s.whole_hash);
-                    Some((ri, whole_hash))
-                }
-                NodeScopeId::Global => None,
-            });
+        let enclosing_member = self.enclosing_namespace_binding(
+            scope,
+            ctx.scope_payload,
+            name.as_ref(),
+            ctx.name_resolution.and_then(|map| map.get(name.as_ref())),
+        );
+        let resolved: Option<(ResolvedRootIdentity, HashValue)> =
+            if let Some(member) = enclosing_member {
+                let whole_hash = self
+                    .ctx
+                    .shallow_file_state(member.canonical_id.as_ref())
+                    .map_or(HashValue::default(), |state| state.whole_hash);
+                Some((member, whole_hash))
+            } else {
+                ctx.name_resolution
+                    .and_then(|map| map.get(name.as_ref()))
+                    .and_then(|direct| {
+                        // A map entry whose canonical does not name a live file is
+                        // not a usable identity — e.g. an empty canonical, or an
+                        // ambient string-literal module SPECIFIER the bundle
+                        // canonicalization stored verbatim at prep time. Fall
+                        // through to the full in-scope resolver, which resolves the
+                        // specifier through the live dependency/ambient-module
+                        // authority.
+                        if direct.canonical_id.is_empty() {
+                            return None;
+                        }
+                        // Facts-returning form + tracer record: the route-chain
+                        // facts (every barrel/re-export participant's version) enter
+                        // the active fact tracer and land in the enclosing
+                        // `LowerLocator` entry's `ReadSetSignature`, so a barrel
+                        // retarget with the owner unchanged MISSES the warm shape.
+                        let final_identity =
+                            if direct.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
+                                let (routed, route_facts) =
+                                    self.ctx.resolve_imported_type_root_with_facts(
+                                        &direct.canonical_id,
+                                        &direct.symbol_name,
+                                    );
+                                self.ctx.observe_borrowed_signature(&route_facts);
+                                routed.unwrap_or_else(|| direct.clone())
+                            } else {
+                                direct.clone()
+                            };
+                        // ONE leaf shallow-state retrieval: this read is BOTH the
+                        // liveness gate (the permitted first canonical shallow
+                        // materialization — at most once per content generation)
+                        // AND the versioned-identity hash source. It builds the
+                        // versioned `DeclIdentity` + correct invalidation facts;
+                        // it never lowers the target's declaration bodies.
+                        let state = self.ctx.shallow_file_state(&final_identity.canonical_id)?;
+                        Some((final_identity, state.whole_hash))
+                    })
+                    .or_else(|| match scope {
+                        NodeScopeId::File { canonical_id, .. } => {
+                            let ri = resolve_bare_name_in_scope(
+                                self.ctx,
+                                self,
+                                canonical_id.as_ref(),
+                                scope
+                                    .top_level_owner()
+                                    .expect("file scope carries an authored owner"),
+                                ctx.scope_payload,
+                                name.as_ref(),
+                            )?;
+                            // Same single retrieval on the bare-name path: one
+                            // state read supplies the versioned-identity hash (an
+                            // unknown file keeps the default hash — the identity
+                            // is still deterministic within the generation).
+                            let whole_hash = self
+                                .ctx
+                                .shallow_file_state(ri.canonical_id.as_ref())
+                                .map_or(HashValue::default(), |s| s.whole_hash);
+                            Some((ri, whole_hash))
+                        }
+                        NodeScopeId::Global => None,
+                    })
+            };
         use crate::project_semantic_dispatch::carrier::RefHeadResolution;
         if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
@@ -2680,6 +2803,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }));
         }
 
+        // An `infer` declaration read outside its scope, applied or bare,
+        // is the checker's TS2304, the error type.
+        if ctx.reads_out_of_scope_infer(name) {
+            return LocatorRefPlan::Ready(crate::semantic_query::checker_policy::checker_recovery(
+                self.graph(),
+                crate::semantic_query::checker_policy::unresolved_type_name(),
+            ));
+        }
         // Unresolved: keep the deferred BareRef carrier — demand-time
         // carrier-subject normalization owns its resolution.
         LocatorRefPlan::Carrier(RefHeadResolution::Unresolved)

@@ -85,7 +85,10 @@ enum SplitResult {
 /// ct.overwrite(6, 11, "Rust");
 /// assert_eq!(ct.build_string(), "Hello Rust");
 /// ```
-pub struct CodeTransform<'a> {
+pub struct CodeTransform<
+    'a,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
     /// The original source text (never modified)
     pub(super) original: &'a str,
     /// List of chunks representing the output content.
@@ -154,34 +157,39 @@ pub struct CodeTransform<'a> {
     pub(super) anchored_present: bool,
     /// Optional audit tally of this transform's public operations, published
     /// once when the transform is dropped (see [`AuditOpTally`]).
-    audit_ops: AuditOpTally,
+    audit_ops: AuditOpTally<M>,
 }
 
 /// Optional per-transform count of `CodeTransform` operations.
 ///
-/// An operation bumps a plain counter — no observer slot read, no capture
-/// test and no atomic — and the transform publishes the count to the
-/// running request's observer once, when it is dropped. The observer slot
-/// is planted only for a request whose root entry selected captured
-/// execution, so an uncaptured compile publishes nothing. Without
-/// `semantic-observe` the tally is zero-size and has no drop glue.
+/// Captured operations bump a plain counter and publish once on drop.
+/// Uncaptured operations compile out the counter update and the drop-time
+/// observer lookup. The branch is on the mode's constant, so no operation
+/// tests a runtime capture flag. Without `semantic-observe` the tally is
+/// zero-size and has no drop glue.
 #[derive(Debug, Default)]
-struct AuditOpTally {
+struct AuditOpTally<M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured> {
+    mode: std::marker::PhantomData<M>,
     #[cfg(feature = "semantic-observe")]
     ops: std::cell::Cell<u32>,
 }
 
-impl AuditOpTally {
+impl<M: verter_audit::observe::ObserveExec> AuditOpTally<M> {
     #[inline(always)]
     fn bump(&self) {
         #[cfg(feature = "semantic-observe")]
-        self.ops.set(self.ops.get().saturating_add(1));
+        if M::CAPTURED {
+            self.ops.set(self.ops.get().saturating_add(1));
+        }
     }
 }
 
 #[cfg(feature = "semantic-observe")]
-impl Drop for AuditOpTally {
+impl<M: verter_audit::observe::ObserveExec> Drop for AuditOpTally<M> {
     fn drop(&mut self) {
+        if !M::CAPTURED {
+            return;
+        }
         let ops = self.ops.get();
         if ops == 0 {
             return;
@@ -191,6 +199,21 @@ impl Drop for AuditOpTally {
                 observer.record_event(verter_audit::AuditEvent::CompileCodeTransformOp);
             }
         });
+    }
+}
+
+#[cfg(all(test, feature = "semantic-observe"))]
+mod audit_tally_tests {
+    use super::*;
+
+    #[test]
+    fn uncaptured_transform_operations_leave_optional_tally_untouched() {
+        let allocator = Allocator::default();
+        let mut transform = CodeTransform::new("let n = 1;", &allocator);
+        transform.overwrite(8, 9, "2");
+        transform.prepend("// value\n");
+        assert_eq!(transform.build_string(), "// value\nlet n = 2;");
+        assert_eq!(transform.audit_ops.ops.get(), 0);
     }
 }
 
@@ -271,19 +294,37 @@ fn push_preserved_source_ranges(
 
 #[allow(dead_code)] // Many API methods only exercised by tests currently
 impl<'a> CodeTransform<'a> {
-    /// Create a new CodeTransform from source text and an allocator
+    /// Create an uncaptured transform. Compiler execution selects its mode
+    /// explicitly with [`Self::new_in`].
     pub fn new(source: &'a str, allocator: &'a Allocator) -> Self {
+        Self::new_in(source, allocator)
+    }
+
+    /// An uncaptured transform with an explicit chunk-buffer capacity.
+    pub(crate) fn with_chunk_capacity(
+        source: &'a str,
+        allocator: &'a Allocator,
+        estimated_chunks: usize,
+    ) -> Self {
+        Self::with_chunk_capacity_in(source, allocator, estimated_chunks)
+    }
+}
+
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
+    /// Create a transform compiled for `M`. The compiler passes its selected
+    /// execution mode through code generation and source-map construction.
+    pub fn new_in(source: &'a str, allocator: &'a Allocator) -> Self {
         let len = source.len();
         // Empirically, kitchen-sink.vue (27370 bytes) produces ~2098 final chunks.
         // Using /13 avoids a Vec reallocation for typical large files.
         let estimated_chunks = if len > 0 { (len / 13).max(64) } else { 0 };
-        Self::with_chunk_capacity(source, allocator, estimated_chunks)
+        Self::with_chunk_capacity_in(source, allocator, estimated_chunks)
     }
 
-    /// Like [`new`](Self::new) but with an explicit chunk-buffer size. Style
+    /// Like [`new_in`](Self::new_in) but with an explicit chunk-buffer size. Style
     /// rewrites know their edit count and would otherwise pay the template-sized
     /// 64-slot floor on a one-insert rule.
-    pub(crate) fn with_chunk_capacity(
+    fn with_chunk_capacity_in(
         source: &'a str,
         allocator: &'a Allocator,
         estimated_chunks: usize,
@@ -1552,7 +1593,7 @@ impl<'a> CodeTransform<'a> {
     // `batch_overwrite`) live in the sibling `batch_ops` module.
 }
 
-impl<'a> CodeTransform<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// Build the final output string with pre-allocated capacity.
     #[must_use]
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
@@ -1810,7 +1851,7 @@ impl<'a> CodeTransform<'a> {
     }
 }
 
-impl<'a> CodeTransform<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// Write the full output to any `fmt::Write` sink.
     fn write_output_to(&self, w: &mut impl std::fmt::Write) -> std::fmt::Result {
         w.write_str(self.intro)?;
@@ -1833,7 +1874,7 @@ impl<'a> CodeTransform<'a> {
     }
 }
 
-impl<'a> std::fmt::Display for CodeTransform<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> std::fmt::Display for CodeTransform<'a, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.write_output_to(f)
     }

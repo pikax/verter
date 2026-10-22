@@ -89,6 +89,11 @@ it("type is correctly inferred", () => {
 
 ## Rust Test Patterns
 
+The differential harness gives each semantic row worker an 8 MiB stack, matching
+the host CPU workers. A platform-default 2 MiB thread can hit the native stack
+guard before the checker's logical relation-depth refusal in debug builds. Keep
+row CPU and no-progress deadlines independent of this stack reservation.
+
 The differential harness's `Matrix::installed_packages()` resolves installed packages but does not implicitly register SDK globals. Use `.installed_typescript_libs(&["es2020"])` when a fixture needs the pinned SDK's real declarations. The names set the project's explicit TypeScript `lib` option. Registration follows that selection and its reference closure, read from shared cached parser inventories; it does not upsert or register the whole SDK. Keep the native oracle's library selection identical. Missing SDK files fail the fixture; they are never a silent skip.
 
 Group demands over the same installed-package fixture and compiler setting in
@@ -237,7 +242,11 @@ producers. For queued-waiter cancellation, poll the acquire future to
 `Pending`, assert participant registration, then drop the future; a zero-duration
 timeout still pays a timer turn. Concurrency regressions
 should force the relevant orders and observe lock ownership at the decision
-boundary rather than rely on repeated probabilistic races. Fixture drain tasks
+boundary rather than rely on repeated probabilistic races. A flag set before
+`write_lock` signals intent, not an actually queued writer. Hold an existing
+reader and observe failed `try_read` admission when proving writer preference;
+release the held guard on assertion failure before joining the writer.
+Fixture drain tasks
 must abort on assertion failure as well as success.
 
 LSP mock foreign-target checks settle after both `ProviderDispatch` and

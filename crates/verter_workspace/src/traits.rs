@@ -118,6 +118,18 @@ pub trait WorkspaceRead: Send + Sync {
     /// snapshot/disk content. Returns `None` if the file doesn't exist.
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>>;
 
+    /// Read under the capture execution selected by the caller's root.
+    /// Plain `read_file` is uncaptured and performs no observation polling.
+    /// Custom workspaces may leave capture unsupported and serve the same bytes.
+    #[cfg(feature = "semantic-observe")]
+    fn read_file_captured(
+        &self,
+        canonical_id: &str,
+        _capture: &crate::audit_sink::VfsReadCapture,
+    ) -> Option<Arc<str>> {
+        self.read_file(canonical_id)
+    }
+
     /// Trace-only detail about the most recent `read_file()` on the current
     /// thread for this canonical path, if the workspace can provide it.
     ///

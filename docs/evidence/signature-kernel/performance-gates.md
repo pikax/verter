@@ -1292,10 +1292,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   structural reducer, 200 guards take 0.33 s, and 800 answer the checker's
   `"k799"` (`wide_union_relation_tests.rs` →
   `an_equality_guard_chain_over_a_literal_union_reduces_no_relation`).
+  A literal against one of the four primitives literals belong to decides
+  the same way under every relation kind but identity: `"a"` relates to
+  `string` and not to `number`. A template literal capture checked against the
+  `string` its hole implies pays no query, and a pattern whose captures
+  that check left as inferred is not related to the key a second time
+  (`allocator_canaries.rs` →
+  `key_remap_cost_per_key_is_a_small_flat_constant`).
 * **Each return site is connected work.** The demand slice plans every
   `return` on its demanded paths, and each one is a unit of connected work
   the demand pays before the body evaluates: a `switch` of 100, 200, 400
-  and 800 returning cases costs its cases plus two units, and a budget one
+  and 800 returning cases costs two units per case plus two, and a budget one
   unit short ends on the typed work budget
   (`flow_return_schedule_tests.rs` →
   `each_return_site_is_connected_work_the_demand_pays_for`, 0.7 s). The

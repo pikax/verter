@@ -31,6 +31,10 @@ pub(super) struct KeyDomainKey {
     /// no primitive literal representation; consumers must resolve its nominal
     /// value identity or explicitly defer.
     pub(super) literal: Option<LiteralValue>,
+    /// The type substituted for the mapper binder when it is not the
+    /// literal itself: an enum member's literal type (`E.A`) keys the
+    /// property its value names (`0`) while the binder stays the member.
+    pub(super) binder: Option<SemanticNodeId>,
 }
 
 impl KeyDomainKey {
@@ -46,6 +50,7 @@ impl KeyDomainKey {
                     PropertyKey::UniqueSymbol(_) => None,
                 },
                 key,
+                binder: None,
             })
             .collect()
     }
@@ -858,20 +863,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(KeySpaceDomain::finite(vec![KeyDomainKey {
                         key: PropertyKey::string_literal(name.as_str()),
                         literal: Some(LiteralValue::String(name.clone())),
+                        binder: None,
                     }]))
                 }
                 SemanticNodeData::Literal(LiteralValue::Number(number)) => {
                     Some(KeySpaceDomain::finite(vec![KeyDomainKey {
                         key: PropertyKey::from_js_number(*number),
                         literal: Some(LiteralValue::Number(*number)),
+                        binder: None,
                     }]))
                 }
                 SemanticNodeData::TypeOfNominal(_) => {
                     Some(KeySpaceDomain::finite(vec![KeyDomainKey {
                         key: PropertyKey::UniqueSymbol(data.typeof_nominal_identity()?.clone()),
                         literal: None,
+                        binder: None,
                     }]))
                 }
+                SemanticNodeData::EnumLiteral(member) => self
+                    .enum_member_key(node, member)
+                    .map(|key| KeySpaceDomain::finite(vec![key])),
                 SemanticNodeData::Primitive(PrimitiveKind::Never) => {
                     Some(KeySpaceDomain::default())
                 }
@@ -1095,6 +1106,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         values.pop().map(Arc::new)
     }
 
+    /// The key an enum member's literal type `node` stands for: the
+    /// property its value names (`E.A = 0` keys `0`), the binder the
+    /// member itself (`{ [K in E]: K }` is `{ 0: E.A; … }`). `None` for a
+    /// member whose value is no string or number literal.
+    pub(super) fn enum_member_key(
+        &self,
+        node: SemanticNodeId,
+        member: &crate::semantic_query::EnumLiteralType,
+    ) -> Option<KeyDomainKey> {
+        let key = match self.graph().node_data(member.base).as_deref()? {
+            SemanticNodeData::Literal(LiteralValue::String(name)) => KeyDomainKey {
+                key: PropertyKey::string_literal(name.as_str()),
+                literal: Some(LiteralValue::String(name.clone())),
+                binder: Some(node),
+            },
+            SemanticNodeData::Literal(LiteralValue::Number(number)) => KeyDomainKey {
+                key: PropertyKey::from_js_number(*number),
+                literal: Some(LiteralValue::Number(*number)),
+                binder: Some(node),
+            },
+            _ => return None,
+        };
+        Some(key)
+    }
+
     fn key_space_leaf(&self, resolved: SemanticNodeId) -> Option<KeySpaceLeaf> {
         // Resolve only the key-set leaf. Further heads and composites return
         // to the worklist; member values are never a key-domain demand.
@@ -1104,6 +1140,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(KeySpaceLeaf::Finite(vec![KeyDomainKey {
                     key: PropertyKey::string_literal(name.as_str()),
                     literal: Some(LiteralValue::String(name.clone())),
+                    binder: None,
                 }]))
             }
             // Numeric-literal keys are legal keyspace members; they publish
@@ -1118,14 +1155,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(KeySpaceLeaf::Finite(vec![KeyDomainKey {
                     key: PropertyKey::from_js_number(*number),
                     literal: Some(LiteralValue::Number(*number)),
+                    binder: None,
                 }]))
             }
             SemanticNodeData::Primitive(PrimitiveKind::Never) => {
                 Some(KeySpaceLeaf::Finite(Vec::new()))
             }
+            SemanticNodeData::EnumLiteral(member) => self
+                .enum_member_key(resolved, member)
+                .map(|key| KeySpaceLeaf::Finite(vec![key])),
             SemanticNodeData::TypeOfNominal(_) => Some(KeySpaceLeaf::Finite(vec![KeyDomainKey {
                 key: PropertyKey::UniqueSymbol(data.typeof_nominal_identity()?.clone()),
                 literal: None,
+                binder: None,
             }])),
             SemanticNodeData::TypeOf(_) => {
                 let nominal = self.evaluate_deferred_semantic_node(resolved);
@@ -1538,6 +1580,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // `build_mapped_type`'s publication loop.
             SemanticNodeData::DeclRef { identity } => self.member_presence_fact_admission(
                 identity.canonical_id.as_ref(),
+                identity.owner,
                 identity.whole_hash,
                 identity.decl_name.as_ref(),
                 needle,
@@ -1551,6 +1594,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // `MemberPresence` lookup is sound.
                 self.member_presence_fact_admission(
                     base.canonical_id.as_ref(),
+                    base.owner,
                     base.whole_hash,
                     base.decl_name.as_ref(),
                     needle,
@@ -1738,9 +1782,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///   admitted on the strength of a presence fact.
     /// - `Some(false)` (ABSENT) — the artifact exists for the observed
     ///   content version, but the fact registry has no
-    ///   `MemberPresence(type_name, needle, Type)` entry. The member
-    ///   is provably absent regardless of visibility. Refute
-    ///   structurally.
+    ///   `MemberPresence(type_name, needle, Type)` entry, and the
+    ///   declaration WRITES its member set (an interface, a class, or an
+    ///   alias of an object literal). The member is provably absent
+    ///   regardless of visibility. Refute structurally.
+    /// - `None` (COMPUTED) — no presence fact, but the declaration is an
+    ///   alias whose body computes its members (a mapped type over its
+    ///   parameter, `type RO<T> = { readonly [K in keyof T]: T[K] }`, a
+    ///   reference, a conditional): no presence fact records those, so
+    ///   absence proves nothing and the caller resolves.
     /// - `None` (UNRECOVERABLE) — the file artifact for `(canonical,
     ///   observed_hash)` is not recoverable (evicted, schema
     ///   mismatch, content-hash drift). Fall through to the caller's
@@ -1759,6 +1809,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn member_presence_fact_admission(
         &self,
         canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         observed_hash: HashValue,
         type_name: &str,
         needle: &PropertyKey,
@@ -1797,9 +1848,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .ctx
             .member_presence_for_observed_content(canonical, observed_hash, presence_key)?
         {
-            None
-        } else {
-            Some(false)
+            return None;
         }
+        let writes_its_members = self
+            .ctx
+            .prepared_type_decl_return_only(canonical, owner, type_name)
+            .is_none_or(|prepared| {
+                prepared.kind != verter_session_query::declarations::TypeDeclKind::Alias
+                    || prepared
+                        .key_domain_closedness
+                        .as_ref()
+                        .is_some_and(|fact| fact.closed_object_shape)
+            });
+        writes_its_members.then_some(false)
     }
 }

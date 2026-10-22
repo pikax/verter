@@ -376,6 +376,11 @@ pub fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
     Restore(FORCE_PARTIAL_CLOSED_EVALUATION.replace(true))
 }
 
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static COMPOSITE_ARM_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Shell evaluation follows only operator operands. A selected result also
 /// reads value composition, and whole publication reads surface interiors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -708,6 +713,31 @@ struct CompositeReduction {
     read_past_gap: bool,
 }
 
+/// The unions one operation proved its composite reduction leaves as
+/// written — every arm a literal, a primitive or an enum member, and the
+/// canonical union over the arms keeping every one — each with the file
+/// roots the proving canonicalization inspected. Such a canonicalization
+/// charges the connected demand nothing, so replaying its roots prices a
+/// demand exactly as reducing again would. The proof reads only immutable node data, so
+/// a later demand on the same union replays its roots instead of reducing
+/// it again: a distributive conditional demands its `extends` operand once
+/// per member. The outermost dispatch operation releases the table.
+pub(super) type CompositeFixedPoints = std::cell::RefCell<
+    rustc_hash::FxHashMap<SemanticNodeId, Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>>,
+>;
+
+/// Whether `members` holds every one of `arms`: a direct scan for a few
+/// members, else one hashed index of them, so comparing a wide union with
+/// the union it reduced to stays linear.
+pub(super) fn holds_every(members: &[SemanticNodeId], arms: &[SemanticNodeId]) -> bool {
+    const DIRECT_SCAN_MAX: usize = 8;
+    if members.len() <= DIRECT_SCAN_MAX {
+        return arms.iter().all(|arm| members.contains(arm));
+    }
+    let index: rustc_hash::FxHashSet<SemanticNodeId> = members.iter().copied().collect();
+    arms.iter().all(|arm| index.contains(arm))
+}
+
 /// What a suspended composite reduction waits for.
 enum ArmWait {
     /// The demand of this named arm.
@@ -808,6 +838,15 @@ impl StructuralFactDemandOutcome {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// Arms the composite reductions read on this thread
+    /// ([`Self::composite_over_resolved_arms`] and the structural-fact
+    /// demand that reduces a resolved union); test-only. Memoized queries
+    /// can hide a reduction that re-reads a wide union per consumer.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn composite_arm_reads_for_tests() -> usize {
+        COMPOSITE_ARM_READS.with(std::cell::Cell::get)
+    }
+
     /// A mapped object's values belong to the consuming index. A `typeof`
     /// operand shares the keys-only transit context used by `keyof`, so the
     /// two operands of `T[keyof T]` read one source surface.
@@ -857,6 +896,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// be a stable cycle/carrier stop, so it remains a `TypeNode` instead of
     /// recursively re-entering the evaluator.
     fn normalized_index_key_from_evaluated_node(&self, resolved: SemanticNodeId) -> IndexKey {
+        // An enum member's literal type indexes the property its value
+        // names (`Record<E, X>[E.A]` reads key `0`), by the rule a mapped
+        // type's enum domain keys its members with.
+        let enum_value = match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(member)) => {
+                self.enum_member_key(resolved, member).map(|_| member.base)
+            }
+            _ => None,
+        };
+        if let Some(value) = enum_value {
+            return self.normalized_index_key_from_evaluated_node(value);
+        }
         match self.graph().node_data(resolved).as_deref() {
             Some(data @ SemanticNodeData::TypeOfNominal(_)) => IndexKey::UniqueSymbol(
                 data.typeof_nominal_identity()
@@ -1110,7 +1161,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the read kept only when it is a declaration or class reference.
     /// `None` for any other access (a computed index, a partial read, a
     /// terminal that is not a named reference).
-    fn named_indexed_access(
+    pub(super) fn named_indexed_access(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -3516,9 +3567,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let started = if settled.exit_reasons.is_none() {
                             let started =
                                 self.begin_composite(settled.n, !settled.resolve_declaration_refs);
-                            if started.is_none()
-                                && self.carrier_normalizing.borrow().contains(&settled.n)
-                            {
+                            if started.is_none() && self.carrier_normalizing_holds(settled.n) {
                                 *reentered = true;
                             }
                             started
@@ -3640,6 +3689,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
+    /// Whether `arm` is a literal, a primitive or an enum member: a union of
+    /// these alone canonicalizes without a metered construction.
+    fn is_unmetered_scalar(&self, arm: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(arm).as_deref(),
+            Some(
+                SemanticNodeData::Literal(_)
+                    | SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::EnumLiteral(_)
+            )
+        )
+    }
+
     /// Whether a resolved type is a literal, a primitive or an enum member
     /// — the types the composite reductions act on.
     fn is_composite_scalar(&self, view: SemanticNodeId) -> bool {
@@ -3692,7 +3754,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !(is_union && re_decidable) && !arms.iter().any(|arm| self.is_composite_name(*arm)) {
             return None;
         }
-        if self.carrier_normalizing.borrow().contains(&node) {
+        if self.carrier_normalizing_holds(node) {
+            return None;
+        }
+        // A union this operation already proved stays as written: the
+        // reduction would read the same arms and reach the same proof.
+        let proven = self.composite_fixed_points.borrow().get(&node).cloned();
+        if let Some(roots) = proven {
+            self.deposit_reused_canonical_roots(&roots);
             return None;
         }
         self.carrier_normalizing.borrow_mut().push(node);
@@ -3835,6 +3904,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         while reduction.next < reduction.arms.len() {
             let arm = reduction.arms[reduction.next];
             reduction.next += 1;
+            #[cfg(any(test, feature = "test-support"))]
+            COMPOSITE_ARM_READS.with(|count| count.set(count.get() + 1));
             if !self.is_composite_name(arm) {
                 reduction.views.push(arm);
                 continue;
@@ -3888,6 +3959,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A template literal arm is the type its construction builds
         // (`${string}${string}` is `string`), as the checker holds it
         // before the union reduces.
+        let mut read_template = false;
         let views: Vec<SemanticNodeId> = views
             .iter()
             .map(|view| match graph.node_data(*view).as_deref() {
@@ -3895,6 +3967,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     quasis,
                     expressions,
                 }) => {
+                    read_template = true;
                     let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
                         pattern: (*quasis).clone(),
                         args: Arc::clone(expressions.as_arc()),
@@ -3909,17 +3982,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
             .collect();
         let views = views.as_slice();
-        let reduced = self.intern_normalized_union_or_intersection(views, true);
+        let composite = super::canonical_algebra::intern_ordered_union_charged(
+            graph,
+            views,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            self.construction_meter(),
+        );
+        let proof = composite
+            .evidence
+            .is_complete_proof()
+            .then(|| composite.evidence.inspected_file_roots.clone());
+        self.deposit_canonical_evidence(composite.evidence);
+        let reduced = composite.node;
         // Arms read as written whose every member the union's reduction
         // keeps: the union stays as written, in its written order.
         if views == arms {
             let kept = match graph.node_data(reduced).as_deref() {
                 Some(SemanticNodeData::Union(members)) => {
-                    members.len() == arms.len() && arms.iter().all(|arm| members.contains(arm))
+                    members.len() == arms.len() && holds_every(members, arms)
                 }
                 _ => false,
             };
             if kept {
+                // Arms that are literals, primitives and enum members alone
+                // leave no name to demand, no template to build and no
+                // intersection to distribute: the proof read nothing but the
+                // arms and charged the connected demand nothing (its meter
+                // pays only for distributions), so a replay that charges
+                // nothing prices it exactly as a cold run does.
+                if let Some(roots) = proof.filter(|_| {
+                    !read_template
+                        && matches!(reduction.completeness, ResultCompleteness::Complete)
+                        && arms.iter().all(|arm| self.is_unmetered_scalar(*arm))
+                }) {
+                    self.composite_fixed_points
+                        .borrow_mut()
+                        .insert(node, Arc::from(roots));
+                }
                 return None;
             }
         }
@@ -3935,15 +4034,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         // The checker's union origin: the named unions, when they do not
         // overlap and the reduction kept every member they name.
-        let in_named = |member: &SemanticNodeId| {
-            named_unions
-                .iter()
-                .any(|(_, members)| members.contains(member))
-        };
+        // Every member a named union names, looked up by hash: a named
+        // union of thousands of members is read once, not once per member.
+        let named_members: rustc_hash::FxHashSet<SemanticNodeId> = named_unions
+            .iter()
+            .flat_map(|(_, members)| members.iter().copied())
+            .collect();
         let remaining: Vec<SemanticNodeId> = type_set
             .iter()
             .copied()
-            .filter(|member| !in_named(member))
+            .filter(|member| !named_members.contains(member))
             .collect();
         let named_count: usize = named_unions.iter().map(|(_, members)| members.len()).sum();
         let result = match named_unions.as_slice() {
@@ -3955,7 +4055,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .chain(named_unions.iter().map(|(named, _)| *named))
                     .collect();
                 // The written arms ARE the origin: the union stays as written.
-                if origin.len() == arms.len() && origin.iter().all(|arm| arms.contains(arm)) {
+                if origin.len() == arms.len() && holds_every(arms, &origin) {
                     return None;
                 }
                 self.intern_normalized_union_or_intersection(&origin, true)

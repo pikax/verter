@@ -395,6 +395,35 @@ fn structural_hash_discriminates_carrier_type_args_foo_a_vs_foo_b() {
 /// Together with the discrimination test this pins "distinct args ⇒ distinct
 /// footprint, identical args ⇒ identical footprint".
 #[test]
+fn structural_hash_discriminates_lexical_and_ambient_namespace_scope_ordinals() {
+    use verter_type_engine::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
+    let graph = empty_graph();
+    let hashes = [
+        NodeLocalScopeId::Lexical(LocalScopeId(0)),
+        NodeLocalScopeId::AugmentationNamespace(0),
+        NodeLocalScopeId::AugmentationModule(0),
+    ]
+    .map(|address| {
+        let scope = NodeScopeId::File {
+            canonical_id: "/scopes.ts".into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: [0; 16],
+            local_scope: Some(address),
+        };
+        hash_in_lane(
+            &graph,
+            &SemanticNodeData::new_bare_ref(Arc::from("Foo"), scope, Arc::from([])),
+        )
+    });
+    for (index, hash) in hashes.iter().enumerate() {
+        for other in &hashes[..index] {
+            assert_ne!(hash, other, "distinct inventories must hash apart");
+        }
+    }
+}
+
+#[test]
 fn structural_hash_is_stable_for_identical_carriers() {
     let graph = empty_graph();
     let _graph_scope = graph.enter_node_root_scope();
@@ -473,6 +502,7 @@ fn structural_hash_discriminates_spread_operand_identity() {
     let data = |operand| {
         SemanticNodeData::ObjectSpreadProgram(
             verter_type_engine::semantic_query::ObjectSpreadProgram {
+                is_literal: true,
                 effects: verter_type_engine::semantic_query::PayloadArray::from([
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {

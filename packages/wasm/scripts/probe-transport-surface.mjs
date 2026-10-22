@@ -219,7 +219,14 @@ function ideCase(compiled) {
   };
 }
 
-const results = { loaded: true, surface: enumerateSurface(module_), cases: {} };
+const results = {
+  loaded: true,
+  surface: enumerateSurface(module_),
+  // "Available" only for a module built with `semantic-observe`; the audited
+  // compile below can return a stored record only then.
+  captureAvailability: module_.captureAvailability(),
+  cases: {},
+};
 
 // SUCCESS + the optional-product axis
 {

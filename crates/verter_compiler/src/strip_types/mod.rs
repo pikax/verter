@@ -35,6 +35,7 @@ pub struct StripTypesResult {
 /// # Returns
 /// A `StripTypesResult` with the stripped JavaScript code and any parse errors.
 pub fn strip_types<'a>(source: &'a str, allocator: &'a Allocator) -> StripTypesResult {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let source_type = SourceType::tsx();
     let parser = Parser::new(allocator, source, source_type);
     let parse_result = parser.parse();
@@ -45,7 +46,7 @@ pub fn strip_types<'a>(source: &'a str, allocator: &'a Allocator) -> StripTypesR
         .map(|e| e.to_string())
         .collect();
 
-    let mut code_transform = CodeTransform::new(source, allocator);
+    let mut code_transform = CodeTransform::<M>::new_in(source, allocator);
 
     // base_offset is 0 for standalone files (spans are already absolute)
     strip_typescript_types(&parse_result.program, &mut code_transform, 0, source);
@@ -54,6 +55,8 @@ pub fn strip_types<'a>(source: &'a str, allocator: &'a Allocator) -> StripTypesR
         code: code_transform.build_string(),
         errors,
     }
+
+    })
 }
 
 #[cfg(test)]

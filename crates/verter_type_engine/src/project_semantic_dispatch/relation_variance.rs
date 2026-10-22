@@ -37,6 +37,7 @@
 //! first. Every measurement is therefore a function of the declaration
 //! alone, whatever was related before it.
 
+use smallvec::SmallVec;
 use std::sync::Arc;
 use verter_type_expr::OwnedStr;
 
@@ -92,6 +93,16 @@ impl Variance {
             unreliable: false,
         }
     }
+
+    const fn annotation(annotation: verter_type_expr::facts::TypeParamVariance) -> Option<Self> {
+        use verter_type_expr::facts::TypeParamVariance;
+        match annotation {
+            TypeParamVariance::Unannotated => None,
+            TypeParamVariance::Out => Some(Self::exact(Self::COVARIANT)),
+            TypeParamVariance::In => Some(Self::exact(Self::CONTRAVARIANT)),
+            TypeParamVariance::InOut => Some(Self::exact(Self::INVARIANT)),
+        }
+    }
 }
 
 /// What the variance of a reference's declaration is at this point.
@@ -141,12 +152,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.relate_variances(&source_args, &target_args, &variances, bindings)
     }
 
-    /// Two references to one generic declaration under an inference session,
-    /// the target's type arguments holding an `infer` site, infer from
-    /// their type arguments pairwise (`inferFromTypeArguments`: a
-    /// contravariant parameter's argument contravariantly, any other's
+    /// Two references to one generic declaration under an inference session
+    /// first check their fixed annotated arguments. When the target's type
+    /// arguments hold an inference site — an `infer` declaration or a type
+    /// parameter the session infers — they then infer from their type
+    /// arguments pairwise (`inferFromTypeArguments`: a contravariant parameter's argument contravariantly, any other's
     /// covariantly) and relate by them (`Box<"a">` against `Box<infer P>`
-    /// infers `"a"`, whatever `Box` expands to) — an alias's parameters
+    /// infers `"a"`, whatever `Box` expands to; `inject(key)` over
+    /// `inject<T>(key: InjectionKey<T>)` infers `T` from `key:
+    /// InjectionKey<{ a: number }>` though the empty interface never
+    /// mentions it) — an alias's parameters
     /// measured as the checker's `getAliasVariances` measures them. `None`
     /// relates the pair as before: not two such references, a variance that
     /// is unmeasurable, unreliable or being measured, or type arguments that
@@ -167,11 +182,37 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let (target_declaration, target_args) = target_ref?;
         if !same_declaration(&declaration, &target_declaration)
             || source_args.len() != target_args.len()
-            || !target_args
-                .iter()
-                .any(|arg| self.subtree_contains_infer(*arg))
             || self.variance_measurement(source).is_some()
             || self.variance_measurement(target).is_some()
+        {
+            return None;
+        }
+        let call_inference = self
+            .dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| {
+                session.context_key().pass_kind
+                    == crate::semantic_query::InferencePassKind::CallApplicability
+            });
+        // A fixed annotated slot is a relation constraint even when another
+        // slot or union arm owns an inference site. Check it before collecting
+        // candidates; open slots retain their ordinary inference path.
+        // A call collects candidates independently of applicability, which
+        // the instantiated signature checks afterwards.
+        if !call_inference {
+            if let Some(result) = self.relate_fixed_annotated_arguments(
+                &declaration,
+                &source_args,
+                &target_args,
+                bindings,
+            ) {
+                return Some(result);
+            }
+        }
+        if !target_args
+            .iter()
+            .any(|arg| self.holds_inference_site(*arg))
         {
             return None;
         }
@@ -195,18 +236,73 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 })
             })
         };
+        // A call's distinct bare type parameters recover the source's
+        // arguments the same way (`inferFromTypes` over two applications of
+        // one alias infers from their alias arguments before expanding
+        // either): the call's applicability check relates the instantiated
+        // signature afterwards, so the identity needs no ownership of the
+        // whole pattern. The relation holds whatever the variances; the
+        // candidates do not: a call parameter collects candidates from its
+        // other arguments too, so one a contravariant argument infers is a
+        // contravariant candidate, as `inferFromTypeArguments` deposits it.
         let mut binders = rustc_hash::FxHashSet::default();
-        let identity_inference = owns_whole_pattern && target_args.iter().all(|arg| matches!(self.graph().node_data(*arg).as_deref(),
-            Some(SemanticNodeData::Infer { binder, constraint: None, .. }) if binders.insert(binder.clone())));
+        let mut params = rustc_hash::FxHashSet::default();
+        let identity_inference =
+            target_args
+                .iter()
+                .all(|arg| match self.graph().node_data(*arg).as_deref() {
+                    Some(SemanticNodeData::Infer {
+                        binder,
+                        constraint: None,
+                        ..
+                    }) => owns_whole_pattern && binders.insert(binder.clone()),
+                    Some(SemanticNodeData::TypeParam { .. }) => {
+                        self.call_session_infers_bare(*arg) && params.insert(*arg)
+                    }
+                    _ => false,
+                });
         let variances = if identity_inference {
-            vec![Variance::exact(Variance::COVARIANT); source_args.len()]
-        } else {
-            let DeclarationVariance::Known(variances) =
-                self.parameter_variances(&declaration, source_args.len(), true)?
-            else {
-                return None;
+            let measured = if params.is_empty() {
+                None
+            } else {
+                match self.parameter_variances(&declaration, source_args.len(), true) {
+                    Some(DeclarationVariance::Known(variances)) => Some(variances),
+                    _ => None,
+                }
             };
-            variances
+            target_args
+                .iter()
+                .enumerate()
+                .map(|(index, arg)| {
+                    let contravariant = params.contains(arg)
+                        && measured
+                            .as_ref()
+                            .and_then(|measured| measured.get(index))
+                            .is_some_and(|variance| variance.mask == Variance::CONTRAVARIANT);
+                    Variance::exact(if contravariant {
+                        Variance::CONTRAVARIANT
+                    } else {
+                        Variance::COVARIANT
+                    })
+                })
+                .collect()
+        } else {
+            match self.parameter_variances(&declaration, source_args.len(), true)? {
+                DeclarationVariance::Known(variances) => variances,
+                // The checker's in-progress `getVariances` is `emptyArray`:
+                // `inferFromTypeArguments` infers every argument
+                // covariantly, and the references relate as the open
+                // measurement answers. Expanding them instead would re-enter
+                // the measured declaration at every level of its own
+                // recursion (`Promise<T>`'s `then` returns `Promise<R>`).
+                DeclarationVariance::InProgress(result) => {
+                    for (&source, &target) in source_args.iter().zip(target_args.iter()) {
+                        let _ =
+                            self.relate_member(source, target, bindings, InferPosition::Covariant);
+                    }
+                    return Some(result);
+                }
+            }
         };
         if variances
             .iter()
@@ -220,6 +316,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         for ((&source, &target), variance) in
             source_args.iter().zip(target_args.iter()).zip(&variances)
         {
+            if call_inference && !self.holds_inference_site(target) {
+                continue;
+            }
             let related = match variance.mask {
                 Variance::CONTRAVARIANT => {
                     self.relate_member(target, source, bindings, InferPosition::ContravariantParam)
@@ -247,6 +346,107 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return None;
         }
         Some(acc)
+    }
+
+    /// Enforce fixed annotated arguments before candidate collection, preserving
+    /// the whole declaration's eligibility for structural fallback.
+    fn relate_fixed_annotated_arguments(
+        &self,
+        declaration: &DeclIdentity,
+        source_args: &[SemanticNodeId],
+        target_args: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        let prepared = self.ctx.prepared_type_decl_return_only(
+            declaration.canonical_id.as_ref(),
+            declaration.owner,
+            declaration.decl_name.as_ref(),
+        )?;
+        if prepared.type_parameters.len() != source_args.len() {
+            return None;
+        }
+        let mut sources = SmallVec::<[SemanticNodeId; 4]>::new();
+        let mut targets = SmallVec::<[SemanticNodeId; 4]>::new();
+        let mut variances = SmallVec::<[Variance; 4]>::new();
+        for ((&source, &target), parameter) in source_args
+            .iter()
+            .zip(target_args)
+            .zip(&prepared.type_parameters)
+        {
+            let Some(variance) = Variance::annotation(parameter.variance) else {
+                continue;
+            };
+            if [source, target].into_iter().any(|argument| {
+                self.mentions_generic_operand_variable(argument, false)
+                    || self.holds_inference_site(argument)
+            }) {
+                continue;
+            }
+            sources.push(source);
+            targets.push(target);
+            variances.push(variance);
+        }
+        if sources.is_empty() {
+            return None;
+        }
+        let related = self.relate_variances(&sources, &targets, &variances, bindings);
+        if matches!(related, Some(RelationResult::NotAssignable))
+            && sources.len() < source_args.len()
+        {
+            let DeclarationVariance::Known(declaration_variances) =
+                self.parameter_variances(declaration, source_args.len(), true)?
+            else {
+                return None;
+            };
+            if self.variances_allow_structural_fallback(&declaration_variances, target_args) {
+                return None;
+            }
+        }
+        if sources.len() == source_args.len()
+            || matches!(
+                related,
+                Some(RelationResult::NotAssignable | RelationResult::Unknown)
+            )
+        {
+            related
+        } else {
+            None
+        }
+    }
+
+    /// Whether `node` holds an inference site of the active session: an
+    /// `infer` declaration, or a type parameter a call's session infers.
+    /// Only a call's session infers type parameters, and only a node that
+    /// may mention a binder is walked for one.
+    fn holds_inference_site(&self, node: SemanticNodeId) -> bool {
+        if self.subtree_contains_infer(node) {
+            return true;
+        }
+        if !self.mentions_binder(node) {
+            return false;
+        }
+        let txn = self.dispatch_txn.borrow();
+        let Some(session) = txn.active_session().filter(|session| {
+            session.context_key().pass_kind
+                == crate::semantic_query::InferencePassKind::CallApplicability
+        }) else {
+            return false;
+        };
+        let graph = self.graph();
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if session.infers(current) {
+                return true;
+            }
+            if let Some(data) = graph.node_data(current) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
     }
 
     /// The checker's `relateVariances` over `typeArgumentsRelatedTo`: each
@@ -302,7 +502,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if !matches!(acc, RelationResult::NotAssignable) {
             return Some(acc);
         }
-        let structural_fallback = variances
+        (!self.variances_allow_structural_fallback(variances, target_args))
+            .then_some(RelationResult::NotAssignable)
+    }
+
+    fn variances_allow_structural_fallback(
+        &self,
+        variances: &[Variance],
+        target_args: &[SemanticNodeId],
+    ) -> bool {
+        variances
             .iter()
             .any(|variance| variance.unmeasurable || variance.unreliable)
             || variances
@@ -310,12 +519,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .zip(target_args)
                 .any(|(variance, &target)| {
                     variance.mask == Variance::COVARIANT
-                        && matches!(
-                            self.graph().node_data(target).as_deref(),
-                            Some(SemanticNodeData::Primitive(PrimitiveKind::Void))
-                        )
-                });
-        (!structural_fallback).then_some(RelationResult::NotAssignable)
+                        && self.resolves_to_primitive(target, |kind| kind == PrimitiveKind::Void)
+                })
     }
 
     /// Two type arguments of an unmeasurable parameter relate only when
@@ -348,7 +553,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         measure_aliases: bool,
     ) -> Option<DeclarationVariance> {
         use verter_session_query::declarations::TypeDeclKind;
-        use verter_type_expr::facts::TypeParamVariance;
         let prepared = self.ctx.prepared_type_decl_return_only(
             declaration.canonical_id.as_ref(),
             declaration.owner,
@@ -370,12 +574,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let annotated = prepared
             .type_parameters
             .iter()
-            .map(|param| match param.variance {
-                TypeParamVariance::Unannotated => None,
-                TypeParamVariance::Out => Some(Variance::exact(Variance::COVARIANT)),
-                TypeParamVariance::In => Some(Variance::exact(Variance::CONTRAVARIANT)),
-                TypeParamVariance::InOut => Some(Variance::exact(Variance::INVARIANT)),
-            })
+            .map(|param| Variance::annotation(param.variance))
             .collect::<Vec<_>>();
         if !measure_aliases
             && prepared.kind == TypeDeclKind::Alias
@@ -766,18 +965,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some(assignable(&[]))
     }
 
-    /// The generic declaration `node` applies and its type arguments: an
-    /// application (`InstantiationRef`), or a declaration's reference to
-    /// itself lowered inside its own body (`RecursiveRef`), whose file is
-    /// the node's origin scope.
-    fn generic_reference(
+    /// Follow transparent graph wrappers and selected indexed values while
+    /// retaining the first declaration reference and its own annotations.
+    pub(super) fn reference_operand_for_relation(
         &self,
         node: SemanticNodeId,
-    ) -> Option<(DeclIdentity, Arc<[SemanticNodeId]>)> {
+    ) -> Option<SemanticNodeId> {
         let context =
             crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 crate::semantic_query::ProjectionMode::Navigate,
             );
+        if !matches!(
+            self.graph().node_data(node)?.as_ref(),
+            SemanticNodeData::Alias(_) | SemanticNodeData::IndexedAccess { .. }
+        ) {
+            return Some(node);
+        }
         let mut node = node;
         let mut visited = rustc_hash::FxHashSet::default();
         while visited.insert(node) {
@@ -796,21 +999,43 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 _ => break,
             }
         }
-        if let Some(SemanticNodeData::DeclRef { identity }) =
-            self.graph().node_data(node).as_deref()
-        {
-            return Some((
-                identity.clone(),
-                self.declared_application_arguments(identity, &[], context)?,
-            ));
+        Some(node)
+    }
+
+    /// The generic declaration `node` applies and its type arguments: an
+    /// application (`InstantiationRef`), or a declaration's reference to
+    /// itself lowered inside its own body (`RecursiveRef`), whose file is
+    /// the node's origin scope.
+    fn generic_reference(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(DeclIdentity, Arc<[SemanticNodeId]>)> {
+        let context =
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            );
+        let node = self.reference_operand_for_relation(node)?;
+        // A runtime nominal's builtin carrier reads as the project's global
+        // interface it stands for, so it relates by that interface's
+        // variances to another reference to it.
+        let declared_ref = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => Some(identity.clone()),
+            _ => None,
+        };
+        if let Some(identity) = declared_ref {
+            let identity = self.relation_declaration_identity(identity, node);
+            let args = self.declared_application_arguments(&identity, &[], context)?;
+            return Some((identity, args));
         }
         let (declaration, args) = self.raw_generic_reference(node)?;
+        let declaration = self.relation_declaration_identity(declaration, node);
         let args = self.declared_application_arguments(&declaration, &args, context)?;
         Some((declaration, args))
     }
 
-    /// The interface or class reference a type-alias application stands
-    /// for, when the other operand is a reference to that declaration.
+    /// The declaration reference an alias application or selected carrier
+    /// stands for. Each operand is normalized independently so two aliases
+    /// can expose references to the same underlying generic declaration.
     ///
     /// The checker resolves an alias reference where it is written: the
     /// application IS the type its body instantiates to, and when that type
@@ -818,22 +1043,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// one declaration infer from and relate by their type arguments
     /// (`MessageBase<X> extends UIMessage<infer M>` infers through the
     /// `UIMessage<…>` the alias selects, never through its members).
-    /// `None` when `node` applies no alias, when its instantiation is not a
-    /// reference, or when that reference names a declaration other than
-    /// `other`'s.
-    pub(super) fn alias_application_reference_to(
+    /// `None` when no wrapper changes the reference or the selected type is
+    /// not a declaration reference.
+    ///
+    /// Each alias step is one nested instantiation, so the walk stops at the
+    /// instantiation budget: an alias that re-applies itself on a growing
+    /// argument mints a fresh application at every step, never meets one
+    /// it visited, and selects no reference.
+    pub(super) fn declaration_reference_for_relation(
         &self,
         node: SemanticNodeId,
-        other: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
         use verter_session_query::declarations::TypeDeclKind;
-        let declaration_of = |node: SemanticNodeId| -> Option<DeclIdentity> {
-            match self.graph().node_data(node)?.as_ref() {
-                SemanticNodeData::DeclRef { identity } => Some(identity.clone()),
-                SemanticNodeData::InstantiationRef { base, .. } => Some(base.clone()),
-                _ => None,
-            }
-        };
         let is_alias = |declaration: &DeclIdentity| {
             self.ctx
                 .prepared_type_decl_return_only(
@@ -843,30 +1064,29 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 )
                 .is_some_and(|prepared| prepared.kind == TypeDeclKind::Alias)
         };
-        let target = declaration_of(other)?;
-        if is_alias(&target) {
-            return None;
-        }
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let mut current = node;
         let mut visited = rustc_hash::FxHashSet::default();
-        while visited.insert(current) {
-            if let Some(SemanticNodeData::Alias(inner)) = self.graph().node_data(current).as_deref()
+        let mut depth = 0;
+        loop {
+            if self.cancellation.is_cancelled()
+                || !self.connected_demand.instantiation_within_budget(depth)
             {
-                current = *inner;
-                continue;
+                return None;
             }
+            depth += 1;
+            current = self.reference_operand_for_relation(current)?;
             let (declaration, args) = match self.graph().node_data(current)?.as_ref() {
                 SemanticNodeData::DeclRef { identity } => (identity.clone(), Arc::from([])),
                 SemanticNodeData::InstantiationRef { base, args } => {
                     (base.clone(), Arc::clone(args.as_arc()))
                 }
-                _ => return None,
+                _ => self.raw_generic_reference(current)?,
             };
-            if same_declaration(&declaration, &target) {
+            if !is_alias(&declaration) {
                 return (current != node).then_some(current);
             }
-            if !is_alias(&declaration) {
+            if !visited.insert(current) {
                 return None;
             }
             let key = crate::semantic_query::SemanticQueryKey::Instantiate(
@@ -889,22 +1109,33 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .evaluate_deferred_semantic_node_with_context(output.value, transit)
                 .into_active_query_build_node(self);
         }
-        None
     }
 
-    fn raw_generic_reference(
+    pub(super) fn raw_generic_reference(
         &self,
         node: SemanticNodeId,
     ) -> Option<(DeclIdentity, Arc<[SemanticNodeId]>)> {
         let graph = self.graph();
         let data = graph.node_data(node)?;
         match &*data {
+            SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                canonical_id,
+                owner,
+                name,
+                whole_hash,
+            }) => Some((
+                DeclIdentity {
+                    canonical_id: canonical_id.clone(),
+                    owner: *owner,
+                    whole_hash: *whole_hash,
+                    decl_name: name.clone(),
+                },
+                Arc::from([]),
+            )),
             SemanticNodeData::InstantiationRef { base, args } => {
                 Some((base.clone(), Arc::clone(args.as_arc())))
             }
-            SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args })
-                if !args.is_empty() =>
-            {
+            SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
                 let Some(NodeScopeId::File {
                     canonical_id,
                     owner,
@@ -945,7 +1176,7 @@ pub fn declaration_scope(declaration: &DeclIdentity) -> NodeScopeId {
 }
 
 /// Whether two declaration identities name one declaration.
-fn same_declaration(a: &DeclIdentity, b: &DeclIdentity) -> bool {
+pub(super) fn same_declaration(a: &DeclIdentity, b: &DeclIdentity) -> bool {
     a.canonical_id == b.canonical_id && a.owner == b.owner && a.decl_name == b.decl_name
 }
 

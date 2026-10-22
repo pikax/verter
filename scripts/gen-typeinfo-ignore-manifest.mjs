@@ -3893,6 +3893,18 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
       "expectation); the row stays running_unratified until ratification " +
       "lifts it",
   ]),
+  ...[
+    [
+      "decorators.rs",
+      "decorators_accessor_decorator_returning_same_target_publishes_public_property",
+    ],
+    ["decorators.rs", "decorators_identity_accessor_decorator_publishes_public_property"],
+  ].map(([f, fn]) => [
+    tkey(f, fn),
+    "runs always in the default suite (its `#[ignore]` was removed when " +
+      "class `accessor` fields started lowering as the public property they " +
+      "declare); the row stays running_unratified until ratification lifts it",
+  ]),
 ]);
 
 function consumedMechsForBlock(blockVar) {

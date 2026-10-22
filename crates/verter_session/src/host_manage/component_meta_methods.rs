@@ -380,8 +380,6 @@ impl VerterHost {
                 }
             }
             audit_builder.record_component_meta_store(
-                cm_counters.materialize_structure_calls,
-                cm_counters.materialize_structure_cache_hits,
                 cm_counters.node_arena_lock_acquisitions,
                 cm_counters.family_map_lock_acquisitions,
                 cm_counters.dep_signature_merges,

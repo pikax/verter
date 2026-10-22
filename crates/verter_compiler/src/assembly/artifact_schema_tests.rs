@@ -443,7 +443,10 @@ fn schema_construction_preserves_unavailable_and_opaque_content_without_compile_
     assert_eq!(observer.0.load(Ordering::SeqCst), 0);
     // The observer sees real transform work, so zero above discriminates it.
     let allocator = oxc_allocator::Allocator::default();
-    let mut transform = crate::code_transform::CodeTransform::new("x", &allocator);
+    let mut transform =
+        crate::code_transform::CodeTransform::<verter_audit::observe::Captured>::new_in(
+            "x", &allocator,
+        );
     transform.overwrite(0, 1, "y");
     // The transform publishes its operation tally once, when it drops.
     drop(transform);

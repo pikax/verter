@@ -171,7 +171,7 @@ pub fn generate_script<'alloc>(
     script_setup: Option<&RootNodeScript>,
     prepared: &PreparedScript<'alloc>,
     source: &'alloc str,
-    ct: &mut CodeTransform<'alloc>,
+    ct: &mut CodeTransform<'alloc, impl verter_audit::observe::ObserveExec>,
     alloc: &'alloc Allocator,
     options: &ScriptCodeGenOptions<'_>,
 ) -> ScriptCodeGenResult<'alloc> {

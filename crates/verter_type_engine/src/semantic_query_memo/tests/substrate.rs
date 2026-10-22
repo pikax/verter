@@ -2699,7 +2699,9 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
         canonical_id: verter_type_expr::OwnedStr::from("/w/other.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [8u8; 16],
-        local_scope: Some(3),
+        local_scope: Some(crate::semantic_query::NodeLocalScopeId::Lexical(
+            crate::semantic_query::LocalScopeId(3),
+        )),
     };
     let decl_b_id = store.intern_node_with_scope(
         SemanticNodeData::Primitive(PrimitiveKind::Never),

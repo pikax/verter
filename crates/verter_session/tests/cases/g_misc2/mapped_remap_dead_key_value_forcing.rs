@@ -65,8 +65,8 @@ use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::FactKey;
 use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 use verter_type_engine::semantic_query::{
-    IndexKey, PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
+    IndexKey, PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext, PropertyKey,
+    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
 use verter_type_expr::TypeExpr;
 
@@ -379,33 +379,25 @@ fn single_key_demand_through_remapping_mapper_forces_only_the_producing_key() {
     );
 
     // Independent of node identity: the `boxed` member's own value must
-    // address SOURCE KEY `b`, never `e`. The published value is the
-    // addressable `WideSource['b']` access, so the producing iteration key
-    // is readable directly off it — exactly the fact a wrong-producer
-    // regression changes while leaving every member NAME and every counter
-    // identical.
+    // be SOURCE KEY `b`'s, never `e`'s. The published value reads
+    // `WideSource['b']` through to the member's type, `number` (`e` holds
+    // `number[]`), so the producing iteration key shows in it — exactly
+    // the fact a wrong-producer regression changes while leaving every
+    // member NAME and every counter identical.
     let boxed_value = member_value(&host, narrowed, "boxed");
-    let indexed_key = match host
-        .project_type_store()
-        .semantic_graph()
-        .node_data(boxed_value)
-        .as_deref()
-    {
-        Some(SemanticNodeData::IndexedAccess {
-            index: IndexKey::String(name),
-            ..
-        }) => name.to_string(),
-        other => panic!(
-            "`Remapped['kept_b']`'s `boxed` member is `WideSource['b']`, an addressable \
-             indexed access; got {other:?}"
+    assert!(
+        matches!(
+            host.project_type_store()
+                .semantic_graph()
+                .node_data(boxed_value)
+                .as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
         ),
-    };
-    assert_eq!(
-        indexed_key, "b",
         "the demanded produced name `kept_b` is produced by iteration key `b`, so the value \
-         must address `WideSource['b']`. `e` here means the remap preimage selected the wrong \
-         producing key — a regression invisible to member names (`boxed` either way) and to \
-         the per-K counter (one materialisation either way)."
+         must be `WideSource['b']`, `number`. `number[]` here means the remap preimage selected \
+         the wrong producing key `e` — a regression invisible to member names (`boxed` either \
+         way) and to the per-K counter (one materialisation either way). got {}",
+        describe(&host, boxed_value)
     );
 }
 

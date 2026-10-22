@@ -24,6 +24,8 @@
 //! assertions throughout (not the bare carrier, not an honest `Opaque(Miss)`,
 //! not the still-generic shell where an instantiation was demanded).
 
+use verter_type_engine::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -1471,7 +1473,7 @@ fn carrier_head_preserves_local_scope_in_rehydrated_scope() {
         canonical_id: verter_type_expr::OwnedStr::from("/ls.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
-        local_scope: Some(local),
+        local_scope: Some(NodeLocalScopeId::Lexical(LocalScopeId(local))),
     };
     let carrier = bare_ref_carrier(&dispatch, "Foo", scope_with_local, &[]);
     let resolved = resolve_subject(&dispatch, carrier, ProjectionMode::Navigate);
@@ -1488,11 +1490,56 @@ fn carrier_head_preserves_local_scope_in_rehydrated_scope() {
     match resolved_scope {
         NodeScopeId::File { local_scope, .. } => assert_eq!(
             local_scope,
-            Some(local),
+            Some(NodeLocalScopeId::Lexical(LocalScopeId(local))),
             "the rehydrated scope must PRESERVE the carrier's `local_scope` — a \
              `canonical_file()` rebuild would drop it to None"
         ),
         NodeScopeId::Global => panic!("resolved `Foo` must carry a File scope, not Global"),
+    }
+}
+
+#[test]
+fn lexical_scope_ordinal_does_not_select_an_ambient_namespace_block() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/scopes.ts",
+        "export type Foo = { a: string }; declare module 'pkg' { namespace NS { export type Foo = { a: number }; } export = NS; }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    // A lexical scope and the first retained namespace block can both have
+    // ordinal zero. Only a namespace address may select that inventory.
+    for (address, expected) in [
+        (None, PrimitiveKind::String),
+        (
+            Some(NodeLocalScopeId::Lexical(LocalScopeId(0))),
+            PrimitiveKind::String,
+        ),
+        (
+            Some(NodeLocalScopeId::AugmentationNamespace(0)),
+            PrimitiveKind::Number,
+        ),
+    ] {
+        let mut scope = file_scope(&dispatch, "/scopes.ts");
+        let NodeScopeId::File { local_scope, .. } = &mut scope else {
+            unreachable!();
+        };
+        *local_scope = address;
+        let carrier = bare_ref_carrier(&dispatch, "Foo", scope, &[]);
+        let result = dispatch.execute_type_node(SemanticQueryKey::ProjectMember {
+            base: carrier,
+            member: "a".into(),
+            mode: ProjectionMode::Expanded,
+        });
+        let QueryResult::Value(output) = result else {
+            panic!("{address:?}: member read must answer: {result:?}");
+        };
+        assert_eq!(
+            dispatch.graph().node_data(output.value).as_deref(),
+            Some(&SemanticNodeData::Primitive(expected)),
+            "{address:?}",
+        );
     }
 }
 
@@ -2136,15 +2183,15 @@ fn a_builtin_utility_build_reads_the_scope_payload_once() {
         "/p.ts",
         "export type Foo = { a: string };\nexport type X = Partial<Foo>;\n",
     );
-    // Captured execution: only it records into the request counters read below.
+    // Bind the observer before the captured resolver snapshots its receivers.
+    let counter = Arc::new(ScopePayloadReadCounter::default());
+    let guard = verter_audit::observer::install_observer(counter.clone());
     let view = host.resolver_store_view_read().into_owned_view();
     let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     let dispatch = ProjectSemanticDispatch::new(&captured);
     let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/p.ts");
     let carrier = bare_ref_carrier(&dispatch, "Partial", scope, &[PrimitiveKind::String]);
-    let counter = Arc::new(ScopePayloadReadCounter::default());
-    let guard = verter_audit::observer::install_observer(counter.clone());
     let resolved = resolve_subject(&dispatch, carrier, ProjectionMode::Expanded);
     drop(guard);
     assert!(

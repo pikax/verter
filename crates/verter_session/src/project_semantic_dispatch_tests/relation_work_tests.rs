@@ -343,13 +343,16 @@ fn false_aligned_object_unions_decide_at_the_first_arm() {
             );
         }
     }
-    for (index, count) in sizes.iter().enumerate() {
+    for step in 0..2 {
+        let false_step = false_work[step + 1] - false_work[step];
+        let true_step = true_work[step + 1] - true_work[step];
         assert!(
-            false_work[index] <= true_work[index],
-            "{count} arms: the false relation costs no more than the true one \
-             ({} against {})",
-            false_work[index],
-            true_work[index]
+            false_step <= true_step,
+            "from {} to {} arms: a further arm costs the false relation no more than \
+             the true one ({false_step} against {true_step}; false {false_work:?}, \
+             true {true_work:?})",
+            sizes[step],
+            sizes[step + 1]
         );
     }
 }

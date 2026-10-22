@@ -1741,15 +1741,15 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
-    // Captured execution: only it records into the per-request counters.
+    let rctx = RequestContext::new(7781, Arc::from("/w/modeless_counter.ts"), false, None);
+    let _g = RequestContextGuard::install(Arc::clone(&rctx));
+    // Bind the request before the captured resolver snapshots its receivers.
     let view = host.resolver_store_view_read().into_owned_view();
     let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
         crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
     > = &captured;
     let store = SemanticGraphStore::new();
-    let rctx = RequestContext::new(7781, Arc::from("/w/modeless_counter.ts"), false, None);
-    let _g = RequestContextGuard::install(Arc::clone(&rctx));
     let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let key = verter_type_engine::semantic_query::RelateMemoKey::assignable(
@@ -1809,15 +1809,15 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
-    // Captured execution: only it records into the per-request counters.
+    let rctx = RequestContext::new(7783, Arc::from("/w/modeless_miss.ts"), false, None);
+    let _g = RequestContextGuard::install(Arc::clone(&rctx));
+    // Bind the request before the captured resolver snapshots its receivers.
     let view = host.resolver_store_view_read().into_owned_view();
     let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
         crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
     > = &captured;
     let store = SemanticGraphStore::new();
-    let rctx = RequestContext::new(7783, Arc::from("/w/modeless_miss.ts"), false, None);
-    let _g = RequestContextGuard::install(Arc::clone(&rctx));
     let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let key = verter_type_engine::semantic_query::RelateMemoKey::assignable(
@@ -4481,13 +4481,10 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
 /// and post-fix it is bumped on every fast-path return.
 #[test]
 fn execute_cooperative_warm_hit_skips_admission_overhead() {
-    let host = ctx_host();
-    // Captured execution: only it records into the per-request counters.
-    let view = host.resolver_store_view_read().into_owned_view();
-    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     use verter_type_engine::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS;
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/fast_path.ts"),
@@ -4496,6 +4493,9 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
 
     let ctx = RequestContext::new(7777, Arc::from("/w/fast_path.ts"), false, None);
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
+    // Bind the request before the captured resolver snapshots its receivers.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
 
     // Cold build to populate the warm slot. Records one Miss.
     let _ = store.execute_cooperative(
@@ -4828,9 +4828,6 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
-    // Captured execution: only it records into the per-request counters.
-    let view = host.resolver_store_view_read().into_owned_view();
-    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
@@ -4843,6 +4840,9 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
     // exactly when the helper fires.
     let ctx = RequestContext::new(7, Arc::from("/c.vue"), false, None);
     let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+    // Bind the request before the captured resolver snapshots its receivers.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
 
     // Force the cold-abort sweep deterministically on this store.
     let _force_guard = store.test_force_cold_abort_sweep();
@@ -4929,12 +4929,12 @@ fn inflight_aborted_retry_attributes_to_per_request_context() {
     let joiner_ctx = Arc::clone(&ctx);
     let joiner = thread::spawn(move || {
         let host = ctx_host();
-        // Captured execution: only it records into the per-request counters.
+        // Install the context on the JOINER thread — that's where
+        // the retry-bump helper runs — before the captured resolver
+        // snapshots its receivers.
+        let _ctx_guard = RequestContextGuard::install(Arc::clone(&joiner_ctx));
         let view = host.resolver_store_view_read().into_owned_view();
         let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
-        // Install the context on the JOINER thread — that's where
-        // the retry-bump helper runs.
-        let _ctx_guard = RequestContextGuard::install(Arc::clone(&joiner_ctx));
         joiner_store.execute_cooperative(
             &captured,
             joiner_key,
@@ -9901,6 +9901,51 @@ mod release_embedded_node_family_tests {
         ))
     }
 
+    /// A call whose one argument's literal provenance names `key` as a
+    /// member key: on a regular position's path, or only on a fresh read's.
+    fn resolve_call_with_member_key(
+        callee: SemanticNodeId,
+        key: SemanticNodeId,
+        fresh_read: bool,
+    ) -> SemanticQueryKey {
+        use verter_type_engine::semantic_query::{
+            ArgumentLiteralMode, ArgumentLiteralProvenance, ArgumentPathStep,
+            ArgumentRegularPosition, CallArgKey,
+        };
+        let path: Arc<[ArgumentPathStep]> = Arc::from([ArgumentPathStep::Member(key)]);
+        let provenance = if fresh_read {
+            ArgumentLiteralProvenance {
+                positions: Arc::from([]),
+                fresh_reads: Arc::from([path]),
+            }
+        } else {
+            ArgumentLiteralProvenance {
+                positions: Arc::from([ArgumentRegularPosition {
+                    path,
+                    literals: None,
+                }]),
+                fresh_reads: Arc::from([]),
+            }
+        };
+        let SemanticQueryKey::ResolveCall(mut call) = resolve_call_key(
+            callee,
+            CanonicalTypeSubstitution::empty(),
+            FlowNarrowingKey::empty(),
+        ) else {
+            unreachable!("resolve_call_key builds a ResolveCall")
+        };
+        call.args = Arc::from([CallArgKey::Eager {
+            first_pass: None,
+            ty: callee,
+            spread: false,
+            literal_mode: ArgumentLiteralMode::Widened,
+            literal_provenance: Some(Arc::new(provenance)),
+            context_sensitive: false,
+            const_view: None,
+        }]);
+        SemanticQueryKey::ResolveCall(call)
+    }
+
     fn flow_return_key(
         substitution: CanonicalTypeSubstitution,
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand,
@@ -10057,6 +10102,14 @@ mod release_embedded_node_family_tests {
                         FlowNarrowingKey::empty(),
                     )
                 }),
+            ),
+            (
+                "ResolveCall.args regular position member key",
+                Box::new(move |node| resolve_call_with_member_key(live, node, false)),
+            ),
+            (
+                "ResolveCall.args fresh read member key",
+                Box::new(move |node| resolve_call_with_member_key(live, node, true)),
             ),
             (
                 "ResolveCall.flow",

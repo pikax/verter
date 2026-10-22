@@ -1,3 +1,5 @@
+use verter_type_engine::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
 use super::dispatch_txn::RelationStep;
 use super::*;
 use crate::output_sinks::DispatchOutputTestExt;
@@ -375,22 +377,25 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
     assert_ne!(string_key, number_key, "only the pending argument differs");
     assert_eq!(key_for(string), string_key);
     let relation_key = dispatch.relate_key_for(string, string);
-    let mut selection_receipt = None;
+    let relation_query = relation_key.to_query_key();
+    let relation_builds =
+        || verter_type_engine::project_semantic_dispatch::raise::dispatch_cold_for(&relation_query);
+    let builds_before = relation_builds();
     for (key, expected) in [(&string_key, string), (&number_key, number)] {
         let cold = dispatch.execute_read(key.clone());
         assert!(matches!(cold.value().clone(), QueryResult::Value(node) if node == expected));
         assert!(!cold.result_is_partial() && !cold.cache_suppress());
-        let receipt = graph
-            .relation_published_carrier(&relation_key)
-            .expect("the decided relation is published")
-            .admission_seq;
-        if let Some(previous) = selection_receipt {
-            assert_eq!(
-                receipt, previous,
-                "branch-only frames reuse the original relation computation"
-            );
-        }
-        selection_receipt = Some(receipt);
+        // The decision reads its relation nested in its own evaluation: the
+        // relation completes for the request, never the family memo.
+        assert!(
+            graph.relation_published_carrier(&relation_key).is_none(),
+            "the decided relation completes outside the family memo"
+        );
+        assert_eq!(
+            relation_builds() - builds_before,
+            1,
+            "branch-only frames reuse the original relation computation"
+        );
         let count = graph.slot_candidate_count_for_tests(key);
         assert_eq!(count, 1);
         for _ in 0..3 {
@@ -399,6 +404,70 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
             assert_eq!(graph.slot_candidate_count_for_tests(key), count);
         }
     }
+}
+
+/// Every dispatcher of one request shares what the request completed: a
+/// relation one dispatcher's decision completed for the request answers a
+/// second dispatcher of the same request without being related again, and
+/// is held outside the family memo, so a dispatcher of another request
+/// relates it for itself. The completions are released with the request.
+#[test]
+fn dispatchers_of_one_request_share_its_completed_relations() {
+    let host = host();
+    let reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests;
+    let request = verter_type_engine::request_context::install_test_request_for("/w/shared.ts");
+    let first = ProjectSemanticDispatch::new(&host);
+    let _builder = first.enter_construction_scope();
+    let graph = first.graph_arc();
+    let string = primitive(graph, PrimitiveKind::String);
+    let number = primitive(graph, PrimitiveKind::Number);
+    let decision = SemanticQueryKey::Conditional {
+        check: string,
+        extends: string,
+        true_branch: string,
+        false_branch: number,
+        distributive: false,
+        pending: None,
+    };
+    let read = first.execute_read(decision);
+    assert!(matches!(read.value().clone(), QueryResult::Value(node) if node == string));
+    let relation_key = first.relate_key_for(string, string);
+    assert!(
+        graph.relation_published_carrier(&relation_key).is_none(),
+        "the decision's relation completes outside the family memo"
+    );
+    assert!(first.request_completions_for_tests() > 0);
+
+    let second = ProjectSemanticDispatch::new(&host);
+    let before = reductions();
+    assert!(matches!(
+        second.execute_relate(relation_key.clone()),
+        RelationStep::Assignable { .. }
+    ));
+    assert_eq!(
+        reductions() - before,
+        0,
+        "a dispatcher of the same request reads the relation the request completed"
+    );
+
+    drop(second);
+    drop(request);
+    let _other = verter_type_engine::request_context::install_test_request_for("/w/shared.ts");
+    let third = ProjectSemanticDispatch::new(&host);
+    assert_eq!(
+        third.request_completions_for_tests(),
+        0,
+        "another request starts with no completions"
+    );
+    let before = reductions();
+    assert!(matches!(
+        third.execute_relate(relation_key),
+        RelationStep::Assignable { .. }
+    ));
+    assert!(
+        reductions() - before > 0,
+        "a dispatcher of another request relates it for itself"
+    );
 }
 
 #[test]
@@ -6246,7 +6315,7 @@ fn dispatch_host_adapter_routes_per_base_scope() {
         canonical_id: verter_type_expr::OwnedStr::from("/w/scope_b.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
-        local_scope: Some(5),
+        local_scope: Some(NodeLocalScopeId::Lexical(LocalScopeId(5))),
     };
 
     let anchor_a = graph.intern_node_with_scope(
@@ -28585,6 +28654,7 @@ fn subtree_references_node_descends_object_spread_program_effects() {
     });
     let program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28637,7 +28707,7 @@ fn extends_pattern_declares_infer_descends_object_spread_program() {
     let (infer, _parameter) = reverse_test_binders(&graph, "U", 0);
     let program_with = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-            verter_type_engine::semantic_query::ObjectSpreadProgram {
+            verter_type_engine::semantic_query::ObjectSpreadProgram { is_literal: true,
                 effects: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![
                         verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28707,6 +28777,7 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28796,6 +28867,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28909,6 +28981,7 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -28999,6 +29072,7 @@ fn mapped_type_over_open_program_source_defers() {
     });
     let open_source = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -29141,6 +29215,7 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -29241,6 +29316,7 @@ fn keyof_intersection_poisons_through_union_nesting() {
     });
     let open_program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -29317,6 +29393,7 @@ fn excess_arm_knows_property_reads_program_targets() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -30985,8 +31062,8 @@ fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
 #[test]
 fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
     // GROWING-GENERIC discriminator. A conditional generic whose every
-    // tail step applies itself to a FRESH node id (`type Grow<T> = T extends
-    // never ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
+    // tail step applies itself to a FRESH node id (`type Grow<T> = [T]
+    // extends [never] ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
     // so `Grow<string>` → `Grow<[string]>` → `Grow<[[string]]>` → …, distinct
     // `InstantiationRef` ids the `visited` set can NEVER match) DEFEATS
     // visited-ID cycle detection. Under a ledger too small for its tail run
@@ -30998,11 +31075,34 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     // operational truncation ALSO refuses warm admission (`result_is_partial`
     // + `cache_suppress`). Under a ledger with room, the run reaches its tail
     // budget and `Grow<string>` is the checker's TS2589 recovery; a lower
-    // tail budget than production's stands in on the same path.
+    // tail budget than production's stands in on the same path. Its check
+    // wraps the parameter (`[T]`), so no uniform-growth certificate covers
+    // it; the bare-parameter form (`T extends never ? never : Grow<[T]>`) is
+    // a certified divergence instead — the same complete TS2589 under the
+    // starved ledger, kept.
     //
     // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
-    // is `any` under TS2589.
-    const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    // is `any` under TS2589, in both forms.
+    const CERTIFIED: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    let (outcome, partial, suppressed, instantiated, _) = grow_string_demand(CERTIFIED, Some(256));
+    assert!(
+        matches!(outcome, StructuralFactDemandOutcome::Complete(_)) && !partial && !suppressed,
+        "a certified divergence is complete under a starved ledger, got {outcome:?}"
+    );
+    assert!(
+        matches!(
+            &instantiated,
+            Some(SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                basis: verter_type_engine::semantic_query::RecoveryBasis::Certified,
+                ..
+            })) if diagnostic.code
+                == verter_type_engine::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+        ),
+        "the bare-parameter growth is the certified TS2589 recovery, got {instantiated:?}"
+    );
+
+    const GROW: &str = "export type Grow<T> = [T] extends [never] ? never : Grow<[T]>;\n";
     let (outcome, partial, suppressed, _, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
         StructuralFactDemandOutcome::Recovered { reasons, .. }

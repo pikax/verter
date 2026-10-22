@@ -239,6 +239,7 @@ inline_only!(
     super::MacroOwnBodyStamp,
     super::MergeRoleStamp,
     super::BinderScopeId,
+    super::NodeLocalScopeId,
     super::PartialReasonSet,
     super::SemanticQueryValueTag,
     super::CheckerDiagnostic,
@@ -545,7 +546,10 @@ impl PayloadHeap for verter_type_expr::facts::ValueDeclIdentityPart {
 
 impl PayloadHeap for ObjectSpreadProgram {
     fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
-        let Self { effects } = self;
+        let Self {
+            effects,
+            is_literal: _,
+        } = self;
         effects.visit_payload_heap(visitor);
     }
 }
@@ -688,11 +692,13 @@ impl PayloadHeap for EnumLiteralType {
     fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
         let Self {
             enum_decl,
+            module_specifier,
             member,
             base,
             member_count,
         } = self;
         enum_decl.visit_payload_heap(visitor);
+        module_specifier.visit_payload_heap(visitor);
         member.visit_payload_heap(visitor);
         base.visit_payload_heap(visitor);
         member_count.visit_payload_heap(visitor);
