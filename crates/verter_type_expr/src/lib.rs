@@ -70,8 +70,8 @@ pub mod span_origins;
 pub mod facts;
 pub use facts::{
     merge_route_demands, ConstructorBindingEntry, ConstructorBindingOutcome, DeclBindingKey,
-    RouteDemand, RouteKeySet, RuntimeConstructorIdentity, TopLevelOwnerId, TopLevelOwnerKind,
-    ValueDeclIdentityPart,
+    OwnerDeclarationScope, RouteDemand, RouteKeySet, RuntimeConstructorIdentity, TopLevelOwnerId,
+    TopLevelOwnerKind, ValueDeclIdentityPart,
 };
 
 mod indexed_expression;

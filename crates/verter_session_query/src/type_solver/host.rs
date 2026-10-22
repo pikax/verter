@@ -70,10 +70,15 @@ impl std::fmt::Display for ResolvedRootIdentity {
         } else {
             write!(
                 f,
-                "{}::{:?}({})::{}",
+                "{}::{:?}({}){}::{}",
                 self.canonical_id,
                 self.owner.kind(),
                 self.owner.ordinal(),
+                if self.owner.is_global_augmentation() {
+                    "+global"
+                } else {
+                    ""
+                },
                 self.symbol_name
             )
         }

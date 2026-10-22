@@ -851,10 +851,17 @@ impl BinderScopeId {
         let mut buf: Vec<u8> = Vec::with_capacity(32 + name.len());
         buf.extend_from_slice(Self::SALT);
         buf.push(tag);
-        buf.push(match owner.kind() {
+        let kind = match owner.kind() {
             verter_type_expr::TopLevelOwnerKind::Module => b'M',
             verter_type_expr::TopLevelOwnerKind::Instance => b'I',
             verter_type_expr::TopLevelOwnerKind::Frontmatter => b'F',
+        };
+        // A `declare global` contribution's owner encodes its kind in lower
+        // case, so no lexical owner's bytes change.
+        buf.push(if owner.is_global_augmentation() {
+            kind.to_ascii_lowercase()
+        } else {
+            kind
         });
         buf.extend_from_slice(&owner.ordinal().to_le_bytes());
         buf.extend_from_slice(name.as_bytes());
