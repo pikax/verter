@@ -89,6 +89,12 @@ fn peak_live_bytes() -> i64 {
     PEAK_LIVE_BYTES.with(Cell::get)
 }
 
+/// The bytes allocated on this thread since the last reset and not freed
+/// since.
+fn live_bytes() -> i64 {
+    LIVE_BYTES.with(Cell::get)
+}
+
 fn reset_alloc_counter() {
     ALLOC_COUNTER.with(|counter| counter.set(0));
     ALLOC_BYTES.with(|bytes| bytes.set(0));

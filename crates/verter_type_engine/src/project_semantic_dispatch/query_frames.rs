@@ -77,10 +77,13 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 
 /// Where each relation operand's carrier walk stopped in a decision's last
-/// run, by operand and checking site: the node whose step reached a read
-/// without an answer. Every node before it settled from answers the frame
-/// keeps, so the next run's operand demand resumes there.
-type OperandResumes = FxHashMap<(SemanticNodeId, TupleSplicePosition), SemanticNodeId>;
+/// run, by operand and checking site: the point whose step reached a read
+/// without an answer, with the instantiations the walk took to reach it.
+/// Every node before it settled from answers the frame keeps, so the next
+/// run's operand demand resumes there, still counting toward the
+/// instantiation budget the walk from the operand would reach.
+type OperandResumes =
+    FxHashMap<(SemanticNodeId, TupleSplicePosition), super::relation::CarrierWalkPoint>;
 
 /// What a query answered to the frame that needed it: the read (with the
 /// answering result's cost receipt, for the consumer's recording), and the
@@ -2232,7 +2235,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             depth,
             nested: 0,
         }));
-        let demanded = self.observe_read(|| self.demand_relation_operands(operands));
+        let demanded = self.observe_read(|| {
+            let _ = self.demand_relation_operands(operands);
+        });
         let _ = demanded.discard();
         let DecisionSeam {
             answers,
@@ -2264,7 +2269,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// frame keeps, and what the demand observes is dropped, so skipping
     /// them changes nothing the decision decides: its relation still walks
     /// each operand whole, once, when every hop is answered.
-    pub(super) fn demand_relation_operands(&self, operands: [SemanticNodeId; 2]) {
+    ///
+    /// Each operand's entry is the checker recovery its walk ended at, every
+    /// hop answered: the error type the operand is, such as the TS2589
+    /// recovery of a walk that reached the instantiation budget.
+    pub(super) fn demand_relation_operands(
+        &self,
+        operands: [SemanticNodeId; 2],
+    ) -> [Option<SemanticNodeId>; 2] {
         let site = self.checking_site.get();
         let needs_now = || {
             self.decision_seam
@@ -2272,16 +2284,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .as_ref()
                 .map_or(0, |seam| seam.needs.len())
         };
-        for operand in operands {
+        operands.map(|operand| {
             let start = self
                 .decision_seam
                 .borrow()
                 .as_ref()
                 .and_then(|seam| seam.resumes.get(&(operand, site)).copied())
-                .unwrap_or(operand);
+                .unwrap_or(super::relation::CarrierWalkPoint {
+                    node: operand,
+                    depth: 0,
+                });
             let needs_before = needs_now();
             let mut resume = start;
-            let _ = self.unwrap_identity_carrier_walk(start, &mut |reached| {
+            let walked = self.unwrap_identity_carrier_walk(start, &mut |reached| {
                 if needs_now() == needs_before {
                     resume = reached;
                 }
@@ -2289,7 +2304,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.with_decision_seam(|seam| {
                 seam.resumes.insert((operand, site), resume);
             });
-        }
+            match walked {
+                super::relation::IdentityCarrierUnwrap::Concrete(node)
+                    if needs_now() == needs_before
+                        && self.is_conditional_checker_recovery(node) =>
+                {
+                    Some(node)
+                }
+                _ => None,
+            }
+        })
     }
 
     /// Carry a flow return's frame on: record a delivery as the answer to

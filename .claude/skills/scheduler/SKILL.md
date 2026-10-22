@@ -143,9 +143,11 @@ terminal-failure indices; no removal path scans a DAG-wide map.
 reports the edge store, its file index and the blocker reference index as
 membership counts plus backing capacity in every build — including the summed
 capacity of the nested per-generation and per-canonical hash tables, which keep
-their backing while any member survives; reset releases those tables' backing
-storage. `TaskRegistry::wait_graph_occupancy` reports the wait-for graph the
-same way, including the per-producer waiter sets.
+their backing while any member survives. A blocker-reference bucket tracks
+its allocated capacity alongside its counts: hash-table tombstones can lower
+`HashMap::capacity()` without releasing backing storage. Dropping an empty
+bucket or resetting releases that backing. `TaskRegistry::wait_graph_occupancy`
+reports the wait-for graph the same way, including the per-producer waiter sets.
 
 `remove` marks the object retired, signals Shutdown, cancels work, scrubs records,
 unpublishes the node and publishes its source-root Absent state under one DAG
