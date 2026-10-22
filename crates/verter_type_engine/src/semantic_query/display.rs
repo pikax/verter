@@ -238,16 +238,201 @@ pub(crate) struct DisplayContext {
     /// `strictNullChecks: false` the checker never builds them, so a
     /// message names neither. A union of only those arms prints whole.
     pub(crate) omit_nullish: bool,
+    /// The checker's node-builder length count, kept while printing a type
+    /// for a message ([`Self::for_checker`]) so its abbreviation is the
+    /// checker's.
+    length: Option<NodeBuilderLength>,
+    /// What each mapped type a message prints settled to, materialized by
+    /// the consumer ([`Self::with_settled_mapped`]): the checker prints a
+    /// mapped type that is not generic as the object type it resolves to.
+    settled_mapped: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    /// The mapped types a message print met with no settled form, for the
+    /// consumer to materialize ([`Self::unsettled_mapped`]).
+    unsettled_mapped: Vec<SemanticNodeId>,
 }
 
+/// `typeToString`'s clip of a message's type text: a text of at least twice
+/// the truncation length keeps its first that-many-minus-three bytes and
+/// `...`. The checker clips bytes, so a character the clip splits prints
+/// as U+FFFD.
+pub(crate) fn clip_checker_text(printed: String) -> String {
+    let clip = super::checker_policy::MAXIMUM_TRUNCATION_LENGTH * 2;
+    if printed.len() < clip {
+        return printed;
+    }
+    let kept = String::from_utf8_lossy(&printed.as_bytes()[..clip - "...".len()]);
+    format!("{kept}...")
+}
+
+/// The running length the checker's node builder counts while it prints one
+/// type (`approximateLength`), and whether it has started abbreviating
+/// (`checkTruncationLength`'s latch). TypeScript 7.0.2 counts in UTF-8
+/// bytes, per node kind, as the node is built rather than as its text
+/// prints; a list or member set past
+/// [`MAXIMUM_TRUNCATION_LENGTH`](super::checker_policy::MAXIMUM_TRUNCATION_LENGTH)
+/// elides its remaining entries.
+#[derive(Debug, Default)]
+struct NodeBuilderLength {
+    approximate: usize,
+    truncating: bool,
+    /// An upper bound on what the node kinds whose count is not modelled
+    /// add: while it could take the count past the truncation length, which
+    /// entries the checker elides is not known.
+    unmodeled: usize,
+}
+
+/// Printed in place of what the display depth cap or a missing node cut
+/// from a checker message: a noncharacter, so its position in the printed
+/// text tells whether the cut is inside what the message keeps.
+const CHECKER_CUT: &str = "\u{FDD0}";
+
 impl DisplayContext {
-    /// A context printing as the checker does when `strictNullChecks` is
-    /// `omit_nullish`'s opposite.
+    /// A context printing as the checker prints a type in a message when
+    /// `strictNullChecks` is `omit_nullish`'s opposite, abbreviating as its
+    /// node builder does. Finish the print with [`Self::checker_text`].
     pub(crate) fn for_checker(strict_null_checks: bool) -> Self {
         Self {
             omit_nullish: !strict_null_checks,
+            length: Some(NodeBuilderLength::default()),
             ..Self::default()
         }
+    }
+
+    /// The text a message prints for `printed`, a type printed under this
+    /// context: `typeToString`'s clip of a text of at least twice the
+    /// truncation length to its first that-many-minus-three bytes and
+    /// `...`. `None` when the print cannot be the checker's: a node kind
+    /// whose node-builder count is not modelled could have moved where the
+    /// checker abbreviates, or the depth cap cut a part the message keeps.
+    pub(crate) fn checker_text(&self, printed: String) -> Option<String> {
+        use super::checker_policy::MAXIMUM_TRUNCATION_LENGTH;
+        let length = self.length.as_ref()?;
+        if length.unmodeled > 0
+            && (length.truncating
+                || length.approximate + length.unmodeled > MAXIMUM_TRUNCATION_LENGTH)
+        {
+            return None;
+        }
+        if let Some(cut) = printed.find(CHECKER_CUT) {
+            // Every byte before the cut is the checker's; it keeps fewer.
+            if cut < MAXIMUM_TRUNCATION_LENGTH * 2 {
+                return None;
+            }
+        }
+        Some(clip_checker_text(printed))
+    }
+
+    /// This context printing every part, without the node builder's
+    /// abbreviation.
+    pub(crate) fn unabbreviated(mut self) -> Self {
+        self.length = None;
+        self
+    }
+
+    /// This context printing each mapped type `settled` names as the object
+    /// type it settled to, as the checker prints a mapped type that is not
+    /// generic (`createTypeNodeFromObjectType`).
+    pub(crate) fn with_settled_mapped(
+        mut self,
+        settled: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    ) -> Self {
+        self.settled_mapped = settled;
+        self
+    }
+
+    /// The mapped types a checker print met that its settled forms did not
+    /// name, in the order it met them.
+    pub(crate) fn unsettled_mapped(&self) -> &[SemanticNodeId] {
+        &self.unsettled_mapped
+    }
+
+    /// The settled forms this context prints mapped types by.
+    pub(crate) fn into_settled_mapped(
+        self,
+    ) -> rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> {
+        self.settled_mapped
+    }
+
+    fn measuring(&self) -> bool {
+        self.length.is_some()
+    }
+
+    /// Count `bytes` the node builder adds for what it builds next.
+    fn add_length(&mut self, bytes: usize) {
+        if let Some(length) = &mut self.length {
+            length.approximate += bytes;
+        }
+    }
+
+    /// Whether the node builder abbreviates from here
+    /// (`checkTruncationLength`): once the count passes the truncation
+    /// length it does for the rest of the print.
+    fn check_truncation(&mut self) -> bool {
+        let Some(length) = &mut self.length else {
+            return false;
+        };
+        if !length.truncating {
+            length.truncating =
+                length.approximate > super::checker_policy::MAXIMUM_TRUNCATION_LENGTH;
+        }
+        length.truncating
+    }
+
+    /// Record `printed`, the text of a node whose node-builder count is not
+    /// modelled, by a bound on what the checker counts for it.
+    fn unmodeled(&mut self, printed: &str) {
+        if let Some(length) = &mut self.length {
+            length.unmodeled += 2 * (printed.len() + 1);
+        }
+    }
+
+    /// The text of a part the depth cap or a missing node cut.
+    fn cut(&self) -> String {
+        if self.measuring() {
+            CHECKER_CUT.to_owned()
+        } else {
+            TRUNCATION_TOKEN.to_owned()
+        }
+    }
+
+    /// The node builder's list of type nodes (`mapToTypeNodes`): each entry
+    /// counts two bytes for its separator before it builds, and once the
+    /// count passes the truncation length the rest of the list is elided —
+    /// a bare list (a union's or an intersection's members) as
+    /// `... N more ...` before its last entry, any other list (type
+    /// arguments, tuple elements) as `...` alone when it begins elided.
+    /// Every entry renders when no count is kept.
+    fn type_node_list<T: Copy>(
+        &mut self,
+        entries: &[T],
+        bare: bool,
+        mut render: impl FnMut(&mut Self, T) -> String,
+    ) -> Vec<String> {
+        let Some(&last) = entries.last() else {
+            return Vec::new();
+        };
+        if self.check_truncation() {
+            if !bare {
+                return vec!["...".to_owned()];
+            }
+            if entries.len() > 2 {
+                let first = render(self, entries[0]);
+                let elided = format!("... {} more ...", entries.len() - 2);
+                return vec![first, elided, render(self, last)];
+            }
+        }
+        let mut rendered = Vec::with_capacity(entries.len());
+        for (index, &entry) in entries.iter().enumerate() {
+            let shown = index + 1;
+            if self.check_truncation() && shown + 2 < entries.len() - 1 {
+                rendered.push(format!("... {} more ...", entries.len() - shown));
+                rendered.push(render(self, last));
+                break;
+            }
+            self.add_length(2);
+            rendered.push(render(self, entry));
+        }
+        rendered
     }
 
     fn contains(&self, node: &SemanticNodeId) -> bool {
@@ -422,10 +607,12 @@ pub(crate) fn display_type_node(
 
 /// Where a checker-spelled union print places one constituent: the
 /// intrinsic primitives in their creation order — `any`-class first, then
-/// `string`, `number`, `bigint`, `symbol`, `boolean`, `null`, `undefined` —
-/// before the types a program declares, with the literals a check interned
-/// last. Measured on TypeScript 7.0.2, whose unions sort by type id
-/// (`sortAndDeduplicateTypes`) and intern those classes in this order.
+/// `string`, `number`, `bigint`, `symbol`, `boolean` — before the types a
+/// program declares, with the literals a check interned after them, and
+/// `null` then `undefined` last of all, where the printer moves them
+/// (`formatUnionTypes`): `"q" | undefined`. Measured on TypeScript 7.0.2,
+/// whose unions sort by type id (`sortAndDeduplicateTypes`) and intern
+/// those classes in this order.
 fn checker_union_constituent_rank(
     store: &SemanticGraphStore,
     arm: &crate::semantic_query::PrintedUnionArm,
@@ -446,13 +633,13 @@ fn checker_union_constituent_rank(
         Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => 3,
         Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => 4,
         Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 5,
-        Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => 6,
-        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => 7,
         Some(
             SemanticNodeData::Literal(_)
             | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::TemplateLiteral { .. },
         ) => 9,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => 10,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => 11,
         _ => 8,
     }
 }
@@ -497,21 +684,24 @@ fn display_resolved_type_node(
     visited: &mut DisplayContext,
 ) -> DisplayString {
     if depth == 0 {
-        return DisplayString(TRUNCATION_TOKEN.to_string());
+        return DisplayString(visited.cut());
     }
     let data = match store.node_data(id) {
         Some(d) => d,
         // Unresolved / un-interned id — render the truncation token rather than
         // panicking (display tolerates a torn graph).
-        None => return DisplayString(TRUNCATION_TOKEN.to_string()),
+        None => return DisplayString(visited.cut()),
     };
     // Cycle break: a node already on the ancestor stack renders as a
     // back-reference (its name when available, else `…`) instead of recursing.
     if visited.contains(&id) {
-        return DisplayString(back_ref_token(&data));
+        return DisplayString(back_ref_token(&data, visited));
     }
     visited.push(id);
     let child_depth = depth - 1;
+    // A node kind whose node-builder count is not modelled bounds it by its
+    // printed text instead.
+    let mut unmodeled = false;
     let out = match data.as_ref() {
         // Transparent structural indirection — always followed (it carries a
         // target, not a name); raise.rs treats it identically.
@@ -519,111 +709,7 @@ fn display_resolved_type_node(
             display_type_node(store, *target, needs, child_depth, visited).0
         }
         SemanticNodeData::Object(surface) => {
-            let mut parts: Vec<String> = Vec::new();
-            for member in surface.members.iter() {
-                let mut s = String::new();
-                if member.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
-                    s.push_str("readonly ");
-                }
-                s.push_str(&match &member.key {
-                    crate::semantic_query::AuthoredPropertyKey::String(name)
-                        if needs.contains(DisplayFacet::CheckerSpelling)
-                            && !is_bare_member_name(name) =>
-                    {
-                        double_quoted(name)
-                    }
-                    crate::semantic_query::AuthoredPropertyKey::String(name) => {
-                        member_name_token(name)
-                    }
-                    crate::semantic_query::AuthoredPropertyKey::Number(number) => {
-                        number.to_string()
-                    }
-                    crate::semantic_query::AuthoredPropertyKey::UniqueSymbol(identity) => {
-                        format!("[unique symbol {}]", identity.symbol)
-                    }
-                    crate::semantic_query::AuthoredPropertyKey::Computed(node) => format!(
-                        "[{}]",
-                        display_type_node(store, *node, needs, child_depth, visited).0
-                    ),
-                });
-                if member.optional {
-                    s.push('?');
-                }
-                if member.method_kind.is_some()
-                    && resolves_to_function(store, member.value, visited)
-                {
-                    s.push_str(&render_signature_colon(
-                        store,
-                        member.value,
-                        "",
-                        needs,
-                        child_depth,
-                        visited,
-                    ));
-                } else if member.optional
-                    && needs.contains(DisplayFacet::CheckerSpelling)
-                    && !visited.omit_nullish
-                    && !holds_undefined(store, member.value)
-                {
-                    // Under `strictNullChecks` the checker prints an
-                    // optional property's type with `undefined` added.
-                    s.push_str(": ");
-                    s.push_str(&render_operand(
-                        store,
-                        member.value,
-                        needs,
-                        child_depth,
-                        visited,
-                        Prec::Union,
-                    ));
-                    s.push_str(" | undefined");
-                } else {
-                    s.push_str(": ");
-                    s.push_str(
-                        &display_type_node(store, member.value, needs, child_depth, visited).0,
-                    );
-                }
-                parts.push(s);
-            }
-            for sig in surface.call_signatures.iter() {
-                parts.push(render_signature_colon(
-                    store,
-                    *sig,
-                    "",
-                    needs,
-                    child_depth,
-                    visited,
-                ));
-            }
-            for sig in surface.construct_signatures.iter() {
-                parts.push(render_signature_colon(
-                    store,
-                    *sig,
-                    "new ",
-                    needs,
-                    child_depth,
-                    visited,
-                ));
-            }
-            for index in surface.index_signatures.iter() {
-                let mut s = String::new();
-                if index.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
-                    s.push_str("readonly ");
-                }
-                s.push_str(&format!(
-                    "[key: {}]: {}",
-                    display_type_node(store, index.key_type, needs, child_depth, visited).0,
-                    display_type_node(store, index.value_type, needs, child_depth, visited).0
-                ));
-                parts.push(s);
-            }
-            if parts.is_empty() {
-                "{}".to_string()
-            } else if needs.contains(DisplayFacet::CheckerSpelling) {
-                format!("{{ {}; }}", parts.join("; "))
-            } else {
-                format!("{{ {} }}", parts.join("; "))
-            }
+            render_object_surface(store, surface, needs, child_depth, visited)
         }
         SemanticNodeData::ObjectSpreadProgram(program) => {
             use crate::semantic_query::{AuthoredPropertyKey, ObjectConstructionEffect};
@@ -638,6 +724,7 @@ fn display_resolved_type_node(
                     display_type_node(store, *node, needs, child_depth, visited).0
                 ),
             };
+            unmodeled = true;
             let mut parts = Vec::with_capacity(program.effects.len());
             for effect in program.effects.iter() {
                 let part = match effect {
@@ -689,69 +776,44 @@ fn display_resolved_type_node(
             // A union arm only parenthesises a LOOSER binder (Conditional /
             // Function). A same-kind nested union arm (`A | (B | C)`) and a
             // tighter intersection arm (`A | B & C`) both render bare.
-            let mut printed = crate::semantic_query::printed_union_arms(store, arms);
-            if visited.omit_nullish {
-                let is_nullish = |arm: &crate::semantic_query::PrintedUnionArm| {
-                    matches!(
-                        arm,
-                        crate::semantic_query::PrintedUnionArm::Node(node)
-                            if matches!(
-                                store.node_data(*node).as_deref(),
-                                Some(SemanticNodeData::Primitive(
-                                    PrimitiveKind::Null | PrimitiveKind::Undefined
-                                ))
-                            )
-                    )
-                };
-                if printed.iter().any(|arm| !is_nullish(arm)) {
-                    printed.retain(|arm| !is_nullish(arm));
-                }
-            }
-            // A checker-spelled union prints its constituents in the
-            // checker's own id order (`sortAndDeduplicateTypes`), not the
-            // stored one: the intrinsics by their creation — `string`,
-            // `number`, `bigint`, `boolean`, `symbol`, then `null` and
-            // `undefined` — before the types a program declares, with the
-            // literals a check interned last. The sort is stable, so
-            // constituents that timeline leaves unranked keep the stored
-            // order.
-            if needs.contains(DisplayFacet::CheckerSpelling) {
-                printed.sort_by_key(|arm| checker_union_constituent_rank(store, arm));
-            }
-            let rendered: Vec<String> = printed
-                .into_iter()
-                .map(|arm| match arm {
-                    crate::semantic_query::PrintedUnionArm::Node(a) => {
-                        render_operand(store, a, needs, child_depth, visited, Prec::Union)
-                    }
-                    crate::semantic_query::PrintedUnionArm::Enum(decl) => {
-                        decl.decl_name.to_string()
-                    }
-                })
-                .collect();
+            let printed = printed_union_arms_in_order(store, arms, needs, visited);
             if needs.contains(DisplayFacet::TruncateLargeUnions)
-                && rendered.len() > UNION_TRUNCATION_THRESHOLD
+                && printed.len() > UNION_TRUNCATION_THRESHOLD
             {
-                let head = rendered[..UNION_TRUNCATION_THRESHOLD].join(" | ");
-                format!("{head} | {TRUNCATION_TOKEN}")
+                let rendered: Vec<String> = printed[..UNION_TRUNCATION_THRESHOLD]
+                    .iter()
+                    .map(|arm| match arm {
+                        crate::semantic_query::PrintedUnionArm::Node(a) => {
+                            render_operand(store, *a, needs, child_depth, visited, Prec::Union)
+                        }
+                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                            decl.decl_name.to_string()
+                        }
+                    })
+                    .collect();
+                format!("{} | {TRUNCATION_TOKEN}", rendered.join(" | "))
             } else {
-                rendered.join(" | ")
+                let entries: Vec<Option<&crate::semantic_query::PrintedUnionArm>> =
+                    printed.iter().map(Some).collect();
+                render_union_entries(store, &entries, needs, child_depth, visited)
             }
         }
         SemanticNodeData::Intersection(arms) => {
             // An intersection arm parenthesises looser binders (Conditional /
             // Function → Loose, and Union), but NOT a same-kind nested
             // intersection (`A & (B & C)` renders `A & B & C`).
-            let rendered: Vec<String> = arms
-                .iter()
-                .map(|a| render_operand(store, *a, needs, child_depth, visited, Prec::Intersection))
-                .collect();
-            rendered.join(" & ")
+            let arms: Vec<SemanticNodeId> = arms.iter().copied().collect();
+            visited
+                .type_node_list(&arms, true, |visited, a| {
+                    render_operand(store, a, needs, child_depth, visited, Prec::Intersection)
+                })
+                .join(" & ")
         }
         // A same-name merged declaration renders a peer-merged surface from a
         // transient projection. Display stays read-only: semantic consumers that
         // need a graph node materialize through the reducer before rendering.
         SemanticNodeData::MergedDecl { contributors } => {
+            unmodeled = true;
             let surface =
                 crate::project_semantic_dispatch::walk::reduce_merged_decl_display_surface(
                     store,
@@ -759,16 +821,31 @@ fn display_resolved_type_node(
                 );
             render_merged_decl_surface(store, &surface, needs, child_depth, visited)
         }
-        SemanticNodeData::Primitive(kind) => primitive_keyword(*kind).to_string(),
+        SemanticNodeData::Primitive(kind) => {
+            visited.add_length(primitive_length(*kind));
+            primitive_keyword(*kind).to_string()
+        }
         SemanticNodeData::Literal(LiteralValue::String(s))
             if needs.contains(DisplayFacet::CheckerSpelling) =>
         {
+            visited.add_length(s.len() + 2);
             double_quoted(s)
         }
-        SemanticNodeData::Literal(value) => literal_token(value),
-        SemanticNodeData::EnumLiteral(literal) => literal.printed_name(),
+        SemanticNodeData::Literal(value) => {
+            visited.add_length(literal_length(value));
+            literal_token(value)
+        }
+        // A member prints as a reference through its enum (`E.A`), which the
+        // node builder counts as the enum's.
+        SemanticNodeData::EnumLiteral(literal) => {
+            visited.add_length(reference_length(&literal.enum_decl.decl_name));
+            literal.printed_name()
+        }
         // Error carrier riding through display — a concise token, NOT a panic.
-        SemanticNodeData::Opaque(_) => "<error>".to_string(),
+        SemanticNodeData::Opaque(_) => {
+            unmodeled = true;
+            "<error>".to_string()
+        }
         SemanticNodeData::Array { element, readonly } => {
             // The leading-`readonly` postfix-base parenthesisation is handled
             // uniformly inside `render_operand` for `Prec::Postfix` operands.
@@ -781,27 +858,71 @@ fn display_resolved_type_node(
             }
         }
         SemanticNodeData::Tuple { elements, readonly } => {
-            let mut parts: Vec<String> = Vec::new();
-            for el in elements.iter() {
+            // The node builder counts an element's type alone: a label, a
+            // `?` and a `...` add nothing. Under `strictNullChecks` the
+            // checker prints an optional element's type with `undefined`
+            // added, as it does an optional property's.
+            let checker = needs.contains(DisplayFacet::CheckerSpelling);
+            let elements: Vec<&crate::semantic_query::TupleElement> = elements.iter().collect();
+            let parts = visited.type_node_list(&elements, false, |visited, el| {
                 let mut s = String::new();
                 if el.rest {
                     s.push_str("...");
                 }
+                let adds_undefined = el.optional
+                    && checker
+                    && !visited.omit_nullish
+                    && !holds_undefined(store, el.value);
                 if let Some(label) = &el.label {
                     s.push_str(label);
                     if el.optional {
                         s.push('?');
                     }
                     s.push_str(": ");
-                    s.push_str(&display_type_node(store, el.value, needs, child_depth, visited).0);
+                    if adds_undefined {
+                        s.push_str(&render_with_undefined(
+                            store,
+                            el.value,
+                            needs,
+                            child_depth,
+                            visited,
+                        ));
+                    } else {
+                        s.push_str(
+                            &display_type_node(store, el.value, needs, child_depth, visited).0,
+                        );
+                    }
+                } else if adds_undefined && settles_to_never(store, el.value, visited) {
+                    // `never` with `undefined` added is `undefined`, no union.
+                    s.push_str(&render_with_undefined(
+                        store,
+                        el.value,
+                        needs,
+                        child_depth,
+                        visited,
+                    ));
+                    s.push('?');
+                } else if adds_undefined {
+                    let value = render_with_undefined(store, el.value, needs, child_depth, visited);
+                    s.push_str(&format!("({value})?"));
+                } else if el.optional && checker {
+                    s.push_str(&render_operand(
+                        store,
+                        el.value,
+                        needs,
+                        child_depth,
+                        visited,
+                        Prec::Postfix,
+                    ));
+                    s.push('?');
                 } else {
                     s.push_str(&display_type_node(store, el.value, needs, child_depth, visited).0);
                     if el.optional {
                         s.push('?');
                     }
                 }
-                parts.push(s);
-            }
+                s
+            });
             let body = format!("[{}]", parts.join(", "));
             if *readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
                 format!("readonly {body}")
@@ -826,27 +947,48 @@ fn display_resolved_type_node(
                 }
             }
             s.push('`');
+            visited.add_length(2);
             s
         }
         SemanticNodeData::KeyOf { base } => {
+            visited.add_length(6);
             let inner = render_operand(store, *base, needs, child_depth, visited, Prec::Prefix);
             format!("keyof {inner}")
         }
         SemanticNodeData::IndexedAccess { object, index } => {
             let obj = render_operand(store, *object, needs, child_depth, visited, Prec::Postfix);
             let key = match index {
-                IndexKey::String(s) => single_quoted(s),
-                IndexKey::Number(n) => n.to_string(),
+                IndexKey::String(s) => {
+                    visited.add_length(s.len() + 2);
+                    single_quoted(s)
+                }
+                IndexKey::Number(n) => {
+                    let n = n.to_string();
+                    visited.add_length(n.len());
+                    n
+                }
                 IndexKey::UniqueSymbol(identity) => {
+                    unmodeled = true;
                     format!("unique symbol {}", identity.symbol)
                 }
                 IndexKey::Computed(node) => {
                     display_type_node(store, *node, needs, child_depth, visited).0
                 }
             };
+            visited.add_length(2);
             format!("{obj}[{key}]")
         }
+        // A mapped type that is not generic prints as the object type it
+        // resolves to, which the consumer settled.
+        SemanticNodeData::Mapped { .. } if visited.settled_mapped.contains_key(&id) => {
+            let settled = visited.settled_mapped[&id];
+            display_type_node(store, settled, needs, child_depth, visited).0
+        }
         SemanticNodeData::Mapped { source: _, mapper } => {
+            if visited.measuring() && !visited.unsettled_mapped.contains(&id) {
+                visited.unsettled_mapped.push(id);
+            }
+            unmodeled = true;
             let param = visited.scoped(DisplaySubstitution::default(), |visited| {
                 display_type_node(store, mapper.parameter_node, needs, child_depth, visited).0
             });
@@ -882,6 +1024,7 @@ fn display_resolved_type_node(
             format!("{{ {readonly}[{param} in {key_space}{remap}]{optionality}: {value} }}")
         }
         SemanticNodeData::TypeOf(_) => {
+            unmodeled = true;
             let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
             let type_args = data.carrier_type_args();
             let mut s = format!("typeof {}", value_root.name);
@@ -905,9 +1048,11 @@ fn display_resolved_type_node(
         SemanticNodeData::TypeOfNominal(_) if needs.contains(DisplayFacet::CheckerSpelling) => {
             // The checker prints a unique symbol's type as such, not as the
             // query that names it.
+            visited.add_length(13);
             "unique symbol".to_owned()
         }
         SemanticNodeData::TypeOfNominal(_) => {
+            unmodeled = true;
             // Renders the AUTHORED head (`typeof TOKEN` / `typeof Ns.TOKEN`)
             // — the local spelling every display consumer reads; the
             // declaring identity rides the payload and is never spliced into
@@ -921,9 +1066,28 @@ fn display_resolved_type_node(
             }
             s
         }
-        SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
-        SemanticNodeData::Infer { name, .. } => format!("infer {name}"),
-        SemanticNodeData::InferRef { name, .. } => name.to_string(),
+        SemanticNodeData::TypeParam { display_name, .. } => {
+            visited.add_length(reference_length(display_name));
+            display_name.to_string()
+        }
+        SemanticNodeData::Infer {
+            name, constraint, ..
+        } => {
+            // A printed constraint's count is not modelled.
+            unmodeled = constraint.is_some();
+            visited.add_length(name.len() + 6);
+            format!("infer {name}")
+        }
+        SemanticNodeData::InferRef { name, .. } => {
+            visited.add_length(reference_length(name));
+            name.to_string()
+        }
+        // The node builder abbreviates a conditional it begins past the
+        // truncation length whole (`conditionalTypeToTypeNode`).
+        SemanticNodeData::Conditional { .. } if visited.check_truncation() => {
+            visited.add_length(3);
+            "...".to_owned()
+        }
         SemanticNodeData::Conditional {
             check,
             extends,
@@ -952,6 +1116,7 @@ fn display_resolved_type_node(
                     .map_or(&[], |frame| frame.false_branch().pairs()),
             );
             let check = render_operand(store, *check, needs, child_depth, visited, Prec::Prefix);
+            visited.add_length(15);
             let extends = visited.scoped(scoped, |visited| {
                 render_operand(store, *extends, needs, child_depth, visited, Prec::Prefix)
             });
@@ -984,6 +1149,9 @@ fn display_resolved_type_node(
                 crate::semantic_query::SignatureKind::Construct if *is_abstract => "abstract new ",
                 crate::semantic_query::SignatureKind::Construct => "new ",
             };
+            // The fewest a signature prints beside its parts
+            // (`signatureToSignatureDeclarationHelper`).
+            visited.add_length(3);
             let tps = render_type_parameters(store, type_parameters, needs, child_depth, visited);
             let rendered_params = render_params(store, params, needs, child_depth, visited);
             let ret = render_return(
@@ -1001,6 +1169,7 @@ fn display_resolved_type_node(
         // materialised body, and display must not re-resolve, so `ExpandAliases`
         // is a no-op here). `QualifyNames` qualifies with the declaration origin.
         SemanticNodeData::DeclRef { identity } => {
+            visited.add_length(reference_length(&identity.decl_name));
             qualified_name(needs, &identity.canonical_id, &identity.decl_name)
         }
         // A class expression renders by the name the checker prints for a
@@ -1017,6 +1186,7 @@ fn display_resolved_type_node(
             type_arguments,
             ..
         } => {
+            unmodeled = true;
             let name = qualified_name(
                 needs,
                 &identity.canonical_id,
@@ -1035,22 +1205,33 @@ fn display_resolved_type_node(
         }
         // A compiler-native operation renders by its OP name — there is no
         // declaration to qualify, because none was applied.
+        //
+        // The node builder builds a reference's type arguments before it
+        // counts the referenced name (`typeReferenceToTypeNode` and the alias
+        // path), so the arguments see the count from before the name.
+        // `Awaited<T>` is the lib alias over its argument list; `NoInfer<T>`
+        // is a substitution type, whose base type builds bare, outside any
+        // list.
         SemanticNodeData::IntrinsicApplication { op, args } => {
-            let rendered: Vec<String> = args
-                .iter()
-                .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
-                .collect();
+            let rendered = match op {
+                verter_type_expr::CompilerIntrinsicTypeOp::Awaited => {
+                    type_argument_list(store, args, needs, child_depth, visited)
+                }
+                verter_type_expr::CompilerIntrinsicTypeOp::NoInfer => args
+                    .iter()
+                    .map(|arg| display_type_node(store, *arg, needs, child_depth, visited).0)
+                    .collect(),
+            };
+            visited.add_length(reference_length(op.display_name()));
             format!("{}<{}>", op.display_name(), rendered.join(", "))
         }
         SemanticNodeData::InstantiationRef { base, args } => {
+            let rendered = type_argument_list(store, args, needs, child_depth, visited);
+            visited.add_length(reference_length(&base.decl_name));
             let name = qualified_name(needs, &base.canonical_id, &base.decl_name);
             if args.is_empty() {
                 name
             } else {
-                let rendered: Vec<String> = args
-                    .iter()
-                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
-                    .collect();
                 format!("{name}<{}>", rendered.join(", "))
             }
         }
@@ -1061,19 +1242,18 @@ fn display_resolved_type_node(
         SemanticNodeData::BareRef(_) => {
             let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
             let type_args = data.carrier_type_args();
+            let rendered = type_argument_list(store, type_args, needs, child_depth, visited);
+            visited.add_length(reference_length(name));
             if type_args.is_empty() {
                 name.to_string()
             } else {
-                let rendered: Vec<String> = type_args
-                    .iter()
-                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
-                    .collect();
                 format!("{name}<{}>", rendered.join(", "))
             }
         }
         // Dynamic-import carrier renders the import expression + qualifier
         // path + any type arguments.
         SemanticNodeData::ImportType(_) => {
+            unmodeled = true;
             let (specifier, qualifier, typeof_query) =
                 data.import_type_head().expect("ImportType carrier head");
             let type_args = data.carrier_type_args();
@@ -1098,15 +1278,335 @@ fn display_resolved_type_node(
             out
         }
         // Raw-fallback carrier renders its preserved text verbatim.
-        SemanticNodeData::RawFallback { value } => value.raw().to_string(),
+        SemanticNodeData::RawFallback { value } => {
+            unmodeled = true;
+            value.raw().to_string()
+        }
         // Synthetic-binding carrier renders the bound name.
-        SemanticNodeData::SyntheticBinding { id, .. } => id.binding_name.to_string(),
+        SemanticNodeData::SyntheticBinding { id, .. } => {
+            unmodeled = true;
+            id.binding_name.to_string()
+        }
         // The sealed callable carrier has no observable return, so it has
         // no function-type rendering; it is never part of a displayed type.
-        SemanticNodeData::DeferredCallable(_) => "DeferredCallable".to_string(),
+        SemanticNodeData::DeferredCallable(_) => {
+            unmodeled = true;
+            "DeferredCallable".to_string()
+        }
     };
+    if unmodeled {
+        visited.unmodeled(&out);
+    }
     visited.pop();
     DisplayString(out)
+}
+
+/// A reference's type arguments through the node builder's list: elided
+/// whole as `...` when the list begins past the truncation length.
+fn type_argument_list(
+    store: &SemanticGraphStore,
+    args: &[SemanticNodeId],
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut DisplayContext,
+) -> Vec<String> {
+    visited.type_node_list(args, false, |visited, arg| {
+        display_type_node(store, arg, needs, depth, visited).0
+    })
+}
+
+/// An object type's surface, its properties, then its call, construct and
+/// index signatures. Counted as the checker's node builder builds it
+/// (`createTypeNodesFromResolvedType`): the signatures first, then each
+/// property, and once the count passes the truncation length the remaining
+/// properties elide as `... N more ...` before the last, or the whole
+/// surface as `{ ...; }` when it begins past it.
+fn render_object_surface(
+    store: &SemanticGraphStore,
+    surface: &crate::semantic_query::SurfaceView,
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut DisplayContext,
+) -> String {
+    let checker = needs.contains(DisplayFacet::CheckerSpelling);
+    if surface.members.is_empty()
+        && surface.call_signatures.is_empty()
+        && surface.construct_signatures.is_empty()
+        && surface.index_signatures.is_empty()
+    {
+        visited.add_length(2);
+        return "{}".to_string();
+    }
+    if visited.check_truncation() {
+        visited.add_length(2);
+        return "{ ...; }".to_string();
+    }
+    let mut signatures: Vec<String> = Vec::new();
+    for sig in surface.call_signatures.iter() {
+        signatures.push(render_signature_colon(
+            store, *sig, "", needs, depth, visited,
+        ));
+    }
+    for sig in surface.construct_signatures.iter() {
+        signatures.push(render_signature_colon(
+            store, *sig, "new ", needs, depth, visited,
+        ));
+    }
+    for index in surface.index_signatures.iter() {
+        let mut s = String::new();
+        if index.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
+            s.push_str("readonly ");
+        }
+        // The node builder builds the key type, then the value type, then
+        // counts the parameter name and seven more; `readonly` counts as on
+        // a property. The checker prints a signature no declaration wrote
+        // with the parameter `x`.
+        let key = display_type_node(store, index.key_type, needs, depth, visited).0;
+        let value = display_type_node(store, index.value_type, needs, depth, visited).0;
+        let name = match (&index.key_name, checker) {
+            (Some(name), true) => name.as_ref(),
+            (None, true) => "x",
+            (_, false) => "key",
+        };
+        visited.add_length(name.len() + 7);
+        if index.readonly {
+            visited.add_length(9);
+        }
+        s.push_str(&format!("[{name}: {key}]: {value}"));
+        signatures.push(s);
+    }
+    let members: Vec<&crate::semantic_query::SurfaceMember> = surface.members.iter().collect();
+    let mut parts: Vec<String> = Vec::new();
+    let render_member = |visited: &mut DisplayContext,
+                         member: &crate::semantic_query::SurfaceMember| {
+        let mut s = String::new();
+        if member.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
+            s.push_str("readonly ");
+        }
+        // The node builder counts a property's symbol name and its colon
+        // before its type (`addPropertyToElementList`).
+        let name = match &member.key {
+            crate::semantic_query::AuthoredPropertyKey::String(name) => {
+                visited.add_length(name.len() + 1);
+                if checker && !is_bare_member_name(name) {
+                    double_quoted(name)
+                } else {
+                    member_name_token(name)
+                }
+            }
+            crate::semantic_query::AuthoredPropertyKey::Number(number) => {
+                let number = number.to_string();
+                visited.add_length(number.len() + 1);
+                number
+            }
+            crate::semantic_query::AuthoredPropertyKey::UniqueSymbol(identity) => {
+                let name = format!("[unique symbol {}]", identity.symbol);
+                visited.unmodeled(&name);
+                name
+            }
+            crate::semantic_query::AuthoredPropertyKey::Computed(node) => {
+                let name = format!(
+                    "[{}]",
+                    display_type_node(store, *node, needs, depth, visited).0
+                );
+                visited.unmodeled(&name);
+                name
+            }
+        };
+        s.push_str(&name);
+        if member.optional {
+            s.push('?');
+        }
+        if member.method_kind.is_some() && resolves_to_function(store, member.value, visited) {
+            s.push_str(&render_signature_colon(
+                store,
+                member.value,
+                "",
+                needs,
+                depth,
+                visited,
+            ));
+        } else if member.optional
+            && checker
+            && !visited.omit_nullish
+            && !holds_undefined(store, member.value)
+        {
+            // Under `strictNullChecks` the checker prints an optional
+            // property's type with `undefined` added: one union, its
+            // members then `undefined`.
+            s.push_str(": ");
+            s.push_str(&render_with_undefined(
+                store,
+                member.value,
+                needs,
+                depth,
+                visited,
+            ));
+        } else {
+            s.push_str(": ");
+            s.push_str(&display_type_node(store, member.value, needs, depth, visited).0);
+        }
+        if member.readonly {
+            visited.add_length(9);
+        }
+        s
+    };
+    let count = members.len();
+    for (index, member) in members.iter().enumerate() {
+        let shown = index + 1;
+        if visited.check_truncation() && shown + 2 < count - 1 {
+            parts.push(format!("... {} more ...", count - shown));
+            parts.push(render_member(visited, members[count - 1]));
+            break;
+        }
+        parts.push(render_member(visited, member));
+    }
+    visited.add_length(2);
+    if checker {
+        // The checker prints the signatures before the properties, in the
+        // order it builds them.
+        signatures.extend(parts);
+        format!("{{ {}; }}", signatures.join("; "))
+    } else {
+        parts.extend(signatures);
+        format!("{{ {} }}", parts.join("; "))
+    }
+}
+
+/// `value` with `undefined` added, as the checker prints an optional
+/// property's type under `strictNullChecks`: a union's members then
+/// `undefined`, as one list, and `never` with it added `undefined` alone.
+fn render_with_undefined(
+    store: &SemanticGraphStore,
+    value: SemanticNodeId,
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut DisplayContext,
+) -> String {
+    if settles_to_never(store, value, visited) {
+        visited.add_length(primitive_length(PrimitiveKind::Undefined));
+        return primitive_keyword(PrimitiveKind::Undefined).to_owned();
+    }
+    let (resolved, substitution) = follow_alias_chain(store, value, &visited.substitution);
+    let arms = match store.node_data(resolved).as_deref() {
+        Some(SemanticNodeData::Union(arms)) if !visited.contains(&resolved) => {
+            Some(printed_union_arms_in_order(store, arms, needs, visited))
+        }
+        _ => None,
+    };
+    match arms {
+        Some(arms) => visited.scoped(substitution, |visited| {
+            let entries: Vec<Option<&crate::semantic_query::PrintedUnionArm>> =
+                arms.iter().map(Some).chain(std::iter::once(None)).collect();
+            render_union_entries(store, &entries, needs, depth, visited)
+        }),
+        None => {
+            let arm = crate::semantic_query::PrintedUnionArm::Node(value);
+            render_union_entries(store, &[Some(&arm), None], needs, depth, visited)
+        }
+    }
+}
+
+/// A union's printed members in the order a checker-spelled union prints
+/// them, without `null` and `undefined` when they are omitted.
+fn printed_union_arms_in_order(
+    store: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+    needs: DisplayNeeds,
+    visited: &DisplayContext,
+) -> Vec<crate::semantic_query::PrintedUnionArm> {
+    let mut printed = crate::semantic_query::printed_union_arms(store, arms);
+    if visited.omit_nullish {
+        let is_nullish = |arm: &crate::semantic_query::PrintedUnionArm| {
+            matches!(
+                arm,
+                crate::semantic_query::PrintedUnionArm::Node(node)
+                    if matches!(
+                        store.node_data(*node).as_deref(),
+                        Some(SemanticNodeData::Primitive(
+                            PrimitiveKind::Null | PrimitiveKind::Undefined
+                        ))
+                    )
+            )
+        };
+        if printed.iter().any(|arm| !is_nullish(arm)) {
+            printed.retain(|arm| !is_nullish(arm));
+        }
+    }
+    // A checker-spelled union prints its constituents in the checker's own
+    // id order (`sortAndDeduplicateTypes`), not the stored one: the
+    // intrinsics by their creation — `string`, `number`, `bigint`,
+    // `boolean`, `symbol`, then `null` and `undefined` — before the types a
+    // program declares, with the literals a check interned last. The sort
+    // is stable, so constituents that timeline leaves unranked keep the
+    // stored order.
+    if needs.contains(DisplayFacet::CheckerSpelling) {
+        printed.sort_by_key(|arm| checker_union_constituent_rank(store, arm));
+    }
+    printed
+}
+
+/// A union's entries joined by ` | `, through the node builder's list
+/// (`None` is an `undefined` the checker added).
+fn render_union_entries(
+    store: &SemanticGraphStore,
+    entries: &[Option<&crate::semantic_query::PrintedUnionArm>],
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut DisplayContext,
+) -> String {
+    visited
+        .type_node_list(entries, true, |visited, entry| match entry {
+            Some(crate::semantic_query::PrintedUnionArm::Node(arm)) => {
+                render_operand(store, *arm, needs, depth, visited, Prec::Union)
+            }
+            Some(crate::semantic_query::PrintedUnionArm::Enum(decl)) => {
+                visited.add_length(reference_length(&decl.decl_name));
+                decl.decl_name.to_string()
+            }
+            None => {
+                visited.add_length(9);
+                "undefined".to_owned()
+            }
+        })
+        .join(" | ")
+}
+
+/// What the node builder counts for a reference to the symbol `name`
+/// (`createAccessFromSymbolChain`): the root of the chain is counted twice,
+/// its name and a separator each time.
+fn reference_length(name: &str) -> usize {
+    2 * (name.len() + 1)
+}
+
+/// What the node builder counts for a primitive keyword. `unknown` counts
+/// nothing.
+fn primitive_length(kind: PrimitiveKind) -> usize {
+    match kind {
+        PrimitiveKind::Unknown => 0,
+        PrimitiveKind::Any => 3,
+        PrimitiveKind::Void | PrimitiveKind::Null => 4,
+        PrimitiveKind::Never => 5,
+        PrimitiveKind::String
+        | PrimitiveKind::Number
+        | PrimitiveKind::BigInt
+        | PrimitiveKind::Symbol
+        | PrimitiveKind::Object => 6,
+        PrimitiveKind::Boolean => 7,
+        PrimitiveKind::Undefined => 9,
+    }
+}
+
+/// What the node builder counts for a literal type: a string's value and
+/// its quotes, a number as written, a bigint's digits and its `n`.
+fn literal_length(value: &LiteralValue) -> usize {
+    match value {
+        LiteralValue::String(value) => value.len() + 2,
+        LiteralValue::Number(value) => value.to_string().len(),
+        LiteralValue::BigInt(digits) => digits.len() + 1,
+        LiteralValue::Boolean(true) => 4,
+        LiteralValue::Boolean(false) => 5,
+    }
 }
 
 fn render_merged_decl_surface(
@@ -1318,16 +1818,24 @@ fn display_program_analysis(
 }
 
 /// The back-reference token emitted when a node is already on the ancestor
-/// stack: its name when the node carries one, else the truncation token.
-fn back_ref_token(data: &SemanticNodeData) -> String {
-    match data {
+/// stack: its name when the node carries one, else the truncation token —
+/// in a checker message the `...` the node builder prints for a type it is
+/// already printing.
+fn back_ref_token(data: &SemanticNodeData, visited: &mut DisplayContext) -> String {
+    let name = match data {
         SemanticNodeData::DeclRef { identity } => identity.decl_name.to_string(),
         SemanticNodeData::ClassExpressionInstance { identity, .. } => identity.name.to_string(),
         SemanticNodeData::InstantiationRef { base, .. } => base.decl_name.to_string(),
         SemanticNodeData::IntrinsicApplication { op, .. } => op.display_name().to_string(),
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
-        _ => TRUNCATION_TOKEN.to_string(),
-    }
+        _ if visited.measuring() => {
+            visited.add_length(3);
+            return "...".to_owned();
+        }
+        _ => return TRUNCATION_TOKEN.to_string(),
+    };
+    visited.add_length(reference_length(&name));
+    name
 }
 
 /// A declaration name, optionally qualified with its canonical origin when
@@ -1500,12 +2008,15 @@ fn render_params(
             if p.rest {
                 ps.push_str("...");
             }
-            ps.push_str(p.name.as_deref().unwrap_or("arg"));
+            let name = p.name.as_deref().unwrap_or("arg");
+            ps.push_str(name);
             if p.optional {
                 ps.push('?');
             }
             ps.push_str(": ");
             ps.push_str(&display_type_node(store, p.ty, needs, depth, visited).0);
+            // Counted after its type (`symbolToParameterDeclaration`).
+            visited.add_length(name.len() + 3);
             ps
         })
         .collect();
@@ -1544,6 +2055,8 @@ fn render_return(
         rendered.push_str(" is ");
         rendered.push_str(&display_type_node(store, target, needs, depth, visited).0);
     }
+    // A type predicate's count is not modelled.
+    visited.unmodeled(&rendered);
     rendered
 }
 
@@ -1575,6 +2088,7 @@ fn render_signature_colon(
                 predicate,
                 ..
             }) => {
+                visited.add_length(3);
                 let tps = render_type_parameters(store, type_parameters, needs, depth, visited);
                 let rendered_params = render_params(store, params, needs, depth, visited);
                 let ret = render_return(
@@ -1749,6 +2263,19 @@ fn element_renders_leading_readonly(
 /// operand wraps and a string literal whose TEXT contains `" | "` does not.
 /// Whether `node` already holds `undefined` (or absorbs it), so adding it
 /// as an optional property's type changes nothing.
+/// Whether `node` is `never` through its transparent alias chain.
+fn settles_to_never(
+    store: &SemanticGraphStore,
+    node: SemanticNodeId,
+    visited: &DisplayContext,
+) -> bool {
+    let (resolved, _) = follow_alias_chain(store, node, &visited.substitution);
+    matches!(
+        store.node_data(resolved).as_deref(),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+    )
+}
+
 fn holds_undefined(store: &SemanticGraphStore, node: SemanticNodeId) -> bool {
     let absorbs = |node: SemanticNodeId| {
         matches!(

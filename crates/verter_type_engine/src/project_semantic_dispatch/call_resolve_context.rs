@@ -1707,10 +1707,6 @@ pub(super) fn checker_property_name(key: &AuthoredPropertyKey) -> Option<String>
     }
 }
 
-/// The length past which the checker abbreviates a type in a message
-/// (`defaultMaximumTruncationLength`).
-const DIAGNOSTIC_TYPE_TRUNCATION_LENGTH: usize = 160;
-
 /// How many levels of unions, intersections and constraints a relation's
 /// target is read through to decide whether it could hold a literal.
 const SINGLETON_SCAN_DEPTH: u32 = 16;
@@ -1893,53 +1889,105 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some((canonical, span))
     }
 
-    /// One type as a message prints it, never withheld: past the string
-    /// length `typeToString` itself clips at (twice the truncation length)
-    /// the text is cut to that length with a trailing `...`. The node
-    /// builder's own abbreviation of a wide union or object (`... N more
-    /// ...`) runs on a running length count this printer does not model,
-    /// so a type between the two lengths prints whole. For a message with
-    /// no occurrence to withhold (a refused relation's two types).
+    /// One type as a message prints it, never withheld. For a message with
+    /// no occurrence to withhold (a refused relation's two types): where
+    /// the checker's abbreviation is not known exactly
+    /// ([`Self::print_diagnostic_type`] is `None`) the type prints every
+    /// part, clipped where `typeToString` clips.
     fn print_diagnostic_type_clipped(&self, node: SemanticNodeId) -> String {
-        let printed = self.print_diagnostic_type_text(node);
-        let clip = DIAGNOSTIC_TYPE_TRUNCATION_LENGTH * 2;
-        if printed.chars().count() >= clip {
-            let kept: String = printed.chars().take(clip - 3).collect();
-            format!("{kept}...")
-        } else {
-            printed
-        }
+        self.print_diagnostic_type(node).unwrap_or_else(|| {
+            let strict_null_checks = self.relation_strict_config().strict_null_checks;
+            crate::semantic_query::display::clip_checker_text(
+                self.print_diagnostic_type_text(node, || {
+                    crate::semantic_query::display::DisplayContext::for_checker(strict_null_checks)
+                        .unabbreviated()
+                })
+                .0,
+            )
+        })
     }
 
-    /// One type as a diagnostic message prints it. `None` past the
-    /// checker's truncation length: `typeToString` abbreviates such a type
-    /// by a running length count this printer does not model, so no text
-    /// is claimed for it (`defaultMaximumTruncationLength`, TypeScript
-    /// 7.0.2).
+    /// One type as a diagnostic message prints it (`typeToString`),
+    /// abbreviated as the checker's node builder abbreviates it: past the
+    /// truncation length a union's or an intersection's remaining members
+    /// print as `... N more ...` before its last, an object's remaining
+    /// properties likewise, a type-argument or tuple list as `...`, and the
+    /// whole text is clipped at twice that length (TypeScript 7.0.2).
+    /// `None` when the print cannot be the checker's: a part whose
+    /// node-builder count is not modelled could move where it abbreviates,
+    /// or the display depth cap cut a part the message keeps.
     pub(in crate::project_semantic_dispatch) fn print_diagnostic_type(
         &self,
         node: SemanticNodeId,
     ) -> Option<String> {
-        let printed = self.print_diagnostic_type_text(node);
-        (printed.chars().count() <= DIAGNOSTIC_TYPE_TRUNCATION_LENGTH).then_some(printed)
+        let strict_null_checks = self.relation_strict_config().strict_null_checks;
+        let (printed, context) = self.print_diagnostic_type_text(node, || {
+            crate::semantic_query::display::DisplayContext::for_checker(strict_null_checks)
+        });
+        context.checker_text(printed)
     }
 
-    fn print_diagnostic_type_text(&self, node: SemanticNodeId) -> String {
-        crate::semantic_query::display::display_type_node(
-            self.graph().store(),
-            node,
-            crate::semantic_query::DisplayNeeds::single(
-                crate::semantic_query::DisplayFacet::CheckerSpelling,
+    /// `node` printed under a fresh context from `context`, every mapped
+    /// type the print meets settled first where it settles: the checker
+    /// prints a mapped type that is not generic as the object type it
+    /// resolves to (`createTypeNodeFromObjectType`), which display reads
+    /// but never materializes. A settled object can hold further mapped
+    /// types, so the print repeats until none it meets is new.
+    fn print_diagnostic_type_text(
+        &self,
+        node: SemanticNodeId,
+        context: impl Fn() -> crate::semantic_query::display::DisplayContext,
+    ) -> (String, crate::semantic_query::display::DisplayContext) {
+        let mut settled = FxHashMap::default();
+        let mut tried = FxHashSet::default();
+        loop {
+            let mut printing = context().with_settled_mapped(settled);
+            let printed = crate::semantic_query::display::display_type_node(
+                self.graph().store(),
+                node,
+                crate::semantic_query::DisplayNeeds::single(
+                    crate::semantic_query::DisplayFacet::CheckerSpelling,
+                )
+                .union(crate::semantic_query::DisplayNeeds::single(
+                    crate::semantic_query::DisplayFacet::IncludeReadonlyModifier,
+                )),
+                crate::semantic_query::display::MAX_DISPLAY_DEPTH,
+                &mut printing,
             )
-            .union(crate::semantic_query::DisplayNeeds::single(
-                crate::semantic_query::DisplayFacet::IncludeReadonlyModifier,
-            )),
-            crate::semantic_query::display::MAX_DISPLAY_DEPTH,
-            &mut crate::semantic_query::display::DisplayContext::for_checker(
-                self.relation_strict_config().strict_null_checks,
-            ),
+            .0;
+            let newly_settled: Vec<(SemanticNodeId, SemanticNodeId)> = printing
+                .unsettled_mapped()
+                .iter()
+                .copied()
+                .filter(|mapped| tried.insert(*mapped))
+                .filter_map(|mapped| Some((mapped, self.settled_mapped_object(mapped)?)))
+                .collect();
+            if newly_settled.is_empty() {
+                return (printed, printing);
+            }
+            settled = printing.into_settled_mapped();
+            settled.extend(newly_settled);
+        }
+    }
+
+    /// The object type a mapped type that is not generic resolves to: the
+    /// object the relation decides it by. `None` while it stays a mapped
+    /// type.
+    fn settled_mapped_object(&self, mapped: SemanticNodeId) -> Option<SemanticNodeId> {
+        let data = self.graph().node_data(mapped)?;
+        let SemanticNodeData::Mapped { source, mapper } = data.as_ref() else {
+            return None;
+        };
+        let object = self.mapped_object_for_relation(
+            *source,
+            mapper,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        matches!(
+            self.graph().node_data(object).as_deref(),
+            Some(SemanticNodeData::Object(_))
         )
-        .0
+        .then_some(object)
     }
 
     /// The properties `target` requires that `source` lacks, named as the

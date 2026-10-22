@@ -687,6 +687,7 @@ fn lower_node<M: verter_audit::observe::ObserveExec>(
                             key_type: lower_node(graph, &sig.key_type, scope, ctx)?,
                             value_type: lower_node(graph, &sig.value_type, scope, ctx)?,
                             readonly: sig.readonly,
+                            key_name: Some(verter_type_expr::OwnedStr::from(sig.key_name.as_str())),
                             spans: sig.spans,
                             declaration_origin: declaration_origin.clone(),
                         }))

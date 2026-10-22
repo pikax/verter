@@ -6866,6 +6866,7 @@ pub(crate) mod fresh_excess_property_checking {
                     key_type: string,
                     value_type: number,
                     readonly: false,
+                    key_name: None,
                     spans: Default::default(),
                     declaration_origin: None,
                 }]

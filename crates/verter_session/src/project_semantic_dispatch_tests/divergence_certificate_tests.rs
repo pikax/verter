@@ -234,6 +234,55 @@ interface Finite { then(f: (value: 1) => void): void }
     );
 }
 
+/// A step that read a complete result its memo would not keep is no exact
+/// step either: the Awaited walk over `Rec` comes round to the operand it
+/// is evaluating through a non-cacheable (but complete) observation, and
+/// answers the budget's TS2589 after evaluating, never a certified one.
+#[test]
+fn a_walk_through_a_result_its_memo_would_not_keep_is_never_certified() {
+    let source = "interface Rec { then(f: (value: Rec) => void): void }\n";
+    let _budget = TailBudgetForTests::install(5);
+    let basis = with_probe_outcome_on_host(
+        &default_probe_host(),
+        ProbeProject::default(),
+        source,
+        "Rec",
+        |dispatch, outcome| {
+            let StructuralFactDemandOutcome::Complete(operand) = outcome else {
+                panic!("expected a complete operand, got {outcome:?}");
+            };
+            let (_demand, trip) = dispatch.enter_connected_demand(false);
+            assert!(trip.is_none(), "the local walk starts with allowance");
+            let guard = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+            {
+                let mut frames = dispatch.build_local_taint.borrow_mut();
+                let frame = frames.last_mut().expect("the observation frame");
+                frame.cache_suppress = true;
+                assert!(!frame.result_is_partial, "the observation is complete");
+            }
+            let node = dispatch
+                .lib_awaited_for_tests(operand)
+                .expect("the walk answers a recovery instead of refusing at recurrence");
+            let _observation = guard.finish();
+            match dispatch.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                    diagnostic,
+                    basis,
+                    ..
+                })) if diagnostic.code == CheckerDiagnosticCode::ExcessivelyDeepInstantiation => {
+                    *basis
+                }
+                other => panic!("the cycle answers TS2589, got {other:?}"),
+            }
+        },
+    );
+    assert_eq!(
+        basis,
+        RecoveryBasis::Budget,
+        "a cycle through a non-cacheable step is evaluated under the budget"
+    );
+}
+
 /// A declaration error is the checker's TS2456, complete, and no
 /// divergence.
 #[test]

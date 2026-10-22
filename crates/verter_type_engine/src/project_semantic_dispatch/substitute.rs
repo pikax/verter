@@ -1337,6 +1337,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         key_type: sub_key,
                         value_type: sub_value,
                         readonly: signature.readonly,
+                        key_name: signature.key_name.clone(),
                         // Preserve the index signature's OXC spans + declaration file.
                         spans: signature.spans,
                         declaration_origin: signature.declaration_origin.clone(),

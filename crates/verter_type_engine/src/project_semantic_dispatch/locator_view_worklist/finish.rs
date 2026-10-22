@@ -1427,6 +1427,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         key_type: self.answer_member(projected(memo, signature.key_type, context), context, inputs),
                         value_type: self.answer_member(projected(memo, signature.value_type, context), context, inputs),
                         readonly: signature.readonly,
+                        key_name: signature.key_name.clone(),
                         spans: signature.spans,
                         declaration_origin: signature.declaration_origin.clone(),
                     })

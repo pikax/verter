@@ -857,6 +857,7 @@ impl<'a> ClosedObjectProjectionAlternative<'a> {
                     key_type: index.key_type,
                     value_type: *value_type,
                     readonly: *readonly,
+                    key_name: None,
                     spans: index.spans,
                     declaration_origin: index.declaration_origin.clone(),
                 })

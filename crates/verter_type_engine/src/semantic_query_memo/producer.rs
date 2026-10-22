@@ -621,7 +621,7 @@ impl SemanticGraphStore {
             }
             if !attempt.miss_recorded {
                 // One miss per logical claim, however many attempts it takes.
-                if super::records_telemetry::<C::Observe>() { self.stats.misses.fetch_add(1, Ordering::Relaxed); }
+                if super::records_work::<C::Observe>() { self.stats.misses.fetch_add(1, Ordering::Relaxed); }
                 crate::request_observers::record_cache_event::<C::Observe>(crate::resolver_core::resolver_context::capture_targets(ctx), verter_execution::request_context::CacheEventKind::Miss);
                 attempt.miss_recorded = true;
             }
@@ -911,7 +911,7 @@ impl Subscription<'_> {
                 .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
         }
         // Every cooperative wait return counts; a retry may count again.
-        if super::records_telemetry::<C::Observe>() {
+        if super::records_work::<C::Observe>() {
             store.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
         }
         crate::request_observers::record_cache_event::<C::Observe>(
@@ -1267,7 +1267,7 @@ impl SemanticGraphStore {
         let _ = observation;
         if !attempt.miss_recorded {
             // The one miss a claim of the key records.
-            if super::records_telemetry::<M>() {
+            if super::records_work::<M>() {
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
             }
             crate::request_observers::record_cache_event::<M>(

@@ -597,6 +597,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
         key_type: key_node,
         value_type: value_node,
         readonly: false,
+        key_name: None,
         spans: verter_type_expr::IndexSignatureSpans {
             declaration: Some(Span::new(0, 24)),
             key: Some(Span::new(1, 10)),
@@ -1064,6 +1065,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
         key_type: string,
         value_type: number,
         readonly: false,
+        key_name: None,
         spans: verter_type_expr::IndexSignatureSpans {
             declaration: Some(Span::new(13, 29)),
             key: Some(Span::new(14, 20)),

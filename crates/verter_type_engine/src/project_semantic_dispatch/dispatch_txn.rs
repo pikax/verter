@@ -912,6 +912,19 @@ impl ResolveCallSelection {
         }
     }
 
+    /// The diagnostic an error-recovery winner reports, if it is one.
+    pub(crate) fn recovery_diagnostic(
+        &self,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticRecipe> {
+        match self {
+            Self::Selected {
+                recovery_diagnostic,
+                ..
+            } => recovery_diagnostic.as_deref().copied(),
+            Self::DynamicAny => None,
+        }
+    }
+
     pub(crate) fn with_return_type<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         dispatch: &super::ProjectSemanticDispatch<'_, C>,

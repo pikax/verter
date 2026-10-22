@@ -2263,6 +2263,8 @@ pub struct SliceClassParam {
 pub struct SliceClassIndexSignature {
     /// Whether the signature is on the constructor (`static`).
     pub is_static: bool,
+    /// The index parameter's name (`k` in `[k: string]`).
+    pub key_name: Arc<str>,
     /// The key type.
     pub key: GatedType,
     /// The value type.

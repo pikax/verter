@@ -36,6 +36,23 @@ use crate::{
 use verter_type_engine::instant::Instant;
 
 impl VerterHost {
+    /// Read the two selected host work counters without enabling full capture.
+    ///
+    /// Available with `soak-support` or `semantic-observe`. Other optional
+    /// provenance is absent from this typed snapshot, never measured zero.
+    #[cfg(any(feature = "soak-support", feature = "semantic-observe"))]
+    #[must_use]
+    pub fn work_snapshot(&self) -> crate::HostWorkSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        crate::HostWorkSnapshot {
+            resolver_node_cache_misses: self.provenance.resolver_node_cache_misses.load(Relaxed),
+            component_meta_resolved_state_recomputes: self
+                .provenance
+                .component_meta_resolved_state_recomputes
+                .load(Relaxed),
+        }
+    }
+
     /// Swap the workspace backing this host.
     ///
     /// The scheduler's `SourceLoader` shares the same `Arc<RwLock>`, so
@@ -106,7 +123,8 @@ impl VerterHost {
     }
 
     /// Access provenance counters for component-meta observability. The
-    /// counters are kept, and readable, only under `semantic-observe`.
+    /// Full counters require `semantic-observe`; narrow work fields also
+    /// have storage/readers with `soak-support`.
     pub fn provenance(&self) -> &Arc<MetaProvenance> {
         &self.provenance
     }
