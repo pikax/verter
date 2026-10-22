@@ -104,7 +104,7 @@
     "json-diff": "^1.0.6",
     "shx": "0.4.0",
     "svelte": "5.56.10",
-    "typescript": "7.0.2",
+    "typescript": "7.1.0-beta",
     "vitest": "^5.0.5",
     "vue": "3.6.0-rc.5"
   },
