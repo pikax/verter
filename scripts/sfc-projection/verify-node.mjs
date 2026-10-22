@@ -2166,17 +2166,20 @@ export function probeMapperHost(engine, { helpTextHasMapperHost }) {
       present: false,
       performed: false,
       method: null,
-      evidence: `${id}@${version} mapper-host probe skipped: no executable`,
+      evidence: `no mapper host on ${id}@${version}: mapper-host probe skipped, no executable`,
     };
   }
+  // `--all`: TypeScript 7.1 lists --runExternalCode only in the full help,
+  // so plain `--help` misses a real host.
+  const helpArgs = ["--help", "--all"];
   const spawned =
     engine.kind === "native"
-      ? spawnSync(engine.executable, ["--help"], {
+      ? spawnSync(engine.executable, helpArgs, {
           encoding: "utf8",
           windowsHide: true,
           timeout: 20000,
         })
-      : spawnSync(process.execPath, [engine.executable, "--help"], {
+      : spawnSync(process.execPath, [engine.executable, ...helpArgs], {
           encoding: "utf8",
           windowsHide: true,
           timeout: 20000,
@@ -2185,8 +2188,8 @@ export function probeMapperHost(engine, { helpTextHasMapperHost }) {
     return {
       present: false,
       performed: false,
-      method: "tsc --help",
-      evidence: `${id}@${version} tsc --help probe failed: ${spawned.error.message}`,
+      method: "tsc --help --all",
+      evidence: `no mapper host on ${id}@${version}: tsc --help --all probe failed: ${spawned.error.message}`,
     };
   }
   const text = `${spawned.stdout || ""}${spawned.stderr || ""}`;
@@ -2194,10 +2197,10 @@ export function probeMapperHost(engine, { helpTextHasMapperHost }) {
   return {
     present,
     performed: true,
-    method: "tsc --help",
+    method: "tsc --help --all",
     evidence: present
       ? "executable-selected-build"
-      : `${id}@${version} tsc --help has no content mapper host (--runExternalCode / contentMappers)`,
+      : `no mapper host on ${id}@${version}: tsc --help --all lists neither --runExternalCode nor contentMappers`,
   };
 }
 
@@ -2408,17 +2411,39 @@ async function evaluateStp5Node({ repoRoot, resolvedEngines, harnessRuns, skipPr
     );
     return { errors, capabilityRows: [] };
   }
-  const engines = resolvedEngines.map((engine) => {
+  const e2e = await import(
+    pathToFileURL(repoPath(repoRoot, "tests/sfc-projection/STP5/mapper-host/e2e.mjs")).href
+  );
+  const engines = [];
+  for (const engine of resolvedEngines) {
     const probe = probeMapperHost(engine, protocol);
     const run = harnessRuns.find((row) => row.engine === engine.id);
-    return {
+    // The executed proof runs only where the probe found a host; a build
+    // without one is recorded as "no mapper host on <engine>@<version>".
+    let hostRun = null;
+    if (probe.present) {
+      try {
+        hostRun = await e2e.runMapperHostEndToEnd(engine);
+      } catch (error) {
+        hostRun = { performed: false, error: String(error?.message || error) };
+        errors.push(
+          err(
+            "STP5-capability",
+            "mapper-host-run-failed",
+            `${engine.id}@${engine.version} end-to-end mapper run failed: ${hostRun.error}`,
+          ),
+        );
+      }
+    }
+    engines.push({
       mapperHostPresent: probe.present,
       mapperHostEvidence: probe.evidence,
+      hostRun,
       observation: observationFromRun(run),
       engineId: engine.id,
       engineVersion: engine.version,
-    };
-  });
+    });
+  }
   const stp5 = await protocol.evaluateStp5({ engines });
   errors.push(...stp5.errors);
   return { errors, capabilityRows: stp5.capabilityRows };
