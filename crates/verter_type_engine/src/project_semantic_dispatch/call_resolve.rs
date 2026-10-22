@@ -722,15 +722,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             Err(_) => false,
         };
-        let site_rooted = if let Some(serve) = self
-            .ctx
-            .ensure_indexed_ready_serve(key.point.canonical_id.as_ref())
+        let site_rooted = if let Some(indexed) =
+            self.transaction_indexed_record(key.point.canonical_id.as_ref())
         {
             if !self_roots
                 .iter()
                 .any(|(canonical, _)| canonical == &key.point.canonical_id)
             {
-                self_roots.push((key.point.canonical_id.clone(), serve.indexed.whole_hash));
+                self_roots.push((key.point.canonical_id.clone(), indexed.whole_hash));
             }
             true
         } else {

@@ -516,10 +516,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // The declaration scope the value was read from: the file's own,
         // else the ambient block its identity falls back to.
         let own_scope = self
-            .ctx
-            .ensure_indexed_ready_serve(canonical)
-            .and_then(|serve| {
-                let state = &serve.indexed.shallow_state;
+            .transaction_indexed_record(canonical)
+            .and_then(|indexed| {
+                let state = &indexed.shallow_state;
                 if state.headers.value_header_in(owner, name).is_some() {
                     None
                 } else {
@@ -534,12 +533,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     Some((object, roots)) => (Some(object), roots),
                     None => (
                         None,
-                        self.ctx
-                            .ensure_indexed_ready_serve(canonical)
-                            .map(|serve| {
+                        self.transaction_indexed_record(canonical)
+                            .map(|indexed| {
                                 vec![(
                                     verter_type_expr::OwnedStr::from(canonical),
-                                    serve.indexed.whole_hash,
+                                    indexed.whole_hash,
                                 )]
                             })
                             .unwrap_or_default(),
@@ -566,7 +564,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
-        let indexed = self.ctx.ensure_indexed_ready_serve(canonical)?.indexed;
+        let indexed = self.transaction_indexed_record(canonical)?;
         let headers = &indexed.shallow_state.headers;
         let names = headers.namespace_value_members(scope, owner, Some(name));
         // A namespace that declares no value (only types) is no value; one
@@ -619,7 +617,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
         let canonical = assigned.scope.canonical_id.as_ref();
-        let indexed = self.ctx.ensure_indexed_ready_serve(canonical)?.indexed;
+        let indexed = self.transaction_indexed_record(canonical)?;
         let roots = vec![(assigned.scope.canonical_id.clone(), indexed.whole_hash)];
         let whole = match self
             .execute_read(self.typeof_key_for(assigned.clone(), context))
