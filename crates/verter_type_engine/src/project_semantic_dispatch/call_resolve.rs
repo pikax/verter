@@ -1124,20 +1124,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         {
             let txn = self.dispatch_txn.borrow();
-            for member in &txn.flow.completed_members {
-                union_self_roots(&mut scc_self_roots, &member.self_roots);
-            }
-            for member in &txn.call.completed_members {
-                union_self_roots(&mut scc_self_roots, &member.self_roots);
-            }
-            let relation_nodes = txn
-                .relation
-                .completed_members
-                .iter()
-                .flat_map(|member| [member.key.source, member.key.target]);
+            union_self_roots(&mut scc_self_roots, txn.flow.completed_members.self_roots());
+            union_self_roots(&mut scc_self_roots, txn.call.completed_members.self_roots());
             union_self_roots(
                 &mut scc_self_roots,
-                &self.observed_self_roots_from_nodes(relation_nodes),
+                txn.relation.completed_members.self_roots(),
             );
         }
         let discharge = self.relation_discharge_and_route(
@@ -1297,8 +1288,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             (
                 txn.relation.completed_members.take(),
-                std::mem::take(&mut txn.flow.completed_members),
-                std::mem::take(&mut txn.call.completed_members),
+                txn.flow.completed_members.take(),
+                txn.call.completed_members.take(),
             )
         };
         self.publish_scc_member_batch(

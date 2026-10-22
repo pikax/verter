@@ -279,7 +279,7 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
             stamp,
         }));
     }
-    kept.sort_unstable_by(compare_fact_refs);
+    sort_fact_refs(&mut kept);
     kept.dedup();
     *facts = kept;
     true
@@ -781,7 +781,7 @@ impl FactReadSet {
     /// in `observations`, no runs outstanding).
     fn canonicalise(&mut self) {
         self.rewrites = self.rewrites.wrapping_add(1);
-        self.observations.sort_unstable_by(compare_fact_refs);
+        sort_fact_refs(&mut self.observations);
         self.observations.dedup();
         if !self.canonical_runs.is_empty() {
             let runs = std::mem::take(&mut self.canonical_runs);
@@ -1122,7 +1122,7 @@ fn page_canonical_at_width(mut entries: Vec<FactVersionRef>, width: usize) -> Ve
             .collect();
         // A page orders by its digest, so the level of pages is put into
         // canonical order before it is used as entries.
-        pages.sort_unstable_by(compare_fact_refs);
+        sort_fact_refs(&mut pages);
         entries = pages;
     }
     entries
@@ -1153,22 +1153,31 @@ const APPENDED_TAIL_MAX: usize = 8;
 /// order as a full sort and deduplication.
 fn sort_dedup_facts(facts: &mut Vec<FactVersionRef>) {
     let mut prefix = facts.len().min(1);
-    while prefix < facts.len()
-        && compare_fact_refs(&facts[prefix - 1], &facts[prefix]) == std::cmp::Ordering::Less
-    {
+    let mut compared = 0;
+    while prefix < facts.len() && {
+        compared += 1;
+        compare_fact_refs(&facts[prefix - 1], &facts[prefix]) == std::cmp::Ordering::Less
+    } {
         prefix += 1;
     }
+    record_signature_work(compared);
     if prefix == facts.len() {
         return;
     }
     if facts.len() - prefix > APPENDED_TAIL_MAX {
-        facts.sort_unstable_by(compare_fact_refs);
+        sort_fact_refs(facts);
         facts.dedup();
         return;
     }
     let tail = facts.split_off(prefix);
     for fact in tail {
-        if let Err(at) = facts.binary_search_by(|held| compare_fact_refs(held, &fact)) {
+        let mut compared = 0;
+        let found = facts.binary_search_by(|held| {
+            compared += 1;
+            compare_fact_refs(held, &fact)
+        });
+        record_signature_work(compared);
+        if let Err(at) = found {
             facts.insert(at, fact);
         }
     }
@@ -1201,10 +1210,25 @@ fn sort_dedup_facts(facts: &mut Vec<FactVersionRef>) {
 ///   `str` CONTENT — never the pointer, never intern-table insertion
 ///   order, never a randomly-seeded hash. Two processes that observe the
 ///   same fact set emit byte-identical signatures.
+///
+/// Each comparison is one unit of signature work. A pass counts its
+/// comparisons and records them once ([`record_signature_work`]), so a
+/// sort or merge of `n` facts records `n`-proportional work without a
+/// thread-local update per comparison.
 #[inline]
 fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Ordering {
-    record_signature_work(1);
     a.cmp(b)
+}
+
+/// Sort `facts` into the canonical fact order ([`compare_fact_refs`]),
+/// recording each comparison as signature work.
+fn sort_fact_refs(facts: &mut [FactVersionRef]) {
+    let mut compared = 0;
+    facts.sort_unstable_by(|a, b| {
+        compared += 1;
+        compare_fact_refs(a, b)
+    });
+    record_signature_work(compared);
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1238,13 +1262,18 @@ pub fn signature_work_for_tests() -> usize {
 /// falls back to the ordinary observation path, which sorts it.
 fn is_canonical_run(run: &[FactVersionRef]) -> bool {
     let mut index = 1;
-    while index < run.len() {
+    let canonical = loop {
+        if index >= run.len() {
+            break true;
+        }
         if compare_fact_refs(&run[index - 1], &run[index]) != std::cmp::Ordering::Less {
-            return false;
+            index += 1;
+            break false;
         }
         index += 1;
-    }
-    true
+    };
+    record_signature_work(index - 1);
+    canonical
 }
 
 /// A signature verified to be a canonical run — strictly increasing under
@@ -1293,8 +1322,10 @@ fn merge_canonical_runs<'a>(left: &MergeLevel<'a>, right: &MergeLevel<'a>) -> Me
     let (left_len, right_len) = (left.len(), right.len());
     let mut out = Vec::with_capacity(left_len + right_len);
     let (mut i, mut j) = (0usize, 0usize);
+    let mut compared = 0;
     while i < left_len && j < right_len {
         let (l, r) = (left.get(i), right.get(j));
+        compared += 1;
         match compare_fact_refs(l, r) {
             Ordering::Less => {
                 out.push(l);
@@ -1311,6 +1342,7 @@ fn merge_canonical_runs<'a>(left: &MergeLevel<'a>, right: &MergeLevel<'a>) -> Me
             }
         }
     }
+    record_signature_work(compared);
     out.extend((i..left_len).map(|index| left.get(index)));
     out.extend((j..right_len).map(|index| right.get(index)));
     MergeLevel::Merged(out)

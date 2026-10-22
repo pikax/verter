@@ -573,6 +573,26 @@ pub fn flow_result_contract_id(contract: &FlowOperationContract) -> ResultContra
     ResultContractId::from_canonical(&ResultContractDescriptor(contract))
 }
 
+/// The result-contract identity of a row of the static registry, minted
+/// once per process: a row never changes, so neither does its identity,
+/// and every flow key and every finalized solve reads it.
+fn registered_result_contract_id(
+    contract: &'static FlowOperationContract,
+) -> &'static ResultContractId {
+    static IDS: std::sync::OnceLock<Box<[ResultContractId]>> = std::sync::OnceLock::new();
+    let ids = IDS.get_or_init(|| {
+        FLOW_OPERATION_CONTRACTS
+            .iter()
+            .map(flow_result_contract_id)
+            .collect()
+    });
+    let row = FLOW_OPERATION_CONTRACTS
+        .iter()
+        .position(|row| std::ptr::eq(row, contract))
+        .expect("a registered contract is a row of the registry");
+    &ids[row]
+}
+
 /// The result-contract identity of the `FlowReturn` operation, derived
 /// ONLY here from the closed registry row (the registry is static, so
 /// this is a deterministic constant of the registry revision). The single
@@ -580,10 +600,11 @@ pub fn flow_result_contract_id(contract: &FlowOperationContract) -> ResultContra
 /// caller-selected contract is unrepresentable on a production request.
 #[must_use]
 pub fn flow_return_result_contract_id() -> ResultContractId {
-    flow_result_contract_id(
+    registered_result_contract_id(
         flow_operation_contract(SemanticQueryKeyTag::FlowReturn)
             .expect("FlowReturn is a registered flow operation"),
     )
+    .clone()
 }
 
 /// One flow demand: the full query identity (function, demand, input,
@@ -1787,7 +1808,7 @@ pub fn finalize_flow_solve(
     if contract.role != R::Root || contract.status != S::Enabled {
         return partial(FlowPartialReason::OperationNotProvable);
     }
-    if plan.basis().result_contract != flow_result_contract_id(contract) {
+    if plan.basis().result_contract != *registered_result_contract_id(contract) {
         return partial(FlowPartialReason::ResultContractMismatch);
     }
     let Some(records) = runtime.flow_obligations(handle) else { return partial(FlowPartialReason::NoDemandInstalled) };

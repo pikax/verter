@@ -137,14 +137,24 @@ impl EvidenceOwner {
         }
     }
 
-    /// Visit what the node reads, in order.
+    /// Visit what the node reads, in order: each consumed receipt, and each
+    /// canonical once. A read set names a file once per fact it read of
+    /// it, but linking a holder under a file, and unlinking it, is one
+    /// edge however many of the file's facts it read.
     fn for_each_read<'a>(&'a self, mut visit: impl FnMut(EvidenceRead<'a>)) {
+        let mut visited: SmallVec<[&'a str; 8]> = SmallVec::new();
+        let mut canonical_once = |canonical: &'a str, visit: &mut dyn FnMut(EvidenceRead<'a>)| {
+            if !visited.contains(&canonical) {
+                visited.push(canonical);
+                visit(EvidenceRead::Canonical(canonical));
+            }
+        };
         let facts = match self {
             Self::Receipt(receipt) => receipt.facts(),
             Self::Carrier(facts) => facts,
             Self::Fence(fence) => {
                 for crate::semantic_query::DepEntry(canonical, _) in fence.iter() {
-                    visit(EvidenceRead::Canonical(canonical));
+                    canonical_once(canonical, &mut visit);
                 }
                 return;
             }
@@ -154,7 +164,7 @@ impl EvidenceOwner {
                 FactVersionRef::Receipt(child) => visit(EvidenceRead::Receipt(child)),
                 leaf => {
                     if let Some(canonical) = leaf.canonical_id() {
-                        visit(EvidenceRead::Canonical(canonical));
+                        canonical_once(canonical, &mut visit);
                     }
                 }
             }
