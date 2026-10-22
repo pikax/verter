@@ -706,10 +706,9 @@ mod tests {
     //    the version `pnpm install` actually provisions. ───────────────────────
     #[test]
     fn pin_matches_the_workspace_typescript_dev_dependency() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../package.json");
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let root: serde_json::Value = serde_json::from_str(&text).expect("parse package.json");
+        // Embedded at compile time: the crate's tests stay off the filesystem.
+        let text = include_str!("../../../../package.json");
+        let root: serde_json::Value = serde_json::from_str(text).expect("parse package.json");
         assert_eq!(
             root["devDependencies"]["typescript"].as_str(),
             Some(TYPESCRIPT_PIN),
