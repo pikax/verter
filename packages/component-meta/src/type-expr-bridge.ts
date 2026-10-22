@@ -1224,17 +1224,20 @@ function resolveObjectProperty(
       case NODE_OBJECT: {
         const member = node.members.find(
           (candidate) =>
-            candidate.kind === MEMBER_PROPERTY &&
+            (candidate.kind === MEMBER_PROPERTY || candidate.kind === MEMBER_METHOD) &&
             graphPropertyKeyName(expr.graph.getString.bind(expr.graph), candidate.key) ===
               propertyName,
         );
-        if (!member) {
+        // A method member's value is its signature.
+        const typeNodeId =
+          member?.kind === MEMBER_METHOD ? member.functionNodeId : member?.typeNodeId;
+        if (!member || !typeNodeId) {
           return undefined;
         }
 
         return {
           ty: typeExprToDescriptor(
-            createGraphTypeExprRef(expr.graph, member.typeNodeId),
+            createGraphTypeExprRef(expr.graph, typeNodeId),
             nativeRegistry,
             visiting,
             graphVisiting,
@@ -1308,8 +1311,16 @@ function resolveObjectProperty(
     case "object": {
       const member = expr.properties.find(
         (candidate) =>
-          candidate.memberKind === "property" && nativeMemberStringName(candidate) === propertyName,
+          (candidate.memberKind === "property" || candidate.memberKind === "method") &&
+          nativeMemberStringName(candidate) === propertyName,
       );
+      // A method member's value is its signature.
+      if (member?.memberKind === "method" && member.function) {
+        return {
+          ty: nativeFunctionToDescriptor(member.function, nativeRegistry, visiting, graphVisiting),
+          optional: member.optional ?? false,
+        };
+      }
       if (!member?.ty) {
         return undefined;
       }
@@ -1806,7 +1817,7 @@ function resolveFiniteObjectEntries(
         return node.members
           .filter(
             (member) =>
-              member.kind === MEMBER_PROPERTY &&
+              (member.kind === MEMBER_PROPERTY || member.kind === MEMBER_METHOD) &&
               graphPropertyKeyName(expr.graph.getString.bind(expr.graph), member.key) !== null,
           )
           .map((member) => ({
@@ -1880,7 +1891,10 @@ function resolveFiniteObjectEntries(
   switch (expr.kind) {
     case "object":
       return expr.properties.flatMap((member) => {
-        const name = member.memberKind === "property" ? nativeMemberStringName(member) : undefined;
+        const name =
+          member.memberKind === "property" || member.memberKind === "method"
+            ? nativeMemberStringName(member)
+            : undefined;
         if (name === undefined) {
           return [];
         }

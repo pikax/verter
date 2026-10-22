@@ -1178,6 +1178,8 @@
         "importers": [
           "crates/verter_bench/benches/fact_validation_hot_path.rs",
           "crates/verter_bench/examples/profile_component_meta.rs",
+          "crates/verter_bench/src/soak/run.rs",
+          "crates/verter_bench/src/soak/isolation.rs",
           "crates/verter_ffi/src/convert/component_meta.rs",
           "crates/verter_ffi/src/convert/string_helpers.rs",
           "crates/verter_ffi/src/convert/tests.rs",
@@ -1664,6 +1666,8 @@
             "kind": "bulk",
             "to": "pub(crate)",
             "consumersAffected": [
+              "crates/verter_bench/src/soak/run.rs",
+              "crates/verter_bench/src/soak/isolation.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/connected_demand_tests.rs",
               "crates/verter_session/benches/projection_safety_bench.rs",
               "crates/verter_session/examples/signature_kernel_bench.rs",

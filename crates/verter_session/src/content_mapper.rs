@@ -49,6 +49,28 @@
 //! does not. Keying the projection on content instead would mint a new unit on
 //! the first keystroke and lose every association the previous projection held.
 //!
+//! # Relation to the TypeScript content-mapper wire
+//!
+//! This plane is not the wire. The protocol TypeScript speaks to a mapper
+//! (microsoft/typescript-go#4712, amended by microsoft/TypeScript#63936; its
+//! harness model is `tests/sfc-projection/STP5/protocol.mjs`) carries span
+//! mappings `[virtualStart, virtualLength, originalStart, originalLength,
+//! kind, features?]`; lowering this plane into them is the adapter's job
+//! (STP40), not this module's. The correspondence it must preserve:
+//!
+//! - offsets here are UTF-8 bytes, so an adapter negotiates `utf-8`;
+//! - [`ProjectedClass::Identity`] and [`ProjectedClass::Relocated`] are
+//!   `Verbatim` (equal length and content; the only spans edits may be
+//!   written back through), [`ProjectedClass::Rewritten`] is `Atom` (or
+//!   `Alias` when diagnostics should display the authored text), and
+//!   [`ProjectedClass::Synthesized`] is a gap, never a mapping;
+//! - projected (virtual) regions never overlap, while one carrier region may
+//!   project many times ([`ContentMapper::to_projected`] answers all of them),
+//!   which the wire allows since #63936 lifted the original-overlap ban;
+//! - the wire addresses the one-past-the-end offset; this plane refuses it
+//!   without a declared anchor, so an adapter answers end-of-file positions
+//!   from an anchor rather than by clamping.
+//!
 //! # Dormant
 //!
 //! No production route reaches this module. Activation is a separate, atomic
