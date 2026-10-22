@@ -18,6 +18,38 @@ use crate::resolution::resolution_world_identity::{ResolutionPopulation, Resolut
 
 pub type FactHash16 = [u8; 16];
 
+/// One canonical's text for the facts a producer observes on it: allocated
+/// once, on first use, and shared by every fact naming it, so a producer
+/// observing several facts on one file makes one allocation, not one per
+/// fact.
+pub struct SharedCanonical<'a> {
+    text: &'a str,
+    shared: std::cell::OnceCell<Arc<str>>,
+}
+
+impl<'a> SharedCanonical<'a> {
+    /// `text`, not yet allocated.
+    #[must_use]
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            shared: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The shared text, allocated the first time it is asked for.
+    #[must_use]
+    pub fn id(&self) -> Arc<str> {
+        Arc::clone(self.shared.get_or_init(|| Arc::from(self.text)))
+    }
+
+    /// The text.
+    #[must_use]
+    pub fn as_str(&self) -> &'a str {
+        self.text
+    }
+}
+
 /// The compaction domain a precise fact belongs to.
 ///
 /// Compaction is DOMAIN-WISE, not whole-signature: a domain whose precise

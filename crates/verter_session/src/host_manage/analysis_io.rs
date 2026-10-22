@@ -1637,27 +1637,31 @@ impl VerterHost {
     /// `FileFacts` payload paired with `indexed` in the current artifact
     /// store. A separately-read current registry is not sufficient: an edit
     /// between the indexed serve and fact lookup could otherwise sign old
-    /// routing bytes with a new fact.
+    /// routing bytes with a new fact. `canonical` is a text, or a shared
+    /// canonical the fact then shares.
     #[must_use]
-    pub(crate) fn syntactic_route_interface_fact_for_indexed(
+    pub(crate) fn syntactic_route_interface_fact_for_indexed<C>(
         &self,
-        canonical: &str,
+        canonical: C,
         indexed: &Arc<crate::project_type_store::IndexedReady>,
-    ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef>
+    where
+        C: AsRef<str> + Into<Arc<str>>,
+    {
         if !indexed.shallow_state.has_resolvable_surface() {
             return None;
         }
-        let artifacts = self.current_content_pinned_artifacts(canonical)?;
+        let artifacts = self.current_content_pinned_artifacts(canonical.as_ref())?;
         if !Arc::ptr_eq(&artifacts.indexed, indexed) {
             return None;
         }
-        Self::syntactic_route_interface_fact_of(canonical.to_string(), &artifacts)
+        Self::syntactic_route_interface_fact_of(canonical.into(), &artifacts)
     }
 
     /// The `SyntacticRouteInterface` parse fact of `artifacts`, the current
     /// base entry for `canonical`; `None` when its surface is not resolvable.
     pub(crate) fn syntactic_route_interface_fact_of(
-        canonical: String,
+        canonical: Arc<str>,
         artifacts: &crate::file_artifact_store::FileArtifacts,
     ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
         if !artifacts.indexed.shallow_state.has_resolvable_surface() {
@@ -1667,7 +1671,7 @@ impl VerterHost {
             .facts
             .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
         Some(verter_session_query::facts::fact_cache::ParseFactRef {
-            canonical_id: canonical.into(),
+            canonical_id: canonical,
             key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
             lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: fact.semantic_hash,

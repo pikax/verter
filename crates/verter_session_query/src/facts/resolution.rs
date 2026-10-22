@@ -340,39 +340,50 @@ impl ResolutionFactKey {
         }
     }
 
-    /// Heap this key owns beyond its inline bytes: each of its shared
-    /// canonical and specifier texts once per `aliases`, and a decision's
-    /// shared query identity, with that identity's own texts, once per
-    /// `aliases` (see [`crate::retention::allocation`]).
+    /// Heap this key owns beyond its inline bytes: its canonical and
+    /// specifier texts and a decision's shared query identity, with that
+    /// identity's own texts, each once per `aliases` (see
+    /// [`crate::retention::allocation::FactMeasure`]).
     #[must_use]
     pub fn owned_heap_bytes(&self, aliases: &mut crate::retention::allocation::AliasSet) -> usize {
-        use crate::retention::allocation::{arc_block_bytes, arc_str_bytes, AliasSet};
-        let entry = |entry: &ResolutionEntry, aliases: &mut AliasSet| match entry {
-            ResolutionEntry::Importer(canonical) => arc_str_bytes(&canonical.0, aliases),
-            ResolutionEntry::ExplicitProject(_) => 0,
+        self.measure_heap(&mut crate::retention::allocation::FactMeasure::new(aliases))
+    }
+
+    /// [`Self::owned_heap_bytes`] within one fact measurement.
+    pub(crate) fn measure_heap<M: crate::retention::allocation::FactMeter>(
+        &self,
+        m: &mut crate::retention::allocation::FactMeasure<'_, M>,
+    ) -> usize {
+        let entry = |entry: &ResolutionEntry,
+                     m: &mut crate::retention::allocation::FactMeasure<'_, M>| {
+            match entry {
+                ResolutionEntry::Importer(canonical) => m.text(&canonical.0),
+                ResolutionEntry::ExplicitProject(_) => 0,
+            }
         };
         match self {
             Self::PathProbe { canonical, .. }
             | Self::Manifest { canonical, .. }
-            | Self::DirectoryMembers { canonical, .. } => arc_str_bytes(&canonical.0, aliases),
-            Self::Realpath { requested, .. } => arc_str_bytes(&requested.0, aliases),
+            | Self::DirectoryMembers { canonical, .. } => m.text(&canonical.0),
+            Self::Realpath { requested, .. } => m.text(&requested.0),
             Self::RecoveryScope {
                 canonical_prefix, ..
-            } => arc_str_bytes(&canonical_prefix.0, aliases),
-            Self::OwnerResolutionSet { owner, .. } => arc_str_bytes(&owner.0, aliases),
+            } => m.text(&canonical_prefix.0),
+            Self::OwnerResolutionSet { owner, .. } => m.text(&owner.0),
             Self::ExactResolution {
                 entry: owner,
                 specifier,
                 ..
-            } => entry(owner, aliases) + arc_str_bytes(&specifier.0, aliases),
-            Self::ContextSelection { entry: owner, .. } => entry(owner, aliases),
+            } => entry(owner, m) + m.text(&specifier.0),
+            Self::ContextSelection { entry: owner, .. } => entry(owner, m),
             Self::Decision { query } => {
-                if !aliases.first(query) {
+                if !m.first_owned(query) {
                     return 0;
                 }
-                arc_block_bytes(std::mem::size_of::<ResolutionQueryKey>())
-                    + entry(&query.entry, aliases)
-                    + arc_str_bytes(&query.normalized_specifier.0, aliases)
+                crate::retention::allocation::arc_block_bytes(
+                    std::mem::size_of::<ResolutionQueryKey>(),
+                ) + entry(&query.entry, m)
+                    + m.text(&query.normalized_specifier.0)
             }
         }
     }

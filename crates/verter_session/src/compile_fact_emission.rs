@@ -107,14 +107,18 @@ pub(crate) fn observe_compile_tier_dependencies(
     //    file). Adding / removing the binding on the owner side
     //    invalidates the compile output that references it.
     let mut seen_imports = FxHashSet::default();
+    // The owner's canonical, shared by every fact observed on it.
+    let owner = verter_session_query::facts::version::SharedCanonical::new(canonical_id);
     // Resolved deps reached through a value (runtime) import binding —
     // each one needs a `FileWholeHash` observation (step 1b below).
     let mut runtime_dep_canonicals = FxHashSet::default();
     for import in script_imports {
         let space = symbol_space_for_import(import);
         let specifier = InternedSpecifier::from(import.source.as_str());
-        let resolved_dep =
-            resolve_import_source_to_canonical(host, canonical_id, import.source.as_str());
+        // One shared text per resolved dep, for every fact naming it.
+        let resolved_dep: Option<Arc<str>> =
+            resolve_import_source_to_canonical(host, canonical_id, import.source.as_str())
+                .map(Arc::from);
         for binding in import.bindings.iter() {
             let local = binding.name.clone();
             // A binding is a *value* (runtime) binding iff neither the
@@ -129,7 +133,7 @@ pub(crate) fn observe_compile_tier_dependencies(
                 binding: InternedName::from(local.as_str()),
                 space,
             };
-            observe_parse_fact_present(host, canonical_id, key, FactLane::Semantic);
+            observe_parse_fact_present(host, &owner.id(), key, FactLane::Semantic);
 
             // R28 path-precise cross-file: also observe the
             // `Export(binding, space)` fact on the resolved dep so
@@ -140,7 +144,7 @@ pub(crate) fn observe_compile_tier_dependencies(
             // declaration's body fingerprint. Path-precise: editing
             // a sibling export in the dep does not invalidate this
             // consumer.
-            if let Some(resolved_dep) = resolved_dep.as_deref() {
+            if let Some(resolved_dep) = resolved_dep.as_ref() {
                 let dep_export_key = FactKey::Export {
                     name: InternedName::from(local.as_str()),
                     space,
@@ -155,8 +159,8 @@ pub(crate) fn observe_compile_tier_dependencies(
                 // output re-emits the runtime dependency, so its
                 // full content matters — record the dep for a
                 // whole-hash observation.
-                if binding_is_value && resolved_dep != canonical_id {
-                    runtime_dep_canonicals.insert(resolved_dep.to_string());
+                if binding_is_value && **resolved_dep != *canonical_id {
+                    runtime_dep_canonicals.insert(Arc::clone(resolved_dep));
                 }
             }
         }
@@ -171,9 +175,9 @@ pub(crate) fn observe_compile_tier_dependencies(
         // declaration is non-type-only and has no bindings, mirroring
         // the per-binding `binding_is_value` admission above.
         if import.bindings.is_empty() && !import.is_type_only {
-            if let Some(resolved_dep) = resolved_dep.as_deref() {
-                if resolved_dep != canonical_id {
-                    runtime_dep_canonicals.insert(resolved_dep.to_string());
+            if let Some(resolved_dep) = resolved_dep.as_ref() {
+                if **resolved_dep != *canonical_id {
+                    runtime_dep_canonicals.insert(Arc::clone(resolved_dep));
                 }
             }
         }
@@ -225,7 +229,8 @@ pub(crate) fn observe_compile_tier_dependencies(
             name: type_name.clone(),
             space,
         };
-        observe_parse_fact_present(host, &resolved_canonical, export_key, FactLane::Semantic);
+        let resolved_id: Arc<str> = Arc::from(resolved_canonical.as_str());
+        observe_parse_fact_present(host, &resolved_id, export_key, FactLane::Semantic);
 
         // MemberShape(exporter=type_name) — member surface
         // fingerprint. Changes on sibling add / remove.
@@ -233,12 +238,12 @@ pub(crate) fn observe_compile_tier_dependencies(
             exporter: type_name.clone(),
             space,
         };
-        observe_parse_fact_present(host, &resolved_canonical, shape_key, FactLane::Semantic);
+        observe_parse_fact_present(host, &resolved_id, shape_key, FactLane::Semantic);
 
         // Enumerate the type's existing members from the
         // dependency's FactRegistry and emit one
         // `MemberPresence(exporter=type_name, name=m)` per member.
-        observe_member_presences_for_export(host, &resolved_canonical, &type_name, space);
+        observe_member_presences_for_export(host, &resolved_id, &type_name, space);
     }
 
     // 3. ModuleAugmentationIndexShape per consumed specifier (R29).
@@ -265,7 +270,7 @@ pub(crate) fn observe_compile_tier_dependencies(
         if !seen_external.insert(resolved.clone()) {
             continue;
         }
-        observe_file_whole_hash(host, &resolved);
+        observe_file_whole_hash(host, &Arc::from(resolved));
     }
 
     // 5. Owner import-route witness — the route-retarget pin.
@@ -318,13 +323,13 @@ pub(crate) fn with_extra_compile_observations<T>(
 /// specifier) the observation is skipped — consistent with the
 /// `observe_parse_fact_present` skip-on-miss contract: a consumer
 /// must never depend on a fact the producer cannot publish.
-fn observe_file_whole_hash(host: &VerterHost, canonical_id: &str) {
+fn observe_file_whole_hash(host: &VerterHost, canonical_id: &Arc<str>) {
     let Some(whole_hash) = host.current_or_read_whole_hash(canonical_id) else {
         return;
     };
     verter_type_engine::resolver_core::resolver_context::observe_fan_out(
         FactVersionRef::FileWholeHash {
-            canonical_id: canonical_id.into(),
+            canonical_id: Arc::clone(canonical_id),
             hash: whole_hash,
         },
     );
@@ -352,13 +357,18 @@ fn observe_file_whole_hash(host: &VerterHost, canonical_id: &str) {
 ///   specifier without workspace fallback, deleted file, etc.)
 ///   the observation is conservatively skipped so a consumer
 ///   never depends on a fact that the producer cannot publish.
-fn observe_parse_fact_present(host: &VerterHost, canonical_id: &str, key: FactKey, lane: FactLane) {
+fn observe_parse_fact_present(
+    host: &VerterHost,
+    canonical_id: &Arc<str>,
+    key: FactKey,
+    lane: FactLane,
+) {
     let Some(expected_hash) = lookup_parse_fact_hash(host, canonical_id, &key, lane) else {
         return;
     };
     verter_type_engine::resolver_core::resolver_context::observe_fan_out(FactVersionRef::Parse(
         ParseFactRef {
-            canonical_id: canonical_id.into(),
+            canonical_id: Arc::clone(canonical_id),
             key,
             lane,
             expected_hash,
@@ -377,7 +387,7 @@ fn observe_parse_fact_present(host: &VerterHost, canonical_id: &str, key: FactKe
 /// holds for unresolvable specifiers).
 fn observe_member_presences_for_export(
     host: &VerterHost,
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     exporter: &InternedName,
     space: SymbolSpace,
 ) {
@@ -553,7 +563,7 @@ fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[Analyz
             };
             verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                 FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-                    canonical_id: import.source.clone().into(),
+                    canonical_id: Arc::clone(&spec.0),
                     key: fact_key,
                     lane: FactLane::Semantic,
                     expected_hash: *fingerprint,
@@ -571,7 +581,7 @@ fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[Analyz
                 for entry in augmenter_set.entries.iter() {
                     let augmenter_canonical = entry.canonical();
                     if emitted_augmenter_whole_hashes.insert(Arc::clone(augmenter_canonical)) {
-                        observe_file_whole_hash(host, augmenter_canonical.as_ref());
+                        observe_file_whole_hash(host, augmenter_canonical);
                     }
                 }
             }

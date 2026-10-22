@@ -63,6 +63,16 @@ pub trait Measured: Send + Sync + 'static {
     /// offered to `aliases` ([`Owned::offer`]), and each distinct `Arc`
     /// allocation is counted once per `aliases`.
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize;
+
+    /// [`Self::heap_bytes`] of every item of a list, summed. A type whose
+    /// items share allocations among themselves measures the list as one
+    /// value, so an allocation several items share is counted once.
+    fn slice_heap_bytes(items: &[Self], aliases: &mut AliasSet) -> usize
+    where
+        Self: Sized,
+    {
+        items.iter().map(|item| item.heap_bytes(aliases)).sum()
+    }
 }
 
 impl Measured for Box<str> {
@@ -73,11 +83,7 @@ impl Measured for Box<str> {
 
 impl<T: Measured> Measured for Box<[T]> {
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        heap_block_bytes(std::mem::size_of_val::<[T]>(self))
-            + self
-                .iter()
-                .map(|item| item.heap_bytes(aliases))
-                .sum::<usize>()
+        heap_block_bytes(std::mem::size_of_val::<[T]>(self)) + T::slice_heap_bytes(self, aliases)
     }
 }
 

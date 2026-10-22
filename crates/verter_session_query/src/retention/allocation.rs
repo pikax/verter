@@ -5,9 +5,10 @@ pub use verter_retention::allocation::*;
 
 use std::sync::Arc;
 
+use verter_retention::heap_size::HeapMeter;
+
 use crate::facts::fact_cache::ReadSetSignature;
 use crate::facts::registry::FactKey;
-use crate::facts::resolution::ResolutionFactKey;
 use crate::facts::version::{FactVersionRef, ProgramAnalysisFactRef, ResolveImportsFactRef};
 
 /// Bytes a fact signature keeps alive: its slice block and every fact's
@@ -24,22 +25,21 @@ pub fn fact_slice_bytes(facts: &Arc<[FactVersionRef]>, aliases: &mut AliasSet) -
     let Some(block) = arc_slice_block_bytes(facts, aliases) else {
         return 0;
     };
-    block
-        + facts
-            .iter()
-            .map(|fact| fact_heap_bytes(fact, aliases))
-            .sum::<usize>()
+    block + facts_heap_bytes(facts, aliases)
 }
 
 /// Bytes an owned fact list keeps alive: its backing by capacity and every
 /// fact's owned heap.
 #[must_use]
 pub fn fact_vec_bytes(facts: &Vec<FactVersionRef>, aliases: &mut AliasSet) -> usize {
-    vec_bytes(facts)
-        + facts
-            .iter()
-            .map(|fact| fact_heap_bytes(fact, aliases))
-            .sum::<usize>()
+    vec_bytes(facts) + facts_heap_bytes(facts, aliases)
+}
+
+/// Heap a list of facts owns beyond their inline slots, measured as one
+/// value: an allocation several of the facts share is counted once.
+#[must_use]
+pub fn facts_heap_bytes(facts: &[FactVersionRef], aliases: &mut AliasSet) -> usize {
+    FactMeasure::new(aliases).facts(facts)
 }
 
 /// Heap one fact owns beyond its inline slot.
@@ -50,179 +50,296 @@ pub fn fact_vec_bytes(facts: &Vec<FactVersionRef>, aliases: &mut AliasSet) -> us
 /// ([`crate::facts::receipt::reserve_retained_with_evidence`]).
 #[must_use]
 pub fn fact_heap_bytes(fact: &FactVersionRef, aliases: &mut AliasSet) -> usize {
-    match fact {
-        FactVersionRef::FileWholeHash { canonical_id, .. }
-        | FactVersionRef::DerivedFactHash { canonical_id, .. }
-        | FactVersionRef::FileSourceEnv { canonical_id, .. } => {
-            arc_str_bytes(canonical_id, aliases)
+    FactMeasure::new(aliases).fact(fact)
+}
+
+/// Where a fact measurement counts the raw allocations facts share: the
+/// charge's [`AliasSet`], or a [`HeapMeter`]'s raw set when a fact is
+/// part of a measured data tree, so one allocation is offered to one set
+/// whichever field of the tree reaches it.
+pub trait FactMeter {
+    /// `true` the first time this measurement reaches `arc`'s allocation.
+    fn first_raw<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool;
+    /// Bytes a fact key's leaf name costs this measurement (the declared
+    /// leaf-text convention).
+    fn leaf_name(&mut self, name: &Arc<str>) -> usize;
+    /// The set the owned handles facts reach are offered to.
+    fn handles(&mut self) -> &mut AliasSet;
+}
+
+impl FactMeter for AliasSet {
+    fn first_raw<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
+        self.first(arc)
+    }
+
+    fn leaf_name(&mut self, name: &Arc<str>) -> usize {
+        arc_str_bytes(name, self)
+    }
+
+    fn handles(&mut self) -> &mut AliasSet {
+        self
+    }
+}
+
+impl FactMeter for HeapMeter<'_, '_> {
+    fn first_raw<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
+        self.first(arc)
+    }
+
+    /// Counted like any other raw `Arc<str>` of the tree.
+    fn leaf_name(&mut self, name: &Arc<str>) -> usize {
+        if self.first(name) {
+            arc_block_bytes(name.len())
+        } else {
+            0
         }
-        FactVersionRef::Parse(parse) => {
-            arc_str_bytes(&parse.canonical_id, aliases) + fact_key_heap_bytes(&parse.key, aliases)
+    }
+
+    fn handles(&mut self) -> &mut AliasSet {
+        HeapMeter::handles(self)
+    }
+}
+
+/// One measurement of facts on one [`FactMeter`].
+///
+/// A fact's canonical id, its resolution key's canonical and specifier
+/// texts and a decision's query identity are INLINE allocations: each is
+/// charged inside the charge that measures the fact, once per charge
+/// (deduplicated on the meter), and never registered as a shared leaf
+/// ([`AliasSet::collecting`]). Registering every canonical as a leaf would
+/// add a registration, its bookkeeping and a registry insert to every hold
+/// for allocations of a few dozen bytes; charging them inline keeps a hold
+/// as cheap as when each fact owned its own `String`. A canonical several
+/// separately charged carriers share is charged once by each of them: a
+/// bounded overcharge of one block per carrier, never an undercharge.
+///
+/// Only an allocation with more than one owner can be reached twice, so
+/// only those are offered to the meter's set: a text this fact alone owns
+/// is counted in full without a set entry, and a measurement of facts that
+/// share nothing records nothing, exactly as when each owned a `String`.
+/// The measurement also remembers the last shared text it counted, so a
+/// run of facts naming one allocation offers it once: a canonically sorted
+/// list keeps one file's facts of one kind together.
+pub struct FactMeasure<'m, M: FactMeter> {
+    meter: &'m mut M,
+    last_text: usize,
+}
+
+impl<'m, M: FactMeter> FactMeasure<'m, M> {
+    /// A measurement counting on `meter`.
+    pub fn new(meter: &'m mut M) -> Self {
+        Self {
+            meter,
+            last_text: 0,
         }
-        FactVersionRef::RouteSurface(route) => {
-            arc_str_bytes(&route.canonical_id, aliases) + fact_key_heap_bytes(&route.key, aliases)
-        }
-        FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-            canonical_id,
-            key,
-            ..
-        }) => arc_str_bytes(canonical_id, aliases) + fact_key_heap_bytes(key, aliases),
-        FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) => {
-            resolution_key_heap_bytes(&resolution.key, aliases)
-        }
-        FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody { function, .. }) => {
-            function.canonical_id.offer(aliases)
-                + function.merged_symbol_name.offer(aliases)
-                + match &function.function_part {
-                    verter_type_expr::facts::FunctionPartIdentity::Member { member_path } => {
-                        member_path.offer(aliases)
+    }
+
+    /// Heap every fact of `facts` owns, each shared allocation once.
+    pub fn facts<'f>(&mut self, facts: impl IntoIterator<Item = &'f FactVersionRef>) -> usize {
+        facts.into_iter().map(|fact| self.fact(fact)).sum()
+    }
+
+    /// Heap one fact owns beyond its inline slot (see [`fact_heap_bytes`]).
+    pub fn fact(&mut self, fact: &FactVersionRef) -> usize {
+        match fact {
+            FactVersionRef::FileWholeHash { canonical_id, .. }
+            | FactVersionRef::DerivedFactHash { canonical_id, .. }
+            | FactVersionRef::FileSourceEnv { canonical_id, .. } => self.text(canonical_id),
+            FactVersionRef::Parse(parse) => {
+                self.text(&parse.canonical_id) + self.fact_key(&parse.key)
+            }
+            FactVersionRef::RouteSurface(route) => {
+                self.text(&route.canonical_id) + self.fact_key(&route.key)
+            }
+            FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
+                canonical_id,
+                key,
+                ..
+            }) => self.text(canonical_id) + self.fact_key(key),
+            FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) => {
+                resolution.key.measure_heap(self)
+            }
+            FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
+                function, ..
+            }) => {
+                let handles = self.meter.handles();
+                function.canonical_id.offer(handles)
+                    + function.merged_symbol_name.offer(handles)
+                    + match &function.function_part {
+                        verter_type_expr::facts::FunctionPartIdentity::Member { member_path } => {
+                            member_path.offer(handles)
+                        }
+                        verter_type_expr::facts::FunctionPartIdentity::DeclarationBody
+                        | verter_type_expr::facts::FunctionPartIdentity::Initializer
+                        | verter_type_expr::facts::FunctionPartIdentity::Other { .. } => 0,
                     }
-                    verter_type_expr::facts::FunctionPartIdentity::DeclarationBody
-                    | verter_type_expr::facts::FunctionPartIdentity::Initializer
-                    | verter_type_expr::facts::FunctionPartIdentity::Other { .. } => 0,
-                }
+            }
+            FactVersionRef::ProjectGeneration { .. }
+            | FactVersionRef::DomainGeneration(_)
+            | FactVersionRef::StrictSelfRootWorld(_)
+            | FactVersionRef::Receipt(_) => 0,
         }
-        FactVersionRef::ProjectGeneration { .. }
-        | FactVersionRef::DomainGeneration(_)
-        | FactVersionRef::StrictSelfRootWorld(_)
-        | FactVersionRef::Receipt(_) => 0,
+    }
+
+    /// Bytes an inline text costs this measurement: its block the first
+    /// time the measurement reaches it, nothing after, and nothing for the
+    /// empty text every `Arc::default()` shares, which allocates nothing.
+    pub(crate) fn text(&mut self, text: &Arc<str>) -> usize {
+        let address = Arc::as_ptr(text).cast::<u8>() as usize;
+        if address == self.last_text {
+            return 0;
+        }
+        self.last_text = address;
+        if is_shared_empty(text) || !self.first_owned(text) {
+            return 0;
+        }
+        arc_block_bytes(text.len())
+    }
+
+    /// `true` the first time this measurement reaches `arc`'s allocation.
+    /// An allocation the measured value alone owns cannot be reached again,
+    /// so it is counted without a set entry.
+    pub(crate) fn first_owned<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
+        Arc::strong_count(arc) == 1 || self.meter.first_raw(arc)
+    }
+
+    /// Heap one fact key's leaf names keep alive.
+    fn fact_key(&mut self, key: &FactKey) -> usize {
+        let m = &mut *self.meter;
+        match key {
+            FactKey::Export { name: n, .. } | FactKey::LocalDecl { name: n, .. } => {
+                m.leaf_name(&n.0)
+            }
+            FactKey::ExportAlias { exported_as, .. } => m.leaf_name(&exported_as.0),
+            FactKey::Member {
+                exporter, name: n, ..
+            }
+            | FactKey::MemberPresence {
+                exporter, name: n, ..
+            } => {
+                m.leaf_name(&exporter.0)
+                    + match n {
+                        // An owned name: charged by its own cell, collected here.
+                        verter_type_expr::PropertyKey::String(text) => text.offer(m.handles()),
+                        _ => 0,
+                    }
+            }
+            FactKey::MemberShape { exporter, .. } => m.leaf_name(&exporter.0),
+            FactKey::ImportRef {
+                specifier, binding, ..
+            } => m.leaf_name(&specifier.0) + m.leaf_name(&binding.0),
+            FactKey::SyntacticReexportRef {
+                specifier,
+                source_name,
+                target_name,
+                ..
+            } => {
+                m.leaf_name(&specifier.0)
+                    + m.leaf_name(&source_name.0)
+                    + m.leaf_name(&target_name.0)
+            }
+            FactKey::ModuleAugmentation {
+                specifier,
+                augmented_name,
+                ..
+            } => m.leaf_name(&specifier.0) + m.leaf_name(&augmented_name.0),
+            FactKey::AugmentationContributionSet { specifier, .. }
+            | FactKey::AugmentationContributionOrder { specifier, .. } => m.leaf_name(&specifier.0),
+            FactKey::DeclContributionOrder { name: n, .. } => m.leaf_name(&n.0),
+            FactKey::ResolvedImportClause {
+                specifier,
+                binding,
+                resolved_canonical,
+                resolved_source_name,
+                ..
+            } => {
+                m.leaf_name(&specifier.0)
+                    + m.leaf_name(&binding.0)
+                    + m.leaf_name(resolved_canonical)
+                    + m.leaf_name(&resolved_source_name.0)
+            }
+            FactKey::ResolvedReexportBinding {
+                specifier,
+                source_name,
+                target_name,
+                resolved_canonical,
+                resolved_source_name,
+                ..
+            } => {
+                m.leaf_name(&specifier.0)
+                    + m.leaf_name(&source_name.0)
+                    + m.leaf_name(&target_name.0)
+                    + m.leaf_name(resolved_canonical)
+                    + m.leaf_name(&resolved_source_name.0)
+            }
+            FactKey::ModuleAugmentationIndexShape {
+                external_specifier,
+                resolved_relative_canonical,
+                wildcard_pattern,
+                ..
+            } => {
+                external_specifier
+                    .as_ref()
+                    .map_or(0, |specifier| m.leaf_name(&specifier.0))
+                    + resolved_relative_canonical
+                        .as_ref()
+                        .map_or(0, |canonical| m.leaf_name(canonical))
+                    + wildcard_pattern
+                        .as_ref()
+                        .map_or(0, |pattern| m.leaf_name(&pattern.0))
+            }
+            FactKey::ProgramFileOrder { program } => m.leaf_name(program),
+            FactKey::SyntacticExportSet
+            | FactKey::SyntacticRouteInterface
+            | FactKey::MacroSurface { .. }
+            | FactKey::TemplateRoot
+            | FactKey::AugmentationTargetSet
+            | FactKey::NamespaceScopeSet => 0,
+        }
     }
 }
 
-/// Heap one fact key's leaf names keep alive.
-fn fact_key_heap_bytes(key: &FactKey, aliases: &mut AliasSet) -> usize {
-    let mut bytes = 0;
-    let mut name = |text: &Arc<str>| bytes += arc_str_bytes(text, aliases);
-    match key {
-        FactKey::Export { name: n, .. } | FactKey::LocalDecl { name: n, .. } => name(&n.0),
-        FactKey::ExportAlias { exported_as, .. } => name(&exported_as.0),
-        FactKey::Member {
-            exporter, name: n, ..
-        }
-        | FactKey::MemberPresence {
-            exporter, name: n, ..
-        } => {
-            name(&exporter.0);
-            if let verter_type_expr::PropertyKey::String(text) = n {
-                // An owned name: charged by its own cell, collected here.
-                bytes += text.offer(aliases);
-            }
-        }
-        FactKey::MemberShape { exporter, .. } => name(&exporter.0),
-        FactKey::ImportRef {
-            specifier, binding, ..
-        } => {
-            name(&specifier.0);
-            name(&binding.0);
-        }
-        FactKey::SyntacticReexportRef {
-            specifier,
-            source_name,
-            target_name,
-            ..
-        } => {
-            name(&specifier.0);
-            name(&source_name.0);
-            name(&target_name.0);
-        }
-        FactKey::ModuleAugmentation {
-            specifier,
-            augmented_name,
-            ..
-        } => {
-            name(&specifier.0);
-            name(&augmented_name.0);
-        }
-        FactKey::AugmentationContributionSet { specifier, .. }
-        | FactKey::AugmentationContributionOrder { specifier, .. } => name(&specifier.0),
-        FactKey::DeclContributionOrder { name: n, .. } => name(&n.0),
-        FactKey::ResolvedImportClause {
-            specifier,
-            binding,
-            resolved_canonical,
-            resolved_source_name,
-            ..
-        } => {
-            name(&specifier.0);
-            name(&binding.0);
-            name(resolved_canonical);
-            name(&resolved_source_name.0);
-        }
-        FactKey::ResolvedReexportBinding {
-            specifier,
-            source_name,
-            target_name,
-            resolved_canonical,
-            resolved_source_name,
-            ..
-        } => {
-            name(&specifier.0);
-            name(&source_name.0);
-            name(&target_name.0);
-            name(resolved_canonical);
-            name(&resolved_source_name.0);
-        }
-        FactKey::ModuleAugmentationIndexShape {
-            external_specifier,
-            resolved_relative_canonical,
-            wildcard_pattern,
-            ..
-        } => {
-            if let Some(specifier) = external_specifier {
-                name(&specifier.0);
-            }
-            if let Some(canonical) = resolved_relative_canonical {
-                name(canonical);
-            }
-            if let Some(pattern) = wildcard_pattern {
-                name(&pattern.0);
-            }
-        }
-        FactKey::ProgramFileOrder { program } => name(program),
-        FactKey::SyntacticExportSet
-        | FactKey::SyntacticRouteInterface
-        | FactKey::MacroSurface { .. }
-        | FactKey::TemplateRoot
-        | FactKey::AugmentationTargetSet
-        | FactKey::NamespaceScopeSet => {}
-    }
-    bytes
-}
-
-/// Heap one resolution fact key owns: its shared canonical and specifier
-/// texts, and a decision's shared query identity.
-fn resolution_key_heap_bytes(key: &ResolutionFactKey, aliases: &mut AliasSet) -> usize {
-    key.owned_heap_bytes(aliases)
+/// Whether `text` is the empty text `Arc::<str>::default()` hands out. The
+/// standard library shares one static for it, so it allocates nothing; an
+/// empty text built any other way is its own allocation and is charged.
+fn is_shared_empty(text: &Arc<str>) -> bool {
+    static EMPTY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    text.is_empty() && Arc::ptr_eq(text, EMPTY.get_or_init(Arc::default))
 }
 
 impl verter_retention::heap_size::HeapSize for FactVersionRef {
-    /// A fact's own heap; a receipt carries its own charge.
-    fn heap_size<'t>(
-        &'t self,
-        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        fact_heap_bytes(self, meter.handles())
+    /// A fact's own heap, its raw allocations counted on the tree's raw
+    /// set; a receipt carries its own charge.
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        FactMeasure::new(meter).fact(self)
     }
 }
 
 impl verter_retention::owned::Measured for FactVersionRef {
-    /// A fact's own heap; a receipt carries its own charge. The raw leaf
-    /// names a fact key keeps are counted with the list that owns the fact,
-    /// on a set of the fact's own; its owned names pass to the list's cell.
+    /// A fact's own heap; a receipt carries its own charge.
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        let mut leaves = AliasSet::new();
-        let bytes = fact_heap_bytes(self, &mut leaves);
-        bytes + aliases.absorb(&mut leaves)
+        Self::slice_heap_bytes(std::slice::from_ref(self), aliases)
+    }
+
+    /// The facts of an owned list, measured as one value. The raw
+    /// allocations facts keep are counted with the list that owns them, on
+    /// one set of the list's own, so an allocation several facts share is
+    /// counted once; their owned names pass to the list's cell.
+    fn slice_heap_bytes(items: &[Self], aliases: &mut AliasSet) -> usize {
+        let mut raw = AliasSet::new();
+        let bytes = facts_heap_bytes(items, &mut raw);
+        bytes + aliases.absorb(&mut raw)
     }
 }
 
 impl verter_retention::heap_size::HeapSize for crate::facts::fact_cache::ReadSetSignature {
-    /// The fact slice and every fact's own heap.
-    fn heap_size<'t>(
-        &'t self,
-        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        fact_slice_bytes(&self.facts, meter.handles())
+    /// The fact slice and every fact's own heap, on the tree's raw set.
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        if !meter.first(&self.facts) {
+            return 0;
+        }
+        arc_block_bytes(std::mem::size_of_val::<[FactVersionRef]>(&self.facts))
+            + FactMeasure::new(meter).facts(self.facts.iter())
     }
 }
 

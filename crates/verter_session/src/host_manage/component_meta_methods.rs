@@ -3292,10 +3292,11 @@ impl VerterHost {
         facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
     ) {
+        let canonical_id = verter_session_query::facts::version::SharedCanonical::new(canonical);
         if let Some(hash) = self.current_or_read_whole_hash(canonical) {
             let file_fact =
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.into(),
+                    canonical_id: canonical_id.id(),
                     hash,
                 };
             if seen.insert(file_fact.clone()) {
@@ -3304,8 +3305,8 @@ impl VerterHost {
         }
 
         if let Some(artifacts) = self.current_content_pinned_artifacts(canonical) {
-            if let Some(parse_fact) =
-                self.syntactic_route_interface_fact_for_indexed(canonical, &artifacts.indexed)
+            if let Some(parse_fact) = self
+                .syntactic_route_interface_fact_for_indexed(canonical_id.id(), &artifacts.indexed)
             {
                 let fact =
                     verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);

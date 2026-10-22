@@ -63,7 +63,7 @@ struct LocatedIndexedServe {
 /// The exact base `FileArtifacts` entry a fast hit served, under the
 /// normalized canonical it was read for.
 struct CurrentIndexedHit {
-    canonical: String,
+    canonical: Arc<str>,
     artifacts: Arc<crate::file_artifact_store::FileArtifacts>,
 }
 
@@ -2456,7 +2456,7 @@ impl VerterHost {
                             store_published: true,
                         },
                         current_hit: Some(CurrentIndexedHit {
-                            canonical: canonical_id.to_owned(),
+                            canonical: Arc::from(canonical_id),
                             artifacts,
                         }),
                     });
@@ -3131,12 +3131,13 @@ impl VerterHost {
         // only remaining fallback is the caller-provided `known_shallow`
         // hash (avoids a redundant ensure_loaded round-trip when the caller
         // already has shallow state in hand).
+        let canonical = verter_session_query::facts::version::SharedCanonical::new(canonical_id);
         let whole_hash = self
             .current_or_read_whole_hash(canonical_id)
             .or_else(|| known_shallow.map(|state| state.whole_hash));
         if let Some(hash) = whole_hash {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.into(),
+                canonical_id: canonical.id(),
                 hash,
             };
             if seen.insert(fact.clone()) {
@@ -3152,7 +3153,7 @@ impl VerterHost {
             })
         });
         if let Some(parse_fact) = indexed.and_then(|indexed| {
-            self.syntactic_route_interface_fact_for_indexed(canonical_id, indexed)
+            self.syntactic_route_interface_fact_for_indexed(canonical.id(), indexed)
         }) {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);
             if seen.insert(fact.clone()) {
@@ -3173,12 +3174,13 @@ impl VerterHost {
         facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
     ) {
+        let canonical = verter_session_query::facts::version::SharedCanonical::new(canonical_id);
         let whole_hash = ctx
             .authoritative_current_content_hash(canonical_id)
             .or_else(|| known_shallow.map(|state| state.whole_hash));
         if let Some(hash) = whole_hash {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.into(),
+                canonical_id: canonical.id(),
                 hash,
             };
             if seen.insert(fact.clone()) {
@@ -3194,7 +3196,11 @@ impl VerterHost {
             })
         });
         if let Some(parse_fact) = indexed.and_then(|indexed| {
-            self.syntactic_route_interface_fact_for_indexed_with_context(ctx, canonical_id, indexed)
+            self.syntactic_route_interface_fact_for_indexed_with_context(
+                ctx,
+                canonical.id(),
+                indexed,
+            )
         }) {
             let fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);
             if seen.insert(fact.clone()) {
@@ -3210,13 +3216,13 @@ impl VerterHost {
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
             crate::resolver_core::HostCapabilities<M>,
         >,
-        canonical_id: &str,
+        canonical_id: impl AsRef<str> + Into<Arc<str>>,
         indexed: &Arc<verter_session_query::inputs::indexed::IndexedInputRecord>,
     ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
         if !indexed.shallow_state.has_resolvable_surface() {
             return None;
         }
-        let key = ctx.artifact_key_for_current_content(canonical_id)?;
+        let key = ctx.artifact_key_for_current_content(canonical_id.as_ref())?;
         let artifacts = self.project_type_store().indexed().get_artifacts(&key)?;
         if !Arc::ptr_eq(&artifacts.indexed.input_record(), indexed) {
             return None;
@@ -3290,9 +3296,10 @@ impl VerterHost {
                     }
                     if !ambiguous_owner {
                         if let Some(owner) = exact_owner {
+                            let dep_id: Arc<str> = Arc::from(dep_canonical);
                             let mut facts =
                                 vec![verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                                    canonical_id: dep_canonical.into(),
+                                    canonical_id: Arc::clone(&dep_id),
                                     hash: source_data.parse.whole_hash,
                                 }];
                             // Cross-file ROUTE fact — recorded ONLY from an
@@ -3307,7 +3314,7 @@ impl VerterHost {
                             // covering fact for a direct local export.
                             let dep_key =
                                 verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-                                    Arc::from(dep_canonical),
+                                    Arc::clone(&dep_id),
                                     source_data.parse.whole_hash,
                                     source_snapshot.as_ref()?.source.as_ref(),
                                     source_data.file_language.clone(),
@@ -3328,7 +3335,7 @@ impl VerterHost {
                                 {
                                     if let Some(parse_fact) = self
                                         .syntactic_route_interface_fact_for_indexed(
-                                            dep_canonical,
+                                            Arc::clone(&dep_id),
                                             &indexed,
                                         )
                                     {
