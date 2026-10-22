@@ -1663,12 +1663,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return Some(RelationResult::Unknown);
         }
         let depth = chain.depth + 1;
-        let deeply_nested_depth = if self.relation_session_reads_candidates_only() {
+        let inference_walk = self.relation_session_reads_candidates_only();
+        let deeply_nested_depth = if inference_walk {
             2
         } else {
             CHECKER_DEEPLY_NESTED_DEPTH
         };
         let mut expanding = chain.expanding;
+        // A side an inference walk does not find deeply nested only because
+        // an older instance stopped the count: another transaction, meeting
+        // the instances in another order, would.
+        let mut order_dependent = false;
         {
             let mut txn = self.dispatch_txn.borrow_mut();
             let reentry = txn.reentry_mut();
@@ -1686,13 +1691,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let Some(identity) = identities[side].as_ref() else {
                     continue;
                 };
-                let stacked =
+                let (every, ordered) =
                     Self::stack_recursion_identity(reentry, chain.base..top + 1, side, identity);
-                if expanding & flag == 0
-                    && usize::from(depth) >= deeply_nested_depth
-                    && stacked >= deeply_nested_depth
-                {
-                    expanding |= flag;
+                let stacked = if inference_walk { ordered } else { every };
+                if expanding & flag == 0 && usize::from(depth) >= deeply_nested_depth {
+                    if stacked >= deeply_nested_depth {
+                        expanding |= flag;
+                    } else if every >= deeply_nested_depth {
+                        order_dependent = true;
+                    }
                 }
             }
             if let Some(state) = reentry
@@ -1713,6 +1720,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 crate::semantic_query::PartialReasonSet::empty(),
             );
             return Some(assignable(&[]));
+        }
+        if order_dependent {
+            self.note_relation_context_dependent();
+            self.fold_into_top_build_local_taint_with(
+                false,
+                true,
+                crate::semantic_query::PartialReasonSet::empty(),
+            );
         }
         None
     }
@@ -2182,19 +2197,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// References count distinct instantiations; function-symbol origins
     /// count every occurrence, including the same instance met again.
     /// Neither count depends on graph allocation or query order.
+    /// The second count reads only the order this transaction met its
+    /// signature instances in, and a verdict it changes is marked
+    /// context-dependent, so no cache publishes it.
     ///
     /// Each frame is credited, per side and identity, with the count from
     /// it up to the entry: the repeats its own footprint carries.
+    ///
+    /// The second count is the one an inference walk stops at: there the
+    /// checker counts an occurrence of a signature only when it is no older
+    /// than the occurrence below it (`t.id >= lastTypeId`), so a signature
+    /// an earlier walk of this transaction already expanded — the cached
+    /// base signature the checker hands out again — does not count once a
+    /// newer instance of its declaration sits below it. Both counts are
+    /// equal for references.
     fn stack_recursion_identity(
         reentry: &mut super::dispatch_txn::ObligationReentryStack,
         frames: std::ops::Range<usize>,
         side: usize,
         identity: &super::dispatch_txn::RelationRecursionIdentity,
-    ) -> usize {
+    ) -> (usize, usize) {
         use super::dispatch_txn::RecursionCountMode;
         let fingerprint = recursion_identity_fingerprint(&identity.origin);
         let mut instantiations: smallvec::SmallVec<[Arc<[SemanticNodeId]>; 4]> =
             smallvec::SmallVec::new();
+        let mut ordered = 0;
+        let mut last_visit = 0;
+        for index in frames.clone() {
+            let Some(entry) = reentry
+                .frame(index)
+                .and_then(|frame| frame.relation())
+                .and_then(|state| state.chain.identities[side].as_ref())
+                .filter(|entry| entry.origin == identity.origin)
+            else {
+                continue;
+            };
+            match &entry.counting {
+                RecursionCountMode::EveryOccurrence { visit } => {
+                    if *visit >= last_visit {
+                        ordered += 1;
+                    }
+                    last_visit = *visit;
+                }
+                RecursionCountMode::DistinctInstantiation(arguments) => {
+                    if !instantiations.contains(arguments) {
+                        instantiations.push(Arc::clone(arguments));
+                        ordered += 1;
+                    }
+                }
+            }
+        }
+        instantiations.clear();
         let mut count = 0;
         for index in frames.rev() {
             let Some(state) = reentry
@@ -2206,7 +2259,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(entry) = state.chain.identities[side].as_ref() {
                 if entry.origin == identity.origin {
                     match &entry.counting {
-                        RecursionCountMode::EveryOccurrence => count += 1,
+                        RecursionCountMode::EveryOccurrence { .. } => count += 1,
                         RecursionCountMode::DistinctInstantiation(arguments) => {
                             if !instantiations.contains(arguments) {
                                 instantiations.push(Arc::clone(arguments));
@@ -2219,7 +2272,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let stacked = u16::try_from(count).unwrap_or(u16::MAX);
             state.chain.recursion.repeats[side].raise(fingerprint, stacked);
         }
-        count
+        (count, ordered)
     }
 
     /// Whether a memo entry of `footprint`, read for a relation opened now,
@@ -2313,7 +2366,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             };
             match &identity.counting {
-                RecursionCountMode::EveryOccurrence => entry.count = entry.count.saturating_add(1),
+                RecursionCountMode::EveryOccurrence { .. } => {
+                    entry.count = entry.count.saturating_add(1);
+                }
                 RecursionCountMode::DistinctInstantiation(arguments) => {
                     if !entry.instantiations.contains(&arguments) {
                         entry.instantiations.push(arguments);
@@ -2539,12 +2594,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }) = self.graph().node_data(carrier).as_deref()
         {
             let scope = self.graph().node_scope(carrier)?;
+            let visit = {
+                let mut txn = self.dispatch_txn.borrow_mut();
+                let visits = &mut txn.relation.signature_visits;
+                let next = u32::try_from(visits.len()).unwrap_or(u32::MAX);
+                *visits.entry(carrier).or_insert(next)
+            };
             return Some(RelationRecursionIdentity {
                 origin: DeclIdentity::from_scope(
                     &scope,
                     OwnedStr::from(format!("\u{1}signature@{}:{}", span.start, span.end)),
                 ),
-                counting: RecursionCountMode::EveryOccurrence,
+                counting: RecursionCountMode::EveryOccurrence { visit },
             });
         }
         let (identity, arguments) = match self.graph().node_data(carrier).as_deref() {
@@ -13911,41 +13972,48 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             return result_and(acc, related);
         }
-        // Covariant return; a bivariant callback's either way round.
+        // Covariant return; a bivariant callback's either way round, the
+        // target's return to the source's first (`BivariantCallback`): which
+        // way is tried first decides which instances an inference walk below
+        // meets first.
+        let bivariant = !candidates_only
+            && mode
+                == (SignatureCheckMode::Callback {
+                    bivariant_return: true,
+                });
         let checkpoint = self.relation_session_checkpoint();
         let bindings_len = bindings.len();
+        if bivariant {
+            let reversed = self.relate_member(
+                target_result.return_type,
+                source_result.return_type,
+                bindings,
+                parameter_position,
+            );
+            if matches!(reversed, RelationResult::Assignable { .. }) {
+                return result_and(acc, reversed);
+            }
+            self.relation_session_rollback(&checkpoint);
+            bindings.truncate(bindings_len);
+            let covariant = self.relate_member(
+                source_result.return_type,
+                target_result.return_type,
+                bindings,
+                return_position,
+            );
+            if !matches!(covariant, RelationResult::Assignable { .. }) {
+                self.relation_session_rollback(&checkpoint);
+                bindings.truncate(bindings_len);
+            }
+            return result_and(acc, result_or(reversed, covariant));
+        }
         let covariant = self.relate_member(
             source_result.return_type,
             target_result.return_type,
             bindings,
             return_position,
         );
-        let r = if !candidates_only
-            && mode
-                == (SignatureCheckMode::Callback {
-                    bivariant_return: true,
-                })
-            && !matches!(covariant, RelationResult::Assignable { .. })
-        {
-            self.relation_session_rollback(&checkpoint);
-            bindings.truncate(bindings_len);
-            let fallback_checkpoint = self.relation_session_checkpoint();
-            let fallback_bindings_len = bindings.len();
-            let fallback = self.relate_member(
-                target_result.return_type,
-                source_result.return_type,
-                bindings,
-                parameter_position,
-            );
-            if !matches!(fallback, RelationResult::Assignable { .. }) {
-                self.relation_session_rollback(&fallback_checkpoint);
-                bindings.truncate(fallback_bindings_len);
-            }
-            result_or(covariant, fallback)
-        } else {
-            covariant
-        };
-        result_and(acc, r)
+        result_and(acc, covariant)
     }
 
     /// Relate the target's callback `target_callback` to the source's
@@ -13954,11 +14022,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `compareSignaturesRelated` does under `StrictCallback` or, with
     /// `bivariant_return`, `BivariantCallback`.
     ///
-    /// Under `strictFunctionTypes` the pair's own relation — a memoized
-    /// frame relating the parameters strictly and the return covariantly —
-    /// already is that verdict when it holds or when the return is not
-    /// bivariant; only a bivariant return it does not discharge relates the
-    /// pair again in the callback mode. `position` is the enclosing
+    /// Under `strictFunctionTypes` a return that is not bivariant makes the
+    /// pair's own relation — a memoized frame relating the parameters
+    /// strictly and the return covariantly — that verdict. A bivariant
+    /// return relates in the callback mode, the target's return to the
+    /// source's first, in the checker's order. `position` is the enclosing
     /// signature's parameter position, which a method target keeps
     /// bivariant for inference.
     fn relate_callback_signatures(
@@ -13976,15 +14044,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .unwrap_or(StrictFamilyConfig::TS_STRICT)
                 .strict_function_types
         };
-        if strict_function_types {
-            let checkpoint = self.relation_session_checkpoint();
-            let bindings_len = bindings.len();
-            let related = self.relate_member(target_callback, source_callback, bindings, position);
-            if !bivariant_return || matches!(related, RelationResult::Assignable { .. }) {
-                return related;
-            }
-            self.relation_session_rollback(&checkpoint);
-            bindings.truncate(bindings_len);
+        if strict_function_types && !bivariant_return {
+            return self.relate_member(target_callback, source_callback, bindings, position);
         }
         let result_of = |node: SemanticNodeId| match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Signature {

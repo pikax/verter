@@ -614,6 +614,9 @@ pub(super) const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T,
 /// Cyclic authored and library thenables complete through shared inference.
 /// The library reference infers one layer and accepts the fixed thenable;
 /// the two authored interfaces keep the checker's negative result.
+/// `Promise`'s `then` callback is its own declaration, not `PromiseLike`'s,
+/// so the inference into it is not circular; `PromiseLike` mirrors `PL`
+/// declaration for declaration and stays negative like the authored pair.
 /// Every row asserts the answer, not merely
 /// termination. The named-alias controls also run on a 1 MiB stack.
 #[test]
@@ -622,6 +625,7 @@ fn a_mirrored_thenable_relation_terminates() {
         (Read::Type("Promise<1> extends PL<infer U> ? U : 0"), "1"),
         (Read::Type("[PP2<1>] extends [PL<1>] ? 1 : 0"), "0"),
         (Read::Type("[Promise<1>] extends [PL<1>] ? 1 : 0"), "1"),
+        (Read::Type("[PromiseLike<1>] extends [PL<1>] ? 1 : 0"), "0"),
     ];
     let matrix = Matrix::new(MIRRORED_THENABLE)
         .lib(GLOBALS_LIB)
