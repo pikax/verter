@@ -16577,6 +16577,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     key_type: self.primitive_node(PrimitiveKind::String),
                     value_type: source,
                     readonly: false,
+                    key_name: None,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
                     declaration_origin: None,
                 }],
@@ -17249,6 +17250,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     key_type,
                     value_type: value,
                     readonly,
+                    key_name: None,
                     spans: index_key
                         .source
                         .as_ref()

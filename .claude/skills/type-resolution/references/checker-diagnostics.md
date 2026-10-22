@@ -57,19 +57,26 @@ parameters, an undecided relation — explains nothing, and the diagnostic is no
 records a history: the explanation runs only when a recipe is bound. Its depth is the checker's relation
 stack (`checker_policy::RELATION_STACK_DEPTH`, 100): every step into a structured pair's part — a
 property, an array element, a tuple position, a parameter, a return, a predicate — holds the pair open
-on it, a union's or an intersection's member does not; past it the checker reports TS2321 instead,
-which is not modelled, so nothing is reported.
+on it; so does an intersection target's pair, a union source's pair unless it has fewer than four
+constituents (`boolean` counting two) against a non-union target (`isRelatedTo`'s `skipCaching`), and the
+failing pair itself when it lacks properties or either side is structured or instantiable — never two
+primitives, nor an object type against a primitive. Past it the checker reports TS2321 instead, which is
+not modelled, so nothing is reported.
 
 Types print as the checker's `typeToString` prints them (`print_diagnostic_type`,
 `DisplayContext::for_checker`): the display walk keeps the node builder's running `approximateLength`
-(UTF-8 bytes, per node kind as the node is built: a named reference counts its name twice, a property
-its name and colon before its type, an object its braces after its members, each list entry two bytes
-before it) and its truncation latch past `checker_policy::MAXIMUM_TRUNCATION_LENGTH` (160) — a union's
+(UTF-8 bytes, per node kind as the node is built: a named reference counts its name twice after its
+type arguments, a property its name and colon before its type, an index signature its key and value
+types then its parameter name and seven, a tuple element its type alone (a label adds nothing), an
+object its braces after its members, each list entry two bytes before it) and its truncation latch past `checker_policy::MAXIMUM_TRUNCATION_LENGTH` (160) — a union's
 or an intersection's remaining members then print as `... N more ...` before the last, an object's
 remaining properties likewise, a member it begins past the length as `{ ...; }`, a type-argument or
-tuple list as `...` — and the whole text is clipped to its first 317 bytes and `...` at 320. A node kind
-whose count is not modelled (index signatures, mapped and `typeof` types, predicates, labelled tuple
-elements, …) bounds its count by twice its printed text; a type whose bound could reach the truncation
+tuple list as `...` — and the whole text is clipped to its first 317 bytes and `...` at 320. An object
+prints its call, construct and index signatures before its properties, an index signature by its
+declared parameter name (`IndexSignature::key_name`; `x` for one no declaration wrote), and under
+`strictNullChecks` an optional tuple element's type with `undefined` added. A node kind whose count is
+not modelled (mapped and `typeof` types, predicates, computed keys, …) bounds its count by twice its
+printed text; a type whose bound could reach the truncation
 length, or whose depth-cap cut lands inside the kept text, is not reported rather than abbreviated where
 the checker's is not.
 
@@ -104,8 +111,12 @@ the checker's first failure and records no diagnostic.
 
 Coverage: `call_diagnostics_carry_the_checkers_code_message_position_and_order` (TypeScript 7.0.2
 lines with their chains, cold and warm, two call sites),
-`long_messages_print_as_the_checker_abbreviates_them` (a wide union, a wide object and a 70-level
-property path, cold and warm, two call sites of one body),
+`long_messages_print_as_the_checker_abbreviates_them` (a wide union, a wide object, a 70-level
+property path, reference arguments, index signatures and a long tuple label at their abbreviation
+boundaries, cold and warm, two call sites of one body),
+`messages_print_tuple_elements_and_object_members_as_the_checker_does`,
+`deep_chains_report_until_the_checker_relation_stack_overflows` (the relation stack's boundary per
+leaf kind),
 `call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability` (the explicit-overload
 recovery with a differing return), `a_diagnostic_the_route_cannot_place_is_not_reported`, the `checker_diagnostic::tests` recipe-binding
 units, `resolve_symbol_graph_reports_the_checkers_ts2456_at_the_alias_name`,

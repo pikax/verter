@@ -825,21 +825,53 @@ fn display_resolved_type_node(
             }
         }
         SemanticNodeData::Tuple { elements, readonly } => {
-            // A labelled element's count is not modelled.
-            unmodeled = elements.iter().any(|el| el.label.is_some());
+            // The node builder counts an element's type alone: a label, a
+            // `?` and a `...` add nothing. Under `strictNullChecks` the
+            // checker prints an optional element's type with `undefined`
+            // added, as it does an optional property's.
+            let checker = needs.contains(DisplayFacet::CheckerSpelling);
             let elements: Vec<&crate::semantic_query::TupleElement> = elements.iter().collect();
             let parts = visited.type_node_list(&elements, false, |visited, el| {
                 let mut s = String::new();
                 if el.rest {
                     s.push_str("...");
                 }
+                let adds_undefined = el.optional
+                    && checker
+                    && !visited.omit_nullish
+                    && !holds_undefined(store, el.value);
                 if let Some(label) = &el.label {
                     s.push_str(label);
                     if el.optional {
                         s.push('?');
                     }
                     s.push_str(": ");
-                    s.push_str(&display_type_node(store, el.value, needs, child_depth, visited).0);
+                    if adds_undefined {
+                        s.push_str(&render_with_undefined(
+                            store,
+                            el.value,
+                            needs,
+                            child_depth,
+                            visited,
+                        ));
+                    } else {
+                        s.push_str(
+                            &display_type_node(store, el.value, needs, child_depth, visited).0,
+                        );
+                    }
+                } else if adds_undefined {
+                    let value = render_with_undefined(store, el.value, needs, child_depth, visited);
+                    s.push_str(&format!("({value})?"));
+                } else if el.optional && checker {
+                    s.push_str(&render_operand(
+                        store,
+                        el.value,
+                        needs,
+                        child_depth,
+                        visited,
+                        Prec::Postfix,
+                    ));
+                    s.push('?');
                 } else {
                     s.push_str(&display_type_node(store, el.value, needs, child_depth, visited).0);
                     if el.optional {
@@ -1121,18 +1153,33 @@ fn display_resolved_type_node(
         }
         // A compiler-native operation renders by its OP name — there is no
         // declaration to qualify, because none was applied.
+        //
+        // The node builder builds a reference's type arguments before it
+        // counts the referenced name (`typeReferenceToTypeNode` and the alias
+        // path), so the arguments see the count from before the name.
+        // `Awaited<T>` is the lib alias over its argument list; `NoInfer<T>`
+        // is a substitution type, whose base type builds bare, outside any
+        // list.
         SemanticNodeData::IntrinsicApplication { op, args } => {
+            let rendered = match op {
+                verter_type_expr::CompilerIntrinsicTypeOp::Awaited => {
+                    type_argument_list(store, args, needs, child_depth, visited)
+                }
+                verter_type_expr::CompilerIntrinsicTypeOp::NoInfer => args
+                    .iter()
+                    .map(|arg| display_type_node(store, *arg, needs, child_depth, visited).0)
+                    .collect(),
+            };
             visited.add_length(reference_length(op.display_name()));
-            let rendered = type_argument_list(store, args, needs, child_depth, visited);
             format!("{}<{}>", op.display_name(), rendered.join(", "))
         }
         SemanticNodeData::InstantiationRef { base, args } => {
+            let rendered = type_argument_list(store, args, needs, child_depth, visited);
             visited.add_length(reference_length(&base.decl_name));
             let name = qualified_name(needs, &base.canonical_id, &base.decl_name);
             if args.is_empty() {
                 name
             } else {
-                let rendered = type_argument_list(store, args, needs, child_depth, visited);
                 format!("{name}<{}>", rendered.join(", "))
             }
         }
@@ -1142,12 +1189,12 @@ fn display_resolved_type_node(
         // Display never re-resolves a carrier — the args render structurally.
         SemanticNodeData::BareRef(_) => {
             let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
-            visited.add_length(reference_length(name));
             let type_args = data.carrier_type_args();
+            let rendered = type_argument_list(store, type_args, needs, child_depth, visited);
+            visited.add_length(reference_length(name));
             if type_args.is_empty() {
                 name.to_string()
             } else {
-                let rendered = type_argument_list(store, type_args, needs, child_depth, visited);
                 format!("{name}<{}>", rendered.join(", "))
             }
         }
@@ -1258,12 +1305,22 @@ fn render_object_surface(
         if index.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
             s.push_str("readonly ");
         }
-        // The index parameter's name is not kept: its count is bounded by
-        // the printed signature.
+        // The node builder builds the key type, then the value type, then
+        // counts the parameter name and seven more; `readonly` counts as on
+        // a property. The checker prints a signature no declaration wrote
+        // with the parameter `x`.
         let key = display_type_node(store, index.key_type, needs, depth, visited).0;
         let value = display_type_node(store, index.value_type, needs, depth, visited).0;
-        s.push_str(&format!("[key: {key}]: {value}"));
-        visited.unmodeled(&s);
+        let name = match (&index.key_name, checker) {
+            (Some(name), true) => name.as_ref(),
+            (None, true) => "x",
+            (_, false) => "key",
+        };
+        visited.add_length(name.len() + 7);
+        if index.readonly {
+            visited.add_length(9);
+        }
+        s.push_str(&format!("[{name}: {key}]: {value}"));
         signatures.push(s);
     }
     let members: Vec<&crate::semantic_query::SurfaceMember> = surface.members.iter().collect();
@@ -1352,11 +1409,14 @@ fn render_object_surface(
         }
         parts.push(render_member(visited, member));
     }
-    parts.extend(signatures);
     visited.add_length(2);
     if checker {
-        format!("{{ {}; }}", parts.join("; "))
+        // The checker prints the signatures before the properties, in the
+        // order it builds them.
+        signatures.extend(parts);
+        format!("{{ {}; }}", signatures.join("; "))
     } else {
+        parts.extend(signatures);
         format!("{{ {} }}", parts.join("; "))
     }
 }

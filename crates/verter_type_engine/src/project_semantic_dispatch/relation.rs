@@ -12660,6 +12660,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         key_type: key,
                         value_type: value,
                         readonly,
+                        key_name: None,
                         spans: verter_type_expr::IndexSignatureSpans::default(),
                         declaration_origin: None,
                     });

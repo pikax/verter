@@ -1004,6 +1004,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     value_type: graph
                         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
                     readonly: true,
+                    key_name: None,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
                     declaration_origin: Some(enumeration.decl.canonical_id.clone()),
                 },

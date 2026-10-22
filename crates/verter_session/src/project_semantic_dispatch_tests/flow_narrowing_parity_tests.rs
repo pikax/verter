@@ -1606,7 +1606,10 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
 /// an object's remaining properties as `... N more ...;` before its last; a
 /// printed type of twice that length is clipped to its first 317 bytes and
 /// `...`; and a failure through a property path of 70 nested object types
-/// is explained on one path line, never cut. Each is reported at its own
+/// is explained on one path line, never cut. A reference's type arguments
+/// are counted before its name, a tuple label adds nothing, and an index
+/// signature counts its authored parameter name, so each is elided exactly
+/// where the checker elides it, and never withheld. Each is reported at its own
 /// call, two calls of one body in source order, cold and warm. Every
 /// expected line is TypeScript 7.0.2's on this fixture, identical with
 /// `strictNullChecks` off.
@@ -1635,11 +1638,28 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
          export function wide_object() {{ return one(wobj); }}\n\
          export function deep_chain() {{ return nested(deep); }}\n\
          export function both() {{ return [one(wobj), one(wide)]; }}\n\
-         export function short() {{ return one(1); }}\n",
+         export function short() {{ return one(1); }}\n\
+         interface Wrapper<T> {{ w: T }}\n\
+         declare const near: {{ a: \"{near}\"; b: Wrapper<string>; c: number }};\n\
+         declare const past: {{ a: \"{past}\"; b: Wrapper<string>; c: number }};\n\
+         declare const index_near: {{ t: {{ [k: string]: \"{index_near}\" }}; b: Wrapper<string> }};\n\
+         declare const index_past: {{ t: {{ [k: string]: \"{index_past}\" }}; b: Wrapper<string> }};\n\
+         declare const labelled: [{label}: string];\n\
+         declare const indexed: {{ [k: string]: {{ {indexed} }} }};\n\
+         export function references() {{ return [one(near), one(past)]; }}\n\
+         export function index_counts() {{ return [one(index_near), one(index_past)]; }}\n\
+         export function labelled_tuple() {{ return one(labelled); }}\n\
+         export function index_signature() {{ return one(indexed); }}\n",
         nest("number", 70),
         arms.join(" | "),
         nest("string", 70),
         properties.join("; "),
+        near = "x".repeat(150),
+        past = "x".repeat(155),
+        index_near = "x".repeat(138),
+        index_past = "x".repeat(139),
+        label = "a".repeat(90),
+        indexed = properties[..20].join("; "),
     );
     const ARG: &str = "is not assignable to parameter of type 'string'.";
     let union = format!(
@@ -1674,12 +1694,246 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
                 "Argument of type 'number' is not assignable to parameter of type 'string'.",
             )],
         ),
+        (
+            "references",
+            vec![
+                at(
+                    "(19,44)",
+                    &format!(
+                        "Argument of type '{{ a: \"{}\"; b: Wrapper<string>; c: number; }}' {ARG}",
+                        "x".repeat(150)
+                    ),
+                ),
+                at(
+                    "(19,55)",
+                    &format!(
+                        "Argument of type '{{ a: \"{}\"; b: Wrapper<...>; c: number; }}' {ARG}",
+                        "x".repeat(155)
+                    ),
+                ),
+            ],
+        ),
+        (
+            "index_counts",
+            vec![
+                at(
+                    "(20,46)",
+                    &format!(
+                        "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<string>; }}' {ARG}",
+                        "x".repeat(138)
+                    ),
+                ),
+                at(
+                    "(20,63)",
+                    &format!(
+                        "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<...>; }}' {ARG}",
+                        "x".repeat(139)
+                    ),
+                ),
+            ],
+        ),
+        (
+            "labelled_tuple",
+            vec![at(
+                "(21,47)",
+                &format!("Argument of type '[{}: string]' {ARG}", "a".repeat(90)),
+            )],
+        ),
+        (
+            "index_signature",
+            vec![at(
+                "(22,48)",
+                &format!(
+                    "Argument of type '{{ [k: string]: {{ {}; }}; }}' {ARG}",
+                    properties[..20].join("; ")
+                ),
+            )],
+        ),
     ];
     let host = host_with(&source);
     let mut mismatches = Vec::new();
     for pass in ["cold", "warm"] {
         for root in [STRICT_ROOT, LOOSE_ROOT] {
             for (function, expected) in &rows {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, &source,
+                );
+                if reported != *expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// A message prints a tuple and an object's members as the checker does:
+/// under `strictNullChecks` an optional element's type with `undefined`
+/// added, which also counts toward where the node builder abbreviates; an
+/// object's call, construct and index signatures before its properties; and
+/// an index signature by its authored parameter name, or `x` for one no
+/// declaration wrote. Every expected line is TypeScript 7.0.2's on this
+/// fixture.
+#[test]
+fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
+    let source = format!(
+        "\ndeclare function one(x: string): number;\n\
+         interface IX {{ [k: string]: number }}\n\
+         interface Wrapper<T> {{ w: T }}\n\
+         declare const t1: [lab: string, other?: number];\n\
+         declare const t2: [number?, \"q\"?, (1 | 2)?];\n\
+         declare const t3: {{ t: [lab?: \"{long}\"]; b: Wrapper<string>; c: number }};\n\
+         declare const o1: {{ p: 1; [k: string]: \"q\" | 1 }};\n\
+         declare const o2: {{ [k: string]: number; (): void; new (): void; p: 1 }};\n\
+         declare const m1: {{ [P in keyof IX]: IX[P] }};\n\
+         export function tuples() {{ return [one(t1), one(t2), one(t3)]; }}\n\
+         export function members() {{ return [one(o1), one(o2), one(m1)]; }}\n",
+        long = "x".repeat(140),
+    );
+    let at = |position: &str, printed: &str| {
+        format!(
+            "{position}: error TS2345: Argument of type '{printed}' is not assignable to parameter of type 'string'."
+        )
+    };
+    let long = "x".repeat(140);
+    let tuples = |strict: bool| {
+        if strict {
+            vec![
+                at("(11,40)", "[lab: string, other?: number | undefined]"),
+                at(
+                    "(11,49)",
+                    "[(number | undefined)?, (\"q\" | undefined)?, (1 | 2 | undefined)?]",
+                ),
+                at(
+                    "(11,58)",
+                    &format!(
+                        "{{ t: [lab?: \"{long}\" | undefined]; b: Wrapper<...>; c: number; }}"
+                    ),
+                ),
+            ]
+        } else {
+            vec![
+                at("(11,40)", "[lab: string, other?: number]"),
+                at("(11,49)", "[number?, \"q\"?, (1 | 2)?]"),
+                at(
+                    "(11,58)",
+                    &format!("{{ t: [lab?: \"{long}\"]; b: Wrapper<string>; c: number; }}"),
+                ),
+            ]
+        }
+    };
+    let members = vec![
+        at("(12,41)", "{ [k: string]: \"q\" | 1; p: 1; }"),
+        at(
+            "(12,50)",
+            "{ (): void; new (): void; [k: string]: number; p: 1; }",
+        ),
+        at("(12,59)", "{ [x: string]: number; }"),
+    ];
+    let host = host_with(&source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for (root, strict) in [(STRICT_ROOT, true), (LOOSE_ROOT, false)] {
+            for (function, expected) in [("tuples", tuples(strict)), ("members", members.clone())] {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, &source,
+                );
+                if reported != expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// A failure through a long property path is reported while the checker's
+/// relation stack holds it, and withheld where the checker reports TS2321
+/// instead: the failing pair itself takes a frame when it is two object
+/// types or an intersection target's member, not when it is two primitives
+/// or an object type against a primitive. Every reported line is
+/// TypeScript 7.0.2's on this fixture, identical with `strictNullChecks`
+/// off; each withheld row is one tsc reports as TS2321.
+#[test]
+fn deep_chains_report_until_the_checker_relation_stack_overflows() {
+    let nest = |inner: &str, depth: usize| {
+        let mut ty = inner.to_owned();
+        for _ in 0..depth {
+            ty = format!("{{ a: {ty} }}");
+        }
+        ty
+    };
+    let rows: [(&str, usize, &str, &str); 8] = [
+        ("object_leaf_99", 99, "{ x: number }", "{ y: number }"),
+        ("object_leaf_100", 100, "{ x: number }", "{ y: number }"),
+        ("object_to_primitive_99", 99, "{ x: 1 }", "string"),
+        ("object_to_primitive_100", 100, "{ x: 1 }", "string"),
+        ("primitive_leaf_100", 100, "string", "number"),
+        ("primitive_leaf_101", 101, "string", "number"),
+        ("intersection_98", 98, "string", "{ p: 1 } & { q: 2 }"),
+        ("intersection_99", 99, "string", "{ p: 1 } & { q: 2 }"),
+    ];
+    let mut source = String::from("\n");
+    for (name, depth, leaf_source, leaf_target) in rows {
+        source.push_str(&format!(
+            "declare function {name}_f(x: {}): void;\n\
+             declare const {name}_s: {};\n\
+             export function {name}() {{ return {name}_f({name}_s); }}\n",
+            nest(leaf_target, depth),
+            nest(leaf_source, depth),
+        ));
+    }
+    let clipped = format!("{}{{ ...", "{ a: ".repeat(63));
+    let reported = |position: &str, depth: usize, leaf: &str| {
+        vec![format!(
+            "{position}: error TS2345: Argument of type '{clipped}' is not assignable to parameter of type '{clipped}'.\n  \
+             The types of '{}' are incompatible between these types.\n    {leaf}",
+            vec!["a"; depth].join("."),
+        )]
+    };
+    let expected: [(&str, Vec<String>); 8] = [
+        (
+            "object_leaf_99",
+            reported(
+                "(4,60)",
+                99,
+                "Property 'y' is missing in type '{ x: number; }' but required in type '{ y: number; }'.",
+            ),
+        ),
+        ("object_leaf_100", Vec::new()),
+        (
+            "object_to_primitive_99",
+            reported("(10,76)", 99, "Type '{ x: 1; }' is not assignable to type 'string'."),
+        ),
+        (
+            "object_to_primitive_100",
+            reported("(13,78)", 100, "Type '{ x: 1; }' is not assignable to type 'string'."),
+        ),
+        (
+            "primitive_leaf_100",
+            reported("(16,68)", 100, "Type 'string' is not assignable to type 'number'."),
+        ),
+        ("primitive_leaf_101", Vec::new()),
+        (
+            "intersection_98",
+            reported(
+                "(22,62)",
+                98,
+                "Type 'string' is not assignable to type '{ p: 1; } & { q: 2; }'.\n      \
+                 Type 'string' is not assignable to type '{ p: 1; }'.",
+            ),
+        ),
+        ("intersection_99", Vec::new()),
+    ];
+    let host = host_with(&source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in &expected {
                 let reported = super::signature_predicate_inference_tests::checker_report(
                     &host, root, function, &source,
                 );

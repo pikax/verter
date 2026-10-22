@@ -1473,6 +1473,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 key_type,
                                 value_type: value,
                                 readonly: sig.readonly,
+                                key_name: Some(verter_type_expr::OwnedStr::from(
+                                    sig.key_name.as_str(),
+                                )),
                                 spans: sig.spans,
                                 declaration_origin: scope.canonical_file(),
                             }));

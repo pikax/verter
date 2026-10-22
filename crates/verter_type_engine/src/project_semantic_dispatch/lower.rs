@@ -1816,6 +1816,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             key_type,
                             value_type: value,
                             readonly: sig.readonly,
+                            key_name: Some(verter_type_expr::OwnedStr::from(sig.key_name.as_str())),
                             // Carry the IR index signature's OXC spans.
                             spans: sig.spans,
                             // Declaration file of THIS index signature —

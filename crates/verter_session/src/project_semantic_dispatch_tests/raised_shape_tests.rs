@@ -1775,6 +1775,7 @@ fn parity_real_index_signature_member() {
                     key_type: string_id,
                     value_type: number_id,
                     readonly: false,
+                    key_name: None,
                     spans: Default::default(),
                     declaration_origin: Some(verter_type_expr::OwnedStr::from("/w/idx.ts")),
                 }]
@@ -1815,6 +1816,7 @@ fn parity_real_index_signature_member() {
                     key_type: string_id,
                     value_type: miss,
                     readonly: false,
+                    key_name: None,
                     spans: Default::default(),
                     declaration_origin: Some(verter_type_expr::OwnedStr::from("/w/idx.ts")),
                 }]

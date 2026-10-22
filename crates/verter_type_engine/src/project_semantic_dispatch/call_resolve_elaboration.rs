@@ -27,8 +27,10 @@ use super::super::ProjectSemanticDispatch;
 /// The relation step a failed relation's pair fails at: the child pair it
 /// fails through, as the checker relates them.
 enum FailedStep {
-    /// The pair fails as a whole; nothing below explains it.
-    Leaf,
+    /// The pair fails as a whole; nothing below explains it. `holds_frame`
+    /// is whether the checker relates it on its relation stack
+    /// (`recursiveTypeRelatedTo`), `None` where that is not known.
+    Leaf { holds_frame: Option<bool> },
     /// The source lacks properties the target requires: the message names
     /// them, in place of the pair's own line (`reportUnmatchedProperty`).
     Missing {
@@ -42,10 +44,12 @@ enum FailedStep {
         target: SemanticNodeId,
     },
     /// A union source's member or an intersection target's member,
-    /// reported with its own line.
+    /// reported with its own line. `holds_frame` is whether the checker
+    /// relates the union or intersection pair itself on its relation stack.
     Member {
         source: SemanticNodeId,
         target: SemanticNodeId,
+        holds_frame: bool,
     },
     /// An array's element type, reported with its own line.
     Element {
@@ -566,7 +570,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// `stack` is what is left of the checker's relation stack
     /// (`RELATION_STACK_DEPTH`): every step into a structured pair's part —
     /// a property, an element, a position, a parameter, a return or a
-    /// predicate — holds that pair open on it. A failure explained past it
+    /// predicate — holds that pair open on it, and so does a union or
+    /// intersection pair the checker relates on it and the failing pair
+    /// itself when either side is structured. A failure explained past it
     /// is one the checker reports as TS2321 instead, which is not modelled,
     /// so no diagnostic is reported for it.
     fn explain_failure(
@@ -589,6 +595,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ));
         };
         if let FailedStep::Missing { code, arguments } = &step {
+            // The object pair lacking the properties is itself related on
+            // the stack.
+            stack.checked_sub(1)?;
             push(chain, depth, code.format(arguments));
             return Some(());
         }
@@ -604,12 +613,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             depth
         };
         let below = depth.checked_add(1)?;
-        // A step into the pair's part holds the pair on the relation stack;
-        // a union's or an intersection's member does not.
+        // A step into the pair's part holds the pair on the relation stack,
+        // as does a union or intersection pair the checker does not relate
+        // past it.
         let inner = stack.checked_sub(1);
         match step {
-            FailedStep::Leaf | FailedStep::Missing { .. } => Some(()),
-            FailedStep::Member { source, target } => {
+            // The failing pair itself is related on the stack when it is
+            // structured: past the stack the checker reports TS2321 instead.
+            FailedStep::Leaf { holds_frame } => {
+                (stack > 0 || holds_frame == Some(false)).then_some(())
+            }
+            FailedStep::Missing { .. } => Some(()),
+            FailedStep::Member {
+                source,
+                target,
+                holds_frame,
+            } => {
+                let stack = if holds_frame { inner? } else { stack };
                 self.explain_failure(source, target, depth, true, chain, stack)
             }
             FailedStep::Element { source, target } | FailedStep::Return { source, target, .. } => {
@@ -697,6 +717,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
+    /// How many constituents the checker's union of `members` has:
+    /// `boolean` is its union of `true` and `false`.
+    fn checker_union_size(&self, members: &[SemanticNodeId]) -> usize {
+        members
+            .iter()
+            .map(|&member| match self.graph().node_data(member).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 2,
+                _ => 1,
+            })
+            .sum()
+    }
+
     /// The relation step `source` fails `target` at. `None` when the pair
     /// relates, when the relation is undecided, or when the failing step is
     /// one this does not model.
@@ -710,7 +742,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         );
         let source_data = self.settled_data(source)?;
         let target_data = self.settled_data(target)?;
+        let target_is_union = matches!(target_data.as_ref(), SemanticNodeData::Union(_));
         if let SemanticNodeData::Union(members) = source_data.as_ref() {
+            // The checker relates a union source of fewer than four members
+            // to a target that is not a union without holding the pair on
+            // its relation stack (`isRelatedTo`'s `skipCaching`).
+            let holds_frame = target_is_union || self.checker_union_size(members) >= 4;
             // An enum's union of its members is a primitive the checker does
             // not elaborate.
             if members.iter().all(|&member| {
@@ -719,22 +756,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     Some(SemanticNodeData::EnumLiteral(_))
                 )
             }) {
-                return Some(FailedStep::Leaf);
+                return Some(FailedStep::Leaf {
+                    holds_frame: Some(holds_frame),
+                });
             }
             for member in self.in_relation_order(members.iter().copied()) {
                 if !self.relation_holds(member, target)? {
                     return Some(FailedStep::Member {
                         source: member,
                         target,
+                        holds_frame,
                     });
                 }
             }
             return None;
         }
-        if let SemanticNodeData::Union(_) = target_data.as_ref() {
+        if let SemanticNodeData::Union(members) = target_data.as_ref() {
             // A non-primitive source is elaborated against the target's
-            // best-matching member (`getBestMatchingType`).
-            return is_atomic(&source_data).then_some(FailedStep::Leaf);
+            // best-matching member (`getBestMatchingType`). An atomic one
+            // is related on the stack unless the target has fewer than four
+            // members and the source is neither structured nor
+            // instantiable.
+            let holds_frame =
+                is_instantiable_atomic(&source_data) || self.checker_union_size(members) >= 4;
+            return is_atomic(&source_data).then_some(FailedStep::Leaf {
+                holds_frame: Some(holds_frame),
+            });
         }
         if let SemanticNodeData::Intersection(members) = target_data.as_ref() {
             for member in self.in_relation_order(members.iter().copied()) {
@@ -742,6 +789,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     return Some(FailedStep::Member {
                         source,
                         target: member,
+                        holds_frame: true,
                     });
                 }
             }
@@ -751,7 +799,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return None;
         }
         if is_atomic(&source_data) || is_atomic(&target_data) {
-            return Some(FailedStep::Leaf);
+            // Related on the stack when either side is structured or
+            // instantiable; two primitives are not, nor an object type
+            // against a primitive, which `isRelatedTo` decides first.
+            let holds_frame = !(is_object_type(&source_data) && is_atomic(&target_data))
+                && (!is_atomic(&source_data)
+                    || !is_atomic(&target_data)
+                    || is_instantiable_atomic(&source_data)
+                    || is_instantiable_atomic(&target_data));
+            return Some(FailedStep::Leaf {
+                holds_frame: Some(holds_frame),
+            });
         }
         let source_data = self.structural_data(source)?;
         let target_data = self.structural_data(target)?;
@@ -1185,6 +1243,28 @@ fn occurrence(
 /// Whether a type is one the checker relates as a whole, with no structure
 /// to elaborate: a primitive, a literal, an enum member or a template
 /// literal type.
+/// Whether the checker types `data` as an object type (`TypeFlags.Object`):
+/// not a union, an intersection or an instantiable type.
+fn is_object_type(data: &SemanticNodeData) -> bool {
+    matches!(
+        data,
+        SemanticNodeData::Object(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Signature { .. }
+            | SemanticNodeData::Mapped { .. }
+            | SemanticNodeData::ClassExpressionInstance { .. }
+            | SemanticNodeData::MergedDecl { .. }
+            | SemanticNodeData::ObjectSpreadProgram(_)
+    )
+}
+
+/// Whether an atomic type is one the checker counts as instantiable (a
+/// template literal type), which it relates on its relation stack.
+fn is_instantiable_atomic(data: &SemanticNodeData) -> bool {
+    matches!(data, SemanticNodeData::TemplateLiteral { .. })
+}
+
 fn is_atomic(data: &SemanticNodeData) -> bool {
     matches!(
         data,
