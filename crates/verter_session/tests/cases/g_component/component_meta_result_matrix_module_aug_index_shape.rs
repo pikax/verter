@@ -44,7 +44,7 @@ fn component_meta_result_signature_carries_module_aug_index_shape() {
     );
 
     let aug_fact = FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-        canonical_id: "/src/Comp.vue".to_owned(),
+        canonical_id: "/src/Comp.vue".into(),
         key: FactKey::ModuleAugmentationIndexShape {
             target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
             external_specifier: Some(InternedSpecifier::from("vue")),

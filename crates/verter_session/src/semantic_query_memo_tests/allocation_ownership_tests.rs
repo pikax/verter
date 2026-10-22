@@ -828,7 +828,7 @@ fn an_scc_batch_never_publishes_without_a_member_whose_family_was_evicted_meanwh
     let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)))
         .with_memo_family_bound(MemoFamilyBound::ForTest(3));
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/w/scc.ts".to_owned(),
+        canonical_id: "/w/scc.ts".into(),
         hash: [5; 16],
     }]));
     let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/scc.ts")]);

@@ -9,7 +9,7 @@ type Index = ReceiptReverseIndex<u32, ()>;
 
 fn file(canonical: &str) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_owned(),
+        canonical_id: canonical.into(),
         hash: [7; 16],
     }
 }

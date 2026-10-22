@@ -124,7 +124,7 @@ fn cold_compile_observes_member_fact_for_cross_file_type_import() {
         matches!(
             fact,
             FactVersionRef::Parse(ParseFactRef { canonical_id, key, .. })
-                if canonical_id == "/src/types.ts"
+                if &**canonical_id == "/src/types.ts"
                     && matches!(
                         key,
                         FactKey::Export { .. }
@@ -279,7 +279,7 @@ fn compile_slot_invalidates_on_runtime_import_body_edit() {
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/utils.ts"
+                if &**canonical_id == "/src/utils.ts"
         )
     });
     assert!(
@@ -468,7 +468,7 @@ fn compile_slot_invalidates_on_external_src_template_edit() {
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/tpl.html"
+                if &**canonical_id == "/src/tpl.html"
         )
     });
     assert!(
@@ -581,7 +581,7 @@ fn compile_slot_invalidates_on_side_effect_import_body_edit() {
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/setup.ts"
+                if &**canonical_id == "/src/setup.ts"
         )
     });
     assert!(
@@ -830,7 +830,7 @@ fn compile_slot_invalidates_on_external_augmenter_member_type_edit() {
         !signature
             .facts
             .iter()
-            .any(|f| matches!(f, FactVersionRef::Parse(ParseFactRef { canonical_id, .. }) if canonical_id == "/src/aug.ts")),
+            .any(|f| matches!(f, FactVersionRef::Parse(ParseFactRef { canonical_id, .. }) if &**canonical_id == "/src/aug.ts")),
         "isolation invariant: the owner must pin NO Parse (Export/ImportRef) fact on the \
          augmenter it never imports — otherwise that fact, not the augmentation rail, would \
          catch the edit. Signature: {:?}",
@@ -844,7 +844,7 @@ fn compile_slot_invalidates_on_external_augmenter_member_type_edit() {
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/aug.ts"
+                if &**canonical_id == "/src/aug.ts"
         )
     });
     assert!(

@@ -44,7 +44,7 @@ fn cached_fallthrough_signature_carries_member_presence() {
     );
 
     let presence_fact = FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/src/types.ts".to_owned(),
+        canonical_id: "/src/types.ts".into(),
         key: FactKey::MemberPresence {
             exporter: InternedName::from("Foo"),
             name: verter_type_expr::facts::FactPropertyKey::identifier("a"),

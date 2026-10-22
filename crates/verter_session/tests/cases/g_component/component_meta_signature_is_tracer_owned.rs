@@ -145,7 +145,7 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
                     canonical_id,
                     kind: DerivedFactKind::Route,
                     ..
-                } if canonical_id == "/src/Comp.vue"
+                } if &**canonical_id == "/src/Comp.vue"
             )
         })
         .cloned()

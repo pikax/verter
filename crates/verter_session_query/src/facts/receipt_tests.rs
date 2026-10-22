@@ -4,7 +4,7 @@ use super::*;
 
 fn whole(canonical: &str, byte: u8) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: [byte; 16],
     }
 }

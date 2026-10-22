@@ -55,7 +55,7 @@ fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey
 /// shape directly.
 fn route_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "warm_dep.ts".to_string(),
+        canonical_id: "warm_dep.ts".into(),
         hash: [0x11u8; 16],
     }
 }

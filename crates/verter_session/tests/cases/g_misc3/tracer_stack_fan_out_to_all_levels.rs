@@ -17,7 +17,7 @@ fn make_host() -> VerterHost {
 
 fn shared_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "shared_fanout.ts".to_string(),
+        canonical_id: "shared_fanout.ts".into(),
         hash: [42u8; 16],
     }
 }

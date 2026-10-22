@@ -2575,7 +2575,7 @@ mod tests {
                 key: key.to_string(),
                 cache: ValidatedFactCache::default(),
                 valid_fact: FactVersionRef::FileWholeHash {
-                    canonical_id: "/src/App.vue".to_string(),
+                    canonical_id: "/src/App.vue".into(),
                     hash: [1; 16],
                 },
                 token,
@@ -2653,7 +2653,7 @@ mod tests {
     fn validated_cache_reuses_entry_when_all_facts_match() {
         let cache = ValidatedFactCache::<String, usize>::default();
         let fact = FactVersionRef::FileWholeHash {
-            canonical_id: "/src/App.vue".to_string(),
+            canonical_id: "/src/App.vue".into(),
             hash: [7; 16],
         };
         cache.insert("node".to_string(), 42, vec![fact.clone()]);
@@ -2679,15 +2679,15 @@ mod tests {
         let key = "node".to_string();
         let shared_value = CachedValue::new(42);
         let first_fact = FactVersionRef::FileWholeHash {
-            canonical_id: "/src/first.ts".to_string(),
+            canonical_id: "/src/first.ts".into(),
             hash: [1; 16],
         };
         let second_fact = FactVersionRef::FileWholeHash {
-            canonical_id: "/src/second.ts".to_string(),
+            canonical_id: "/src/second.ts".into(),
             hash: [2; 16],
         };
         let resigned_fact = FactVersionRef::FileWholeHash {
-            canonical_id: "/src/resigned.ts".to_string(),
+            canonical_id: "/src/resigned.ts".into(),
             hash: [3; 16],
         };
 
@@ -2742,7 +2742,7 @@ mod tests {
             "node".to_string(),
             42,
             vec![FactVersionRef::FileWholeHash {
-                canonical_id: "/src/index.ts".to_string(),
+                canonical_id: "/src/index.ts".into(),
                 hash: [99u8; 16],
             }],
         );
@@ -3431,7 +3431,7 @@ mod tests {
         let shared = Arc::new(SessionBurstState {
             cache: ValidatedFactCache::default(),
             valid_fact: FactVersionRef::FileWholeHash {
-                canonical_id: "/src/App.vue".to_string(),
+                canonical_id: "/src/App.vue".into(),
                 hash: [7; 16],
             },
             computes: AtomicUsize::new(0),
@@ -3600,7 +3600,7 @@ mod tests {
         let shared = SessionBurstState {
             cache: ValidatedFactCache::default(),
             valid_fact: FactVersionRef::FileWholeHash {
-                canonical_id: "/src/App.vue".to_string(),
+                canonical_id: "/src/App.vue".into(),
                 hash: [7; 16],
             },
             computes: AtomicUsize::new(0),
@@ -3664,7 +3664,7 @@ mod tests {
         let shared = SessionBurstState {
             cache: ValidatedFactCache::default(),
             valid_fact: FactVersionRef::FileWholeHash {
-                canonical_id: "/src/App.vue".to_string(),
+                canonical_id: "/src/App.vue".into(),
                 hash: [7; 16],
             },
             computes: AtomicUsize::new(0),
@@ -4649,7 +4649,7 @@ mod file_source_env_fact_rail_tests {
         language_of: &str,
     ) -> FactVersionRef {
         FactVersionRef::FileSourceEnv {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             parse_env_hash: ParseEnvHash::from_env_hash([env_byte; 16]),
             parse_key: verter_session_query::source::toolchain::parse_key_for_test(
                 language_of,
@@ -4664,7 +4664,7 @@ mod file_source_env_fact_rail_tests {
     /// fields feed the fingerprint even inside a larger signature.
     fn fingerprint_with_sibling(fact: &FactVersionRef) -> [u8; 16] {
         let sibling = FactVersionRef::FileWholeHash {
-            canonical_id: "/owner.vue".to_string(),
+            canonical_id: "/owner.vue".into(),
             hash: [9u8; 16],
         };
         compute_signature_fingerprint(&[sibling, fact.clone()])
@@ -4788,34 +4788,34 @@ mod fact_signature_fingerprint_pins {
     fn every_variant() -> Vec<FactVersionRef> {
         vec![
             FactVersionRef::FileWholeHash {
-                canonical_id: "/w/owner.vue".to_string(),
+                canonical_id: "/w/owner.vue".into(),
                 hash: [1u8; 16],
             },
             FactVersionRef::DerivedFactHash {
-                canonical_id: "/w/dep.ts".to_string(),
+                canonical_id: "/w/dep.ts".into(),
                 kind: DerivedFactKind::Route,
                 hash: [2u8; 16],
             },
             FactVersionRef::Parse(ParseFactRef {
-                canonical_id: "/w/parse.ts".to_string(),
+                canonical_id: "/w/parse.ts".into(),
                 key: export_key("Foo"),
                 lane: FactLane::Semantic,
                 expected_hash: [3u8; 16],
             }),
             FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-                canonical_id: "/w/imports.ts".to_string(),
+                canonical_id: "/w/imports.ts".into(),
                 key: export_key("Bar"),
                 lane: FactLane::Semantic,
                 expected_hash: [4u8; 16],
             }),
             FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-                canonical_id: "/w/route.ts".to_string(),
+                canonical_id: "/w/route.ts".into(),
                 key: export_key("Baz"),
                 lane: FactLane::Semantic,
                 expected_hash: [5u8; 16],
             }),
             FactVersionRef::FileSourceEnv {
-                canonical_id: "/w/env.ts".to_string(),
+                canonical_id: "/w/env.ts".into(),
                 parse_env_hash: ParseEnvHash::from_env_hash([6u8; 16]),
                 parse_key: verter_session_query::source::toolchain::parse_key_for_test(
                     "/dep.ts", 2,
@@ -4850,14 +4850,14 @@ mod fact_signature_fingerprint_pins {
             (
                 0,
                 FactVersionRef::FileWholeHash {
-                    canonical_id: "/w/owner.vue".to_string(),
+                    canonical_id: "/w/owner.vue".into(),
                     hash: [11u8; 16],
                 },
             ),
             (
                 1,
                 FactVersionRef::DerivedFactHash {
-                    canonical_id: "/w/dep.ts".to_string(),
+                    canonical_id: "/w/dep.ts".into(),
                     kind: DerivedFactKind::DirectSource,
                     hash: [2u8; 16],
                 },
@@ -4865,7 +4865,7 @@ mod fact_signature_fingerprint_pins {
             (
                 2,
                 FactVersionRef::Parse(ParseFactRef {
-                    canonical_id: "/w/parse.ts".to_string(),
+                    canonical_id: "/w/parse.ts".into(),
                     key: export_key("FooPrime"),
                     lane: FactLane::Semantic,
                     expected_hash: [3u8; 16],
@@ -4874,7 +4874,7 @@ mod fact_signature_fingerprint_pins {
             (
                 3,
                 FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-                    canonical_id: "/w/imports-prime.ts".to_string(),
+                    canonical_id: "/w/imports-prime.ts".into(),
                     key: export_key("Bar"),
                     lane: FactLane::Semantic,
                     expected_hash: [4u8; 16],
@@ -4883,7 +4883,7 @@ mod fact_signature_fingerprint_pins {
             (
                 4,
                 FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-                    canonical_id: "/w/route.ts".to_string(),
+                    canonical_id: "/w/route.ts".into(),
                     key: export_key("Baz"),
                     lane: FactLane::Display,
                     expected_hash: [5u8; 16],
@@ -4892,7 +4892,7 @@ mod fact_signature_fingerprint_pins {
             (
                 5,
                 FactVersionRef::FileSourceEnv {
-                    canonical_id: "/w/env.ts".to_string(),
+                    canonical_id: "/w/env.ts".into(),
                     parse_env_hash: ParseEnvHash::from_env_hash([66u8; 16]),
                     parse_key: verter_session_query::source::toolchain::parse_key_for_test(
                         "/dep.ts", 2,
@@ -4927,19 +4927,19 @@ mod fact_signature_fingerprint_pins {
     #[test]
     fn distinct_variants_with_identical_payloads_discriminate() {
         let parse = FactVersionRef::Parse(ParseFactRef {
-            canonical_id: "/w/same.ts".to_string(),
+            canonical_id: "/w/same.ts".into(),
             key: export_key("Same"),
             lane: FactLane::Semantic,
             expected_hash: [9u8; 16],
         });
         let imports = FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-            canonical_id: "/w/same.ts".to_string(),
+            canonical_id: "/w/same.ts".into(),
             key: export_key("Same"),
             lane: FactLane::Semantic,
             expected_hash: [9u8; 16],
         });
         let route = FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-            canonical_id: "/w/same.ts".to_string(),
+            canonical_id: "/w/same.ts".into(),
             key: export_key("Same"),
             lane: FactLane::Semantic,
             expected_hash: [9u8; 16],
@@ -5043,7 +5043,7 @@ mod central_signature_rail_tests {
 
     fn whole_hash(canonical: &str, byte: u8) -> FactVersionRef {
         FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: [byte; 16],
         }
     }
@@ -5220,7 +5220,7 @@ mod receipt_validation_tests {
 
     fn whole_hash(canonical: &str, byte: u8) -> FactVersionRef {
         FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: [byte; 16],
         }
     }

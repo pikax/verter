@@ -52,7 +52,7 @@ fn fake_fact(canonical: &str, name: &str, byte: u8) -> FactVersionRef {
     let mut h = [0u8; 16];
     h[0] = byte;
     FactVersionRef::Parse(ParseFactRef {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         key: FactKey::Member {
             exporter: "X".into(),
             name: name.into(),
@@ -65,7 +65,7 @@ fn fake_fact(canonical: &str, name: &str, byte: u8) -> FactVersionRef {
 
 fn import_ref_fact(specifier: &str) -> FactVersionRef {
     FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/w/owner.ts".to_string(),
+        canonical_id: "/w/owner.ts".into(),
         key: FactKey::ImportRef {
             specifier: specifier.into(),
             binding: "X".into(),
@@ -152,7 +152,7 @@ fn editing_import_ref_does_not_invalidate_unrelated_consumers() {
     // `ImportRef` facts are distinct (different canonical id).
     let member_a = fake_fact("/w/x.ts", "a", 0x01);
     let import_x_from_owner_1 = FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/w/owner1.ts".to_string(),
+        canonical_id: "/w/owner1.ts".into(),
         key: FactKey::ImportRef {
             specifier: "./x".into(),
             binding: "X".into(),
@@ -162,7 +162,7 @@ fn editing_import_ref_does_not_invalidate_unrelated_consumers() {
         expected_hash: HashValue::default(),
     });
     let import_x_from_owner_2 = FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/w/owner2.ts".to_string(),
+        canonical_id: "/w/owner2.ts".into(),
         key: FactKey::ImportRef {
             specifier: "./x".into(),
             binding: "X".into(),

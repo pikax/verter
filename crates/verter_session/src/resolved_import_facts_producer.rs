@@ -352,7 +352,7 @@ impl VerterHost {
         content_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<Vec<FactVersionRef>> {
         let mut witness = vec![FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: content_hash,
         }];
         witness.extend(self.owner_import_route_witness(canonical)?);

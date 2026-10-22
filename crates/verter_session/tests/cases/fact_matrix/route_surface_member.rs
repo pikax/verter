@@ -36,7 +36,7 @@ fn route_surface_signature_carries_member() {
     );
 
     let member_fact = FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/src/leaf.ts".to_owned(),
+        canonical_id: "/src/leaf.ts".into(),
         key: FactKey::Member {
             exporter: InternedName::from("Foo"),
             name: verter_type_expr::facts::FactPropertyKey::identifier("a"),

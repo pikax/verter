@@ -803,8 +803,7 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
     // keys the parse-domain validator (`file_facts`) by the raw overlay
     // owner — so the emitted fact's id must NOT be normalised.
     assert_eq!(
-        recovered.canonical_id.as_str(),
-        "/pkg/index.js",
+        &*recovered.canonical_id, "/pkg/index.js",
         "the recovered ParseFactRef MUST stay rooted on the raw overlay scope — \
          the materialize-memo signature builder requires `ParseFactRef.canonical_id == \
          observation.canonical_id`, and the OverlaidView parse-domain validator keys \

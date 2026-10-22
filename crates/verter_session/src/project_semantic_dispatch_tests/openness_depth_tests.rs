@@ -632,7 +632,7 @@ fn in_a_traced_build<R>(
     let rooted = facts.iter().any(|fact| {
         matches!(
             fact,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == FILE
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == FILE
         )
     });
     (value, rooted)

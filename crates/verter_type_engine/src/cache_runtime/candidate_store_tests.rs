@@ -17,7 +17,7 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 /// `canonical`. The hash byte distinguishes distinct content versions.
 fn sig_for(canonical: &str, hash_byte: u8) -> ReadSetSignature {
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: [hash_byte; 16],
     }]);
     ReadSetSignature::new(facts)
@@ -657,7 +657,7 @@ fn chained_receipts_reach_their_candidates_and_drain_with_the_last() {
     use verter_session_query::facts::fact_cache::ResultReceipt;
 
     let file = |i: usize| FactVersionRef::FileWholeHash {
-        canonical_id: format!("/w/chain{i}.ts"),
+        canonical_id: format!("/w/chain{i}.ts").into(),
         hash: [5; 16],
     };
     let mut receipts: Vec<ResultReceipt> = Vec::new();
@@ -723,7 +723,7 @@ fn a_candidate_charge_does_not_grow_with_the_canonicals_its_receipts_reach() {
     let mut receipts: Vec<ResultReceipt> = Vec::new();
     for i in 0..16 {
         let mut facts = vec![FactVersionRef::FileWholeHash {
-            canonical_id: format!("/w/deep{i}.ts"),
+            canonical_id: format!("/w/deep{i}.ts").into(),
             hash: [6; 16],
         }];
         if let Some(below) = receipts.last() {

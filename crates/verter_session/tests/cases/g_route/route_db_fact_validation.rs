@@ -91,7 +91,7 @@ fn cross_consumer_route_hit_produces_one_entry() {
                         defining_symbol: "Foo".to_owned(),
                     },
                     vec![FactVersionRef::FileWholeHash {
-                        canonical_id: "provider.ts".to_owned(),
+                        canonical_id: "provider.ts".into(),
                         hash: [1u8; 16],
                     }],
                 ))
@@ -130,7 +130,7 @@ fn whole_hash_migration_audit_route_db_318_eliminated() {
     let view = AcceptAllView::new(1);
     let signature = Arc::from(
         vec![FactVersionRef::FileWholeHash {
-            canonical_id: "barrel.ts".to_owned(),
+            canonical_id: "barrel.ts".into(),
             hash: [42u8; 16],
         }]
         .into_boxed_slice(),
@@ -171,7 +171,7 @@ fn lib_env_hash_change_does_not_invalidate_resolved_import_facts() {
         resolver_version: RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     };
     let witness = vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/a.ts".to_string(),
+        canonical_id: "/a.ts".into(),
         hash: [9u8; 16],
     }];
     let view = PermissiveStoreView;

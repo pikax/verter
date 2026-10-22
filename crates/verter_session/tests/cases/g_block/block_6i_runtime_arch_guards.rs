@@ -552,7 +552,7 @@ fn per_key_route_builds_bounded() {
         defining_symbol: "X".to_string(),
     };
     let fact = FactVersionRef::FileWholeHash {
-        canonical_id: "p.ts".to_string(),
+        canonical_id: "p.ts".into(),
         hash: [1u8; 16],
     };
 

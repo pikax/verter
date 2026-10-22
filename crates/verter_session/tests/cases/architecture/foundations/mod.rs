@@ -905,6 +905,14 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // foreground request context and imported-child-contract freshness
         // key.
         "pub use resolver_store::{HostAuthority, HostAuthorityView}",
+        // `HostWorkSnapshot` — the narrow capture-off work-observation
+        // reader (`resolver_node_cache_misses` +
+        // `component_meta_resolved_state_recomputes`), named by the public
+        // host reader `VerterHost::work_snapshot()`
+        // (`host_lifecycle::work_snapshot`) and by the standalone
+        // narrow-consumer proof, which must name the type outside this
+        // crate with only `soak-support` enabled.
+        "pub use crate::meta_provenance::HostWorkSnapshot",
         // NOTE: the session-overlay copy-on-write counter is intentionally
         // ABSENT from this surface. It was retired as a process-global
         // re-export and rehomed PER-HOST onto

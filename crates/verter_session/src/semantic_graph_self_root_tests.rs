@@ -602,7 +602,7 @@ fn read_set_signature_prepends_observed_self_roots() {
         carrier.0.iter().any(|f| matches!(
             f,
             FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == "/w/a.ts" && *hash == [0x11; 16]
+                if &**canonical_id == "/w/a.ts" && *hash == [0x11; 16]
         )),
         "the facts rail must lead with a self-root FileWholeHash pinned to the observed hash",
     );
@@ -632,7 +632,7 @@ fn read_set_signature_rejects_traced_self_root_hash_mismatch() {
     let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
         vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/w/a.ts".to_string(),
+        canonical_id: "/w/a.ts".into(),
         hash: [0x99; 16],
     }];
     let result =
@@ -670,7 +670,7 @@ fn read_set_signature_rejects_a_traced_self_root_hash_mismatch_on_an_evidence_pa
     let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
         vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = paged_traced_set(FactVersionRef::FileWholeHash {
-        canonical_id: "/w/a.ts".to_string(),
+        canonical_id: "/w/a.ts".into(),
         hash: [0x99; 16],
     });
     assert_eq!(
@@ -690,7 +690,7 @@ fn a_paged_agreeing_self_root_keeps_its_precise_root() {
     let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
         vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = paged_traced_set(FactVersionRef::FileWholeHash {
-        canonical_id: "/w/a.ts".to_string(),
+        canonical_id: "/w/a.ts".into(),
         hash: [0x11; 16],
     });
     let (facts, roots) =
@@ -704,7 +704,7 @@ fn a_paged_agreeing_self_root_keeps_its_precise_root() {
     assert!(entries.iter().any(|fact| matches!(
         fact,
         FactVersionRef::FileWholeHash { canonical_id, hash }
-            if canonical_id == "/w/a.ts" && *hash == [0x11; 16]
+            if &**canonical_id == "/w/a.ts" && *hash == [0x11; 16]
     )));
     assert_eq!(
         entries
@@ -725,7 +725,7 @@ fn read_set_signature_merges_traced_cross_file_facts() {
         vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::Parse(
         verter_session_query::facts::fact_cache::ParseFactRef {
-            canonical_id: "/w/dep.ts".to_string(),
+            canonical_id: "/w/dep.ts".into(),
             key: FactKey::SyntacticExportSet,
             lane: FactLane::Semantic,
             expected_hash: [0x44; 16],
@@ -737,14 +737,14 @@ fn read_set_signature_merges_traced_cross_file_facts() {
     assert!(
         carrier.0.iter().any(|f| matches!(
             f,
-            FactVersionRef::Parse(p) if p.canonical_id == "/w/dep.ts"
+            FactVersionRef::Parse(p) if &*p.canonical_id == "/w/dep.ts"
         )),
         "a traced cross-file Parse fact must be merged into the carrier's facts rail",
     );
     assert!(
         carrier.0.iter().any(|f| matches!(
             f,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == "/w/a.ts"
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == "/w/a.ts"
         )),
         "the self-root FileWholeHash must also be present",
     );
@@ -818,7 +818,7 @@ fn an_oversized_root_set_strips_a_paged_root_fact_beside_its_witness() {
         })
         .collect();
     let traced = paged_traced_set(FactVersionRef::FileWholeHash {
-        canonical_id: "/w/root-0.ts".to_string(),
+        canonical_id: "/w/root-0.ts".into(),
         hash: [0; 16],
     });
     let (facts, roots) =
@@ -973,7 +973,7 @@ fn validate_with_self_roots_rejects_untracked_self_root() {
 
     let untracked = "/sg_self_root/never_loaded.ts";
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: untracked.to_string(),
+        canonical_id: untracked.into(),
         hash: [0xCD; 16],
     }]));
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(untracked)]);
@@ -999,7 +999,7 @@ fn validate_with_self_roots_accepts_matching_tracked_self_root() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: c.to_string(),
+        canonical_id: c.into(),
         hash: whole_hash,
     }]));
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(c)]);
@@ -1028,7 +1028,7 @@ fn validate_with_self_roots_checks_every_page_of_a_wide_carrier() {
         paths
             .iter()
             .map(|path| FactVersionRef::FileWholeHash {
-                canonical_id: path.clone(),
+                canonical_id: path.clone().into(),
                 hash: host.ensure_indexed_ready(path).expect("indexed").whole_hash,
             })
             .collect()
@@ -1078,7 +1078,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
         verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: untracked.to_string(),
+        canonical_id: untracked.into(),
         hash: [0xAB; 16],
     }]));
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(untracked)]);
@@ -1150,7 +1150,7 @@ fn relation_memo_warm_read_validates_self_root() {
     // untracked canonical.
     let untracked = "/sg_self_root/relation_never_loaded.ts";
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: untracked.to_string(),
+        canonical_id: untracked.into(),
         hash: [0xEF; 16],
     }]));
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(untracked)]);
@@ -1769,7 +1769,7 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
         cold_facts.iter().any(|f| matches!(
             f,
             FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == c && *hash == observed_hash
+                if &**canonical_id == c && *hash == observed_hash
         )),
         "the cold-owner publish path MUST bubble the completed carrier into the still-active \
          outer tracer — the outer tracer's finalised signature must contain the cold child's \
@@ -1803,7 +1803,7 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
         warm_facts.iter().any(|f| matches!(
             f,
             FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == c && *hash == observed_hash
+                if &**canonical_id == c && *hash == observed_hash
         )),
         "the warm-hit fast path bubbles the entry's carrier — the outer tracer must contain \
          the same self-root FileWholeHash for {c}. Got: {warm_facts:?}",
@@ -1888,7 +1888,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     assert!(
         carrier.facts.iter().any(|f| matches!(
             f,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == c
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == c
         )),
         "the built-in utility instantiation carrier MUST carry a self-root FileWholeHash for \
          the source argument's file {c} — `build_builtin_utility` inspects the argument nodes \
@@ -2008,7 +2008,7 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
     assert!(
         carrier.facts.iter().any(|f| matches!(
             f,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == arg
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == arg
         )),
         "the non-builtin instantiation carrier MUST carry a self-root FileWholeHash for the \
          type argument's file {arg} — `build_instantiate` substitutes the generic `args` into \
@@ -2132,7 +2132,7 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
     assert!(
         carrier.facts.iter().any(|f| matches!(
             f,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == arg
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == arg
         )),
         "the ResolveMacroPayload carrier MUST carry a self-root FileWholeHash for the type \
          argument's file {arg} — the `DefineProps` 1-arg arm returns the `type_args[0]` node \
@@ -2285,7 +2285,7 @@ fn session_overlay_warm_validation_matrix() {
             verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
         let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: root_hash,
         }]));
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
@@ -2629,7 +2629,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
             ));
             let carrier = ReadSetSignature::new(Arc::from(vec![
                 FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.to_string(),
+                    canonical_id: canonical.into(),
                     hash: root_hash,
                 },
                 FactVersionRef::Parse(parse_fact.clone()),
@@ -2706,7 +2706,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
         // carries the BASE version's SyntacticExportSet hash — a
         // genuine superseded-version mismatch.
         let stale_parse_fact = verter_session_query::facts::fact_cache::ParseFactRef {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             key: FactKey::SyntacticExportSet,
             lane: FactLane::Semantic,
             expected_hash: base_parse_fact.expected_hash,
@@ -2942,7 +2942,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             &graph,
             &key,
             vec![FactVersionRef::FileWholeHash {
-                canonical_id: deleted_canonical.to_string(),
+                canonical_id: deleted_canonical.into(),
                 hash: deleted_base_hash,
             }],
             deleted_canonical,
@@ -2989,7 +2989,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             &key,
             vec![
                 FactVersionRef::FileWholeHash {
-                    canonical_id: deleted_canonical.to_string(),
+                    canonical_id: deleted_canonical.into(),
                     hash: deleted_base_hash,
                 },
                 FactVersionRef::Parse(deleted_parse_fact.clone()),
@@ -3035,7 +3035,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
             &graph,
             &key,
             vec![FactVersionRef::FileWholeHash {
-                canonical_id: sibling_canonical.to_string(),
+                canonical_id: sibling_canonical.into(),
                 hash: sibling_base_hash,
             }],
             sibling_canonical,
@@ -3153,11 +3153,11 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
         ));
         let carrier = ReadSetSignature::new(Arc::from(vec![
             FactVersionRef::FileWholeHash {
-                canonical_id: parent_canonical.to_string(),
+                canonical_id: parent_canonical.into(),
                 hash: parent_base_hash,
             },
             FactVersionRef::FileWholeHash {
-                canonical_id: child_canonical.to_string(),
+                canonical_id: child_canonical.into(),
                 hash: child_base_hash,
             },
         ]));

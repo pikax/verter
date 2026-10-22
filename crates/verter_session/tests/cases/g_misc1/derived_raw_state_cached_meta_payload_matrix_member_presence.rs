@@ -61,7 +61,7 @@ fn cached_meta_payload_signature_carries_member_presence() {
     // Block 1A substrate is structurally able to carry a
     // MemberPresence fact-kind.
     let presence_fact = FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/src/types.ts".to_owned(),
+        canonical_id: "/src/types.ts".into(),
         key: FactKey::MemberPresence {
             exporter: InternedName::from("Foo"),
             name: verter_type_expr::facts::FactPropertyKey::identifier("a"),

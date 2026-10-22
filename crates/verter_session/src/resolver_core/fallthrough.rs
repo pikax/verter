@@ -1938,7 +1938,7 @@ mod tests {
         ) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
             vec![
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: canonical_id.to_string(),
+                    canonical_id: canonical_id.into(),
                     hash: [1; 16],
                 },
             ]
@@ -2376,7 +2376,7 @@ mod tests {
                 },
                 fact_versions: vec![
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                        canonical_id: "/Child.vue".to_string(),
+                        canonical_id: "/Child.vue".into(),
                         hash: [2; 16],
                     },
                 ],
@@ -2586,7 +2586,7 @@ mod tests {
                 },
                 fact_versions: vec![
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                        canonical_id: "/Child.svelte".to_string(),
+                        canonical_id: "/Child.svelte".into(),
                         hash: [2; 16],
                     },
                 ],
@@ -3188,7 +3188,7 @@ mod tests {
                     reason: verter_session_query::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
                 },
                 fact_versions: vec![verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: "/Child.vue".to_string(),
+                    canonical_id: "/Child.vue".into(),
                     hash: [3; 16],
                 }],
             },
@@ -4112,7 +4112,7 @@ mod tests {
 
     fn own_fact(canonical: &str) -> verter_session_query::facts::fact_cache::FactVersionRef {
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: [9; 16],
         }
     }

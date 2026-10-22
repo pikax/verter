@@ -336,7 +336,7 @@ fn cold_seed_context_fails_warm_probes_closed() {
         .expect("decl.ts must have shallow state")
         .whole_hash;
     let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-        canonical_id: canonical.clone(),
+        canonical_id: canonical.clone().into(),
         hash: whole_hash,
     };
 
@@ -507,7 +507,7 @@ fn session_cold_seed_context_fails_warm_probes_closed() {
         .expect("decl.ts must have shallow state")
         .whole_hash;
     let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-        canonical_id: canonical.clone(),
+        canonical_id: canonical.clone().into(),
         hash: whole_hash,
     };
     let session_view = EmptyBaseSessionView {
@@ -608,7 +608,7 @@ fn view_bound_cold_seed_currentness_comes_from_its_own_read() {
         .expect("decl.ts must have shallow state")
         .whole_hash;
     let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-        canonical_id: canonical.clone(),
+        canonical_id: canonical.clone().into(),
         hash: whole_hash,
     };
 
@@ -737,7 +737,7 @@ fn fallthrough_cold_compute_node_cache_validation_fails_closed_under_churn() {
         .expect("decl.ts must have shallow state")
         .whole_hash;
     let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-        canonical_id: canonical.clone(),
+        canonical_id: canonical.clone().into(),
         hash: whole_hash,
     };
 

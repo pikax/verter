@@ -36,7 +36,7 @@ fn route_surface_signature_carries_import_ref() {
     );
 
     let import_fact = FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/src/barrel.ts".to_owned(),
+        canonical_id: "/src/barrel.ts".into(),
         key: FactKey::ImportRef {
             specifier: InternedSpecifier::from("./leaf"),
             binding: InternedName::from("Foo"),

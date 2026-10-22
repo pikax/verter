@@ -485,6 +485,10 @@ impl ArtifactNode for CompileOutputNodePureContent {
 /// its fact slice and the evidence pages it reaches, on one refusable
 /// reservation that also holds the products' cell — which, once the slot
 /// goes, passes to the warm hits still sharing it.
+///
+/// The value's footprint and the fact slice are measured on separate sets:
+/// a raw text the value shares with the signature is charged by each, a
+/// bounded overcharge of one block per such text, never an undercharge.
 pub(crate) fn compile_slot_retention(
     value: &CompileOutputValue,
     signature: &ReadSetSignature,

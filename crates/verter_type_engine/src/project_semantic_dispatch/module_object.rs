@@ -237,10 +237,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     canonical_id,
                     hash,
                 } if seen.insert((canonical_id.clone(), *hash)) => {
-                    roots.push((
-                        verter_type_expr::OwnedStr::from(canonical_id.as_str()),
-                        *hash,
-                    ));
+                    roots.push((verter_type_expr::OwnedStr::from(&**canonical_id), *hash));
                 }
                 _ => {}
             }

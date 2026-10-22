@@ -209,7 +209,7 @@ fn session_lookup_misses_when_validate_facts_returns_false() {
     let mut state = ProfileState::default();
     let semantic = [0x12u8; 16];
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/dep.ts".to_string(),
+        canonical_id: "/dep.ts".into(),
         hash: [0xAB; 16],
     }]);
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(facts));
@@ -375,7 +375,7 @@ fn session_peek_signature_round_trips_admitted_signature() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let mut state = ProfileState::default();
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/dep.ts".to_string(),
+        canonical_id: "/dep.ts".into(),
         hash: [0xCD; 16],
     }]);
     let signature = ReadSetSignature::new(facts);
@@ -395,7 +395,7 @@ fn session_peek_last_good_misses_when_validate_facts_returns_false() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let mut state = ProfileState::default();
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/dep.ts".to_string(),
+        canonical_id: "/dep.ts".into(),
         hash: [0xAB; 16],
     }]);
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(facts));
@@ -613,7 +613,7 @@ fn concurrent_publish_and_remove_canonical_never_orphans_content_entry() {
 fn wide_signature() -> ReadSetSignature {
     let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
         .map(|index| FactVersionRef::FileWholeHash {
-            canonical_id: format!("/wide/{index:05}.ts"),
+            canonical_id: format!("/wide/{index:05}.ts").into(),
             hash: [1u8; 16],
         })
         .collect();

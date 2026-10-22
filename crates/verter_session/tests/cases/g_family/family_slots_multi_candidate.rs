@@ -288,22 +288,22 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
     // Fact rail for candidate A+C: depends on /a.ts and /c.ts.
     let facts_a_c: Arc<[FactVersionRef]> = Arc::from(vec![
         FactVersionRef::FileWholeHash {
-            canonical_id: canonical_a.to_string(),
+            canonical_id: canonical_a.into(),
             hash: [1u8; 16],
         },
         FactVersionRef::FileWholeHash {
-            canonical_id: canonical_c.to_string(),
+            canonical_id: canonical_c.into(),
             hash: [2u8; 16],
         },
     ]);
     // Fact rail for candidate B+C: depends on /b.ts and /c.ts.
     let facts_b_c: Arc<[FactVersionRef]> = Arc::from(vec![
         FactVersionRef::FileWholeHash {
-            canonical_id: canonical_b.to_string(),
+            canonical_id: canonical_b.into(),
             hash: [3u8; 16],
         },
         FactVersionRef::FileWholeHash {
-            canonical_id: canonical_c.to_string(),
+            canonical_id: canonical_c.into(),
             hash: [4u8; 16],
         },
     ]);
@@ -450,7 +450,7 @@ pub(crate) fn family_eviction_prefers_invalid_then_lru_valid_hit() {
     // `dep` lets the guard assert orphan-free cleanup of a NON-front
     // victim.
     let stale_facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: dep.to_string(),
+        canonical_id: dep.into(),
         hash: [0xEEu8; 16],
     }]);
 

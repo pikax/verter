@@ -150,7 +150,7 @@ fn a_scope_with_a_basis_and_no_domain_advance_still_admits() {
             // domain.
             verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                 FactVersionRef::FileWholeHash {
-                    canonical_id: "/proj/a.ts".to_string(),
+                    canonical_id: "/proj/a.ts".into(),
                     hash: [1_u8; 16],
                 },
             );
@@ -216,7 +216,7 @@ fn a_scope_with_no_basis_is_unaffected_by_a_domain_advance() {
     let (_, finalise) = install_fact_tracer(&FactTracerBasisSource::unbound(&*host), || {
         verter_type_engine::resolver_core::resolver_context::observe_fan_out(
             FactVersionRef::FileWholeHash {
-                canonical_id: "/proj/a.ts".to_string(),
+                canonical_id: "/proj/a.ts".into(),
                 hash: [1_u8; 16],
             },
         );
