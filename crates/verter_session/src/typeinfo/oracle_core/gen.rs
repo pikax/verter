@@ -798,7 +798,7 @@ async fn drive_hover_over_files(
         Duration::from_secs(15),
         provider.get_hover(
             &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(
-                &hover_abs.to_string_lossy(),
+                hover_abs.to_string_lossy(),
             ),
             hover_offset,
         ),
@@ -1246,7 +1246,7 @@ fn preflight_reduces_clean(spec: &QuerySpec) -> Result<(), GenError> {
         ))
     })?;
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .ok_or_else(|| {
             GenError::PreflightUnclean(format!(
                 "{}::{}: resolved node did not project to a TypeExpr (carrier/operator shell)",
