@@ -1430,7 +1430,7 @@ export interface Props { label: string }
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/src/types.vue"
+                if &**canonical_id == "/src/types.vue"
         )),
         "the direct-local proof must track the provider content hash",
     );
