@@ -3,3 +3,5 @@
 pub mod css_gate;
 pub mod css_identities;
 pub mod semantic_perf;
+#[cfg(feature = "soak-support")]
+pub mod soak;

@@ -13,7 +13,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -136,6 +136,10 @@ export function validateManifest(manifest, file) {
   const problems = [];
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
     return { problems: ["the manifest is not a JSON object"], run: null };
+  if ("kind" in manifest)
+    return manifest.kind === "soak"
+      ? validateSoakManifest(manifest, file)
+      : { problems: [`unknown kind ${JSON.stringify(manifest.kind)}; kinds: soak`], run: null };
   for (const key of Object.keys(manifest))
     if (!REQUIRED_FIELDS.includes(key) && !OPTIONAL_FIELDS.includes(key))
       problems.push(`unknown field ${key}`);
@@ -328,6 +332,443 @@ export function validateManifest(manifest, file) {
     ],
   };
   return { problems, run };
+}
+
+/**
+ * A soak manifest (`kind: "soak"`) registers a frozen run of the long-churn
+ * soak runner (`crates/verter_bench/src/soak/`, binary `verter-soak`) instead
+ * of a semantic-perf harness invocation. Its workloads are frozen by digest:
+ * the runner's own test regenerates them and compares, so the manifest is the
+ * single record of what the run executes.
+ */
+export const SOAK_MODES = ["normal", "pressure"];
+const SOAK_REQUIRED = ["name", "kind", "description", "modes", "noise", "soak", "requiredCells"];
+const SOAK_FIELDS = [
+  "surgeLimits",
+  "runner",
+  "tranches",
+  "actionsPerTranche",
+  "minDistinctQueries",
+  "sampleEvery",
+  "envelopeActions",
+  "workloads",
+  "smoke",
+  "controls",
+  "binding",
+  "build",
+];
+/**
+ * The one build the soak runs on, on every worker: the runner binary of
+ * `verter_bench` with its default-off `soak-support` tooling feature and no
+ * other feature (audit/footprint capture and `semantic-observe` stay off).
+ */
+export const SOAK_BUILD = {
+  package: "verter_bench",
+  bin: "verter-soak",
+  profile: "release",
+  features: ["soak-support"],
+};
+const SOAK_COUNTS = [
+  "tranches",
+  "actionsPerTranche",
+  "minDistinctQueries",
+  "sampleEvery",
+  "envelopeActions",
+];
+const SOAK_CELL_FIELDS = ["mode", "metrics", "benchM3Only"];
+
+const closedCounts = (r) => r.summary?.samples?.find((s) => s.at === "closed")?.counts ?? null;
+const finalCounts = (r) => r.summary?.samples?.at(-1)?.counts ?? null;
+const surges = (r) => (r.summary?.records ?? []).filter((x) => x.class === "pressure-surge");
+const surgeSum = (r, pick) =>
+  surges(r).length ? surges(r).reduce((sum, s) => sum + (pick(s) ?? 0), 0) : null;
+const surgeMax = (r, pick) => {
+  const values = surges(r)
+    .map(pick)
+    .filter((v) => typeof v === "number");
+  return values.length ? Math.max(...values) : null;
+};
+
+/**
+ * The metrics a soak cell may name. `work` metrics are the runner's
+ * deterministic verdict and counts, read on any worker; `time` and `memory`
+ * only on bench-m3, so a cell naming one is marked `benchM3Only`. `from`
+ * reads the value from one mode's `{ verdict, summary, wallMs }`.
+ */
+export const SOAK_METRICS = {
+  verdict: { kind: "work", from: (r) => r.verdict?.verdict ?? null },
+  // The negative controls run once, before the modes, and are shared by both.
+  controls: { kind: "work", from: (r) => r.controls?.verdict ?? null },
+  failures: { kind: "work", from: (r) => r.verdict?.failures?.length ?? null },
+  actions: { kind: "work", from: (r) => r.summary?.records?.length ?? null },
+  samples: { kind: "work", from: (r) => r.summary?.samples?.length ?? null },
+  closedRetainedBytes: { kind: "work", from: (r) => closedCounts(r)?.retainedBytes ?? null },
+  finalRetainedBytes: { kind: "work", from: (r) => finalCounts(r)?.retainedBytes ?? null },
+  // Surge-attributed figures: the deltas each surge recorded while it ran and
+  // the peak its own ACTIVE window attributed to it, never the account's
+  // lifetime counters or total peak.
+  surgeRefusalsPressure: { kind: "work", from: (r) => surgeSum(r, (s) => s.refusalsPressure) },
+  surgeRefusalsOversized: { kind: "work", from: (r) => surgeSum(r, (s) => s.refusalsOversized) },
+  surgeRefusalsActive: {
+    kind: "work",
+    from: (r) => surgeSum(r, (s) => s.pressure?.refusalsActive),
+  },
+  surgeActivePeakBytes: {
+    kind: "work",
+    from: (r) => surgeMax(r, (s) => s.pressure?.active?.attributedPeak),
+  },
+  wallMs: { kind: "time", from: (r) => r.wallMs ?? null },
+  peakRssBytes: {
+    kind: "memory",
+    from: (r) => r.summary?.process?.peakResidentBytes ?? r.summary?.process?.peakBytes ?? null,
+  },
+  // The runner is one process and spawns none: its process tree is itself.
+  processTreePeakBytes: { kind: "memory", from: (r) => r.summary?.process?.peakBytes ?? null },
+};
+
+const isDigest = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+
+function surgeLimitProblems(limits) {
+  const at = "soak.surgeLimits";
+  const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  if (!object(limits)) return [`${at} must declare bounded and full surge bounds`];
+  const problems = [];
+  const fields = [
+    "modules",
+    "props",
+    "oversizedProps",
+    "inputBytesMax",
+    "concurrency",
+    "liveArtifactsMax",
+    "registeredSourcesMax",
+    "snapshotLeasesMax",
+    "retainedBytesMax",
+  ];
+  for (const name of Object.keys(limits))
+    if (!["bounded", "full"].includes(name)) problems.push(`${at}: unknown shape ${name}`);
+  for (const name of ["bounded", "full"]) {
+    const shape = limits[name];
+    const where = `${at}.${name}`;
+    if (!object(shape)) {
+      problems.push(`${where} must be an object`);
+      continue;
+    }
+    for (const field of Object.keys(shape))
+      if (!fields.includes(field)) problems.push(`${where}: unknown field ${field}`);
+    for (const field of fields)
+      if (!Number.isSafeInteger(shape[field]) || shape[field] <= 0)
+        problems.push(`${where}.${field} must be a positive safe integer`);
+    if (shape.modules !== shape.concurrency)
+      problems.push(`${where}.concurrency must cover all requested modules together`);
+    for (const field of ["liveArtifactsMax", "registeredSourcesMax", "snapshotLeasesMax"])
+      if (shape.modules > shape[field]) problems.push(`${where}.modules exceeds ${field}`);
+    const retainedLimit = name === "bounded" ? 64 * 1024 ** 2 : 1024 ** 3;
+    if (shape.retainedBytesMax > retainedLimit)
+      problems.push(`${where}.retainedBytesMax exceeds the retained-byte policy`);
+  }
+  return problems;
+}
+
+function soakCellProblems(cell, at, modes) {
+  const problems = [];
+  if (!cell || typeof cell !== "object" || Array.isArray(cell)) return [`${at} is not an object`];
+  for (const key of Object.keys(cell))
+    if (!SOAK_CELL_FIELDS.includes(key)) problems.push(`${at}: unknown field ${key}`);
+  if (!modes.includes(cell.mode))
+    problems.push(`${at}: mode ${cell.mode} is not one of the run's modes`);
+  if ("benchM3Only" in cell && typeof cell.benchM3Only !== "boolean")
+    problems.push(`${at}: benchM3Only must be true or false`);
+  if (!stringList(cell.metrics)) return [...problems, `${at}: metrics must be a non-empty list`];
+  const kinds = new Set();
+  for (const m of cell.metrics)
+    if (!SOAK_METRICS[m]) problems.push(`${at}: unknown soak metric ${m}`);
+    else kinds.add(SOAK_METRICS[m].kind);
+  const benchOnly = cell.benchM3Only === true;
+  if (!benchOnly && (kinds.has("time") || kinds.has("memory")))
+    problems.push(
+      `${at}: a time or memory metric is measured only on ${BENCH_TAG}; mark the cell benchM3Only`,
+    );
+  if (benchOnly && kinds.has("work"))
+    problems.push(`${at}: a benchM3Only cell holds no work metric`);
+  return problems;
+}
+
+/** Validate a soak manifest; `run.soak` carries what the runner executes. */
+export function validateSoakManifest(manifest, file) {
+  const problems = [];
+  for (const key of Object.keys(manifest))
+    if (!SOAK_REQUIRED.includes(key)) problems.push(`unknown field ${key}`);
+  for (const key of SOAK_REQUIRED)
+    if (!(key in manifest)) problems.push(`missing required field ${key}`);
+  if (problems.length) return { problems, run: null };
+  const { name, modes, noise, soak, requiredCells } = manifest;
+  const stem = file ? file.replace(/^.*[\\/]/, "").replace(/\.json$/, "") : name;
+  if (typeof name !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(name))
+    problems.push(`name ${JSON.stringify(name)} must be lower-case letters, digits and hyphens`);
+  else if (name !== stem) problems.push(`name ${name} differs from the file name ${stem}.json`);
+  if (typeof manifest.description !== "string" || !manifest.description.trim())
+    problems.push("description must be a non-empty string");
+  const modeList = stringList(modes) && modes.every((m) => SOAK_MODES.includes(m)) ? modes : [];
+  if (!modeList.length) problems.push(`modes must be a non-empty list of ${SOAK_MODES.join(", ")}`);
+  else if (new Set(modes).size !== modes.length) problems.push("modes lists a mode twice");
+  const noiseRefs = typeof noise === "string" ? [noise] : noise;
+  if (!stringList(noiseRefs)) problems.push("noise must be a reference or a list of references");
+  else {
+    const anchors = headingAnchors(join(ROOT, NOISE_DOC));
+    for (const ref of noiseRefs) {
+      const [doc, anchor] = ref.split("#");
+      if (doc !== NOISE_DOC || !anchor || !anchors.has(anchor))
+        problems.push(`noise reference ${ref} is not a section of ${NOISE_DOC}`);
+    }
+  }
+  if (!soak || typeof soak !== "object" || Array.isArray(soak))
+    return { problems: [...problems, "soak must be an object"], run: null };
+  for (const key of Object.keys(soak))
+    if (!SOAK_FIELDS.includes(key)) problems.push(`soak: unknown field ${key}`);
+  for (const key of SOAK_FIELDS) if (!(key in soak)) problems.push(`soak: missing field ${key}`);
+  problems.push(...surgeLimitProblems(soak.surgeLimits));
+  if (soak.runner !== "verter-soak") problems.push("soak.runner must be verter-soak");
+  for (const key of SOAK_COUNTS)
+    if (key in soak && !isInt(soak[key], 1))
+      problems.push(`soak.${key} must be a positive integer`);
+  if (isInt(soak.sampleEvery, 1) && soak.sampleEvery > 100)
+    problems.push("soak.sampleEvery must sample at least every 100 actions");
+  for (const mode of modeList) {
+    const w = soak.workloads?.[mode];
+    if (!w || !isDigest(w.digest) || !isInt(w.actions, 1) || !isInt(w.distinctQueries, 1))
+      problems.push(`soak.workloads.${mode} needs a sha-256 digest, actions and distinctQueries`);
+    else {
+      if (w.actions !== soak.tranches * soak.actionsPerTranche)
+        problems.push(`soak.workloads.${mode}.actions is not tranches x actionsPerTranche`);
+      if (w.distinctQueries < soak.minDistinctQueries)
+        problems.push(
+          `soak.workloads.${mode} demands fewer than ${soak.minDistinctQueries} distinct queries`,
+        );
+    }
+    const s = soak.smoke?.[mode];
+    if (!s || s.tranches !== 1 || !isDigest(s.digest))
+      problems.push(`soak.smoke.${mode} needs tranches 1 and a sha-256 digest`);
+  }
+  if (soak.controls?.runner !== "verter-soak --controls" || !stringList(soak.controls?.names))
+    problems.push('soak.controls needs the runner "verter-soak --controls" and its control names');
+  if (soak.binding?.smoke !== "targeted-domain" || soak.binding?.full !== BENCH_TAG)
+    problems.push(
+      `soak.binding must bind the smoke to targeted-domain and the full run to ${BENCH_TAG}`,
+    );
+  if (JSON.stringify(soak.build) !== JSON.stringify(SOAK_BUILD))
+    problems.push(
+      `soak.build must declare the support-feature build ${JSON.stringify(SOAK_BUILD)}`,
+    );
+  if (!Array.isArray(requiredCells) || !requiredCells.length)
+    problems.push("requiredCells must be a non-empty list");
+  else {
+    const seen = new Set();
+    requiredCells.forEach((cell, i) => {
+      problems.push(...soakCellProblems(cell, `requiredCells[${i}]`, modeList));
+      const key = `${cell?.mode}|${cell?.benchM3Only === true}`;
+      if (seen.has(key)) problems.push(`requiredCells[${i}]: duplicate cell ${key}`);
+      seen.add(key);
+    });
+  }
+  if (problems.length) return { problems, run: null };
+  return {
+    problems,
+    run: { soak: { modes, tranches: soak.tranches }, sessions: [], requireAllMatched: false },
+  };
+}
+
+/** One soak cell of the summary (`result` null when the mode did not run). */
+export function summarizeSoakCell(cell, result, { dryRun, worker }) {
+  const out = { ...cell, status: dryRun ? "not run" : result ? "present" : "missing", metrics: {} };
+  for (const m of cell.metrics) {
+    const def = SOAK_METRICS[m];
+    if (dryRun)
+      out.metrics[m] = {
+        kind: def.kind,
+        status: "not measured",
+        reason: "a dry run executes nothing",
+      };
+    else if (def.kind !== "work" && !worker.benchM3)
+      out.metrics[m] = {
+        kind: def.kind,
+        status: "not measured",
+        reason: `${def.kind} is measured only on a worker tagged ${BENCH_TAG}`,
+      };
+    else {
+      const value = result ? def.from(result) : null;
+      out.metrics[m] =
+        value === null
+          ? {
+              kind: def.kind,
+              status: "unavailable",
+              reason: result ? "the run recorded no such figure" : "the mode did not run",
+            }
+          : { kind: def.kind, status: "measured", values: value };
+    }
+  }
+  return out;
+}
+
+/** The evidence summary of a soak run; `results` maps each mode to its run. */
+export function buildSoakSummary(loaded, { dryRun, worker, results = {} }) {
+  const cells = loaded.manifest.requiredCells.map((cell) =>
+    summarizeSoakCell(cell, results[cell.mode] ?? null, { dryRun, worker }),
+  );
+  const problems = [];
+  if (!dryRun) {
+    // Correctness and accounting figures are required evidence whatever the
+    // runner's verdict says: a required work metric the run did not record
+    // fails the summary. Time and memory metrics stay advisory.
+    for (const cell of cells)
+      for (const [name, metric] of Object.entries(cell.metrics))
+        if (metric.kind === "work" && metric.status !== "measured")
+          problems.push(
+            `cell ${cell.mode}: required work metric ${name} is ${metric.status}: ${metric.reason ?? "no figure"}`,
+          );
+    const controls = results.controls;
+    const frozenControls = loaded.manifest.soak.controls.names;
+    const reported = (controls?.controls ?? []).map((c) => c.name);
+    if (!controls) problems.push("the negative controls did not run");
+    else if (controls.error) problems.push(`negative controls: ${controls.error}`);
+    else {
+      if (controls.verdict !== "passed")
+        problems.push(
+          `negative controls failed: ${
+            (controls.controls ?? [])
+              .filter((c) => !c.bit)
+              .map((c) => c.name)
+              .join(", ") || "no verdict"
+          }`,
+        );
+      for (const name of frozenControls)
+        if (!reported.includes(name)) problems.push(`negative control ${name} did not run`);
+    }
+    for (const mode of loaded.run.soak.modes) {
+      const r = results[mode];
+      const frozen = loaded.manifest.soak.workloads[mode].digest;
+      if (!r) problems.push(`mode ${mode} did not run`);
+      else if (r.error) problems.push(`mode ${mode}: ${r.error}`);
+      else {
+        // A verdict without the summary it judged proves nothing about the
+        // frozen workload, and a summary without its verdict was not judged.
+        if (!r.summary) problems.push(`mode ${mode}: the runner wrote no summary`);
+        else {
+          if (r.summary.manifestDigest !== frozen)
+            problems.push(
+              `mode ${mode} ran manifest ${r.summary.manifestDigest}, not the frozen ${frozen}`,
+            );
+          if (r.summary.mode !== mode || r.summary.tranches !== loaded.run.soak.tranches)
+            problems.push(`mode ${mode}: the summary is for a different workload`);
+        }
+        if (r.verdict?.verdict !== "passed")
+          problems.push(
+            `mode ${mode} failed: ${(r.verdict?.failures ?? []).map((f) => f.kind).join(", ") || "no verdict"}`,
+          );
+      }
+    }
+  }
+  return {
+    schema: SUMMARY_SCHEMA,
+    run: {
+      name: loaded.manifest.name,
+      kind: "soak",
+      manifest: relPath(loaded.path),
+      manifestSha256: loaded.sha256,
+    },
+    dryRun,
+    worker,
+    provenance: dryRun ? null : { candidate: results.candidate ?? null },
+    cells,
+    validation: dryRun
+      ? { verdict: "not run", problems: [] }
+      : { verdict: problems.length ? "failed" : "passed", problems },
+  };
+}
+
+/**
+ * Run the soak runner `exe` with `args` into `dir`. Every invocation starts
+ * from an empty directory, so an artifact found afterwards was written by this
+ * invocation, and a run that ended abnormally (a signal, a spawn failure, a
+ * status the runner does not exit with) is an error whatever an earlier run
+ * left behind. The runner exits 0 when it passed and 1 when it judged a failure.
+ */
+export function invokeSoakRunner(exe, args, dir) {
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const started = process.hrtime.bigint();
+  const r = spawnSync(exe, [...args, "--out", dir], { cwd: ROOT, stdio: "inherit" });
+  const wallMs = Number(process.hrtime.bigint() - started) / 1e6;
+  const read = (f) =>
+    existsSync(join(dir, f)) ? JSON.parse(readFileSync(join(dir, f), "utf8")) : null;
+  const ended =
+    r.error || r.signal || (r.status !== 0 && r.status !== 1)
+      ? `the runner ended abnormally (${r.error?.message ?? r.signal ?? `status ${r.status}`})`
+      : null;
+  return { read, wallMs, ended };
+}
+
+/** Build the declared runner once, then run every mode of the frozen workload. */
+export function defaultSoakRunner(loaded, outDir) {
+  const { package: pkg, bin, profile, features } = loaded.manifest.soak.build;
+  const build = spawnSync(
+    "cargo",
+    [
+      "build",
+      "--profile",
+      profile,
+      "-p",
+      pkg,
+      "--bin",
+      bin,
+      "--features",
+      features.join(","),
+      "--message-format",
+      "json-render-diagnostics",
+    ],
+    { cwd: ROOT, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
+  );
+  const parse = (line) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return null;
+    }
+  };
+  const exe = (build.stdout ?? "")
+    .split(/\r?\n/)
+    .map(parse)
+    .find((m) => m?.reason === "compiler-artifact" && m.target?.name === "verter-soak")?.executable;
+  const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" });
+  const results = { candidate: head.status === 0 ? head.stdout.trim() : null };
+  const modes = loaded.run.soak.modes;
+  if (build.status !== 0 || !exe) {
+    const error = `cargo build of verter-soak exited ${build.status}`;
+    results.controls = { error };
+    for (const mode of modes) results[mode] = { error };
+    return results;
+  }
+  const invoke = (args, dir) => invokeSoakRunner(exe, args, dir);
+  const controls = invoke(["--controls"], join(outDir, "soak", "controls"));
+  results.controls = controls.ended
+    ? { error: controls.ended }
+    : (controls.read("soak-controls.json") ?? { error: "the controls wrote no verdict" });
+  for (const mode of modes) {
+    if (results.controls.error || results.controls.verdict !== "passed") {
+      results[mode] = { error: "the negative controls did not pass; the real run was not started" };
+      continue;
+    }
+    const dir = join(outDir, "soak", mode);
+    const run = invoke(["--mode", mode, "--tranches", String(loaded.run.soak.tranches)], dir);
+    results[mode] = run.ended
+      ? { error: run.ended }
+      : {
+          verdict: run.read("soak-verdict.json"),
+          summary: run.read("soak-summary.json"),
+          controls: results.controls,
+          wallMs: run.wallMs,
+        };
+  }
+  return results;
 }
 
 export const cellKey = (c) => `${c.scenario}/${c.setting}|${c.arm}|${c.mode}|threads=${c.threads}`;
@@ -751,7 +1192,12 @@ export async function main(argv, deps = {}) {
   const outDir = opts.out ?? join(ROOT, "target", "evidence-runs", loaded.manifest.name, stamp);
   mkdirSync(outDir, { recursive: true });
   let summary;
-  if (opts.dryRun) summary = buildSummary(loaded, { dryRun: true, worker });
+  if (loaded.run.soak) {
+    const runSoak = deps.runSoak ?? defaultSoakRunner;
+    summary = opts.dryRun
+      ? buildSoakSummary(loaded, { dryRun: true, worker })
+      : buildSoakSummary(loaded, { dryRun: false, worker, results: runSoak(loaded, outDir) });
+  } else if (opts.dryRun) summary = buildSummary(loaded, { dryRun: true, worker });
   else {
     const harnessDir = join(outDir, "harness");
     const runHarness = deps.runHarness ?? defaultHarness;
