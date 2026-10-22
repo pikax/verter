@@ -24,6 +24,7 @@
       "css/cssService.spec.ts",
       "css/styleDocumentText.spec.ts",
       "css/styleStructure.spec.ts",
+      "desktopLanguageLifecycle.spec.ts",
       "e2eLogMirror.spec.ts",
       "e2eProfileProvisioning.spec.ts",
       "e2eProviderAttestation.spec.ts",
@@ -95,13 +96,13 @@
     }
   ],
   "counts": {
-    "productionModules": 49,
+    "productionModules": 50,
     "desktop": 20,
     "presentation": 6,
-    "pure": 23,
+    "pure": 24,
     "testSupportFiles": 1,
-    "specFiles": 47,
-    "totalSourceFiles": 97
+    "specFiles": 48,
+    "totalSourceFiles": 99
   },
   "modules": [
     {
@@ -333,6 +334,15 @@
     },
     {
       "path": "css/transpiler.ts",
+      "tier": "pure",
+      "vscodeApi": false,
+      "nodeImports": [],
+      "usesProcess": false,
+      "usesRequire": false,
+      "lspClient": "none"
+    },
+    {
+      "path": "desktopLanguageLifecycle.ts",
       "tier": "pure",
       "vscodeApi": false,
       "nodeImports": [],

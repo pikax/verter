@@ -5788,6 +5788,18 @@ impl PartialReasonSet {
         Self(self.0 | other.0)
     }
 
+    /// Raw bit form, for lock-free accumulation across threads.
+    #[must_use]
+    pub const fn to_bits(self) -> u32 {
+        self.0
+    }
+
+    /// Inverse of [`Self::to_bits`] for bits produced by it.
+    #[must_use]
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
     /// Whether `self` contains every reason in `other`.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

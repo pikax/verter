@@ -4,11 +4,65 @@ import {
   CARRIER_UNSUPPORTED_TOOLTIP,
   providerServesFrameworkCarriers,
 } from "./carrierProviderSupport";
+import type { LifecycleSnapshot } from "./desktopLanguageLifecycle";
 
 export interface StatusBarState {
   text: string;
   tooltip: string;
   warning: boolean;
+}
+
+/** A lifecycle state that replaces the type-provider status while it lasts. */
+export interface LifecycleStatusBarState extends StatusBarState {
+  /** Severity of the background: a stopped server is an error, recovery a warning. */
+  error: boolean;
+  /** The command the item runs while this state is shown. */
+  command: string;
+}
+
+const RESTART_COMMAND = "verter.restartLanguageServer";
+
+/**
+ * The status bar state the language-server lifecycle imposes, or `undefined`
+ * when the server is running (or making its first start) and the type-provider
+ * status is the honest answer.
+ *
+ * A lost server must not keep showing the last engine status with a check mark:
+ * while recovery runs the item says so with its attempt count, and once recovery
+ * gives up it shows a stopped state that restarts the server when clicked.
+ */
+export function computeLifecycleStatusBarState(
+  snapshot: LifecycleSnapshot,
+): LifecycleStatusBarState | undefined {
+  const reason = snapshot.reason ? ` (${snapshot.reason})` : "";
+  switch (snapshot.phase) {
+    case "stopped":
+      return {
+        text: "$(error) Verter: stopped",
+        tooltip: `Verter language server is stopped${reason}. Click to restart it.`,
+        warning: false,
+        error: true,
+        command: RESTART_COMMAND,
+      };
+    case "recovering":
+    case "starting":
+      if (snapshot.phase === "starting" && snapshot.restartAttempt === 0) {
+        return undefined;
+      }
+      return {
+        text:
+          snapshot.restartAttempt > 0
+            ? `$(sync~spin) Verter: restarting (${snapshot.restartAttempt}/${snapshot.maxRestarts})`
+            : "$(sync~spin) Verter: restarting",
+        tooltip: `Verter language server stopped unexpectedly${reason}; restarting automatically.`,
+        warning: true,
+        error: false,
+        command: RESTART_COMMAND,
+      };
+    case "running":
+    case "disposed":
+      return undefined;
+  }
 }
 
 /**

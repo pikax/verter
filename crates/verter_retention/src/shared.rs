@@ -425,6 +425,13 @@ impl CallerHold {
     pub fn class(&self) -> ChargeClass {
         self.0.state.lock().charge().class()
     }
+
+    /// The shared charge's address: every caller and cache hold on it names
+    /// the same one. For identity checks that never deref.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0).cast::<()>() as usize
+    }
 }
 
 impl Clone for CallerHold {

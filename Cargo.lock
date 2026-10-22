@@ -3385,6 +3385,7 @@ dependencies = [
  "trybuild",
  "verter_session",
  "verter_type_engine",
+ "verter_type_expr",
 ]
 
 [[package]]

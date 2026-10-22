@@ -140,7 +140,7 @@ export interface PollBudgetSpec {
  * is excluded: it guards a cross-process file lock, not a Mocha-surface poll.
  *
  * By that method, over `suite/**`, `lib/**` and `helpers.ts`: 15 default-budget
- * functions and 12 inline loops — 27 sites, all 27 registry-backed. Two earlier
+ * functions and 13 inline loops — 28 sites, all 28 registry-backed. Two earlier
  * counts in this file were asserted rather than derived and were both wrong; this
  * one states its method so the next one need not be taken on trust.
  *
@@ -311,6 +311,15 @@ export const POLL_BUDGETS = {
     budgetMs: DEFAULT_POLL_BUDGET_MS,
     parentTimeoutMs: SUITE_TIMEOUT_MS,
   },
+  lifecycleServerReplaced: {
+    budgetMs: 30_000,
+    parentTimeoutMs: 90_000,
+    reason:
+      "awaited only by the lifecycle suite's restart and crash cases, which declare their own " +
+      "sequence deadlines: one Verter LSP process is stopped or killed, the old process must " +
+      "leave the process table, and the replacement must start and announce readiness — after " +
+      "the 2s first-restart backoff on the crash path. It takes the restart handshake's 30s",
+  },
   diagnosticsUnresolvedRetry: { budgetMs: 20_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
   diagnosticsClearRetry: { budgetMs: 20_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
   confidenceProbe: { budgetMs: 10_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
@@ -478,6 +487,33 @@ export const POLL_SEQUENCES = {
     reason:
       "the suite setup opens the shared fixture and may reset a stale provenance setting, " +
       "waiting for both file readiness and the replacement server under one hook deadline",
+  },
+  lifecycleRestartLoop: {
+    members: [
+      "waitForDiagnostics",
+      "waitForDiagnosticsSettled",
+      "lifecycleServerReplaced",
+      "lifecycleServerReplaced",
+      "waitForDiagnostics",
+      "waitForDiagnosticsSettled",
+    ],
+    parentTimeoutMs: 120_000,
+    reason:
+      "the restart-loop case reads the unsaved edit's diagnostic, replaces the server twice " +
+      "in series, then reads the diagnostic the last replacement published, under one deadline",
+  },
+  lifecycleCrashRecovery: {
+    members: [
+      "waitForDiagnostics",
+      "waitForDiagnosticsSettled",
+      "lifecycleServerReplaced",
+      "waitForDiagnostics",
+      "waitForDiagnosticsSettled",
+    ],
+    parentTimeoutMs: 90_000,
+    reason:
+      "the crash case reads the unsaved edit's diagnostic, kills the server and waits out the " +
+      "bounded recovery's replacement, then reads the diagnostic that replacement published",
   },
   hoverProvenanceRestartRoundTrip: {
     members: ["hoverProvenanceRestart", "measureHover", "measureHover"],

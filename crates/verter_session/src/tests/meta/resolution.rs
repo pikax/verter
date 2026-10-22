@@ -7725,26 +7725,15 @@ defineProps<DeepType>()
 /// `n`-member prop surface through the native graph, without hang or a
 /// spurious budget error.
 ///
-/// The frontier step budget is pinned LOW (`external_resolution_step_budget
-/// = Some(40)`, below the `45`-wide import count) on purpose: the
-/// cross-file frontier performs only ROUTE discovery (a handful of
-/// `(canonical_id, exported_name)` visits), so a wide heritage fan-out
-/// must NOT trip the frontier step-limit — the heritage members are
-/// resolved by the native semantic graph, not by per-member frontier
-/// visits. The `props.len() == import_count` assertion is the
-/// discriminating gate: dropping the cross-file heritage definitions
-/// (so the imported `Tn` are unresolvable) makes the prop count fall
-/// short of `import_count` and the test RED.
-///
-/// Sized small (45 imports / 40-step budget) instead of the historical
-/// 2005/2000 corpus so the test runs in well under a second while
-/// exercising the identical native-graph wide-heritage resolution path.
+/// The heritage members are resolved by the native semantic graph, not by
+/// per-member route visits, so the fan-out width is not a step budget. The
+/// `props.len() == import_count` assertion is the discriminating gate:
+/// dropping the cross-file heritage definitions (so the imported `Tn` are
+/// unresolvable) makes the prop count fall short of `import_count` and the
+/// test RED.
 #[test]
 fn get_component_meta_scales_past_previous_wide_import_budget_fixture() {
-    let project = make_project_with_config(HostConfig {
-        external_resolution_step_budget: Some(40),
-        ..HostConfig::default()
-    });
+    let project = make_project_with_config(HostConfig::default());
 
     let import_count = 45usize;
     let mut defs_source = String::new();
