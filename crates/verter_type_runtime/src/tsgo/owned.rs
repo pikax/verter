@@ -36,7 +36,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex as SyncMutex;
 use verter_span::path::fs_paths_equal;
 use verter_span::Utf16LineIndex;
 use verter_tsgo_api::api_attach::ApiAttachClient;
@@ -58,18 +57,26 @@ use crate::tsgo::ipc::TsgoTypeProvider;
 /// The attached `--api` checker. It stores NO configured project: the tsconfig is
 /// supplied PER QUERY (the owning project the carrier binding resolved), so ONE
 /// `--api` process serves EVERY configured project in the workspace — mirroring the
-/// SHARED provider's per-query `--api` core. Held behind a mutex so the snapshot can
-/// be refreshed as carriers are opened/changed.
+/// SHARED provider's per-query `--api` core. Every query reads the language
+/// server's current snapshot, serves its requests from it, and releases it — no
+/// snapshot handle outlives the query that read it.
 struct ApiSurface {
     /// The `--api` checker client over the minted pipe (same process as `--lsp`).
     client: ApiAttachClient,
     /// The engine version the wire gate channel-validated at attach. Passed to
-    /// the first `updateSnapshot` so its integer-handle rail refusal names the
+    /// the first snapshot request so its integer-handle rail refusal names the
     /// real observed engine.
     engine_version: String,
-    /// The current `--api` snapshot context: `(snapshot_handle, project_id)`, refreshed
-    /// per query. `None` until the first `updateSnapshot` succeeds.
-    snapshot: SyncMutex<Option<(OpaqueHandle, String)>>,
+}
+
+/// A carrier resolved against one language-server snapshot: the snapshot the
+/// query must release when done, the configured project, the carrier as the
+/// engine spells it, and the project's `checkJs`.
+struct ResolvedCarrier {
+    snapshot: OpaqueHandle,
+    project: String,
+    engine_carrier: String,
+    project_check_js: bool,
 }
 
 const OWNED_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -184,7 +191,6 @@ impl TsgoOwnedProvider {
             api: Arc::new(ApiSurface {
                 client,
                 engine_version,
-                snapshot: SyncMutex::new(None),
             }),
             lsp_writes: Arc::default(),
         })
@@ -217,31 +223,34 @@ impl TsgoOwnedProvider {
     ) -> Result<Vec<TypeDiagnostic>, crate::protocol::TypeProviderError> {
         let carrier = slash(path);
         self.settle_lsp_writes(path).await;
-        let Some((snapshot, project, engine_carrier, project_check_js)) =
-            self.api.resolve_for(&carrier, tsconfig).await
-        else {
+        let Some(resolved) = self.api.resolve_for(&carrier, tsconfig).await else {
             return Ok(Vec::new());
         };
-        let content = self.lsp.cached_content(&engine_carrier).await;
+        let content = self.lsp.cached_content(&resolved.engine_carrier).await;
         if content.as_deref().is_some_and(|content| {
             !javascript_carrier_semantic_diagnostics_enabled(
-                &engine_carrier,
+                &resolved.engine_carrier,
                 content,
-                project_check_js,
+                resolved.project_check_js,
             )
         }) {
+            self.api.release(resolved.snapshot).await;
             return Ok(Vec::new());
         }
         let diags = self
             .api
             .client
-            .get_semantic_diagnostics(&snapshot, &project, &engine_carrier)
-            .await
-            .map_err(|e| {
-                crate::protocol::TypeProviderError::new(format!(
-                    "--api getSemanticDiagnostics: {e}"
-                ))
-            })?;
+            .get_semantic_diagnostics(
+                &resolved.snapshot,
+                &resolved.project,
+                &resolved.engine_carrier,
+            )
+            .await;
+        self.api.release(resolved.snapshot).await;
+        let diags = diags.map_err(|e| {
+            crate::protocol::TypeProviderError::new(format!("--api getSemanticDiagnostics: {e}"))
+        })?;
+        let engine_carrier = resolved.engine_carrier;
 
         // The `--api` diagnostic `pos`/`end` are UTF-16 code units against the
         // carrier's own text; `TypeDiagnostic.start`/`end` is a BYTE contract. Fetch
@@ -267,43 +276,58 @@ impl TsgoOwnedProvider {
     ) -> Result<Option<Vec<TypeDiagnostic>>, crate::protocol::TypeProviderError> {
         let carrier = slash(path);
         self.settle_lsp_writes(path).await;
-        let Some((snapshot, project, engine_carrier, project_check_js)) =
-            self.api.resolve_for(&carrier, tsconfig).await
-        else {
+        let Some(resolved) = self.api.resolve_for(&carrier, tsconfig).await else {
             return Ok(None);
         };
-        let content = self.lsp.cached_content(&engine_carrier).await;
+        let content = self.lsp.cached_content(&resolved.engine_carrier).await;
         let semantic_enabled = content.as_deref().is_none_or(|content| {
             javascript_carrier_semantic_diagnostics_enabled(
-                &engine_carrier,
+                &resolved.engine_carrier,
                 content,
-                project_check_js,
+                resolved.project_check_js,
             )
         });
-        let mut diagnostics = if semantic_enabled {
-            self.api
-                .client
-                .get_semantic_diagnostics(&snapshot, &project, &engine_carrier)
-                .await
-                .map_err(|e| {
-                    crate::protocol::TypeProviderError::new(format!(
-                        "--api getSemanticDiagnostics: {e}"
-                    ))
-                })?
-        } else {
-            Vec::new()
-        };
-        diagnostics.extend(
-            self.api
-                .client
-                .get_syntactic_diagnostics(&snapshot, &project, &engine_carrier)
-                .await
-                .map_err(|e| {
-                    crate::protocol::TypeProviderError::new(format!(
-                        "--api getSyntacticDiagnostics: {e}"
-                    ))
-                })?,
-        );
+        // Both requests read the one snapshot; it is released before any error
+        // propagates.
+        let requests = async {
+            let mut diagnostics = if semantic_enabled {
+                self.api
+                    .client
+                    .get_semantic_diagnostics(
+                        &resolved.snapshot,
+                        &resolved.project,
+                        &resolved.engine_carrier,
+                    )
+                    .await
+                    .map_err(|e| {
+                        crate::protocol::TypeProviderError::new(format!(
+                            "--api getSemanticDiagnostics: {e}"
+                        ))
+                    })?
+            } else {
+                Vec::new()
+            };
+            diagnostics.extend(
+                self.api
+                    .client
+                    .get_syntactic_diagnostics(
+                        &resolved.snapshot,
+                        &resolved.project,
+                        &resolved.engine_carrier,
+                    )
+                    .await
+                    .map_err(|e| {
+                        crate::protocol::TypeProviderError::new(format!(
+                            "--api getSyntacticDiagnostics: {e}"
+                        ))
+                    })?,
+            );
+            Ok::<_, crate::protocol::TypeProviderError>(diagnostics)
+        }
+        .await;
+        self.api.release(resolved.snapshot).await;
+        let diagnostics = requests?;
+        let engine_carrier = resolved.engine_carrier;
 
         let mut positioned = position_carrier_diagnostics(&diagnostics, content, &engine_carrier)?;
         let is_javascript = engine_carrier
@@ -466,26 +490,31 @@ fn slash(p: &str) -> String {
 }
 
 impl ApiSurface {
-    /// Refresh the `--api` snapshot for the configured project `tsconfig` (supplied
-    /// per query) and return `(snapshot_handle, project_id, engine_carrier_path,
-    /// project_check_js)` for `carrier`, or `None` when the project / carrier is not
-    /// resolvable on the checker.
+    /// Release a snapshot this surface read. A failed release is logged, never
+    /// surfaced: the query's answer does not depend on it, and the handle is not
+    /// used again either way.
+    async fn release(&self, snapshot: OpaqueHandle) {
+        if let Err(err) = self.client.release(&snapshot).await {
+            tracing::warn!("owned tsgo `--api` could not release snapshot {snapshot:?}: {err}");
+        }
+    }
+
+    /// Read the language server's snapshot with the configured project `tsconfig`
+    /// (supplied per query) open and resolve `carrier` in it, or `None` when the
+    /// project / carrier is not resolvable on the checker. The returned snapshot
+    /// is the caller's to [`Self::release`]; on `None` it is already released.
     ///
     /// `carrier` is the carrier file path; the returned engine path is the carrier
     /// AS THE ENGINE REPORTS IT in the project's root set (diagnostics must be
     /// requested with the engine's own canonical form).
-    async fn resolve_for(
-        &self,
-        carrier: &str,
-        tsconfig: &str,
-    ) -> Option<(OpaqueHandle, String, String, bool)> {
+    async fn resolve_for(&self, carrier: &str, tsconfig: &str) -> Option<ResolvedCarrier> {
         // A FAILED project open is an unhealthy-provider signal, distinct from a
         // project that simply is not in the snapshot below. Surface it (the owned
         // provider must not serve as if healthy when the configured project cannot
         // open) rather than letting it silently degrade to empty diagnostics.
         let snap = match self
             .client
-            .update_snapshot_open_project(tsconfig, &self.engine_version)
+            .current_snapshot_for_project(tsconfig, &self.engine_version)
             .await
         {
             Ok(snap) => snap,
@@ -498,23 +527,31 @@ impl ApiSurface {
         };
         // Select the CONFIGURED project for this tsconfig and require the carrier in
         // its root set — configured-project membership, never an inferred/single-file
-        // fallback. ABSENCE of the carrier from `project.root_files` is a `None`
+        // fallback. ABSENCE of the carrier from `project.root_files()` is a `None`
         // (fail closed), not a degraded open.
-        let project = snap.project_for_config(|c| fs_paths_equal(c, tsconfig))?;
-        let engine_carrier = project
-            .root_files
-            .iter()
-            .find(|file| fs_paths_equal(file, carrier))
-            .cloned()?;
-        let project_id = project.id.clone();
-        let project_check_js = project
-            .compiler_options
-            .get("checkJs")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        // Update the cached snapshot context (the handle is `Copy`).
-        *self.snapshot.lock() = Some((snap.snapshot, project_id.clone()));
-        Some((snap.snapshot, project_id, engine_carrier, project_check_js))
+        let resolved = snap
+            .project_for_config(|c| fs_paths_equal(c, tsconfig))
+            .and_then(|project| {
+                let engine_carrier = project
+                    .root_files()
+                    .iter()
+                    .find(|file| fs_paths_equal(file, carrier))
+                    .cloned()?;
+                Some(ResolvedCarrier {
+                    snapshot: snap.snapshot,
+                    project: project.id.clone(),
+                    engine_carrier,
+                    project_check_js: project
+                        .compiler_options()
+                        .get("checkJs")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                })
+            });
+        if resolved.is_none() {
+            self.release(snap.snapshot).await;
+        }
+        resolved
     }
 }
 
@@ -526,7 +563,7 @@ impl ApiSurface {
 ///   1. `project_for_config` must find a project whose `configFileName` matches
 ///      `tsconfig` (path-normalized). No matching configured project ⇒ `None` —
 ///      NEVER a fallback to an inferred/single-file project.
-///   2. The `carrier` must appear in that project's `root_files` (path-normalized).
+///   2. The `carrier` must appear in that project's `root_files()` (path-normalized).
 ///      Absence ⇒ `None` — the carrier is not a member, NOT a degraded open.
 ///
 /// The returned `engine_carrier` is the carrier AS THE ENGINE REPORTS IT in
@@ -543,7 +580,7 @@ pub fn select_configured_project_carrier(
 ) -> Option<(String, String)> {
     let project = snap.project_for_config(|c| fs_paths_equal(c, tsconfig))?;
     let engine_carrier = project
-        .root_files
+        .root_files()
         .iter()
         .find(|f| fs_paths_equal(f, carrier))
         .cloned()?;

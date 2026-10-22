@@ -319,20 +319,24 @@ fn project_bound_diagnostics_recover_only_rich_suggestions_and_preserve_tags() {
 }
 
 /// Build a fake `--api` snapshot with a single configured project whose root set is
-/// `root_files`. Mirrors what `update_snapshot_open_project` returns from the engine,
+/// `root_files`. Mirrors what `current_snapshot_for_project` returns from the engine,
 /// constructed offline (all DTO fields are public).
 fn fake_snapshot(
     config_file: &str,
     root_files: &[&str],
 ) -> verter_tsgo_api::api_attach::AttachSnapshot {
-    use verter_tsgo_api::proto::types::{OpaqueHandle, ProjectResponse};
+    use verter_tsgo_api::proto::types::{OpaqueHandle, ParsedCommandLine, ProjectResponse};
     verter_tsgo_api::api_attach::AttachSnapshot {
         snapshot: OpaqueHandle(7),
         projects: vec![ProjectResponse {
             id: "p.tsconfig".to_string(),
-            config_file_name: config_file.to_string(),
-            compiler_options: serde_json::Map::new(),
-            root_files: root_files.iter().map(|f| (*f).to_string()).collect(),
+            config_file_name: Some(config_file.to_string()),
+            current_directory: "/".to_string(),
+            dirty: false,
+            parsed_command_line: ParsedCommandLine {
+                file_names: root_files.iter().map(|f| (*f).to_string()).collect(),
+                ..Default::default()
+            },
         }],
     }
 }
@@ -408,7 +412,6 @@ fn owned_over_duplex() -> (
     let api = Arc::new(ApiSurface {
         client: ApiAttachClient::new(JsonRpcConnection::connect(api_read, api_write)),
         engine_version: "test-engine".to_string(),
-        snapshot: SyncMutex::new(None),
     });
 
     (

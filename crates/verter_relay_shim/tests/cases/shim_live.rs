@@ -7,7 +7,7 @@
 //! advertisement, `verter/hello` (nonce verified), `verter/waitInitialized`,
 //! `verter/initializeApiSession` → connects the returned `--api` pipe DIRECTLY
 //! with [`ApiAttachClient`], injects an INLINE off-disk carrier overlay via
-//! `verter/carrierDidOpenSynced`, `updateSnapshot(tsconfig)`, and reads semantic
+//! `verter/carrierDidOpenSynced`, `getCurrentLanguageServerSnapshot(tsconfig)`, and reads semantic
 //! diagnostics. The REAL checker seeing the carrier (a deliberate TS2322, and
 //! the negative: no spurious TS2307) proves the whole transport chain.
 //!
@@ -85,7 +85,7 @@ fn path_eq(a: &str, b: &str) -> bool {
 /// The carrier's path AS THE ENGINE REPORTS IT in the project's root-file set.
 fn engine_carrier_path<'a>(project: &'a ProjectResponse, carrier: &str) -> Option<&'a str> {
     project
-        .root_files
+        .root_files()
         .iter()
         .find(|f| path_eq(f, carrier))
         .map(String::as_str)
@@ -902,7 +902,8 @@ async fn setup(tsgo: &Path, tag: &str) -> Harness {
         .to_string();
     eprintln!("[mechanics] relayed real-tsgo serverInfo.version = {relayed_version:?}");
     assert_eq!(
-        relayed_version, "7.0.2",
+        relayed_version,
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN,
         "the fake editor observes the REAL relayed tsgo version"
     );
     editor
@@ -932,7 +933,10 @@ async fn setup(tsgo: &Path, tag: &str) -> Harness {
         .server_info_version
         .clone()
         .expect("the in-band serverInfo.version witness");
-    assert_eq!(server_version, "7.0.2");
+    assert_eq!(
+        server_version,
+        verter_tsgo_api::toolchain::policy::TYPESCRIPT_PIN
+    );
     assert_eq!(witness.root_uri.as_deref(), Some(root_uri.as_str()));
 
     // initializeApiSession → connect the minted `--api` pipe DIRECTLY.
@@ -983,7 +987,8 @@ async fn fake_editor_through_real_shim_and_tsgo_sees_injected_carrier() {
     let (carrier_norm, carrier_uri, carrier_src) = carrier_fixture(&h.dir);
 
     // Inject the off-disk carrier over the CONTROL protocol (relay injection +
-    // sync barrier), then open the configured project on the --api side.
+    // sync barrier), then read the language server's snapshot with the
+    // configured project open on the --api side.
     with_timeout(
         "carrierDidOpenSynced",
         h.ctl
@@ -994,11 +999,11 @@ async fn fake_editor_through_real_shim_and_tsgo_sees_injected_carrier() {
     let snap = tokio::time::timeout(
         Duration::from_secs(30),
         h.api
-            .update_snapshot_open_project(&h.tsconfig_norm, &h.server_version),
+            .current_snapshot_for_project(&h.tsconfig_norm, &h.server_version),
     )
     .await
-    .expect("updateSnapshot timed out")
-    .expect("updateSnapshot");
+    .expect("getCurrentLanguageServerSnapshot timed out")
+    .expect("getCurrentLanguageServerSnapshot");
 
     let project = snap
         .project_for_config(|c| path_eq(c, &h.tsconfig_norm))
@@ -1006,7 +1011,7 @@ async fn fake_editor_through_real_shim_and_tsgo_sees_injected_carrier() {
     let engine_carrier = engine_carrier_path(project, &carrier_norm).unwrap_or_else(|| {
         panic!(
             "the injected carrier must be a Program root of the configured project; roots: {:?}",
-            project.root_files
+            project.root_files()
         )
     });
 
@@ -1037,6 +1042,10 @@ async fn fake_editor_through_real_shim_and_tsgo_sees_injected_carrier() {
         "the carrier's ./util import must resolve (no false TS2307); got: {diags:?}"
     );
 
+    h.api
+        .release(&snap.snapshot)
+        .await
+        .expect("release the snapshot");
     teardown(h).await;
 }
 
@@ -1063,12 +1072,12 @@ async fn relay_suppresses_carrier_leak_and_demuxes_verter_ids_end_to_end() {
     .await
     .expect("carrier didOpenSynced");
     let snap = with_timeout(
-        "updateSnapshot",
+        "getCurrentLanguageServerSnapshot",
         h.api
-            .update_snapshot_open_project(&h.tsconfig_norm, &h.server_version),
+            .current_snapshot_for_project(&h.tsconfig_norm, &h.server_version),
     )
     .await
-    .expect("updateSnapshot");
+    .expect("getCurrentLanguageServerSnapshot");
     if let Some(project) = snap.project_for_config(|c| path_eq(c, &h.tsconfig_norm)) {
         if let Some(engine_carrier) = engine_carrier_path(project, &carrier_norm) {
             let _ = h
@@ -1077,6 +1086,10 @@ async fn relay_suppresses_carrier_leak_and_demuxes_verter_ids_end_to_end() {
                 .await;
         }
     }
+    h.api
+        .release(&snap.snapshot)
+        .await
+        .expect("release the snapshot");
 
     // Drive an editor request whose server response could reference the carrier
     // (a workspace symbol for the carrier's unique export), plus an editor-origin

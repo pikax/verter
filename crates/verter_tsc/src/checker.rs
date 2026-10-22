@@ -834,7 +834,7 @@ impl CarrierAdmission {
 /// ([`run_declaration_stage`]) because tsgo `--api` exposes no emit surface.
 ///
 /// Returns [`Err`] when the in-memory `--api` typecheck stage cannot run (engine
-/// absent, or a connect/init/updateSnapshot/protocol/project-not-found failure),
+/// absent, or a connect/init/createSnapshot/protocol/project-not-found failure),
 /// or when the declaration/emit stage fails (engine unresolvable, invocation
 /// failure, or an error exit with no parseable diagnostics) — the caller surfaces
 /// it as a non-zero process exit. This fail-closed contract is why a
