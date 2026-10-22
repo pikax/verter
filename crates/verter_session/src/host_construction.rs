@@ -196,20 +196,19 @@ pub(crate) struct WorkspaceSourceLoader {
 
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
-        let workspace = self.workspace.read();
-        // An ambient virtual canonical (`ambient:/<project-tag>/<canonical>`)
-        // IS the scheduler / dep-graph file id of a registered ambient lib.
-        // It is served from the ambient registry, which is the content
-        // authority for that id; the plain registration canonical stays
-        // invisible to `read_file` (a user file at that path shadows the
-        // lib instead).
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some((project, canonical)) =
-            verter_workspace::parse_ambient_virtual_canonical_id(canonical_id)
-        {
-            return workspace.read_ambient_lib(project, canonical.as_ref());
-        }
-        workspace.read_file(canonical_id)
+        self.load_through(canonical_id, |workspace, canonical| {
+            workspace.read_file(canonical)
+        })
+    }
+
+    #[cfg(feature = "semantic-observe")]
+    fn load_captured(&self, canonical_id: &str, request_id: u64, timing: bool) -> Option<Arc<str>> {
+        self.load_through(canonical_id, |workspace, canonical| {
+            workspace.read_file_captured(
+                canonical,
+                &verter_workspace::audit_sink::VfsReadCapture { request_id, timing },
+            )
+        })
     }
 
     fn exists(&self, canonical_id: &str) -> bool {
@@ -231,6 +230,29 @@ impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         self.workspace.read().realpath(canonical_id)
+    }
+}
+
+impl WorkspaceSourceLoader {
+    fn load_through(
+        &self,
+        canonical_id: &str,
+        read: impl FnOnce(&dyn verter_workspace::WorkspaceAccess, &str) -> Option<Arc<str>>,
+    ) -> Option<Arc<str>> {
+        let workspace = self.workspace.read();
+        // An ambient virtual canonical (`ambient:/<project-tag>/<canonical>`)
+        // IS the scheduler / dep-graph file id of a registered ambient lib.
+        // It is served from the ambient registry, which is the content
+        // authority for that id; the plain registration canonical stays
+        // invisible to `read_file` (a user file at that path shadows the
+        // lib instead).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((project, canonical)) =
+            verter_workspace::parse_ambient_virtual_canonical_id(canonical_id)
+        {
+            return workspace.read_ambient_lib(project, canonical.as_ref());
+        }
+        read(workspace.as_ref(), canonical_id)
     }
 }
 
@@ -376,6 +398,9 @@ impl VerterHost {
         worker_pool_source: HostWorkerPoolSource,
         memo_family_bound: MemoFamilyBound,
     ) -> Self {
+        // A build without optional capture cannot record audits, timings or
+        // footprints: the request-time flags would carry nothing.
+        let config = crate::capture::normalize_host_config(config);
         #[cfg(test)]
         configure_workspace_test_projects(workspace.as_ref());
         #[cfg(target_arch = "wasm32")]
@@ -605,6 +630,7 @@ impl VerterHost {
         // `AuditConfig` snapshot. The substrate-side flag is what
         // `AuditRequestRegistration::new` and the sampler thread read,
         // so the wire-up MUST happen here at construction time.
+        #[cfg(feature = "semantic-observe")]
         let audit_config = verter_audit::AuditConfig {
             audit_timing_capture: config.audit_timing_capture,
             ..verter_audit::AuditConfig::default()
@@ -689,6 +715,7 @@ impl VerterHost {
             query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "semantic-observe")]
             host_audit_runtime: Arc::new(crate::host_audit_runtime::HostAuditRuntime::new(
                 audit_config,
             )),
@@ -953,11 +980,11 @@ impl VerterHost {
     }
 
     /// Run one base-lane operation through a sealed request-bound context.
-    pub(crate) fn with_base_resolver_context<R>(
+    pub(crate) fn with_base_resolver_context<R, M: verter_audit::observe::ObserveExec>(
         &self,
         operation: impl FnOnce(
             &dyn verter_type_engine::resolver_core::ResolverContext<
-                crate::resolver_core::HostCapabilities,
+                crate::resolver_core::HostCapabilities<M>,
             >,
         ) -> R,
     ) -> R {

@@ -40,15 +40,19 @@ use verter_session_query::resolution::{
 };
 
 static NEXT_STRICT_SELF_ROOT_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
+/// Test observability only: no production decision reads it.
+#[cfg(any(test, feature = "test-support"))]
 static KNOWN_CANONICALS_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Times `known_canonicals` has been invoked process-wide. Lookup of a
 /// global symbol must not increment this.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn known_canonicals_calls() -> u64 {
     KNOWN_CANONICALS_CALLS.load(Ordering::Relaxed)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn reset_known_canonicals_calls() {
     KNOWN_CANONICALS_CALLS.store(0, Ordering::Relaxed);
 }
@@ -3426,7 +3430,7 @@ impl Engine {
         )
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub(crate) fn resolve_import_with_evidence(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
@@ -5823,6 +5827,7 @@ impl Engine {
     /// augmentation, where the declarer may be a root `.d.ts` that nothing
     /// imports). Deduplicated; order is unspecified.
     pub(crate) fn known_canonicals(&self) -> Vec<String> {
+        #[cfg(any(test, feature = "test-support"))]
         KNOWN_CANONICALS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         seen.extend(self.overlay.read().ids().map(str::to_owned));

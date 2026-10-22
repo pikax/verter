@@ -172,8 +172,8 @@ pub(crate) use surface::MetaQuerySurfaceOutputCap;
 /// Returns [`verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable`]
 /// (refuse shared-cache admission) when the observed version's
 /// parse-fact registry cannot be recovered.
-pub(crate) fn engine_fact_signature_for_exported_type(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(crate) fn engine_fact_signature_for_exported_type<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     canonical_id: &str,
     type_name: &str,
     observed_hash: verter_session_query::facts::store_view::ResolverHash16,
@@ -252,8 +252,8 @@ pub(crate) struct ObservedPreparedTypeDecl {
 /// Build a two-canonical `DepSignature` (used for DB caches whose
 /// validity depends on both an active scope and a declaration source).
 #[allow(dead_code)]
-pub(crate) fn engine_dep_signature_for_two_canonicals(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(crate) fn engine_dep_signature_for_two_canonicals<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     canonical_a: &str,
     canonical_b: &str,
 ) -> verter_type_engine::semantic_query::DepSignature {
@@ -336,11 +336,14 @@ pub(crate) struct FastShallowFieldExpr {
 /// duplicates of dispatch's work; they are a complementary memoization
 /// layer whose consolidation onto the ctx-owned cache substrate is the
 /// tracked debt noted above.
-pub struct ComponentMetaQueryEngine<'a> {
-    pub(crate) ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub struct ComponentMetaQueryEngine<
+    'a,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
+    pub(crate) ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     pub(crate) dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         'a,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     // The caches below are read-through views over the host-owned
     // typed DBs on `ProjectTypeStore` (see `verter_type_engine::component_meta_caches`).
@@ -727,12 +730,12 @@ pub(crate) fn await_imported_registry_winner_park_for_tests(canonical_id: &str) 
     }
 }
 
-impl<'a> ComponentMetaQueryEngine<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'a, M> {
     pub(crate) fn new(
-        ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             'a,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
     ) -> Self {
         // Bump `bare_engine_constructions` whenever the engine is
@@ -837,8 +840,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 }
 
-fn local_type_symbol_metadata_for_known_source(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn local_type_symbol_metadata_for_known_source<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     canonical_source: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
@@ -857,11 +860,16 @@ fn local_type_symbol_metadata_for_known_source(
     Some(ResolvedLocalTypeSymbolMetadata { kind, span })
 }
 
-struct DirectPreparedDeclarationResolver<'a> {
-    ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+struct DirectPreparedDeclarationResolver<
+    'a,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
+    ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
 }
 
-impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
+impl<M: verter_audit::observe::ObserveExec> DeclarationMetadataResolver
+    for DirectPreparedDeclarationResolver<'_, M>
+{
     fn resolve_export_target(
         &self,
         _dep_canonical: &str,

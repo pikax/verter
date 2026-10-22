@@ -373,50 +373,52 @@ impl VerterHost {
         // resolved against superseded state. The bounded retry terminates.
         let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx =
-            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
+            let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
-        // Intermediate-hop demand: the keyed query lowers the instance object in
-        // `structural_transit(Navigate)` so member values stay shallow. The
-        // empty-path `Shallow` terminal below synthesises the one-level surface
-        // under publication demand.
-        let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            verter_type_engine::semantic_query::InstantiateKey::new(
-                dispatch.type_slot_for(
-                    Arc::from(canonical_id),
-                    default_owner,
-                    Arc::from(default_name.as_str()),
-                ),
-                Arc::from(Vec::new().into_boxed_slice()),
-                dispatch.instantiate_context_for(
-                    canonical_id,
-                    ProjectionReductionContext::structural_transit_with_mode(
-                        ProjectionMode::Navigate,
+            // Intermediate-hop demand: the keyed query lowers the instance object in
+            // `structural_transit(Navigate)` so member values stay shallow. The
+            // empty-path `Shallow` terminal below synthesises the one-level surface
+            // under publication demand.
+            let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+                verter_type_engine::semantic_query::InstantiateKey::new(
+                    dispatch.type_slot_for(
+                        Arc::from(canonical_id),
+                        default_owner,
+                        Arc::from(default_name.as_str()),
+                    ),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    dispatch.instantiate_context_for(
+                        canonical_id,
+                        ProjectionReductionContext::structural_transit_with_mode(
+                            ProjectionMode::Navigate,
+                        ),
                     ),
                 ),
-            ),
-        )) {
-            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
-            QueryResult::Recursive(node) => node,
-            QueryResult::Error(_) => return None,
-        };
+            )) {
+                QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+                QueryResult::Recursive(node) => node,
+                QueryResult::Error(_) => return None,
+            };
 
-        // The public component type is a plain structural object
-        // (`{ $props, $emit, $slots }`) — no macro own-body provenance applies
-        // to the synthesized instance members, so the structural
-        // `published(Shallow)` context is correct. An INCOMPLETE projection
-        // records its typed reason before surfacing the miss.
-        crate::typeinfo::surface_resolution::adopt_surface(
-            crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
-                &host_ctx,
-                &dispatch,
-                base,
-                verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
-                ProjectionReductionContext::published(ProjectionMode::Shallow),
-                None,
-            ),
-        )
+            // The public component type is a plain structural object
+            // (`{ $props, $emit, $slots }`) — no macro own-body provenance applies
+            // to the synthesized instance members, so the structural
+            // `published(Shallow)` context is correct. An INCOMPLETE projection
+            // records its typed reason before surfacing the miss.
+            crate::typeinfo::surface_resolution::adopt_surface(
+                crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
+                    &host_ctx,
+                    &dispatch,
+                    base,
+                    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    ProjectionReductionContext::published(ProjectionMode::Shallow),
+                    None,
+                ),
+            )
+        })
     }
 
     /// Resolve a `.vue` macro's type-argument surface to its span-rich
@@ -460,13 +462,15 @@ impl VerterHost {
         // their active session context. The bounded retry terminates.
         let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx =
-            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
-        resolve_vue_macro_surface_with_ctx(
-            &host_ctx,
-            &ProjectSemanticDispatch::new(&host_ctx),
-            request,
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
+            resolve_vue_macro_surface_with_ctx(
+                &host_ctx,
+                &ProjectSemanticDispatch::new(&host_ctx),
+                request,
+            )
+        })
     }
 
     /// Context-bound resolution core for [`Self::resolve_vue_macro_surface`].
@@ -531,13 +535,15 @@ impl VerterHost {
             return Ok(Arc::new(MacroSurfaceDtos::default()));
         };
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx =
-            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
-        // Base-view returner: hand back the DTO bundle. A partial surface is
-        // already refused store admission inside `vue_macro_dtos_with_ctx`;
-        // this direct query has no request-result completeness to fold.
-        vue_macro_dtos_with_ctx(&host_ctx, &ProjectSemanticDispatch::new(&host_ctx), request)
-            .map(|read| read.dtos)
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
+            // Base-view returner: hand back the DTO bundle. A partial surface is
+            // already refused store admission inside `vue_macro_dtos_with_ctx`;
+            // this direct query has no request-result completeness to fold.
+            vue_macro_dtos_with_ctx(&host_ctx, &ProjectSemanticDispatch::new(&host_ctx), request)
+                .map(|read| read.dtos)
+        })
     }
 }
 
@@ -1263,7 +1269,7 @@ fn resolve_vue_macro_surface_fact_with_ctx<
         .map(|projected| {
             let surface = crate::typeinfo::shallow_surface::with_member_jsdoc_spans_from_ctx(
                 ctx,
-                TypeInfoSurface::from_one_level(dispatch.graph(), &projected.surface),
+                TypeInfoSurface::from_one_level(dispatch.graph().store(), &projected.surface),
             );
             VueMacroSurface {
                 surface,

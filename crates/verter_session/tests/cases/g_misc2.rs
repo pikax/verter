@@ -5,6 +5,8 @@
 //! root so leaf modules import it via `use super::harness` instead of each
 //! `#[path]`-loading the same file (which trips `clippy::duplicate_mod`).
 #[path = "g_misc2/corpus_regression_capture_harness.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod corpus_regression_capture_harness;
 #[path = "g_misc2/cross_file_provenance_fixtures_tests.rs"]
 mod cross_file_provenance_fixtures_tests;
@@ -30,6 +32,8 @@ mod host_store_view_validates_real;
 #[path = "g_misc2/is_facts_irrelevant_eligibility.rs"]
 mod is_facts_irrelevant_eligibility;
 #[path = "g_misc2/macro_surface_no_breadth_walk_audit.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod macro_surface_no_breadth_walk_audit;
 #[path = "g_misc2/mapped_remap_dead_key_value_forcing.rs"]
 mod mapped_remap_dead_key_value_forcing;
@@ -48,6 +52,8 @@ mod pe4_mapped_type_k_independent_hoist;
 #[path = "g_misc2/pe4_substitute_hash_cons.rs"]
 mod pe4_substitute_hash_cons;
 #[path = "g_misc2/per_macro_projector_decomposition_tests.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod per_macro_projector_decomposition_tests;
 #[path = "g_misc2/per_macro_projector_native_payload_parity.rs"]
 mod per_macro_projector_native_payload_parity;
@@ -66,18 +72,30 @@ mod request_budget_context;
 #[path = "g_misc2/request_context_tls.rs"]
 mod request_context_tls;
 #[path = "g_misc2/request_critical_path_aggregates_correctly.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod request_critical_path_aggregates_correctly;
 #[path = "g_misc2/sampler_ignores_filtered_requests.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod sampler_ignores_filtered_requests;
 #[path = "g_misc2/scheduler_audit_attributes_worker.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod scheduler_audit_attributes_worker;
 #[path = "g_misc2/scheduler_audit_parent_request_id.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod scheduler_audit_parent_request_id;
 #[path = "g_misc2/scheduler_audit_queue_dwell_under_load.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod scheduler_audit_queue_dwell_under_load;
 #[path = "g_misc2/scheduler_worker_tls_propagation.rs"]
 mod scheduler_worker_tls_propagation;
 #[path = "g_misc2/second_query_hits_cache.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod second_query_hits_cache;
 #[path = "g_misc2/shallow_walk_invariant.rs"]
 mod shallow_walk_invariant;
@@ -88,6 +106,8 @@ mod store_view_compat_token_concurrency_only;
 #[path = "g_misc2/synthetic_carrier_explicit_deepen_routes_through_shape_cache_key.rs"]
 mod synthetic_carrier_explicit_deepen_routes_through_shape_cache_key;
 #[path = "g_misc2/u3c_chatmessages_audit.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod u3c_chatmessages_audit;
 #[path = "g_misc2/workspace_bookkeeping_invariants.rs"]
 mod workspace_bookkeeping_invariants;

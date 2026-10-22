@@ -1215,6 +1215,163 @@ async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
     );
 }
 
+/// Initialization and opening a document never walk the workspace: the scan
+/// exists only once a request demands the complete inventory, and then it runs
+/// to completion without re-announcing level 2. The demand arrives through the
+/// real request routes — the references/rename frontier here, the
+/// workspace-wide enumerations below — never through the starter itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_workspace_scan_starts_only_on_frontier_demand() {
+    let fixture = scan_publication_fixture(true).await;
+    let server = fixture.server();
+    let target = fixture.open("src/Target.vue").await;
+
+    server.spawn_background_init(None, "no demand").await;
+    fixture.await_ready_announced().await;
+    fixture.await_sync_complete().await;
+    assert!(
+        server.workspace_scanner.lock().await.is_none(),
+        "initialize/initialized and an open document must not start the workspace scan"
+    );
+    assert!(!server.sync_coordinator.workspace_scan_in_progress());
+
+    assert!(
+        !server.prepare_workspace_symbol_frontier(&target).await,
+        "an unadvertised owning-project carrier leaves the frontier incomplete"
+    );
+    assert!(
+        server.workspace_scanner.lock().await.is_some(),
+        "the unmet frontier demand starts the scan"
+    );
+    let announced = fixture.sync_complete.lock().len();
+    await_workspace_scan_settled(server).await;
+    assert_eq!(
+        fixture.sync_complete.lock().len(),
+        announced,
+        "a demanded scan does not re-announce level 2"
+    );
+}
+
+/// Workspace-wide enumerations demand the same scan, and while the inventory
+/// is being built they answer pending — never a complete-but-partial list
+/// built from the files the session happened to open. Once the scan settles
+/// the unopened carrier is part of the answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_wide_requests_demand_the_scan_and_answer_pending_until_it_settles() {
+    let fixture = scan_publication_fixture(true).await;
+    let server = fixture.server();
+    let _target = fixture.open("src/Target.vue").await;
+    server.spawn_background_init(None, "cold inventory").await;
+    fixture.await_ready_announced().await;
+    fixture.await_sync_complete().await;
+    let unrelated = fixture.id("far/Unrelated.vue");
+    assert!(
+        !server
+            .documents
+            .host()
+            .list_files()
+            .iter()
+            .any(|(id, _)| *id == unrelated),
+        "the unopened carrier is not in the host before any demand"
+    );
+
+    let pending = tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803);
+    let symbols = super::super::aux_features::handle_symbol(
+        server,
+        WorkspaceSymbolParams {
+            query: String::new(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect_err("workspace symbols are pending while the inventory is cold");
+    assert_eq!(symbols.code, pending);
+    assert!(server.workspace_scanner.lock().await.is_some());
+    let overview = server
+        .get_project_overview(serde_json::Value::Null)
+        .await
+        .expect_err("the project overview is pending while the inventory is cold");
+    assert_eq!(overview.code, pending);
+
+    await_workspace_scan_settled(server).await;
+    let overview = server
+        .get_project_overview(serde_json::Value::Null)
+        .await
+        .expect("the overview answers once the inventory is built");
+    assert!(
+        overview.files.iter().any(|file| file.path == unrelated),
+        "the settled inventory includes the unopened carrier"
+    );
+}
+
+/// Auto-import tag completion enumerates the whole host: while the workspace
+/// inventory is not built it keeps its local items but marks the list
+/// incomplete so the client asks again, and it never marks a workspace with no
+/// folders (nothing to scan) incomplete.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_import_completion_is_incomplete_while_the_inventory_is_pending() {
+    let app = "<script setup lang=\"ts\"></script>\n<template><Oth /></template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/App.vue", "vue", app),
+        ("src/Other.vue", "vue", "<template><p>other</p></template>"),
+    ])
+    .await;
+    let _drain = AbortTaskOnDrop(drain_handle);
+    let server = service.inner();
+    server.documents.set_semantic_analysis_enabled(true);
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let position = find_document_position(server, &uri, "<Oth", 1);
+    let list = || async {
+        match super::super::nav_features::handle_completion(
+            server,
+            completion_params(&uri, position, None),
+        )
+        .await
+        .expect("completion answers")
+        {
+            Some(CompletionResponse::List(list)) => list,
+            other => panic!("expected a completion list, got {other:?}"),
+        }
+    };
+
+    let folderless = list().await;
+    assert!(
+        folderless.items.iter().any(|item| item.label == "Other"),
+        "the workspace component is offered, got {:?}",
+        folderless
+            .items
+            .iter()
+            .map(|i| &i.label)
+            .take(15)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !folderless.is_incomplete,
+        "a workspace with no folders has no inventory to wait for"
+    );
+
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_id)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+    let pending = list().await;
+    assert!(
+        pending.is_incomplete,
+        "no scan has settled over the workspace folder: the list is marked incomplete"
+    );
+    assert!(
+        pending.items.iter().any(|item| item.label == "Other"),
+        "the local items survive the incomplete marking"
+    );
+    assert!(
+        server
+            .workspace_scan_demanded
+            .load(std::sync::atomic::Ordering::Acquire),
+        "the auto-import enumeration is a demand for the inventory"
+    );
+}
+
 /// With the production workspace scan parked on an unrelated item, a replayed
 /// open document whose dependency content was already delivered is still not
 /// certified until its DependencyReady receipt is minted: the coordinator's
@@ -1241,6 +1398,7 @@ async fn a_scan_parked_on_unrelated_work_does_not_delay_an_open_documents_diagno
     let target = fixture.open("src/Target.vue").await;
     let holds_before = server.sync_coordinator.dependency_holds();
 
+    demand_workspace_scan(server);
     server.spawn_background_init(None, "parked scan").await;
     tokio::time::timeout(std::time::Duration::from_secs(20), scan_parked.notified())
         .await

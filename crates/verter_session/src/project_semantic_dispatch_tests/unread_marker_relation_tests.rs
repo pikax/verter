@@ -45,7 +45,7 @@ fn marker_kinds() -> Vec<QueryError> {
 #[test]
 fn an_unread_marker_is_never_a_relation_fact() {
     with_probe("", "1", |dispatch, _| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let object = graph.intern_node(SemanticNodeData::Object(
             verter_type_engine::semantic_query::SurfaceView::from_members(Vec::new(), None),
         ));

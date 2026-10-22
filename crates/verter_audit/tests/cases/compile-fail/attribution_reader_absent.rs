@@ -1,7 +1,7 @@
 // Negative control for the no-semantic-authority claim.
 //
 // The attribution counter table and every accessor that can produce a
-// number live behind the non-default `attribution` feature. This fixture
+// number live behind the non-default `semantic-observe` feature. This fixture
 // is compiled WITHOUT that feature (the configuration every production
 // build and the canonical gate use) and reaches for the reader path.
 //

@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use verter_audit::payloads::tags::{CompileBackendTag, CompileProductSetTag};
 use verter_session::CompileTarget;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
@@ -40,6 +41,8 @@ fn build_host(audit_enabled: bool) -> Arc<VerterHost> {
     host
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn compile_with_audit_vdom_publishes_record_with_compile_kind_and_vdom_tag() {
     let host = build_host(true);
@@ -132,9 +135,14 @@ fn compile_with_audit_vdom_returns_no_record_when_audit_disabled() {
         Ok(r) => r,
         Err(e) => match e {},
     };
+    // A build without `semantic-observe` marks the same record unavailable.
+    let expected = if cfg!(feature = "semantic-observe") {
+        verter_audit::AuditCaptureState::AuditDisabled
+    } else {
+        verter_audit::AuditCaptureState::Unavailable
+    };
     assert_eq!(
-        record.capture_state,
-        verter_audit::AuditCaptureState::AuditDisabled,
+        record.capture_state, expected,
         "audit_enabled=false ⇒ the carrier still returns a record, marked AuditDisabled. \
          A regression that ran the full-capture path (forgetting the `audit_enabled` gate) \
          would surface as ActiveStored here.",

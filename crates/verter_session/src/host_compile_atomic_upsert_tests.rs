@@ -21,6 +21,7 @@ use verter_scheduler::stage::Priority;
 use crate::host_compile::{CompileBatchInput, CompileBatchOptions, CompileManyTarget};
 use crate::types::{FileLanguage, HostConfig, HostError, UpsertRequest};
 use crate::VerterHost;
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 // ---------------------------------------------------------------------------
@@ -187,6 +188,8 @@ fn compile_many_duplicate_canonical_dedups_to_one_batch_request_and_reports_all_
 // 3. The upsert batch captures the CALLING thread's request context (P0)
 // ---------------------------------------------------------------------------
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// `submit_batch_atomic` is invoked ONCE from the calling thread, so
 /// each `Request` must carry `current_context()` captured on THAT
 /// thread. The scheduler then installs the context into the source /

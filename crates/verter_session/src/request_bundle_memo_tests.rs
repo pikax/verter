@@ -122,7 +122,12 @@ fn overlay_bundle_computes_once_sequentially_per_request_world() {
         .overlay_content_hash_for(OWNER)
         .expect("view must report an overlay content hash for the masked owner");
     let (store_view, overlay) = request_pieces(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&overlay),
+    );
 
     let first =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
@@ -168,7 +173,12 @@ fn memo_only_population_remains_empty() {
         .overlay_content_hash_for(OWNER)
         .expect("session overlay hash");
     let (store_view, producer_overlay) = request_pieces(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&producer_overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&producer_overlay),
+    );
     let bundle =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
@@ -206,7 +216,12 @@ fn fresh_request_observes_new_overlay_content() {
     let hash_a = view_a.overlay_content_hash_for(OWNER).unwrap();
     let (store_view_a, overlay_a) = request_pieces(&host, &view_a);
     let bundle_a = {
-        let ctx = SessionResolverContext::new(&host, &view_a, &store_view_a, overlay_a);
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view_a,
+            &store_view_a,
+            overlay_a,
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -220,7 +235,12 @@ fn fresh_request_observes_new_overlay_content() {
     let hash_b = view_b.overlay_content_hash_for(OWNER).unwrap();
     assert_ne!(hash_a, hash_b, "fixture invariant: contents A and B differ");
     let (store_view_b, overlay_b) = request_pieces(&host, &view_b);
-    let ctx_b = SessionResolverContext::new(&host, &view_b, &store_view_b, overlay_b);
+    let ctx_b = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view_b,
+        &store_view_b,
+        overlay_b,
+    );
     let bundle_b =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx_b, OWNER,
@@ -269,7 +289,12 @@ fn fresh_request_same_overlay_content_rematerializes() {
     let view_1 = overlaid_view(&host, OWNER, OVERLAY_OWNER_A);
     let (store_view_1, overlay_1) = request_pieces(&host, &view_1);
     let bundle_1 = {
-        let ctx = SessionResolverContext::new(&host, &view_1, &store_view_1, overlay_1);
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view_1,
+            &store_view_1,
+            overlay_1,
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -279,7 +304,12 @@ fn fresh_request_same_overlay_content_rematerializes() {
     let view_2 = overlaid_view(&host, OWNER, OVERLAY_OWNER_A);
     let (store_view_2, overlay_2) = request_pieces(&host, &view_2);
     let bundle_2 = {
-        let ctx = SessionResolverContext::new(&host, &view_2, &store_view_2, overlay_2);
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view_2,
+            &store_view_2,
+            overlay_2,
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -309,7 +339,12 @@ fn base_and_overlay_bundle_memos_are_isolated() {
         .overlay_content_hash_for(OWNER)
         .expect("the view must report an overlay content hash for the masked owner");
     let (store_view, overlay) = request_pieces(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&overlay),
+    );
 
     let dep_first =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
@@ -390,7 +425,12 @@ fn tombstoned_canonical_is_not_memoized() {
         .into_owned_view()
         .with_session_overlay(&host, &view);
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&overlay),
+    );
 
     let bundle =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
@@ -424,7 +464,12 @@ fn external_supersession_between_snapshots_misses_memo() {
     // Attempt 1.
     let (store_view_1, overlay) = request_pieces(&host, &view);
     let bundle_1 = {
-        let ctx = SessionResolverContext::new(&host, &view, &store_view_1, Arc::clone(&overlay));
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view_1,
+            Arc::clone(&overlay),
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -451,7 +496,12 @@ fn external_supersession_between_snapshots_misses_memo() {
         );
     }
     let bundle_2 = {
-        let ctx = SessionResolverContext::new(&host, &view, &store_view_2, Arc::clone(&overlay));
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view_2,
+            Arc::clone(&overlay),
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -483,7 +533,12 @@ fn resolution_retarget_between_snapshots_misses_memo() {
 
     let (store_view_1, overlay) = request_pieces(&host, &view);
     let bundle_1 = {
-        let ctx = SessionResolverContext::new(&host, &view, &store_view_1, Arc::clone(&overlay));
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view_1,
+            Arc::clone(&overlay),
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -547,7 +602,12 @@ fn resolution_retarget_between_snapshots_misses_memo() {
     }
 
     let bundle_2 = {
-        let ctx = SessionResolverContext::new(&host, &view, &store_view_2, Arc::clone(&overlay));
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view_2,
+            Arc::clone(&overlay),
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -580,7 +640,12 @@ fn unattributed_refusal_is_not_memoized() {
         .overlay_content_hash_for(OWNER)
         .expect("session overlay hash");
     let (store_view, overlay) = request_pieces(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&overlay),
+    );
 
     let first =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
@@ -617,6 +682,8 @@ fn unattributed_refusal_is_not_memoized() {
 /// (provenance `bundle_request_memo_hits` moves). This pins the memo to
 /// the benchmark's actual flow (compat checker `updateFile` overlays +
 /// `getComponentMeta`), not only to hand-built contexts.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn session_view_component_meta_request_hits_the_request_bundle_memo() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -691,16 +758,22 @@ fn session_view_component_meta_request_hits_the_request_bundle_memo() {
 // below states which oracle it is using and why.
 // ---------------------------------------------------------------------
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 
+#[cfg(feature = "semantic-observe")]
 const BASE_ROOT: &str = "/rc_base_memo";
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn cold_flight_runs(host: &VerterHost) -> u64 {
     host.provenance()
         .bundle_cold_flight_runs
         .load(Ordering::Relaxed)
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn request_memo_hits(host: &VerterHost) -> u64 {
     host.provenance()
         .bundle_request_memo_hits
@@ -708,6 +781,7 @@ fn request_memo_hits(host: &VerterHost) -> u64 {
 }
 
 /// A base-only host: an owner with a resolvable surface plus one import.
+#[cfg(feature = "semantic-observe")]
 fn base_host(root: &str) -> (Arc<VerterHost>, String) {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_base(&host, &format!("{root}/dep.ts"), BASE_DEP);
@@ -718,6 +792,8 @@ fn base_host(root: &str) -> (Arc<VerterHost>, String) {
 
 /// One base touch through the request `memo`, bracketed by a cacheability
 /// scope. Returns `(served, enclosing_scope_is_non_cacheable, flights)`.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn base_touch(
     host: &Arc<VerterHost>,
     memo: &CanonicalCompletionOverlay,
@@ -747,6 +823,7 @@ fn base_touch(
 /// Decision-DAG contract tests cover the upstream refusal producers;
 /// this fixture isolates the stable, joinable `RequestOnly` value that
 /// the session memo may retain but the shared cache may not.
+#[cfg(feature = "semantic-observe")]
 fn refused_resolution_bundle_host(root: &str) -> (Arc<VerterHost>, String) {
     let host = VerterHost::new_standalone(HostConfig::default());
     let owner = format!("{root}/owner.ts");
@@ -786,6 +863,8 @@ fn refused_resolution_bundle_host(root: &str) -> (Arc<VerterHost>, String) {
 /// memo's contribution is skipping the per-touch fact revalidation, and
 /// `bundle_request_memo_hits` is what measures it. Both are asserted, so
 /// a change that reintroduces per-touch cold flights also fails.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn base_bundle_computes_once_sequentially_per_request_world() {
     let (host, owner) = base_host(&format!("{BASE_ROOT}_clean"));
@@ -838,6 +917,8 @@ fn base_bundle_computes_once_sequentially_per_request_world() {
 /// materialisation at all, so without the replay its own scope reads
 /// clean and its enclosing compute may warm a shared cache with a value
 /// derived from a superseded artifact.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn request_only_memo_hit_replays_taint_to_enclosing_signature() {
     let (host, owner) = base_host(&format!("{BASE_ROOT}_taint"));
@@ -881,6 +962,8 @@ fn request_only_memo_hit_replays_taint_to_enclosing_signature() {
 /// `RM-1` / `RM-2` — a deterministic `RequestOnly` bundle computes once
 /// per request world and replays on every touch. This three-touch profile
 /// complements the single-hit assertion above.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn request_only_bundle_computes_once_and_replays_each_touch() {
     let (host, owner) = refused_resolution_bundle_host("/rc_base_memo_refused_replay");
@@ -926,6 +1009,8 @@ fn request_only_bundle_computes_once_and_replays_each_touch() {
 /// transient miss into a permanent one, which is exactly why the reuse
 /// rail splits deterministic from transient refusals instead of treating
 /// "non-cacheable" as one bucket.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn lease_missed_bundle_is_not_request_memoized() {
     assert_transient_refusal_is_not_memoized(
@@ -937,6 +1022,8 @@ fn lease_missed_bundle_is_not_request_memoized() {
 /// `RM-3` — the budget/partial sibling of the lease-miss case: a
 /// safety-budget stop leaves the result degraded rather than definite, so
 /// it is never request-memoised either.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn cancelled_or_partial_bundle_is_not_request_memoized() {
     assert_transient_refusal_is_not_memoized(
@@ -949,6 +1036,8 @@ fn cancelled_or_partial_bundle_is_not_request_memoized() {
 /// through the REAL production marking chokepoint, and assert the memo
 /// refuses it — with an anti-vacuity control proving the same shape IS
 /// memoised without the refusal.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn assert_transient_refusal_is_not_memoized(
     root: &str,
     reason: verter_session_query::facts::reuse::NonCacheableReadReason,
@@ -1010,6 +1099,8 @@ fn assert_transient_refusal_is_not_memoized(
 /// ANSWER. A miss concluded from a fenced (superseded) surface is not an
 /// answer — no replayed taint repairs "nothing here" for a canonical that
 /// has live content — so it stays out of the memo entirely.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn superseded_or_fenced_bundle_is_not_request_memoized() {
     // Arm (a): SUPERSEDED. An entry recorded under one token is not
@@ -1096,6 +1187,8 @@ fn superseded_or_fenced_bundle_is_not_request_memoized() {
 /// the request-scoped completion overlay, so without the token in the
 /// entry the fresh attempt would be served a bundle whose import
 /// canonicalization walked the world the retry exists to escape.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn request_world_token_change_forces_new_bundle() {
     // Staged on the `RequestOnly` owner deliberately: a `Shared` bundle
@@ -1144,6 +1237,8 @@ fn request_world_token_change_forces_new_bundle() {
 
 /// Concurrent callers inside one request world join ONE cold flight and
 /// end with ONE memo entry.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn concurrent_callers_join_one_cold_bundle_flight() {
     let (host, owner) = base_host(&format!("{BASE_ROOT}_concurrent"));

@@ -29,22 +29,25 @@
 //!    `Ok(None)` for a non-fault miss / `Err(fault)` for a request
 //!    fault, with the mandatory audit record alongside.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use verter_audit::{
-    AuditedResult, ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload, WaitAudit,
+    AuditedResult, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
+    RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload,
 };
+#[cfg(feature = "semantic-observe")]
+use verter_audit::{ProjectionModeTag, WaitAudit};
 
+#[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::VerterHost;
-use verter_type_engine::instant::Instant;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
-use verter_type_engine::semantic_query::{
-    ProjectionMode, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-};
+use verter_type_engine::request_context::RequestContextGuard;
+#[cfg(feature = "semantic-observe")]
+use verter_type_engine::semantic_query::ProjectionMode;
+use verter_type_engine::semantic_query::{SemanticNodeId, SemanticQueryApi, SemanticQueryKey};
 
 /// Outcome of a type-resolution query — the resolved
 /// [`SemanticNodeId`] (or `None` if dispatch returned a miss). The
@@ -230,11 +233,13 @@ impl VerterHost {
         // Stamp a fresh request id and bookkeeping for the harness'
         // multi-request guard. Mirrors the component-meta entry-point.
         let request_id = self.next_request_id();
+        #[cfg(feature = "semantic-observe")]
         verter_type_engine::request_context::increment_requests_created();
 
         // Determine the projection mode from the query so the audit
         // payload reports the caller's intent (Identity for queries
         // that do not carry a mode field — Conditional, KeyOf, …).
+        #[cfg(feature = "semantic-observe")]
         let query_mode = query_projection_mode(&query);
 
         // Construct a per-request context. The footprint-attachment
@@ -244,36 +249,45 @@ impl VerterHost {
         // the component-meta entry installs.
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
+        #[cfg(feature = "semantic-observe")]
         let footprint_scope = crate::typeinfo::footprint_attach::TypeinfoFootprintScope::install(
             self,
             request_id,
             footprint_capture,
         );
-        let ctx = RequestContext::with_kind_and_timing(
+        #[cfg(feature = "semantic-observe")]
+        let accumulator = footprint_scope.accumulator();
+        #[cfg(not(feature = "semantic-observe"))]
+        let accumulator = None;
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::<str>::from(canonical_hint),
-            RequestKind::TypeResolution,
+            || RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
-            footprint_scope.accumulator(),
+            accumulator,
+            verter_execution::cancellation::CancellationToken::new(),
         );
 
         // BEFORE installing the TLS guard: construct the registration.
         // The `Noop` arm short-circuits when the consumer filter
         // rejects `TypeResolution`; the `Active` arm captures a slot
         // in the host's active-request registry.
-        let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        verter_debug_assert!(
-            ctx.audit_registration.get().is_none(),
-            "freshly-constructed RequestContext must have no audit_registration",
-        );
-        let _ = ctx.install_audit_registration(registration.clone());
+        #[cfg(feature = "semantic-observe")]
+        let registration = {
+            let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
+            verter_debug_assert!(
+                ctx.audit_registration.get().is_none(),
+                "freshly-constructed RequestContext must have no audit_registration",
+            );
+            let _ = ctx.install_audit_registration(registration.clone());
+            registration
+        };
 
-        // Install the matching TLS observer at the audit boundary.
-        // Active registrations install the real
-        // `RequestContextGuard`; Noop installs
-        // `verter_audit::NoOpObserver` so emit sites still see
-        // `Some(observer)` without paying downstream cost.
+        // Every request runs under its `RequestContextGuard`, whether or
+        // not it captures: the context carries the request's budget and
+        // cancellation, so captured and uncaptured runs answer alike.
         //
         // Query-RETURNER: it returns the resolved node with no outer
         // `run_stable_request` publish fence, so it MUST resolve against a
@@ -283,34 +297,28 @@ impl VerterHost {
         // query against already-superseded state and returning it as a
         // normal answer. `UnstableState` decodes to `resolved = None` below,
         // and the audit record still emits with the unstable signal.
-        let request_start = Instant::now();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let result = match crate::typeinfo::current_store_view_for_query(self) {
             Some(current_view) => {
+                // Resolver admission must snapshot this request's receivers.
+                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                 // Bind the dispatch ctor to a request-scoped
                 // `HostResolverContext` so cache validators inside the
                 // dispatch chain inherit the overlay-aware view instead of
                 // paying a fresh workspace-sweep cost per call.
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let host_ctx = crate::resolver_core::HostResolverContext::from_current(
-                    self,
-                    &current_view,
-                    overlay,
-                );
-                let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-                    crate::resolver_core::HostCapabilities,
-                > = &host_ctx;
-                match registration.as_ref() {
-                    AuditRequestRegistration::Active(_) => {
-                        let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                        let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
-                        dispatch.execute_type_node(query)
-                    }
-                    AuditRequestRegistration::Noop => {
-                        let _noop_guard = verter_audit::install_noop_observer();
-                        let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
-                        dispatch.execute_type_node(query)
-                    }
-                }
+                verter_audit::specialise!(ctx.observe_mode() => M, {
+                    let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
+                        self,
+                        &current_view,
+                        overlay,
+                    );
+                    let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+                        crate::resolver_core::HostCapabilities<M>,
+                    > = &host_ctx;
+                    let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
+                    dispatch.execute_type_node(query)
+                })
             }
             None => verter_type_engine::semantic_query::QueryResult::Error(
                 verter_type_engine::semantic_query::QueryError::UnstableState {
@@ -318,8 +326,6 @@ impl VerterHost {
                 },
             ),
         };
-        let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
-
         // Decode the dispatch result into the carrier outcome:
         // - Value / Recursive → Ok(Some(node)).
         // - Error(non-fault miss) → Ok(None).
@@ -338,114 +344,130 @@ impl VerterHost {
                 }
             };
 
-        // Filtered kinds: return the cheap default-filled record. The
-        // query still ran; no payload was collected and nothing is
-        // published.
-        if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            let state = if self.config.audit_enabled {
-                verter_audit::AuditCaptureState::FilteredNoop
-            } else {
-                verter_audit::AuditCaptureState::AuditDisabled
-            };
-            let record = noop_type_resolution_record(
-                request_id,
-                canonical_hint,
-                ctx.parent_request_id,
-                state,
-            );
-            return audited_from_outcome(outcome, record);
+        // A build without capture: the query ran under its request
+        // context; nothing was measured and no record exists to publish.
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = request_clock;
+            audited_from_outcome(
+                outcome,
+                noop_type_resolution_record(
+                    request_id,
+                    canonical_hint,
+                    None,
+                    crate::capture::uncaptured_state(self.config.audit_enabled),
+                ),
+            )
         }
 
-        // Build the audit record. Only the `Active` arm reaches here.
-        // Snapshot per-request counters from the active context AFTER
-        // dispatch completes (the context is still alive — the guard
-        // dropped above only un-installed it from TLS, not the
-        // owning Arc on this stack frame).
-        let payload = TypeResolutionPayload {
-            query_mode: ProjectionModeTag::from(query_mode),
-            hops: u32::try_from(ctx.type_resolution_hops.load(Ordering::Relaxed))
+        #[cfg(feature = "semantic-observe")]
+        {
+            let total_ms = request_clock.elapsed_ms();
+            // Filtered kinds: return the cheap default-filled record. The
+            // query still ran; no payload was collected and nothing is
+            // published.
+            if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
+                let record = noop_type_resolution_record(
+                    request_id,
+                    canonical_hint,
+                    ctx.parent_request_id,
+                    crate::capture::uncaptured_state(self.config.audit_enabled),
+                );
+                return audited_from_outcome(outcome, record);
+            }
+
+            // Build the audit record. Only the `Active` arm reaches here.
+            // Snapshot per-request counters from the active context AFTER
+            // dispatch completes (the context is still alive — the guard
+            // dropped above only un-installed it from TLS, not the
+            // owning Arc on this stack frame).
+            let payload = TypeResolutionPayload {
+                query_mode: ProjectionModeTag::from(query_mode),
+                hops: u32::try_from(ctx.type_resolution_hops.load(Ordering::Relaxed))
+                    .unwrap_or(u32::MAX),
+                navigations: u32::try_from(ctx.type_resolution_navigations.load(Ordering::Relaxed))
+                    .unwrap_or(u32::MAX),
+                expansions: u32::try_from(ctx.type_resolution_expansions.load(Ordering::Relaxed))
+                    .unwrap_or(u32::MAX),
+                conditional_decisions: u32::try_from(
+                    ctx.type_resolution_conditional_decisions
+                        .load(Ordering::Relaxed),
+                )
                 .unwrap_or(u32::MAX),
-            navigations: u32::try_from(ctx.type_resolution_navigations.load(Ordering::Relaxed))
+                ref_root_cycle_hits: u32::try_from(
+                    ctx.type_resolution_ref_root_cycle_hits
+                        .load(Ordering::Relaxed),
+                )
                 .unwrap_or(u32::MAX),
-            expansions: u32::try_from(ctx.type_resolution_expansions.load(Ordering::Relaxed))
+                projection_ops_executed: u32::try_from(
+                    ctx.type_resolution_projection_ops.load(Ordering::Relaxed),
+                )
                 .unwrap_or(u32::MAX),
-            conditional_decisions: u32::try_from(
-                ctx.type_resolution_conditional_decisions
+                depth_high_water: ctx.type_resolution_depth_high_water.load(Ordering::Relaxed),
+                recursion_limit_reached: ctx
+                    .type_resolution_recursion_limit_reached
                     .load(Ordering::Relaxed),
-            )
-            .unwrap_or(u32::MAX),
-            ref_root_cycle_hits: u32::try_from(
-                ctx.type_resolution_ref_root_cycle_hits
-                    .load(Ordering::Relaxed),
-            )
-            .unwrap_or(u32::MAX),
-            projection_ops_executed: u32::try_from(
-                ctx.type_resolution_projection_ops.load(Ordering::Relaxed),
-            )
-            .unwrap_or(u32::MAX),
-            depth_high_water: ctx.type_resolution_depth_high_water.load(Ordering::Relaxed),
-            recursion_limit_reached: ctx
-                .type_resolution_recursion_limit_reached
-                .load(Ordering::Relaxed),
-            walker_diagnostics: Vec::new(),
-            cache_suppress: false,
-            semantic_query_dispatch_mask: ctx.type_resolution_dispatched_query_tags_mask(),
-        };
+                walker_diagnostics: Vec::new(),
+                cache_suppress: false,
+                semantic_query_dispatch_mask: ctx.type_resolution_dispatched_query_tags_mask(),
+            };
 
-        let timings = RequestTimingAudit {
-            total_ms,
-            ..RequestTimingAudit::default()
-        };
-        let store = RequestStoreAudit {
-            cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
-            bypass_diagnostics: crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
-            ..RequestStoreAudit::default()
-        };
-        let memory = RequestMemoryAudit {
-            process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
-            ..RequestMemoryAudit::default()
-        };
+            let timings = RequestTimingAudit {
+                total_ms,
+                ..RequestTimingAudit::default()
+            };
+            let store = RequestStoreAudit {
+                cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+                bypass_diagnostics:
+                    crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
+                ..RequestStoreAudit::default()
+            };
+            let memory = RequestMemoryAudit {
+                process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
+                ..RequestMemoryAudit::default()
+            };
 
-        let waits = if ctx.timing_capture {
-            Some(WaitAudit {
-                lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
-                queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
-                lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
-            })
-        } else {
-            None
-        };
+            let waits = if ctx.timing_capture {
+                Some(WaitAudit {
+                    lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
+                    queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
+                    lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
+                })
+            } else {
+                None
+            };
 
-        // Finalise the footprint through the shared miner (drain +
-        // per-file attribution + deterministic mine). `(None, [])` when
-        // capture is off.
-        let (footprint, files) =
-            crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
+            // Finalise the footprint through the shared miner (drain +
+            // per-file attribution + deterministic mine). `(None, [])` when
+            // capture is off.
+            let (footprint, files) =
+                crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
 
-        let record = RequestAuditRecord {
-            request_id,
-            canonical_id: canonical_hint.to_string(),
-            target_identity: Some(verter_audit::RequestTargetIdentity::registered(
-                canonical_hint,
-            )),
-            kind: RequestKind::TypeResolution,
-            parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
-            from_cache: false,
-            timings,
-            memory,
-            store,
-            footprint,
-            scheduler: ctx.scheduler_audit.lock().clone(),
-            files,
-            waits,
-            kind_payload: RequestKindPayload::TypeResolution(payload),
-            capture_state: verter_audit::AuditCaptureState::ActiveStored,
-            trace_id: ctx.trace_id.clone(),
-        };
+            let record = RequestAuditRecord {
+                request_id,
+                canonical_id: canonical_hint.to_string(),
+                target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+                    canonical_hint,
+                )),
+                kind: RequestKind::TypeResolution,
+                parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
+                from_cache: false,
+                timings,
+                memory,
+                store,
+                footprint,
+                scheduler: ctx.scheduler_audit.lock().clone(),
+                files,
+                waits,
+                kind_payload: RequestKindPayload::TypeResolution(payload),
+                capture_state: verter_audit::AuditCaptureState::ActiveStored,
+                trace_id: ctx.trace_id.clone(),
+            };
 
-        let cloned = record.clone();
-        registration.finalize(record);
-        audited_from_outcome(outcome, cloned)
+            let cloned = record.clone();
+            registration.finalize(record);
+            audited_from_outcome(outcome, cloned)
+        }
     }
 }
 
@@ -493,6 +515,7 @@ fn noop_type_resolution_record(
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Project the caller-visible projection mode from a
 /// [`SemanticQueryKey`]. Variants without a `mode` field map to
 /// [`ProjectionMode::Identity`] — they do not consume a projection

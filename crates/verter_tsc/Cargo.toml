@@ -23,6 +23,9 @@ required-features = ["test-fake-engine"]
 
 [features]
 test-fake-engine = ["verter_tsgo_api/test-fake-engine"]
+# Default-off measurement opt-in: forwards the session's optional provenance
+# counters so the instrumentation lane runs this crate's counter assertions.
+semantic-observe = ["verter_session/semantic-observe"]
 
 [dependencies]
 verter_session_query = { workspace = true }

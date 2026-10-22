@@ -27,7 +27,7 @@ impl TemplateAst {
 
     /// Allocate a node in the arena and return its NodeId.
     /// NOTE: parent/index_in_parent are filled when you ATTACH the node.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn alloc_node(&mut self, kind: AstNodeKind) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(AstNode {
@@ -73,7 +73,7 @@ impl TemplateAst {
     }
 
     /// Attach an existing node as a child of an existing element node.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn attach_to_parent(&mut self, parent: NodeId, child: NodeId) {
         // Ensure parent is an Element and has content.
         let idx = {

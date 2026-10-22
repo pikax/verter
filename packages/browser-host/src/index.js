@@ -7,6 +7,9 @@ export const CANONICAL_TS = "/probe.ts";
 export const CANONICAL_VUE = "/probe.vue";
 export const TYPEINFO_SYMBOL = "ProbeAlias";
 
+/** The two capture states a binding's `captureAvailability()` reports. */
+export const CAPTURE_STATES = ["Available", "Unavailable"];
+
 /** UTF-16 code-unit order; matches Rust `str::cmp` on the ASCII fixture (BWH1-AC1). */
 export function compareCodeUnits(left, right) {
   const a = String(left ?? "");
@@ -62,6 +65,23 @@ export function emptyOperationFailures(operations) {
     }
   }
   return failures;
+}
+
+/**
+ * The query row must name a capture state, and its `hasRecord` must follow
+ * it: a stored record exactly when capture is available. An empty or
+ * missing query is reported by `emptyOperationFailures`.
+ */
+export function queryCaptureFailures(operations) {
+  const row = Array.isArray(operations?.query) ? operations.query[0] : undefined;
+  if (row == null || typeof row !== "object") return [];
+  if (!CAPTURE_STATES.includes(row.capture)) {
+    return [`query capture availability is missing or unknown (${String(row.capture)})`];
+  }
+  if (row.hasRecord !== (row.capture === "Available")) {
+    return [`query hasRecord=${String(row.hasRecord)} contradicts capture ${row.capture}`];
+  }
+  return [];
 }
 
 export function nodeGlobalsPresent(globals) {

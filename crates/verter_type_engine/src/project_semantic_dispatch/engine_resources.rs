@@ -19,7 +19,6 @@
 //! state a surface-resolution claim. The host holds it privately beside the
 //! output authority and lends it to its surface-publication adapters.
 
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 
 use super::output_materialization::{MaterializedOutputTypeExpr, OutputTypeExpr};
@@ -60,7 +59,7 @@ impl EngineStores {
     pub fn create(
         provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
         store_account: verter_session_query::retention::StoreAccount,
-        cache_live: &Arc<AtomicU64>,
+        cache_live: &crate::cache_runtime::OccupancyCounter,
         task_registry: verter_execution::tasks::TaskRegistry,
     ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
         Self::create_with_memo_family_bound(
@@ -78,7 +77,7 @@ impl EngineStores {
     pub fn create_with_memo_family_bound(
         provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
         store_account: verter_session_query::retention::StoreAccount,
-        cache_live: &Arc<AtomicU64>,
+        cache_live: &crate::cache_runtime::OccupancyCounter,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: MemoFamilyBound,
     ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
@@ -106,19 +105,18 @@ impl EngineStores {
             ),
             intrinsics: Arc::new(crate::intrinsic_registry::IntrinsicRegistry::with_defaults()),
             imported_registry: Arc::new(
-                ImportedRegistryDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+                ImportedRegistryDb::with_counter(cache_live.clone()).charged_to(caches.clone()),
             ),
             declarations: Arc::new(
-                DeclarationLookupDb::with_counter(Arc::clone(cache_live))
-                    .charged_to(caches.clone()),
+                DeclarationLookupDb::with_counter(cache_live.clone()).charged_to(caches.clone()),
             ),
             resolvability: Arc::new(
-                ResolvabilityDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+                ResolvabilityDb::with_counter(cache_live.clone()).charged_to(caches.clone()),
             ),
             owner_collections: Arc::new(
-                OwnerCollectionDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+                OwnerCollectionDb::with_counter(cache_live.clone()).charged_to(caches.clone()),
             ),
-            shapes: Arc::new(ShapeCacheDb::with_counter(Arc::clone(cache_live)).charged_to(caches)),
+            shapes: Arc::new(ShapeCacheDb::with_counter(cache_live.clone()).charged_to(caches)),
             identities: Arc::new(crate::identity_interner::IdentityInterner::new(
                 retention_account,
             )),

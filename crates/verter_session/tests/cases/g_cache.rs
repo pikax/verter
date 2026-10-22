@@ -5,12 +5,20 @@ mod cache_invariant_migration;
 #[path = "g_cache/cache_key_invariants.rs"]
 mod cache_key_invariants;
 #[path = "g_cache/cache_layer_cold_concurrent_attribution.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod cache_layer_cold_concurrent_attribution;
 #[path = "g_cache/cache_layer_concurrent_attribution.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod cache_layer_concurrent_attribution;
 #[path = "g_cache/cache_layer_per_request_attribution.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod cache_layer_per_request_attribution;
 #[path = "g_cache/cache_layer_regression_per_layer.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod cache_layer_regression_per_layer;
 #[path = "g_cache/cache_reuse_invariants.rs"]
 mod cache_reuse_invariants;

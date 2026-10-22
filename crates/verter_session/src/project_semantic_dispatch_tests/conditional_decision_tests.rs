@@ -1066,8 +1066,10 @@ fn a_written_arm_cannot_select_a_whole_distributive_boolean() {
             };
             let store_view = host.resolver_store_view_read().into_owned_view();
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+            let host_ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::new(&host, &store_view, overlay);
             let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
             let expected = checker_syntax::parse(answer).expect("valid checker type");
             let data = dispatch.graph().node_data(node.id());

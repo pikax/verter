@@ -166,6 +166,8 @@ fn component_config_theme_variant_props_use_prepared_theme_fast_path() {
 /// proof (its fact_dep_signature contains the file_whole_hash
 /// observation) and the next call cold-recomputes — counter
 /// advances.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn component_config_theme_variant_uses_app_config_no_override_proof_when_present() {
     use std::sync::Arc;

@@ -69,7 +69,12 @@ fn with_probe<R>(
         .unwrap_or_else(|_| panic!("the probe `{probe}` produced no flow-return result"));
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     let node = dispatch
@@ -161,7 +166,7 @@ fn read_effects(
     candidate: SignatureCandidate,
     call: verter_type_engine::signature_kernel::CallSubstitutionId,
 ) -> Option<PredicateEffect> {
-    let store = dispatch.graph().signature_store();
+    let store = dispatch.graph().store().signature_store();
     match dispatch.read_signature_result(
         store,
         candidate.signature,
@@ -199,7 +204,7 @@ fn identity_call(
 fn an_instantiated_generic_predicate_narrows_to_its_argument() {
     with_probe(PREDICATES, "typeof isT<string>", |dispatch, node| {
         let signature = only_call_signature(dispatch, node);
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let is_string = |node: SemanticNodeId| {
             graph.node_data(node).as_deref()
                 == Some(&SemanticNodeData::Primitive(PrimitiveKind::String))
@@ -277,7 +282,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
     ));
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let prim = |kind| graph.intern_node(SemanticNodeData::Primitive(kind));
     let (unknown, boolean, number, void) = (
         prim(PrimitiveKind::Unknown),
@@ -542,7 +547,7 @@ fn predicates_participate_in_identity_ordering_and_display() {
     ));
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let prim = |kind| graph.intern_node(SemanticNodeData::Primitive(kind));
     let (unknown, boolean, void, string) = (
         prim(PrimitiveKind::Unknown),
@@ -679,7 +684,7 @@ fn shared_call_signatures(
     ),
 ) {
     with_probe(COMPOSITES, probe, |dispatch, node| {
-        let store = dispatch.graph().signature_store();
+        let store = dispatch.graph().store().signature_store();
         let set = match dispatch.signatures_of_type(
             store,
             node,
@@ -709,7 +714,7 @@ fn shown(
     node: SemanticNodeId,
 ) -> String {
     verter_type_engine::semantic_query::display::display(
-        dispatch.graph(),
+        dispatch.graph().store(),
         &verter_type_engine::semantic_query::SemanticQueryValue::TypeNode(node),
         verter_type_engine::semantic_query::demand::DisplayNeeds::empty(),
     )
@@ -879,7 +884,7 @@ fn a_body_signature_effect_is_its_inferred_predicate() {
 export function multi(x: unknown) { if (x) return typeof x === \"string\"; return false; }";
     for (probe, inferred) in [("typeof isStr", true), ("typeof multi", false)] {
         with_probe(source, probe, |dispatch, node| {
-            let store = dispatch.graph().signature_store();
+            let store = dispatch.graph().store().signature_store();
             let set = match dispatch.signatures_of_type(
                 store,
                 node,

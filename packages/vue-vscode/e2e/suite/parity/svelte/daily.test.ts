@@ -17,6 +17,7 @@ import {
   assertHasErrorMatching,
   assertHoverNeedles,
   assertReferenceCountAtLeast,
+  awaitWorkspaceInventory,
   failParityGap,
   openRelative,
   pollUntil,
@@ -249,9 +250,10 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
     this.timeout(sequenceParent("restartedWorkspaceReferences"));
     // The provider-owned witnesses above restart the server in-test, which
     // invalidates the suite setup's level-2 fact. Closed-file references are
-    // answered only once the new server's project frontier is complete, so
-    // await its own level-2 announcement before counting.
+    // answered only once the new server's workspace inventory is built, so
+    // await its own level-2 announcement and then the inventory before counting.
     await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
+    await awaitWorkspaceInventory();
     try {
       await assertReferenceCountAtLeast(
         { file: "src/DailyBinding.svelte", token: "dailyValue", occurrence: 0 },

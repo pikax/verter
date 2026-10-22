@@ -527,16 +527,26 @@ fn index_key_number_convention_is_type_enforced() {
 
 /// Extract a function body (the brace-balanced span from the `{`
 /// after the signature to its matching `}`). `anchor` is the
-/// signature prefix (e.g. `"pub(crate) fn project_props("`).
+/// signature prefix (e.g. `"pub(crate) fn project_props<"`).
 ///
 /// Tracks `"..."` string literals (with `\` escapes) so braces
 /// inside `format!` strings do not unbalance the count. Rust
 /// lifetimes (`'_`, `'a`) make `'`-based char-literal tracking
 /// unreliable, so `'` is ignored — function bodies in this codebase
 /// do not contain unbalanced braces inside char literals.
+/// Locate a function signature by its `anchor` prefix ending in `(` or
+/// `<`: a signature may be plain or generic over the execution mode it is
+/// compiled for, so either head matches.
+fn find_fn_anchor(src: &str, anchor: &str) -> Option<usize> {
+    let head = anchor.trim_end_matches(['(', '<']);
+    [format!("{head}("), format!("{head}<")]
+        .iter()
+        .filter_map(|candidate| src.find(candidate.as_str()))
+        .min()
+}
+
 fn extract_fn_body(src: &str, anchor: &str) -> String {
-    let fn_idx = src
-        .find(anchor)
+    let fn_idx = find_fn_anchor(src, anchor)
         .unwrap_or_else(|| panic!("guard: anchor `{anchor}` must exist"));
     let open_rel = src[fn_idx..]
         .find('{')
@@ -584,7 +594,7 @@ fn ax_cursor_target_set() -> Vec<(&'static str, &'static str, &'static str)> {
         (
             "project_props",
             "crates/verter_session/src/meta_resolve/projectors/props.rs",
-            "pub(crate) fn project_props(",
+            "pub(crate) fn project_props<",
         ),
         (
             "project_emits",
@@ -682,7 +692,7 @@ fn ax_projectors_descend_published_member() {
         (
             "project_props",
             "crates/verter_session/src/meta_resolve/projectors/props.rs",
-            "pub(crate) fn project_props(",
+            "pub(crate) fn project_props<",
         ),
         (
             "project_emits",
@@ -748,7 +758,7 @@ fn ax_projector_uses_terminal_publication_mode() {
     // touches the reverse-materialization boundary).
     let src =
         read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
-    let body = extract_fn_body(&src, "pub(crate) fn surface_member_to_expanded_field(");
+    let body = extract_fn_body(&src, "pub(crate) fn surface_member_to_expanded_field<");
     assert!(
         body.contains("admitted.cursor().terminal_publication_mode()"),
         "publication-mode guard: `surface_member_to_expanded_field` MUST derive \
@@ -771,7 +781,7 @@ fn ax_projector_uses_terminal_publication_mode() {
     // reworked onto node-domain sources) and the published-field second pass
     // must reduce props/emits in `Navigate` carrier mode.
     assert!(
-        src.contains("fn reduce_field_value_node("),
+        find_fn_anchor(&src, "fn reduce_field_value_node(").is_some(),
         "publication-mode guard: `reduce_field_value_node` (the node-domain \
          per-field reducer, sink-private in `output_sink`) MUST exist."
     );
@@ -783,7 +793,7 @@ fn ax_projector_uses_terminal_publication_mode() {
     let finalize_src = read_workspace_file(
         "crates/verter_session/src/meta_resolve/projectors/output_sink/published_finalize.rs",
     );
-    let second_pass = extract_fn_body(&finalize_src, "pub(crate) fn reduce_published_field_types(");
+    let second_pass = extract_fn_body(&finalize_src, "pub(crate) fn reduce_published_field_types<");
     assert!(
         second_pass.contains("ProjectionMode::Navigate"),
         "publication-mode guard: `reduce_published_field_types` MUST reduce \
@@ -801,7 +811,7 @@ fn ax_projector_uses_terminal_publication_mode() {
 fn ax_cursor_threaded_functions_keep_parameter() {
     for (label, rel, anchor) in ax_cursor_target_set() {
         let src = read_workspace_file(rel);
-        let header_start = src.find(anchor).unwrap_or_else(|| {
+        let header_start = find_fn_anchor(&src, anchor).unwrap_or_else(|| {
             panic!("cursor-threading guard ({label}): anchor `{anchor}` must exist")
         });
         // Bound the header by the body's opening brace — the
@@ -1023,7 +1033,7 @@ fn ax_hybrid_projector_layer_name_predicates_retired() {
         "crates/verter_session/src/meta_resolve/projectors/output_sink/published_finalize.rs",
     );
     assert!(
-        published_finalize_src.contains("pub(crate) fn reduce_published_field_types("),
+        published_finalize_src.contains("pub(crate) fn reduce_published_field_types<"),
         "name-predicate-retired guard: `projectors/output_sink/published_finalize.rs` MUST host \
          `reduce_published_field_types` (the high-level publication API on the sink's \
          finalize child module; the per-field reducer it wraps is sink-private)."

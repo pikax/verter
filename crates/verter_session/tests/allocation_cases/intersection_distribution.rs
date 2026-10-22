@@ -31,7 +31,14 @@ fn numbers(
     if with_object {
         members.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Object)));
     }
-    intern_ordered_union(graph, &members, NullabilityPolicy::Strict).node
+    intern_ordered_union(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            graph,
+        ),
+        &members,
+        NullabilityPolicy::Strict,
+    )
+    .node
 }
 
 /// The allocations, and the bytes requested, of `body`.
@@ -241,7 +248,14 @@ fn parameters(graph: &SemanticGraphStore, prefix: &str, count: usize) -> Semanti
             })
         })
         .collect();
-    intern_ordered_union(graph, &members, NullabilityPolicy::Strict).node
+    intern_ordered_union(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            graph,
+        ),
+        &members,
+        NullabilityPolicy::Strict,
+    )
+    .node
 }
 
 /// A divided product's constituents hold every member its halves'

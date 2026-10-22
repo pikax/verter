@@ -9,14 +9,21 @@
  * warm-cache hit, `false` on a cold compute.
  *
  * REGRESSION classification.
+ *
+ * `fromCache` rides the audit record, so the eviction proof needs a
+ * binding built with `semantic-observe`. A default binding still serves
+ * every evaluation and carries no record.
  */
 
+import { captureAvailability } from "@verter/native";
 import { describe, expect, it } from "vitest";
 
 import { TypeInfoSession } from "../src/index.js";
 
+const captured = captureAvailability() === "Available";
+
 describe("typeinfo scratch-cache LRU eviction", () => {
-  it("evicts the oldest entry when cache is full and accepts new entries", () => {
+  it.runIf(captured)("evicts the oldest entry when cache is full and accepts new entries", () => {
     const session = new TypeInfoSession({
       root: "/fixtures",
       evaluateTypeExpressionCacheSize: 3,
@@ -72,4 +79,30 @@ describe("typeinfo scratch-cache LRU eviction", () => {
 
     session.host.close();
   });
+
+  it.runIf(!captured)(
+    "serves every evaluation through a full cache without an audit record when capture is unavailable",
+    () => {
+      const session = new TypeInfoSession({
+        root: "/fixtures",
+        evaluateTypeExpressionCacheSize: 3,
+      });
+      session.host.upsert({
+        inputId: "/fixtures/types.ts",
+        source: `export type A = string;\nexport type B = number;\n`,
+      });
+      const exprs = ["Pick<A, 'length'>", "Pick<A, 'charAt'>", "Record<'k', A>", "Partial<B>"];
+      for (const expr of [...exprs, exprs[0]]) {
+        const r = session.evaluateTypeExpression({
+          scope: "/fixtures/types.ts",
+          expression: expr,
+          cacheable: true,
+          mode: "expanded",
+        });
+        expect(r.type, `${expr} must still resolve`).toBeDefined();
+        expect(r.auditRecord).toBeUndefined();
+      }
+      session.host.close();
+    },
+  );
 });

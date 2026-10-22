@@ -166,7 +166,8 @@ pub(super) struct PreparedRequest {
 #[derive(Default)]
 pub(super) struct AdmissionPostWork {
     /// Deferred dedup-join callbacks collected from
-    /// [`SchedulerDag::register_request`].
+    /// [`SchedulerDag::register_request`] (optional capture).
+    #[cfg(feature = "semantic-observe")]
     pub(super) dedup_events: Vec<DedupJoinerEvent>,
     /// `(canonical, generation)` pairs whose auto-ingest tracking entry
     /// should be cleared once a Source identity has been admitted.
@@ -178,6 +179,7 @@ impl AdmissionPostWork {
     /// auto-ingest entry. MUST be invoked only after the DAG lock has
     /// been released.
     pub(super) fn run(self, scheduler: &Scheduler) {
+        #[cfg(feature = "semantic-observe")]
         for event in self.dedup_events {
             event.fire();
         }
@@ -655,16 +657,24 @@ impl Scheduler {
 
         // Register the waiter group. The dedup callback (if any) is
         // returned as a deferred event and fired after the lock drops.
-        let dedup_event = dag.register_request(
+        #[cfg(feature = "semantic-observe")]
+        if let Some(event) = dag.register_request(
+            &canonical,
+            generation,
+            target.clone(),
+            sender,
+            request_context,
+        ) {
+            post.dedup_events.push(event);
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        dag.register_request(
             &canonical,
             generation,
             target.clone(),
             sender,
             request_context,
         );
-        if let Some(event) = dedup_event {
-            post.dedup_events.push(event);
-        }
 
         let effective_priority = priority;
 

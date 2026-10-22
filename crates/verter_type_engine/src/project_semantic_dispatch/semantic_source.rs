@@ -803,7 +803,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// failures. This is the node-domain reader that lets a raise boundary
     /// answer with the carrier's OWN disposition instead of a blanket `None`.
     fn opaque_failure_carrier_error(&self, node: SemanticNodeId) -> Option<QueryError> {
-        let data = super::node_data_for(self.graph(), node)?;
+        let data = super::node_data_for(self.graph().store(), node)?;
         let SemanticNodeData::Opaque(err) = data.as_ref() else {
             return None;
         };
@@ -876,7 +876,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let Some(realized_root) = view.realized_callable_root(context).recorded() else {
                 return SourceRaiseOutcome::Absent;
             };
-            let combine = match super::node_data_for(self.graph(), realized_root).as_deref() {
+            let combine = match super::node_data_for(self.graph().store(), realized_root).as_deref()
+            {
                 Some(SemanticNodeData::Union(_)) => {
                     crate::project_semantic_dispatch::callable_view::ArmCombineNode::Union
                 }
@@ -1020,7 +1021,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 if !visited.insert(current) {
                     continue;
                 }
-                let data = super::node_data_for(self.graph(), current)?;
+                let data = super::node_data_for(self.graph().store(), current)?;
                 match data.as_ref() {
                     // Stable residual reference carriers are COMPLETE semantic
                     // results. Root normalization already distinguished an

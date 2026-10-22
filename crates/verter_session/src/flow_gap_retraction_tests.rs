@@ -49,7 +49,12 @@ fn identity(canonical: &str, symbol: &str) -> FlowFunctionReturnIdentity {
 fn candidate_count(host: &Arc<VerterHost>, canonical: &str, function: &str) -> usize {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = FlowReturnKey {
         function: dispatch.flow_function_slot_for(

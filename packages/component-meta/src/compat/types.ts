@@ -91,7 +91,10 @@ export interface MetaCheckerOptions {
   /**
    * Logging/audit settings. When `audit` is true, the native runtime captures
    * per-request timing, memory, and solver cost data as structured
-   * `RustAuditRecord` artifacts. Default: false (zero overhead).
+   * `RustAuditRecord` artifacts. Default: false (zero overhead). Capture
+   * requires a `@verter/native` binding built with `semantic-observe`
+   * (`captureAvailability() === "Available"`); with a default binding the
+   * option is accepted and captures nothing.
    */
   logging?: {
     audit?: boolean;

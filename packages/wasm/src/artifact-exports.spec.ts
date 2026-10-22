@@ -26,7 +26,12 @@ const WASM_BINARY_PATH = resolve(import.meta.dirname, "../wasm/verter_wasm_bg.wa
 const WASM_DECLARATIONS_PATH = resolve(import.meta.dirname, "../wasm/verter_wasm.d.ts");
 
 /** Every binding `initialize()` reads off the imported module. */
-const REQUIRED_ARTIFACT_EXPORTS = ["default", "initSync", "VerterHost"] as const;
+const REQUIRED_ARTIFACT_EXPORTS = [
+  "default",
+  "initSync",
+  "VerterHost",
+  "captureAvailability",
+] as const;
 
 /**
  * Every host method the wrapper forwards to. The wrapper reaches these off
@@ -77,6 +82,7 @@ describe("@verter/wasm artifact export surface", () => {
     expect(typeof pkg.initialize).toBe("function");
     expect(typeof pkg.isInitialized).toBe("function");
     expect(typeof pkg.createHost).toBe("function");
+    expect(typeof pkg.captureAvailability).toBe("function");
     expect(typeof pkg.Host).toBe("function");
 
     for (const name of ["compile", "compileSync"]) {

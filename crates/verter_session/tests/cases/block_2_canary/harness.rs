@@ -34,6 +34,7 @@
 
 #![allow(dead_code)]
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
@@ -114,6 +115,8 @@ pub fn compile_main(host: &VerterHost, canonical: &str) -> Result<VirtualFileRes
 }
 
 /// The `ComponentMetaResultDb` warm-hit miss counter.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 pub fn meta_misses(host: &VerterHost) -> u64 {
     host.provenance()
         .component_meta_result_cache_misses
@@ -121,6 +124,8 @@ pub fn meta_misses(host: &VerterHost) -> u64 {
 }
 
 /// The `ComponentMetaResultDb` warm-hit hit counter.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 pub fn meta_hits(host: &VerterHost) -> u64 {
     host.provenance()
         .component_meta_result_cache_hits

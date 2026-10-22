@@ -17,6 +17,11 @@ path = "src/lib.rs"
 name = "verter-mcp"
 path = "src/main.rs"
 
+[features]
+# The coordinated, default-off observation opt-in
+# (docs/arch/semantic-observe.md): the MCP tools' audit records.
+semantic-observe = ["verter_session/semantic-observe"]
+
 [dependencies]
 verter_session_query = { workspace = true }
 verter_session = { path = "../verter_session" }

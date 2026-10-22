@@ -17,19 +17,19 @@
 //! zero-allocation half, and the warm-hit behavioral test pins the
 //! no-`FlowReturnStarted` half.
 
+//!
+//! All three are optional capture: without `semantic-observe` they read no
+//! request context and build no event.
+
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
+#[cfg(feature = "semantic-observe")]
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use verter_audit::{FlowSliceBudgetAxisTag, StructuredAuditEvent};
 
 use verter_session_query::flow::peeker::FlowSliceBudgetExceeded;
-
-/// `true` when a structured-event accumulator is installed for the
-/// current request. The event-construction gate: all payload
-/// allocation for the three flow events happens strictly behind it.
-fn accumulator_installed() -> bool {
-    crate::request_context::current_accumulator().is_some()
-}
 
 /// Record one cold whole-function flow evaluation: bump the
 /// per-request `flow_return_cold_computes` counter and, when an
@@ -38,15 +38,36 @@ fn accumulator_installed() -> bool {
 ///
 /// COLD-PATH ONLY caller contract — the warm family hit must return
 /// before reaching this helper.
-pub fn record_flow_return_started(canonical_id: &str, function_symbol: &str) {
-    if let Some(ctx) = crate::request_context::current_request_context() {
+#[inline(always)]
+pub fn record_flow_return_started<M: verter_audit::observe::ObserveExec>(
+    observation: &crate::request_observers::CaptureTargets,
+    canonical_id: &str,
+    function_symbol: &str,
+) {
+    let _ = observation;
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = (canonical_id, function_symbol);
+    #[cfg(feature = "semantic-observe")]
+    if M::CAPTURED {
+        record_flow_return_started_captured(observation, canonical_id, function_symbol);
+    }
+}
+
+#[cfg(feature = "semantic-observe")]
+fn record_flow_return_started_captured(
+    observation: &crate::request_observers::CaptureTargets,
+    canonical_id: &str,
+    function_symbol: &str,
+) {
+    let _ = observation;
+    if let Some(ctx) = observation.request.as_deref() {
         ctx.flow_return_cold_computes
             .fetch_add(1, Ordering::Relaxed);
     }
-    if !accumulator_installed() {
+    let Some(accumulator) = observation.accumulator.as_deref() else {
         return;
-    }
-    crate::request_observers::push_structured_event(StructuredAuditEvent::FlowReturnStarted {
+    };
+    accumulator.push_structured_event(StructuredAuditEvent::FlowReturnStarted {
         canonical_id: Arc::from(canonical_id),
         function_symbol: Arc::from(function_symbol),
     });
@@ -56,28 +77,45 @@ pub fn record_flow_return_started(canonical_id: &str, function_symbol: &str) {
 /// `flow_return_budget_exceeded` counter and, when an accumulator is
 /// installed, push a
 /// [`StructuredAuditEvent::FlowSliceBudgetExceeded`].
-pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
-    if let Some(ctx) = crate::request_context::current_request_context() {
+#[inline(always)]
+pub fn record_flow_slice_budget_exceeded<M: verter_audit::observe::ObserveExec>(
+    observation: &crate::request_observers::CaptureTargets,
+    exceeded: &FlowSliceBudgetExceeded,
+) {
+    let _ = observation;
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = exceeded;
+    #[cfg(feature = "semantic-observe")]
+    if M::CAPTURED {
+        record_flow_slice_budget_exceeded_captured(observation, exceeded);
+    }
+}
+
+#[cfg(feature = "semantic-observe")]
+fn record_flow_slice_budget_exceeded_captured(
+    observation: &crate::request_observers::CaptureTargets,
+    exceeded: &FlowSliceBudgetExceeded,
+) {
+    let _ = observation;
+    if let Some(ctx) = observation.request.as_deref() {
         ctx.flow_return_budget_exceeded
             .fetch_add(1, Ordering::Relaxed);
     }
-    if !accumulator_installed() {
+    let Some(accumulator) = observation.accumulator.as_deref() else {
         return;
-    }
-    crate::request_observers::push_structured_event(
-        StructuredAuditEvent::FlowSliceBudgetExceeded {
-            axis: match exceeded.axis {
-                verter_session_query::flow::peeker::FlowSliceBudgetAxis::SelectedNodes => {
-                    FlowSliceBudgetAxisTag::SelectedNodes
-                }
-                verter_session_query::flow::peeker::FlowSliceBudgetAxis::ValueStates => {
-                    FlowSliceBudgetAxisTag::ValueStates
-                }
-            },
-            limit: exceeded.limit,
-            observed: exceeded.observed,
+    };
+    accumulator.push_structured_event(StructuredAuditEvent::FlowSliceBudgetExceeded {
+        axis: match exceeded.axis {
+            verter_session_query::flow::peeker::FlowSliceBudgetAxis::SelectedNodes => {
+                FlowSliceBudgetAxisTag::SelectedNodes
+            }
+            verter_session_query::flow::peeker::FlowSliceBudgetAxis::ValueStates => {
+                FlowSliceBudgetAxisTag::ValueStates
+            }
         },
-    );
+        limit: exceeded.limit,
+        observed: exceeded.observed,
+    });
 }
 
 /// Record one coinductive flow-cycle re-entry hold: bump the
@@ -87,15 +125,36 @@ pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
 ///
 /// `cycle_id` is the request-scoped in-flight obligation frame index
 /// the re-entry targeted.
-pub fn record_flow_cycle_reentry(cycle_id: u32, function_symbol: &str) {
-    if let Some(ctx) = crate::request_context::current_request_context() {
+#[inline(always)]
+pub fn record_flow_cycle_reentry<M: verter_audit::observe::ObserveExec>(
+    observation: &crate::request_observers::CaptureTargets,
+    cycle_id: u32,
+    function_symbol: &str,
+) {
+    let _ = observation;
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = (cycle_id, function_symbol);
+    #[cfg(feature = "semantic-observe")]
+    if M::CAPTURED {
+        record_flow_cycle_reentry_captured(observation, cycle_id, function_symbol);
+    }
+}
+
+#[cfg(feature = "semantic-observe")]
+fn record_flow_cycle_reentry_captured(
+    observation: &crate::request_observers::CaptureTargets,
+    cycle_id: u32,
+    function_symbol: &str,
+) {
+    let _ = observation;
+    if let Some(ctx) = observation.request.as_deref() {
         ctx.flow_return_cycle_reentries
             .fetch_add(1, Ordering::Relaxed);
     }
-    if !accumulator_installed() {
+    let Some(accumulator) = observation.accumulator.as_deref() else {
         return;
-    }
-    crate::request_observers::push_structured_event(StructuredAuditEvent::FlowCycleSentinelHit {
+    };
+    accumulator.push_structured_event(StructuredAuditEvent::FlowCycleSentinelHit {
         cycle_id,
         function_symbol: Arc::from(function_symbol),
     });

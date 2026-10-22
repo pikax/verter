@@ -5,5 +5,9 @@
 
 mod fact_value_ownership;
 mod resolver_stay_ownership;
+// Drives the workspace audit producer, which exists only with optional capture.
+#[cfg(feature = "semantic-observe")]
 mod workspace_audit_dep_graph_traverse;
+// Drives the workspace audit producer, which exists only with optional capture.
+#[cfg(feature = "semantic-observe")]
 mod workspace_audit_resolve;

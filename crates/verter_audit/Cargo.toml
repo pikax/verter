@@ -11,19 +11,17 @@ publish = false
 
 [features]
 default = []
-# Coordinated optional capture gate. Forwarded by owners, never enabled by a
-# production dependency. Legacy measurement opt-ins remain independently usable.
-semantic-observe = ["attribution"]
-# Measurement-only work attribution. Compiles the counter table, the
-# scope guards, the attributing global allocator, and the report
-# renderers behind `attribution::*`. NOT in `default`, requested by no
-# production edge (`verter_napi`, `verter_lsp`, `verter_wasm`,
-# `verter_tsc`), and enabled only by the `verter_bench` measurement
-# harness. With it off, the recording macros expand to a site-name check
-# that emits no code and evaluates no argument, and the reader path does
-# not exist — which is what structurally prevents a counter from
-# reaching a semantic decision.
-attribution = []
+# The one coordinated optional-capture gate (docs/arch/semantic-observe.md).
+# Forwarded by owners, never enabled by a production dependency. It compiles
+# the work-attribution counter table, the scope guards, the attributing global
+# allocator and the report renderers behind `attribution::*`, and reports
+# `observe::CaptureAvailability::Available`. NOT in `default` and requested by
+# no production edge (`verter_napi`, `verter_lsp`, `verter_wasm`,
+# `verter_tsc`). With it off, the recording macros expand to a site-name check
+# that emits no code and evaluates no argument, and the reader path does not
+# exist — which is what structurally prevents a counter from reaching a
+# semantic decision.
+semantic-observe = []
 
 [[bin]]
 name = "verter-audit-inspect"

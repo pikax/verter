@@ -2210,8 +2210,8 @@ construction_ordinal_seam! {
 
 construction_ordinal_seam! {
     /// [`union_rank_order`], also reporting how many rank-map probes the
-    /// recovery made.
-    #[cfg(any(test, feature = "semantic-observe"))]
+    /// recovery made. Its only reader is this module's own tests.
+    #[cfg(test)]
     fn union_rank_order_observed(
         graph: &SemanticGraphStore,
         members: &[SemanticNodeId],

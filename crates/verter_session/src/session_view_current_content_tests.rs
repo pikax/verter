@@ -594,7 +594,7 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &session_store_view,
@@ -766,7 +766,7 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &session_store_view,
@@ -956,7 +956,7 @@ fn shallow_file_state_observes_overlay_for_normalised_js() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &session_store_view,

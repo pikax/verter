@@ -386,7 +386,7 @@ fn tuple_factors(
     Vec<Vec<verter_type_engine::semantic_query::SemanticNodeId>>,
     Vec<verter_type_engine::semantic_query::SemanticNodeId>,
 ) {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let elements: Vec<_> = match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
             elements.iter().map(|element| element.value).collect()
@@ -509,10 +509,17 @@ fn a_shared_intersection_dag_is_charged_for_its_flattened_members() {
     let [p, q, r, s, t] = ["P", "Q", "R", "S", "T"].map(param);
     let shallow = carrier([p, q]);
     let deep = (0..8).fold(shallow, |inner, _| carrier([inner, inner]));
-    let right = intern_ordered_union(&graph, &[s, t], NullabilityPolicy::Strict).node;
+    let right = intern_ordered_union(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
+        &[s, t],
+        NullabilityPolicy::Strict,
+    )
+    .node;
     let arms = |nested: SemanticNodeId| {
         [
-            intern_ordered_union(&graph, &[nested, r], NullabilityPolicy::Strict).node,
+            intern_ordered_union(verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph), &[nested, r], NullabilityPolicy::Strict).node,
             right,
         ]
     };

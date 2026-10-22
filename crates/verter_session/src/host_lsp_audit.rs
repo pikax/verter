@@ -36,14 +36,17 @@
 use std::sync::Arc;
 
 use verter_audit::payloads::tags::LspMethodTag;
+use verter_audit::{LspRequestPayload, RequestAuditRecord, RequestTargetIdentity};
+#[cfg(feature = "semantic-observe")]
 use verter_audit::{
-    LspRequestPayload, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
-    RequestStoreAudit, RequestTargetIdentity, RequestTimingAudit,
+    RequestKind, RequestKindPayload, RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
 };
 
+#[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::VerterHost;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+#[cfg(feature = "semantic-observe")]
+use verter_type_engine::request_context::RequestContext;
 
 /// Session object held by an audited LSP handler for the duration
 /// of one request. Constructed by [`VerterHost::lsp_audit_begin`];
@@ -51,16 +54,23 @@ use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 /// [`Self::finalize_cancelled`].
 ///
 /// Internally an `Active(...)` session owns the
-/// [`AuditRequestRegistration`] and its [`RequestContextGuard`]; the
-/// guard is dropped after `finalize` so the per-request counters
-/// remain coherent with the published record.
+/// [`AuditRequestRegistration`] and the audit-observer slot guard; the
+/// guard is dropped after `finalize`.
+///
+/// Neither arm installs a governing request context for the handler: the
+/// handler is an async window that may resume on any runtime worker, and
+/// the requests it issues install their own contexts exactly as they do
+/// without capture, so budget, cancellation and partiality never depend
+/// on whether the LSP request is captured.
 ///
 /// `Noop` sessions hold no state. Their finalize methods return
 /// `None` without entering the records store and without locking
 /// the registry.
 pub enum LspAuditSession {
     /// Active session — `audit_enabled = true` and the consumer
-    /// filter accepted [`RequestKind::Lsp`].
+    /// filter accepted [`RequestKind::Lsp`]. Exists only with
+    /// `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
     Active(ActiveLspSession),
     /// No-op session — audit disabled or kind filtered out. All
     /// finalize methods short-circuit to `None`.
@@ -72,6 +82,7 @@ pub enum LspAuditSession {
 ///
 /// Access the request id via [`Self::request_id`] when constructing
 /// payloads or asserting lifecycle membership.
+#[cfg(feature = "semantic-observe")]
 pub struct ActiveLspSession {
     request_id: u64,
     method: LspMethodTag,
@@ -82,13 +93,14 @@ pub struct ActiveLspSession {
     /// carries parent correlation.
     parent_request_id: Option<u64>,
     registration: Arc<AuditRequestRegistration>,
-    /// TLS guard for `current_observer()`. Held until finalise so
-    /// per-request counters stay coherent with the record we
-    /// publish; dropped inside `finalize_*` AFTER the
-    /// `registration.finalize` call.
-    tls_guard: Option<RequestContextGuard>,
+    /// Observation-only guard for `current_observer()`: plants the
+    /// session's captured context in the audit observer slot, never in the
+    /// request-context slot. Held until finalise; dropped inside
+    /// `finalize_*` AFTER the `registration.finalize` call.
+    tls_guard: Option<verter_audit::observer::ObserverGuard>,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl ActiveLspSession {
     /// The freshly-stamped request id for this session.
     #[must_use]
@@ -111,6 +123,7 @@ impl LspAuditSession {
     pub fn request_id(&self) -> Option<u64> {
         match self {
             Self::Noop => None,
+            #[cfg(feature = "semantic-observe")]
             Self::Active(active) => Some(active.request_id),
         }
     }
@@ -122,8 +135,11 @@ impl LspAuditSession {
     /// `None` otherwise (noop session, or losing a race with the
     /// defensive drop path).
     pub fn finalize_ok(self, payload: LspRequestPayload) -> Option<RequestAuditRecord> {
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = payload;
         match self {
             Self::Noop => None,
+            #[cfg(feature = "semantic-observe")]
             Self::Active(mut active) => {
                 let record = build_record(
                     active.request_id,
@@ -156,6 +172,7 @@ impl LspAuditSession {
     pub fn finalize_cancelled(self) -> Option<RequestAuditRecord> {
         match self {
             Self::Noop => None,
+            #[cfg(feature = "semantic-observe")]
             Self::Active(mut active) => {
                 let payload = LspRequestPayload {
                     method: active.method.clone(),
@@ -180,6 +197,7 @@ impl LspAuditSession {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 fn build_record(
     request_id: u64,
     target_identity: RequestTargetIdentity,
@@ -235,40 +253,53 @@ impl VerterHost {
         method: LspMethodTag,
         target_identity: RequestTargetIdentity,
     ) -> LspAuditSession {
-        if !self.config.audit_enabled {
-            return LspAuditSession::Noop;
+        #[cfg(feature = "semantic-observe")]
+        if self.config.audit_enabled {
+            return self.lsp_audit_begin_captured(method, target_identity);
         }
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (method, target_identity);
+        LspAuditSession::Noop
+    }
 
+    #[cfg(feature = "semantic-observe")]
+    fn lsp_audit_begin_captured(
+        self: &Arc<Self>,
+        method: LspMethodTag,
+        target_identity: RequestTargetIdentity,
+    ) -> LspAuditSession {
         let canonical_id = target_identity.legacy_canonical_id();
         let request_id = self.next_request_id();
+        #[cfg(feature = "semantic-observe")]
         verter_type_engine::request_context::increment_requests_created();
 
-        let footprint_capture = self.config.footprint_capture;
-        let timing_capture = self.config.audit_timing_capture;
-        let ctx = RequestContext::with_kind_and_timing(
+        let ctx = RequestContext::for_root_entry(
             request_id,
             Arc::<str>::from(canonical_id),
-            RequestKind::Lsp {
+            || RequestKind::Lsp {
                 method: method.clone(),
             },
-            footprint_capture,
-            timing_capture,
+            verter_audit::observe::ObserveMode::Captured,
+            self.config.footprint_capture,
+            self.config.audit_timing_capture,
             None,
+            self.config.projection_op_budget,
+            verter_execution::cancellation::CancellationToken::new(),
         );
 
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
 
         // The consumer filter may reject the kind. In that case
-        // `AuditRequestRegistration::new` returned `Noop` and we
-        // skip the TLS guard entirely — emitting through
-        // `current_observer()` would still hit the per-context
-        // counters, but the registration has no record to publish.
+        // `AuditRequestRegistration::new` returned `Noop`: the session
+        // is uncaptured and plants no observer.
         match registration.as_ref() {
             AuditRequestRegistration::Noop => LspAuditSession::Noop,
             AuditRequestRegistration::Active(_) => {
                 let _ = ctx.install_audit_registration(registration.clone());
                 let parent_request_id = ctx.parent_request_id;
-                let tls_guard = RequestContextGuard::install(ctx);
+                let tls_guard = verter_audit::observer::install_observer(
+                    ctx as Arc<dyn verter_audit::AuditObserver>,
+                );
                 LspAuditSession::Active(ActiveLspSession {
                     request_id,
                     method,

@@ -2749,7 +2749,12 @@ fn request_snapshot_captured_at_admission_observes_a_mid_request_workspace_repla
     let host = VerterHost::new_standalone(HostConfig::default());
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let snapshot = ctx.request_snapshot();
     let generation_before = snapshot.current_project_generation();
     let content_before = snapshot.clocks().live().content;

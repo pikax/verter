@@ -40,7 +40,10 @@ fn export_table_refusals_keep_the_complete_answer_and_typed_reason() {
         }
         let view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+        let ctx =
+            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+                &host, &view, overlay,
+            );
         let flight = host
             .build_module_export_tables(&ctx, &view, "/index.ts", || match reason {
                 Some(NonAdmissionReason::MutationUnstable) => {

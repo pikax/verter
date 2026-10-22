@@ -724,9 +724,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let members = members.members_arc();
             return self.union_collapse_class(members.iter().copied(), source);
         }
-        if super::canonical_algebra::tag_level_disjoint(self.graph(), source, target)
+        if super::canonical_algebra::tag_level_disjoint(self.graph().store(), source, target)
             || super::canonical_algebra::scalar_domain_provably_empty(
-                self.graph(),
+                self.graph().store(),
                 &[source, target],
             )
         {
@@ -2803,14 +2803,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let payload = match step {
             RelationStep::Assignable { bindings } => {
                 #[cfg(feature = "semantic-observe")]
-                self.record_relation_explanation(RelationExplanation::Assignable {
+                self.record_relation_explanation(|| RelationExplanation::Assignable {
                     pair: self.lease_relate_pair(&key),
                 });
                 self.relation_payload(RelationOutcome::Assignable, bindings)
             }
             RelationStep::NotAssignable => {
                 #[cfg(feature = "semantic-observe")]
-                self.record_relation_explanation(RelationExplanation::NotAssignable {
+                self.record_relation_explanation(|| RelationExplanation::NotAssignable {
                     pair: self.lease_relate_pair(&key),
                 });
                 self.relation_payload(
@@ -2820,7 +2820,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             RelationStep::BudgetExceeded(cap) => {
                 #[cfg(feature = "semantic-observe")]
-                self.record_relation_explanation(RelationExplanation::BudgetExceeded { cap });
+                self.record_relation_explanation(|| RelationExplanation::BudgetExceeded { cap });
                 self.relation_payload(
                     RelationOutcome::BudgetExceeded(cap.kind),
                     Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
@@ -3401,7 +3401,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return FramePop::RootClose(match failure {
                     crate::semantic_query::ResolveCallFailure::Budget => {
                         #[cfg(feature = "semantic-observe")]
-                        self.record_relation_explanation(RelationExplanation::BudgetExceeded {
+                        self.record_relation_explanation(|| RelationExplanation::BudgetExceeded {
                             cap: RecursionOrBudgetCap {
                                 kind:
                                     crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
@@ -3465,7 +3465,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // edge drove the poison.
             if let Some(cap) = budget_cap {
                 #[cfg(feature = "semantic-observe")]
-                self.record_relation_explanation(RelationExplanation::BudgetExceeded { cap });
+                self.record_relation_explanation(|| RelationExplanation::BudgetExceeded { cap });
                 let payload = self.relation_payload(
                     RelationOutcome::BudgetExceeded(cap.kind),
                     Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
@@ -3538,7 +3538,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // `BudgetExceeded` payload when a budget edge drove it.
                 if let Some(cap) = cap {
                     #[cfg(feature = "semantic-observe")]
-                    self.record_relation_explanation(RelationExplanation::BudgetExceeded { cap });
+                    self.record_relation_explanation(|| RelationExplanation::BudgetExceeded {
+                        cap,
+                    });
                     let payload = self.relation_payload(
                         RelationOutcome::BudgetExceeded(cap.kind),
                         Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
@@ -3820,8 +3822,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let footprints =
                 Self::relation_publication_footprints(&recursion_uses, cyclic, has_relation_root);
             #[cfg(feature = "semantic-observe")]
-            let cycle_members: Option<Arc<[super::relation_explanation::LeasedRelatePair]>> = cyclic
-                .then(|| {
+            let cycle_members: Option<Arc<[super::relation_explanation::LeasedRelatePair]>> =
+                (cyclic && self.relation_explanations_captured()).then(|| {
                     discharged
                         .iter()
                         .map(|(key, _, _, _, _, _, _)| self.lease_relate_pair(key))
@@ -3839,7 +3841,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let mut payload = match &verdict {
                     PendingVerdict::Assignable { bindings } => {
                         #[cfg(feature = "semantic-observe")]
-                        self.record_relation_explanation(match &cycle_members {
+                        self.record_relation_explanation(|| match &cycle_members {
                             Some(members) => RelationExplanation::CoinductiveCycle {
                                 pair: self.lease_relate_pair(&key),
                                 members: Arc::clone(members),
@@ -3852,7 +3854,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     PendingVerdict::NotAssignable => {
                         #[cfg(feature = "semantic-observe")]
-                        self.record_relation_explanation(RelationExplanation::NotAssignable {
+                        self.record_relation_explanation(|| RelationExplanation::NotAssignable {
                             pair: self.lease_relate_pair(&key),
                         });
                         self.relation_payload(
@@ -3885,7 +3887,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             key,
                             payload,
                             inline_flight,
-                        }.held(self.graph()));
+                        }.held(self.graph().store()));
                     }
                 } else if !session_delta {
                     settles.push(!recursion_uses[position].context_dependent);
@@ -3893,7 +3895,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         key,
                         payload,
                         inline_flight,
-                    }.held(self.graph()));
+                    }.held(self.graph().store()));
                 } else {
                     self.abort_inline_flight(inline_flight.as_ref());
                 }
@@ -4003,7 +4005,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             inline_flight: member.inline_flight,
                             self_roots: member.self_roots,
                             materialized: member.materialized,
-                        }.held(self.graph()));
+                        }.held(self.graph().store()));
                     }
                     unproven => {
                         flow_batch_unproven = true;
@@ -4093,7 +4095,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             result,
                             inline_flight: state.inline_flight,
                             self_roots: state.self_roots,
-                        }.held(self.graph())),
+                        }.held(self.graph().store())),
                         _ => rootless_flights.push(state.inline_flight),
                     }
                 }
@@ -4163,9 +4165,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             [single] => *single,
             many => {
                 let mut dedup: Vec<SemanticNodeId> = many.to_vec();
-                crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut dedup);
+                crate::semantic_query::stable_key::sort_by_stable_key(graph.store(), &mut dedup);
                 dedup.dedup_by(|a, b| {
-                    crate::semantic_query::stable_key::provably_equal(graph, *a, *b)
+                    crate::semantic_query::stable_key::provably_equal(graph.store(), *a, *b)
                 });
                 if dedup.len() == 1 {
                     return dedup[0];
@@ -4180,7 +4182,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let disjoint = dedup.iter().enumerate().any(|(i, &a)| {
                         dedup[i + 1..]
                             .iter()
-                            .any(|&b| tag_level_disjoint(graph, a, b))
+                            .any(|&b| tag_level_disjoint(graph.store(), a, b))
                     });
                     if disjoint {
                         return graph
@@ -4590,7 +4592,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
         if let Some((kept, carrier)) = component {
             self.completions
-                .keep_component(graph, kept, &carrier, computed_at);
+                .keep_component(graph.store(), kept, &carrier, computed_at);
         }
         for member in &members {
             self.abort_inline_flight(member.inline_flight.as_ref());
@@ -4691,7 +4693,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     payload,
                     inline_flight: Some(inline_flight),
                 }
-                .held(self.graph()),
+                .held(self.graph().store()),
                 false,
             );
         self.execute_relate_root(root_key)
@@ -4974,7 +4976,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => return None,
             };
             return Some(InferPatternInfo::new(
-                graph,
+                graph.store(),
                 vec![InferParamSite {
                     node: spec.base_infer,
                     name,
@@ -4984,7 +4986,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if let Some(SemanticNodeData::Infer { name, .. }) = graph.node_data(target).as_deref() {
             return Some(InferPatternInfo::new(
-                graph,
+                graph.store(),
                 vec![InferParamSite {
                     node: target,
                     name: Arc::<str>::from(name),
@@ -5008,7 +5010,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => None,
             })
             .collect();
-        (!sites.is_empty()).then(|| InferPatternInfo::new(graph, sites))
+        (!sites.is_empty()).then(|| InferPatternInfo::new(graph.store(), sites))
     }
 
     /// Recognize only the exact `{ [P in keyof T]: X }` descriptor over an
@@ -6667,10 +6669,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut targets);
+        crate::semantic_query::stable_key::sort_by_stable_key(graph.store(), &mut targets);
         targets.dedup_by(|a, b| {
-            crate::semantic_query::stable_key::stable_key_for_node(graph, *a)
-                == crate::semantic_query::stable_key::stable_key_for_node(graph, *b)
+            crate::semantic_query::stable_key::stable_key_for_node(graph.store(), *a)
+                == crate::semantic_query::stable_key::stable_key_for_node(graph.store(), *b)
         });
         targets
     }
@@ -7134,8 +7136,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return RelationResult::Unknown;
         }
         let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
-        evidence.record_file_root(graph, source);
-        evidence.record_file_root(graph, target);
+        evidence.record_file_root(graph.store(), source);
+        evidence.record_file_root(graph.store(), target);
         self.deposit_canonical_evidence(evidence);
         if source == target {
             return assignable(&[]);
@@ -7324,7 +7326,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
                 let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
                 let result = super::canonical_algebra::compare_structural(
-                    graph,
+                    graph.store(),
                     source,
                     target,
                     &mut evidence,
@@ -7696,7 +7698,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             {
                 if !matches!(&*source_data, SemanticNodeData::Union(_))
                     && !matches!(&*target_data, SemanticNodeData::Union(_))
-                    && (super::canonical_algebra::tag_level_disjoint(graph, source, target)
+                    && (super::canonical_algebra::tag_level_disjoint(graph.store(), source, target)
                         || comparable_root_kinds_disjoint(&source_data, &target_data))
                 {
                     return RelationResult::NotAssignable;
@@ -7835,7 +7837,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                         continue;
                     }
-                    if super::canonical_algebra::tag_level_disjoint(graph, source, target)
+                    if super::canonical_algebra::tag_level_disjoint(graph.store(), source, target)
                         || comparable_root_kinds_disjoint(&source_data, &target_data)
                     {
                         results.push(RelationResult::NotAssignable);
@@ -8680,7 +8682,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // agrees for string-to-number). The payload relation still
             // rejects value-mismatched overlapping indices.
             for source_index in source.indices.iter().filter(|index| {
-                index_domains_overlap(self.graph(), index.key_type, target_index.key_type)
+                index_domains_overlap(self.graph().store(), index.key_type, target_index.key_type)
             }) {
                 acc = result_and(
                     acc,
@@ -9186,7 +9188,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A product taken whole under the checker's limit stays under it
         // however the checker divides or simplifies it: accepted from the
         // widths alone, with nothing built or charged.
-        if !any_union || super::canonical_algebra::cross_product_under_limit(graph, &arms) {
+        if !any_union || super::canonical_algebra::cross_product_under_limit(graph.store(), &arms) {
             return None;
         }
         let nullability =
@@ -10111,7 +10113,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut undecided = false;
         let mut identical = |member: SemanticNodeId, target: SemanticNodeId| {
             match super::canonical_algebra::compare_structural(
-                graph,
+                graph.store(),
                 member,
                 target,
                 &mut evidence,
@@ -11259,7 +11261,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         required.iter().any(|target_key| {
             !declared
                 .iter()
-                .any(|source_key| index_key_applies(graph, *source_key, *target_key))
+                .any(|source_key| index_key_applies(graph.store(), *source_key, *target_key))
         })
     }
 
@@ -11567,7 +11569,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .all(|(source, target)| {
                         matches!(
                             super::canonical_algebra::compare_structural(
-                                self.graph(),
+                                self.graph().store(),
                                 *source,
                                 *target,
                                 &mut evidence,
@@ -12347,7 +12349,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let value_reads_modifiers_member = modifier_index.is_some()
             && mapper.modifiers_type.is_some_and(|modifiers| {
                 crate::semantic_query::MapperKind::classify_value_expr(
-                    graph,
+                    &graph,
                     mapper.value_expr,
                     modifiers,
                     mapper.parameter_node,
@@ -12850,10 +12852,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // The strict subtype relation infers no index signature for
                 // a source that declares none, an object literal's own type
                 // aside (the checker's `typeRelatedToIndexInfo`).
-                let applicable_source_index = source_view
-                    .index_signatures
-                    .iter()
-                    .any(|s_index| index_domains_overlap(graph, s_index.key_type, key_type));
+                let applicable_source_index = source_view.index_signatures.iter().any(|s_index| {
+                    index_domains_overlap(graph.store(), s_index.key_type, key_type)
+                });
                 if self.strict_subtype_mode()
                     && !applicable_source_index
                     && !surface_is_object_literal(source_view)
@@ -12864,7 +12865,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     bindings: Arc::from(Vec::new().into_boxed_slice()),
                 };
                 for s_index in source_view.index_signatures.iter() {
-                    if !index_domains_overlap(graph, s_index.key_type, key_type) {
+                    if !index_domains_overlap(graph.store(), s_index.key_type, key_type) {
                         continue;
                     }
                     let r = self.relate_member(
@@ -13058,7 +13059,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     match target
                         .project_known_key_accessor(&target_key)
                         .and_then(|accessor| {
-                            accessor.property_member(graph, |signature| {
+                            accessor.property_member(graph.store(), |signature| {
                                 self.materialize_returned_callable(signature)
                             })
                         }) {
@@ -13079,7 +13080,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => t_prop,
             };
             if let Some(accessor) = source_keys.project_known_key_accessor(&target_key) {
-                let prop_result = match accessor.property_member(graph, |signature| {
+                let prop_result = match accessor.property_member(graph.store(), |signature| {
                     self.materialize_returned_callable(signature)
                 }) {
                     Some(source_member) => {
@@ -13615,7 +13616,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &crate::semantic_query::PropertyKey,
     ) -> bool {
         let graph = self.graph();
-        if index_signature_applies_to_property(graph, key_type, key) {
+        if index_signature_applies_to_property(graph.store(), key_type, key) {
             return true;
         }
         let name = match key {
@@ -13662,7 +13663,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if self.strict_subtype_mode()
             && !surface_is_object_literal(source)
             && !source.index_signatures.iter().any(|s_index| {
-                index_domains_overlap(graph, s_index.key_type, target_index.key_type)
+                index_domains_overlap(graph.store(), s_index.key_type, target_index.key_type)
             })
         {
             return RelationResult::NotAssignable;
@@ -13671,7 +13672,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
         for s_index in source.index_signatures.iter() {
-            if !index_domains_overlap(graph, s_index.key_type, target_index.key_type) {
+            if !index_domains_overlap(graph.store(), s_index.key_type, target_index.key_type) {
                 continue;
             }
             let r = self.relate_member(
@@ -15293,6 +15294,8 @@ fn recursion_identity_fingerprint(identity: &DeclIdentity) -> u64 {
 /// Only the structural reducer's finite semantic demands. The concrete
 /// implementation retains the root authority and transaction owner.
 trait RelationDemandDriver {
+    /// The capture execution the driver's dispatcher is compiled for.
+    type Observe: verter_audit::observe::ObserveExec;
     fn relate_literal_to_union(
         &self,
         source: SemanticNodeId,
@@ -15548,6 +15551,7 @@ trait RelationDemandDriver {
 impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     for ProjectSemanticDispatch<'_, C>
 {
+    type Observe = C::Observe;
     fn relate_literal_to_union(
         &self,
         source: SemanticNodeId,
@@ -15981,7 +15985,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
 /// query leases and transaction state remain private to the root driver.
 struct RelationCx<'a, D: RelationDemandDriver> {
     driver: &'a D,
-    arena: super::arena_ops::ArenaOps<'a>,
+    arena: super::arena_ops::ArenaOps<'a, D::Observe>,
 }
 impl<'a, C: crate::resolver_core::ResolverCapabilities>
     RelationCx<'a, ProjectSemanticDispatch<'a, C>>
@@ -16012,7 +16016,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         self.driver
             .relate_literal_union_to_union(members, target, bindings)
     }
-    fn graph(&self) -> &super::arena_ops::ArenaOps<'_> {
+    fn graph(&self) -> &super::arena_ops::ArenaOps<'_, D::Observe> {
         &self.arena
     }
     /// The type the checker relates an indexed access of a rigid type

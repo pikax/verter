@@ -215,8 +215,8 @@ pub(super) struct StringTagTest<'t> {
 }
 
 /// The text of a string literal node.
-pub(super) fn string_literal_text(
-    graph: &super::super::arena_ops::ArenaOps<'_>,
+pub(super) fn string_literal_text<M: verter_audit::observe::ObserveExec>(
+    graph: &super::super::arena_ops::ArenaOps<'_, M>,
     node: SemanticNodeId,
 ) -> Option<Arc<str>> {
     match graph.node_data(node).as_deref() {

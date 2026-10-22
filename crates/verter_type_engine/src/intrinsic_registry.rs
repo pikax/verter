@@ -187,12 +187,18 @@ impl IntrinsicRegistry {
     /// Lookup by resolved-declaration name. Only called after a
     /// declaration's body has resolved to `= intrinsic`; userland
     /// shadowing is handled upstream by normal declaration resolution and
-    /// never reaches this table.
+    /// never reaches this table. `M` is the looking-up unit's capture
+    /// execution: only a captured one counts the lookup into its request.
     #[must_use]
-    pub fn lookup(&self, name: &str) -> IntrinsicLookup {
+    pub fn lookup<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &crate::request_observers::CaptureTargets,
+        name: &str,
+    ) -> IntrinsicLookup {
+        let _ = observation;
         let entries = self.entries.read();
         let result = entries.get(name).copied();
-        if let Some(rctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(M => on observation.request.as_deref() => |rctx| {
             if result.is_some() {
                 rctx.cache_counters
                     .intrinsic_registry
@@ -204,7 +210,7 @@ impl IntrinsicRegistry {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         match result {
             Some(impl_id) => IntrinsicLookup::Found(impl_id),
             None => IntrinsicLookup::Unsupported {
@@ -334,7 +340,10 @@ mod tests {
     #[test]
     fn lookup_returns_unsupported_for_unknown() {
         let reg = IntrinsicRegistry::with_defaults();
-        match reg.lookup("TotallyNewIntrinsicInNextSdk") {
+        match reg.lookup::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            "TotallyNewIntrinsicInNextSdk",
+        ) {
             IntrinsicLookup::Unsupported { name } => {
                 assert_eq!(name.as_ref(), "TotallyNewIntrinsicInNextSdk");
             }
@@ -345,7 +354,10 @@ mod tests {
     #[test]
     fn lookup_returns_found_for_registered() {
         let reg = IntrinsicRegistry::with_defaults();
-        match reg.lookup("Uppercase") {
+        match reg.lookup::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            "Uppercase",
+        ) {
             IntrinsicLookup::Found(id) => {
                 assert_eq!(id, IntrinsicImpl::UppercaseString);
             }
@@ -389,7 +401,10 @@ type   NoInfer   <   T  >   = intrinsic   ;
     fn registry_round_trip_register_and_lookup() {
         let reg = IntrinsicRegistry::new();
         reg.register("Custom", IntrinsicImpl::NoInfer);
-        match reg.lookup("Custom") {
+        match reg.lookup::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            "Custom",
+        ) {
             IntrinsicLookup::Found(id) => assert_eq!(id, IntrinsicImpl::NoInfer),
             other => panic!("expected Found, got {other:?}"),
         }

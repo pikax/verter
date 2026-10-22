@@ -766,7 +766,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let mut program = QueryProgram {
             dispatch,
-            graph,
+            graph: graph.store(),
             task: graph.execution_task(),
             retries: FxHashMap::default(),
             child_depth: 1,
@@ -1407,9 +1407,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ),
         ValueRead,
     > {
-        crate::request_context::with_current_request_context(|ctx| {
-            ctx.record_dispatched_query_tag(key.tag())
-        });
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| { ctx.record_dispatched_query_tag(key.tag()) });
         let (_connected_guard, preexisting_trip) = self.enter_connected_demand(false);
         let query_depth_guard =
             self.charge_query_entry(key, preexisting_trip, nesting.query_levels() > 0)?;

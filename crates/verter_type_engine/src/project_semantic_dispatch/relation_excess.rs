@@ -1080,7 +1080,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return ArmKnows::Yes;
                 }
                 for info in view.index_signatures.iter() {
-                    if index_signature_applies_to_property(graph, info.key_type, key) {
+                    if index_signature_applies_to_property(graph.store(), info.key_type, key) {
                         return ArmKnows::Yes;
                     }
                 }
@@ -1187,7 +1187,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return Some(member.value);
                 }
                 for info in view.index_signatures.iter() {
-                    if index_signature_applies_to_property(graph, info.key_type, key) {
+                    if index_signature_applies_to_property(graph.store(), info.key_type, key) {
                         return Some(info.value_type);
                     }
                 }

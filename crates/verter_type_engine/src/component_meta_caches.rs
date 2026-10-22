@@ -72,7 +72,7 @@
 //! never holds an independent dep-signature, and never invalidates
 //! independently. The mirror clears on engine drop (per-request scope).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use verter_session_query::retention::heap_size::OwnedTree;
 
@@ -263,10 +263,10 @@ impl ImportedRegistryDb {
     }
 
     pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
+        Self::with_counter(crate::cache_runtime::OccupancyCounter::new())
     }
 
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counter(live_counter: crate::cache_runtime::OccupancyCounter) -> Self {
         Self::with_counter_and_schema_version(
             live_counter,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
@@ -277,10 +277,16 @@ impl ImportedRegistryDb {
     /// Used by `cache_invariant_migration` fixtures.
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+        Self::with_counter_and_schema_version(
+            crate::cache_runtime::OccupancyCounter::new(),
+            schema_version,
+        )
     }
 
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
+    fn with_counter_and_schema_version(
+        live_counter: crate::cache_runtime::OccupancyCounter,
+        schema_version: u32,
+    ) -> Self {
         Self {
             store: crate::cache_runtime::ReverseIndexedCandidateStore::with_counter(live_counter),
             inflight: InflightTable::new(),
@@ -430,7 +436,7 @@ pub type DeclarationLookupKey = (
 pub struct DeclarationLookupDb {
     entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<OwnedTree<ResolvedTypeDeclaration>>>>,
     inflight: InflightTable<QueryFlightKey<DeclarationLookupKey>>,
-    live_counter: Arc<AtomicU64>,
+    live_counter: crate::cache_runtime::OccupancyCounter,
     /// The account this cache's entries are charged to.
     retention: verter_session_query::retention::StoreAccount,
 }
@@ -464,10 +470,10 @@ impl DeclarationLookupDb {
     }
 
     pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
+        Self::with_counter(crate::cache_runtime::OccupancyCounter::new())
     }
 
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counter(live_counter: crate::cache_runtime::OccupancyCounter) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
@@ -499,10 +505,7 @@ impl DeclarationLookupDb {
     pub fn invalidate_all(&self) {
         let n = self.entries.len() as u64;
         self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
+        self.live_counter.saturating_sub(n);
     }
 
     pub fn live_count(&self) -> usize {
@@ -540,7 +543,7 @@ pub type ResolvabilityKey = (
 pub struct ResolvabilityDb {
     entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>,
     inflight: InflightTable<QueryFlightKey<ResolvabilityKey>>,
-    live_counter: Arc<AtomicU64>,
+    live_counter: crate::cache_runtime::OccupancyCounter,
     /// The account this cache's entries are charged to.
     retention: verter_session_query::retention::StoreAccount,
 }
@@ -571,10 +574,10 @@ impl ResolvabilityDb {
     }
 
     pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
+        Self::with_counter(crate::cache_runtime::OccupancyCounter::new())
     }
 
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counter(live_counter: crate::cache_runtime::OccupancyCounter) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
@@ -606,10 +609,7 @@ impl ResolvabilityDb {
     pub fn invalidate_all(&self) {
         let n = self.entries.len() as u64;
         self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
+        self.live_counter.saturating_sub(n);
     }
 
     pub fn live_count(&self) -> usize {
@@ -663,7 +663,7 @@ pub struct OwnerCollectionDb {
         Arc<CacheEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>>,
     >,
     inflight: InflightTable<QueryFlightKey<OwnerCollectionKey>>,
-    live_counter: Arc<AtomicU64>,
+    live_counter: crate::cache_runtime::OccupancyCounter,
     /// The account this cache's entries are charged to.
     retention: verter_session_query::retention::StoreAccount,
 }
@@ -697,10 +697,10 @@ impl OwnerCollectionDb {
     }
 
     pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
+        Self::with_counter(crate::cache_runtime::OccupancyCounter::new())
     }
 
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counter(live_counter: crate::cache_runtime::OccupancyCounter) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
@@ -732,10 +732,7 @@ impl OwnerCollectionDb {
     pub fn invalidate_all(&self) {
         let n = self.entries.len() as u64;
         self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
+        self.live_counter.saturating_sub(n);
     }
 
     pub fn live_count(&self) -> usize {
@@ -1252,7 +1249,7 @@ impl ShapeCacheKey {
 pub struct ShapeCacheDb {
     entries: DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedOutputTypeExpr>>>,
     inflight: InflightTable<QueryFlightKey<ShapeCacheKey>>,
-    live_counter: Arc<AtomicU64>,
+    live_counter: crate::cache_runtime::OccupancyCounter,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
@@ -1289,10 +1286,10 @@ impl ShapeCacheDb {
     }
 
     pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
+        Self::with_counter(crate::cache_runtime::OccupancyCounter::new())
     }
 
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counter(live_counter: crate::cache_runtime::OccupancyCounter) -> Self {
         Self::with_counter_and_schema_version(
             live_counter,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
@@ -1303,10 +1300,16 @@ impl ShapeCacheDb {
     /// Used by `cache_invariant_migration` fixtures.
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+        Self::with_counter_and_schema_version(
+            crate::cache_runtime::OccupancyCounter::new(),
+            schema_version,
+        )
     }
 
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
+    fn with_counter_and_schema_version(
+        live_counter: crate::cache_runtime::OccupancyCounter,
+        schema_version: u32,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
@@ -1338,10 +1341,7 @@ impl ShapeCacheDb {
     pub fn invalidate_all(&self) {
         let n = self.entries.len() as u64;
         self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
+        self.live_counter.saturating_sub(n);
     }
 
     pub fn live_count(&self) -> usize {

@@ -987,6 +987,8 @@ fn det_05_cache_lifecycle() {
     drive_det_05_subset();
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// DET-05's partial-resident-cache axis ([`det_05_cache_lifecycle`]).
 #[test]
 fn det_05_partial_resident_cache() {
@@ -1039,15 +1041,18 @@ fn det_05_persisted_axis_is_dormant_while_no_semantic_cache_serializes() {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// The family memo's retention bound on DET-05's partial-cache host. The
 /// memo admits families in order and evicts the oldest past its bound; the
 /// production bound is one setting of that same FIFO eviction, and a small
 /// one keeps the flood of cold questions that overruns it cheap.
 const PARTIAL_CACHE_FAMILY_CAP: usize = 64;
 
+#[cfg(feature = "semantic-observe")]
 /// More distinct answered questions than the family memo retains.
 const FAMILY_EVICTION_FLOOD: usize = PARTIAL_CACHE_FAMILY_CAP + PARTIAL_CACHE_FAMILY_CAP / 2;
 
+#[cfg(feature = "semantic-observe")]
 /// DET-05's partial-cache axis in the product's own terms. The family memo
 /// is bounded, so a host that has answered more distinct questions than the
 /// bound holds a PARTIAL cache: its oldest answers evicted, the rest

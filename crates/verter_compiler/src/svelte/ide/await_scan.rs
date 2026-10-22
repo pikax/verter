@@ -44,7 +44,11 @@ use crate::code_transform::CodeTransform;
 /// inserted at `await_end` (== `ARG`'s end), preserving the original `ARG` bytes
 /// for hover / mapping. Diagnostics are NOT emitted here — the caller records
 /// them against the absolute source span (see `record_await_diagnostics_in`).
-pub(super) fn rewrite_await_exprs_on(ct: &mut CodeTransform, base: u32, text: &str) {
+pub(super) fn rewrite_await_exprs_on(
+    ct: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
+    base: u32,
+    text: &str,
+) {
     apply_await_rewrite(
         ct,
         scan_await_positions(text).into_iter().map(|at| {
@@ -65,7 +69,10 @@ pub(super) fn rewrite_await_exprs_on(ct: &mut CodeTransform, base: u32, text: &s
 /// parse-wrapper path) both funnel their translated positions here, so there is
 /// exactly one byte-rewrite implementation. The `[keyword_start, arg_start)` run
 /// is overwritten with the wrapper open and a `)` is inserted at `await_end`.
-fn apply_await_rewrite(ct: &mut CodeTransform, positions: impl Iterator<Item = AwaitPosition>) {
+fn apply_await_rewrite(
+    ct: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
+    positions: impl Iterator<Item = AwaitPosition>,
+) {
     for at in positions {
         ct.overwrite(at.keyword_start, at.arg_start, "__verter_await_expr(");
         ct.append_left(at.await_end, ")");
@@ -96,7 +103,7 @@ const PATTERN_WRAPPER_PREFIX_LEN: u32 = "const [".len() as u32;
 /// path keeps NO parallel overwrite of its own. Positions landing inside the
 /// wrapper machinery (defensive) are dropped.
 pub(super) fn rewrite_pattern_default_awaits_on(
-    ct: &mut CodeTransform,
+    ct: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
     pattern_text: &str,
 ) -> bool {
     if !pattern_text.contains("await") {

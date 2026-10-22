@@ -45,7 +45,7 @@
 //! and the one a regression in `compile_prepared` would actually break.
 //! The batch leg's self-reported `CompileBatchReport::cold_build_count`
 //! is cross-checked against the same measurement rather than trusted on
-//! its own. Requires `--features attribution` (see `required-features` on
+//! its own. Requires `--features semantic-observe` (see `required-features` on
 //! this example in `Cargo.toml`) — without it
 //! `verter_audit::attribution::{read, reset}` do not exist in the build
 //! at all (that module's own doc: "There is no disabled stub returning
@@ -62,7 +62,7 @@
 //! numbers this harness produced about the very code it measures.
 //!
 //! Usage:
-//!   cargo run -p verter_bench --release --features attribution --example compiler_route_overhead
+//!   cargo run -p verter_bench --release --features semantic-observe --example compiler_route_overhead
 //!
 //! Environment variables:
 //!   VERTER_ROUTE_OVERHEAD_REPEATS   number of extra `compile_prepared` calls

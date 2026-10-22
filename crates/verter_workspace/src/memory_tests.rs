@@ -589,22 +589,27 @@ fn lazy_import_resolution_cache_invalidates_after_package_json_write() {
     let first = ws
         .resolve_import("/repo/src/App.vue", "pkg", ctx)
         .expect("initial package.json should resolve");
+    #[cfg(feature = "semantic-observe")]
     let after_first = ws.engine.vfs_provenance.snapshot();
     let second = ws
         .resolve_import("/repo/src/App.vue", "pkg", ctx)
         .expect("warm lazy cache lookup should resolve");
-    let after_second = ws.engine.vfs_provenance.snapshot();
 
     assert_eq!(first.source_id, "/repo/node_modules/pkg/dist/old.js");
     assert_eq!(second.source_id, first.source_id);
-    assert_eq!(
-        after_first.import_resolution_cache_miss_count, 1,
-        "first resolve should seed the lazy import cache",
-    );
-    assert_eq!(
-        after_second.import_resolution_cache_hit_count, 1,
-        "second resolve should come from the lazy import cache",
-    );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let after_second = ws.engine.vfs_provenance.snapshot();
+        assert_eq!(
+            after_first.import_resolution_cache_miss_count, 1,
+            "first resolve should seed the lazy import cache",
+        );
+        assert_eq!(
+            after_second.import_resolution_cache_hit_count, 1,
+            "second resolve should come from the lazy import cache",
+        );
+    }
 
     ws.inject_file(
         "/repo/node_modules/pkg/package.json".to_string(),
@@ -614,13 +619,18 @@ fn lazy_import_resolution_cache_invalidates_after_package_json_write() {
     let third = ws
         .resolve_import("/repo/src/App.vue", "pkg", ctx)
         .expect("updated package.json should resolve");
-    let after_third = ws.engine.vfs_provenance.snapshot();
     assert_eq!(
         third.source_id, "/repo/node_modules/pkg/dist/new.js",
         "content-generation invalidation should drop the stale lazy import cache entry",
     );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
-        after_third.import_resolution_cache_miss_count, 2,
+        ws.engine
+            .vfs_provenance
+            .snapshot()
+            .import_resolution_cache_miss_count,
+        2,
         "post-write resolve should rebuild the lazy import cache instead of serving stale data",
     );
 }

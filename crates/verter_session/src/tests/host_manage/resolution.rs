@@ -74,7 +74,7 @@ export interface CheckboxProps {
     let initial_view = host.resolver_store_view_read().into_owned_view();
     assert!(
         matches!(
-            host.prepared_type_decl_in_with_store_view(
+            host.prepared_type_decl_in_with_store_view::<verter_audit::observe::Uncaptured>(&verter_type_engine::request_observers::CaptureTargets::EMPTY,
                 &initial_view,
                 None,
                 "/workspace/Checkbox.vue",
@@ -947,6 +947,8 @@ export type FancyProps = Local
     assert_eq!(prepared.root_identity.symbol_name.as_ref(), "Local");
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolver_store_view_does_not_materialize_tracked_indexed_ready() {
@@ -1305,7 +1307,11 @@ fn cached_import_route_resolution_reuses_untracked_current_version_across_epoch_
         "routed shallow seeding should build the current provider surface after the view snapshot",
     );
 
-    let resolved = host.cached_import_route_resolution(provider, "./inner.d.ts");
+    let resolved = host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+        &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+        provider,
+        "./inner.d.ts",
+    );
     assert_eq!(
         resolved
             .as_ref()
@@ -1320,7 +1326,11 @@ fn cached_import_route_resolution_reuses_untracked_current_version_across_epoch_
         "export const changed = 1",
     );
 
-    let resolved = host.cached_import_route_resolution(provider, "./inner.d.ts");
+    let resolved = host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+        &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+        provider,
+        "./inner.d.ts",
+    );
     assert_eq!(
         resolved
             .as_ref()
@@ -3417,6 +3427,8 @@ const variant: Variant = 'primary'
 /// and must not lower unrelated declarations in the owner. Reintroducing an
 /// owner-wide wrapper-candidate scan, or resolving at the analyzer boundary,
 /// makes the cold read count non-zero.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn return_wrapper_demand_does_not_read_unrelated_cold_wrapper_import() {
     /// Resolve one requested return head in a fresh host whose owner file
@@ -6005,6 +6017,8 @@ export interface IconProps {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_native_props_skip_imported_declaration_builds() {
@@ -6588,6 +6602,8 @@ import { imported_obj } from './attrs'
 ///
 /// Full verification requires read/parse counter instrumentation on the host,
 /// which is not available in the standalone test harness.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn solver_host_same_request_macro_and_fallthrough_single_pass() {
     let host = VerterHost::new_standalone(HostConfig {
@@ -6770,12 +6786,18 @@ export type Props = { render: typeof Button }
 
 #[cfg(test)]
 mod imported_root_trace_dedup_tests {
+    #[cfg(feature = "semantic-observe")]
     use super::super::*;
+    #[cfg(feature = "semantic-observe")]
     use crate::component_meta_audit::structured_event::StructuredAuditEvent;
+    #[cfg(feature = "semantic-observe")]
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    #[cfg(feature = "semantic-observe")]
     use verter_type_engine::request_footprint::RequestFootprintAccumulator;
+    #[cfg(feature = "semantic-observe")]
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
+    #[cfg(feature = "semantic-observe")]
     fn host_with_props_ts() -> Arc<VerterHost> {
         let workspace: Arc<dyn WorkspaceAccess> =
             Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
@@ -6810,6 +6832,8 @@ mod imported_root_trace_dedup_tests {
         host
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn resolve_imported_type_root_traces_once_per_cache_miss_not_per_call() {
         let host = host_with_props_ts();

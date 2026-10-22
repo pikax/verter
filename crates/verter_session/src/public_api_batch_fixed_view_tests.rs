@@ -187,6 +187,8 @@ fn public_api_batch(host: &VerterHost, ids: &[&str]) -> Vec<Option<TscResponse>>
 /// delta is a small constant. The companion `>= 1` assertion proves the
 /// counter is LIVE (the capture's read was counted), so a dead counter cannot
 /// trivially satisfy `< N` with 0.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn warm_public_api_batch_from_host_calls_are_o1_not_per_item() {
     use std::sync::atomic::Ordering::Relaxed;

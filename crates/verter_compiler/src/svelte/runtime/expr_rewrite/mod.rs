@@ -75,6 +75,7 @@ pub(super) fn rewrite_script_statement(
     scope: ScopeId,
     context: RewriteContext<'_>,
 ) -> Result<MappedCode, UnsupportedSvelteRuntimeSurface> {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let edits = plan::plan_script_statement_edits(
         statement,
         RewriteResolveCtx {
@@ -106,7 +107,7 @@ pub(super) fn rewrite_script_statement(
         .min()
         .unwrap_or(span.start);
     let alloc = Allocator::default();
-    let mut transform = CodeTransform::new(source, &alloc);
+    let mut transform = CodeTransform::<M>::new_in(source, &alloc);
     if render_start > 0 {
         transform.remove(0, render_start);
     }
@@ -133,9 +134,14 @@ pub(super) fn rewrite_script_statement(
         0,
         source.len() as u32,
     ))
+
+    })
 }
 
-fn apply_edits(transform: &mut CodeTransform<'_>, edits: &[Edit]) {
+fn apply_edits(
+    transform: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
+    edits: &[Edit],
+) {
     for edit in edits {
         match edit {
             Edit::Overwrite {
@@ -542,6 +548,7 @@ fn rewrite_expression_program(
     role: RewriteRole,
     program: &Program<'_>,
 ) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let wrapped = format!("({source})");
     let Some(Statement::ExpressionStatement(stmt)) = program.body.first() else {
         return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
@@ -576,7 +583,7 @@ fn rewrite_expression_program(
     )?;
 
     let ct_alloc = Allocator::default();
-    let mut ct = CodeTransform::new(&wrapped, &ct_alloc);
+    let mut ct = CodeTransform::<M>::new_in(&wrapped, &ct_alloc);
     // (1) Strip TypeScript syntax through the dedicated machinery (the §F rule —
     // `as`/`satisfies`/`!`/type assertions/instantiation type args), the SAME path
     // the statement lowering uses. The strip and the signal-read rewrites are
@@ -608,6 +615,8 @@ fn rewrite_expression_program(
     );
     let (text, mappings) = mapped.into_parts();
     Ok(RewrittenExpr { text, mappings })
+
+    })
 }
 
 fn mapped_code_from_built(

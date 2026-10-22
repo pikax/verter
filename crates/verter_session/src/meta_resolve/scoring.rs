@@ -44,10 +44,10 @@ fn publication_score_improves(candidate: &PublicationScore, current: &Publicatio
 /// Scoring an unraisable node as `PublicationScore::default()` would be WRONG:
 /// its zero symbolic carriers would beat any symbolic current
 /// (`0 < current.symbolic_carriers`), wrongly preferring the shapeless candidate.
-pub(crate) fn compare_node_improvement(
+pub(crate) fn compare_node_improvement<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     candidate: verter_type_engine::semantic_query::SemanticNodeId,
     current: verter_type_engine::semantic_query::SemanticNodeId,
@@ -77,10 +77,10 @@ pub(crate) fn compare_node_improvement(
 /// `Pick` / `Omit` / `Record` builtin-utility reference). Reads the carrier kind
 /// directly (peeling `Alias`); a builtin-utility name is matched on the
 /// reference's declaration name.
-pub(crate) fn node_root_is_explicit_selector_operator(
+pub(crate) fn node_root_is_explicit_selector_operator<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {

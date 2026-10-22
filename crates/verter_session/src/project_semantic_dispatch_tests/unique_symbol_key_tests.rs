@@ -96,7 +96,7 @@ fn a_unique_symbol_key_type_is_retained_by_its_key_union_and_released_on_close()
         source,
         "Keys<keyof HasSym>",
         |dispatch, keys| {
-            let graph = dispatch.graph();
+            let graph = dispatch.graph_arc();
             let members: Vec<SemanticNodeId> = match graph.node_data(keys).as_deref() {
                 Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
                 other => panic!("two keys make a union, got {other:?}"),

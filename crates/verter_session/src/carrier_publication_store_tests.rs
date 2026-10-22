@@ -672,6 +672,8 @@ fn waiter_cancellation_detaches_without_cancelling_authority_owned_leader() {
     assert_eq!(store.audit_snapshot().parser_started, 1);
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn scheduled_semantic_host_ingests_the_identical_registered_artifact_arc() {
     use std::sync::atomic::Ordering;
@@ -1145,6 +1147,8 @@ fn leader_panic_publishes_one_typed_terminal_and_audit_failure() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn cancelled_request_never_enters_a_publication_lane() {
     let (source, grammar) = authorities();
@@ -1178,6 +1182,8 @@ fn cancelled_request_never_enters_a_publication_lane() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn elected_publication_parses_once_and_warm_get_does_not_reparse() {
     let (source, grammar) = authorities();

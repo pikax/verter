@@ -12,7 +12,9 @@ use crate::resolution_currency::{
     CanonicalResolutionId, ResolutionEpoch, ResolutionFactKey, ResolutionFactVersion,
 };
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge, VfsProvenanceSnapshot};
+#[cfg(feature = "semantic-observe")]
+use crate::types::VfsProvenanceSnapshot;
+use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
 use verter_session_query::resolution::{
     normalize_canonical_id, AttemptFailure, IdeProjectConfig, PathProbe as ProbeOutcome,
     ResolutionContext, ResolutionPopulation, ResolvePhase, ResolveRequestKind, ResolveResult,
@@ -223,6 +225,7 @@ fn resolve(
     engine.resolve_import(reader, importer, specifier, CONTEXT)
 }
 
+#[cfg(feature = "semantic-observe")]
 fn provenance(engine: &Engine) -> VfsProvenanceSnapshot {
     engine.vfs_provenance.snapshot()
 }
@@ -257,20 +260,25 @@ fn assert_warm_hit(
     specifier: &str,
     expected_source: &str,
 ) {
+    #[cfg(feature = "semantic-observe")]
     let before = provenance(engine);
     let result = resolve(engine, reader, importer, specifier)
         .unwrap_or_else(|| panic!("{importer} {specifier} must remain resolvable"));
-    let after = provenance(engine);
     assert_eq!(result.source_id, expected_source);
-    assert_eq!(
-        after.import_resolution_cache_miss_count, before.import_resolution_cache_miss_count,
-        "an unchanged witness must not rerun resolution"
-    );
-    assert_eq!(
-        after.import_resolution_cache_hit_count,
-        before.import_resolution_cache_hit_count + 1,
-        "an unchanged witness must reuse its validating candidate"
-    );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let after = provenance(engine);
+        assert_eq!(
+            after.import_resolution_cache_miss_count, before.import_resolution_cache_miss_count,
+            "an unchanged witness must not rerun resolution"
+        );
+        assert_eq!(
+            after.import_resolution_cache_hit_count,
+            before.import_resolution_cache_hit_count + 1,
+            "an unchanged witness must reuse its validating candidate"
+        );
+    }
 }
 
 fn warm_positive(
@@ -291,20 +299,25 @@ fn assert_recomputed_once(
     specifier: &str,
     expected_source: &str,
 ) {
+    #[cfg(feature = "semantic-observe")]
     let before = provenance(engine);
     let result = resolve(engine, reader, importer, specifier)
         .unwrap_or_else(|| panic!("{importer} {specifier} must recompute"));
-    let after = provenance(engine);
     assert_eq!(result.source_id, expected_source);
-    assert_eq!(
-        after.import_resolution_cache_miss_count,
-        before.import_resolution_cache_miss_count + 1,
-        "an affected witness must miss exactly once"
-    );
-    assert_eq!(
-        after.import_resolution_cache_hit_count, before.import_resolution_cache_hit_count,
-        "the invalidated candidate must not be reported as a warm hit"
-    );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let after = provenance(engine);
+        assert_eq!(
+            after.import_resolution_cache_miss_count,
+            before.import_resolution_cache_miss_count + 1,
+            "an affected witness must miss exactly once"
+        );
+        assert_eq!(
+            after.import_resolution_cache_hit_count, before.import_resolution_cache_hit_count,
+            "the invalidated candidate must not be reported as a warm hit"
+        );
+    }
 }
 
 fn assert_typed_probe_return_only(expected: ProbeOutcome) {
@@ -321,23 +334,28 @@ fn assert_typed_probe_return_only(expected: ProbeOutcome) {
         probes_after_first > 0,
         "the first request must actually observe typed {expected:?}"
     );
+    #[cfg(feature = "semantic-observe")]
     let before_second = provenance(&engine);
     assert!(resolve(&engine, &reader, "/p/main.ts", "./dep").is_none());
-    let after_second = provenance(&engine);
     assert!(
         reader.observed_probe_count(expected) > probes_after_first,
         "an observed {expected:?} must force typed non-admission, so a later \
          request probes again"
     );
-    assert_eq!(
-        after_second.import_resolution_cache_miss_count,
-        before_second.import_resolution_cache_miss_count + 1
-    );
-    assert_eq!(
-        after_second.import_resolution_cache_hit_count,
-        before_second.import_resolution_cache_hit_count,
-        "{expected:?} must never be admitted as a cacheable Absent"
-    );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let after_second = provenance(&engine);
+        assert_eq!(
+            after_second.import_resolution_cache_miss_count,
+            before_second.import_resolution_cache_miss_count + 1
+        );
+        assert_eq!(
+            after_second.import_resolution_cache_hit_count,
+            before_second.import_resolution_cache_hit_count,
+            "{expected:?} must never be admitted as a cacheable Absent"
+        );
+    }
 }
 
 #[test]
@@ -1487,23 +1505,28 @@ fn resolution_currency_project_provider_change_retargets_selected_context_only()
     }];
     WorkspaceAccess::configure_resolver(&workspace, vec![changed]);
 
+    #[cfg(feature = "semantic-observe")]
     let before = workspace.vfs_provenance_snapshot();
     assert!(WorkspaceRead::resolve_import(&workspace, "/p/main.ts", "@dep", CONTEXT).is_some());
     assert!(
         WorkspaceRead::resolve_import(&workspace, "/outside/main.ts", "./stable", CONTEXT)
             .is_some()
     );
-    let after = workspace.vfs_provenance_snapshot();
-    assert_eq!(
-        after.import_resolution_cache_miss_count,
-        before.import_resolution_cache_miss_count + 1,
-        "only the query whose ContextSelection changed may miss"
-    );
-    assert_eq!(
-        after.import_resolution_cache_hit_count,
-        before.import_resolution_cache_hit_count + 1,
-        "the unrelated context must stay warm"
-    );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let after = workspace.vfs_provenance_snapshot();
+        assert_eq!(
+            after.import_resolution_cache_miss_count,
+            before.import_resolution_cache_miss_count + 1,
+            "only the query whose ContextSelection changed may miss"
+        );
+        assert_eq!(
+            after.import_resolution_cache_hit_count,
+            before.import_resolution_cache_hit_count + 1,
+            "the unrelated context must stay warm"
+        );
+    }
 }
 
 #[test]
@@ -1529,22 +1552,27 @@ fn overlay_workspace() -> crate::memory::MemoryWorkspace {
     workspace
 }
 
-fn assert_memory_workspace_warm(
-    workspace: &crate::memory::MemoryWorkspace,
-    before: VfsProvenanceSnapshot,
-) {
+/// The effective dep path still resolves, and (in the instrumentation lane)
+/// is served warm: no new miss, one more hit.
+fn assert_memory_workspace_warm(workspace: &crate::memory::MemoryWorkspace) {
+    #[cfg(feature = "semantic-observe")]
+    let before = workspace.vfs_provenance_snapshot();
     let result = WorkspaceRead::resolve_import(workspace, "/p/main.ts", "./dep", CONTEXT)
         .expect("the effective dep path must remain resolvable");
     assert_eq!(result.source_id, "/p/dep.ts");
-    let after = workspace.vfs_provenance_snapshot();
-    assert_eq!(
-        after.import_resolution_cache_miss_count,
-        before.import_resolution_cache_miss_count
-    );
-    assert_eq!(
-        after.import_resolution_cache_hit_count,
-        before.import_resolution_cache_hit_count + 1
-    );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let after = workspace.vfs_provenance_snapshot();
+        assert_eq!(
+            after.import_resolution_cache_miss_count,
+            before.import_resolution_cache_miss_count
+        );
+        assert_eq!(
+            after.import_resolution_cache_hit_count,
+            before.import_resolution_cache_hit_count + 1
+        );
+    }
 }
 
 #[test]
@@ -1553,8 +1581,7 @@ fn resolution_currency_overlay_open_advances_only_changed_effective_facts() {
     assert!(WorkspaceRead::resolve_import(&workspace, "/p/main.ts", "./dep", CONTEXT).is_some());
 
     WorkspaceAccess::notify_upsert(&workspace, "/p/dep.ts", Arc::from("export const dep = 2"));
-    let before = workspace.vfs_provenance_snapshot();
-    assert_memory_workspace_warm(&workspace, before);
+    assert_memory_workspace_warm(&workspace);
 }
 
 #[test]
@@ -1564,8 +1591,7 @@ fn resolution_currency_overlay_close_advances_only_changed_effective_facts() {
     assert!(WorkspaceRead::resolve_import(&workspace, "/p/main.ts", "./dep", CONTEXT).is_some());
 
     WorkspaceAccess::notify_close(&workspace, "/p/dep.ts");
-    let before = workspace.vfs_provenance_snapshot();
-    assert_memory_workspace_warm(&workspace, before);
+    assert_memory_workspace_warm(&workspace);
 }
 
 #[test]
@@ -1583,8 +1609,7 @@ fn resolution_currency_overlay_reveal_tracks_effective_population_value() {
         Arc::from("export const hidden_base = 2"),
     );
     WorkspaceAccess::notify_close(&workspace, "/p/dep.ts");
-    let before = workspace.vfs_provenance_snapshot();
-    assert_memory_workspace_warm(&workspace, before);
+    assert_memory_workspace_warm(&workspace);
 }
 
 // ─── Resolution-currency invalidation invariants ────────────────────────

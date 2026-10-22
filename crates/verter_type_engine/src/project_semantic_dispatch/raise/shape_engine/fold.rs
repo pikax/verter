@@ -92,7 +92,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
     #[cfg(any(test, feature = "test-support"))]
     FOLDED_NODES.with(|folded| folded.set(folded.get() + 1));
 
-    let data = node_data_for(dispatch.graph(), node)?;
+    let data = node_data_for(dispatch.graph().store(), node)?;
     Some(match data.as_ref() {
         SemanticNodeData::Primitive(kind) => {
             alg.primitive(semantic_primitive_to_primitive_name(*kind))
@@ -127,7 +127,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             // composite (never silently erased). Every member of an enum
             // raises as the enum, as the checker prints it.
             let folded: Vec<A::Out> =
-                crate::semantic_query::printed_union_arms(dispatch.graph(), members)
+                crate::semantic_query::printed_union_arms(dispatch.graph().store(), members)
                     .into_iter()
                     .map(|arm| match arm {
                         crate::semantic_query::PrintedUnionArm::Node(member) => {
@@ -152,7 +152,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             // the recurse closure's unique `alg` borrow.
             let keeps_empty_object =
                 crate::project_semantic_dispatch::canonical_algebra::is_kept_primitive_over_empty_object(
-                    dispatch.graph(),
+                    dispatch.graph().store(),
                     members.as_ref(),
                 );
             let arms: Vec<A::Out> = members
@@ -267,16 +267,16 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             alg.indexed_access(object, index)
         }
         SemanticNodeData::Mapped { mapper, .. } => {
-            let parameter = match node_data_for(dispatch.graph(), mapper.parameter_node).as_deref()
-            {
-                Some(SemanticNodeData::TypeParam { display_name, .. }) => {
-                    display_name.as_ref().to_string()
-                }
-                _ => String::new(),
-            };
+            let parameter =
+                match node_data_for(dispatch.graph().store(), mapper.parameter_node).as_deref() {
+                    Some(SemanticNodeData::TypeParam { display_name, .. }) => {
+                        display_name.as_ref().to_string()
+                    }
+                    _ => String::new(),
+                };
             // The source recurses KeyOf-aware (matching the materializer's
             // explicit KeyOf shell around the mapped source key-space base).
-            let source = match node_data_for(dispatch.graph(), mapper.key_space)?.as_ref() {
+            let source = match node_data_for(dispatch.graph().store(), mapper.key_space)?.as_ref() {
                 SemanticNodeData::KeyOf { base } => {
                     let base = fold_node(alg, dispatch, *base, active)?;
                     alg.key_of(base)
@@ -874,7 +874,7 @@ fn is_class_expression_prototype<C: crate::resolver_core::ResolverCapabilities>(
         && member.key.as_string() == Some("prototype")
         && member.spans == verter_type_expr::MemberSpans::default()
         && matches!(
-            node_data_for(dispatch.graph(), member.value).as_deref(),
+            node_data_for(dispatch.graph().store(), member.value).as_deref(),
             Some(SemanticNodeData::ClassExpressionInstance { .. })
         )
 }

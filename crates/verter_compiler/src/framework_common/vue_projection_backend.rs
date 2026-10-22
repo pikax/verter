@@ -541,7 +541,7 @@ impl VueProjectionBackend {
     /// harnesses call this path directly. STP58 owns Vue atomic activation.
     pub fn projection_emission(
         &self,
-        transform: &CodeTransform<'_>,
+        transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
         plan: &ProjectionPlan,
         canonical_id: &str,
         observations: Vec<RoleQualifiedObservation>,

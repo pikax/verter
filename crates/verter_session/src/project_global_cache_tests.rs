@@ -858,7 +858,11 @@ fn bundler_known_miss_is_never_served_warm_from_the_derived_route_cache() {
     // answer is still negative, so the read-side oracle refuses it and
     // the caller re-resolves through the one owner-edge authority.
     assert_eq!(
-        host.cached_import_route_resolution("/w/owner.ts", "./theme"),
+        host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            "/w/owner.ts",
+            "./theme"
+        ),
         None,
         "a known-miss must never be served warm, so no global generation \
          stamp can pin it current"
@@ -868,7 +872,11 @@ fn bundler_known_miss_is_never_served_warm_from_the_derived_route_cache() {
     // is now satisfiable. The stale negative still must not be served.
     upsert_ts(&host, "/w/theme.ts", "export default { item: 'item' }");
 
-    let post = host.cached_import_route_resolution("/w/owner.ts", "./theme");
+    let post = host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+        &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+        "/w/owner.ts",
+        "./theme",
+    );
     let is_negative_still_served = post
         .as_ref()
         .map(|res| res.resolved_canonical_id.is_none() && res.possible_canonical_ids.is_empty())

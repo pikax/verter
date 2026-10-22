@@ -22,7 +22,7 @@ use super::resolved_state::SurfaceNodeIdentities;
 // consumer was a composition test that has also been deleted
 // commit).
 
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 pub(crate) fn build_origin_graph(
     graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     construction: &verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,

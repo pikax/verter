@@ -156,10 +156,10 @@ async fn run_with_audit_publishes_record_when_audit_enabled(
         line: 1,
         character: 2,
     };
-    let result = audit_harness::run_with_audit::<u8, _, _>(
+    let result = audit_harness::run_with_audit::<u8, _, _, _>(
         &std::sync::Arc::clone(&host),
         LspMethodTag::Hover,
-        verter_audit::RequestTargetIdentity::RegisteredCanonical(canonical),
+        || verter_audit::RequestTargetIdentity::RegisteredCanonical(canonical),
         Some(position),
         async move { Ok(7u8) },
         |payload, value| {
@@ -180,10 +180,10 @@ async fn run_with_audit_short_circuits_when_audit_disabled(
     worker_pools: &Arc<TestHostWorkerPools>,
 ) {
     let host = fresh_host(HostConfig::default(), worker_pools);
-    let result = audit_harness::run_with_audit::<u8, _, _>(
+    let result = audit_harness::run_with_audit::<u8, _, _, _>(
         &std::sync::Arc::clone(&host),
         LspMethodTag::Hover,
-        verter_audit::RequestTargetIdentity::RegisteredCanonical("/probe.vue".to_string()),
+        || verter_audit::RequestTargetIdentity::RegisteredCanonical("/probe.vue".to_string()),
         Some(tower_lsp_server::ls_types::Position {
             line: 0,
             character: 0,

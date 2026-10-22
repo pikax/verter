@@ -1,9 +1,13 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use verter_audit::files::{FileAudit, FileRole};
+#[cfg(feature = "semantic-observe")]
 use verter_audit::origin_graph::VfsLayer;
+#[cfg(feature = "semantic-observe")]
 use verter_audit::payloads::WorkspacePayload;
+#[cfg(feature = "semantic-observe")]
 use verter_audit::{
     RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit, RequestStoreAudit,
     RequestTargetIdentity, RequestTimingAudit, WorkspaceOp,
@@ -19,9 +23,10 @@ use verter_language::FileLanguage;
 use verter_session_query::resolution::ProjectId;
 use verter_session_query::resolution::ProjectStableKey;
 use verter_session_query::resolution::{
-    AmbientSymbolHit, ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind,
-    ResolveResult,
+    AmbientSymbolHit, ProjectOwnership, ResolutionContext, ResolveResult,
 };
+#[cfg(feature = "semantic-observe")]
+use verter_session_query::resolution::{ResolvePhase, ResolveRequestKind};
 
 /// Lightweight resource snapshot for first-class Rust audit.
 #[derive(Debug, Clone, Default)]
@@ -112,6 +117,18 @@ pub trait WorkspaceRead: Send + Sync {
     /// Read file content. Returns overlay content if set, otherwise
     /// snapshot/disk content. Returns `None` if the file doesn't exist.
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>>;
+
+    /// Read under the capture execution selected by the caller's root.
+    /// Plain `read_file` is uncaptured and performs no observation polling.
+    /// Custom workspaces may leave capture unsupported and serve the same bytes.
+    #[cfg(feature = "semantic-observe")]
+    fn read_file_captured(
+        &self,
+        canonical_id: &str,
+        _capture: &crate::audit_sink::VfsReadCapture,
+    ) -> Option<Arc<str>> {
+        self.read_file(canonical_id)
+    }
 
     /// Trace-only detail about the most recent `read_file()` on the current
     /// thread for this canonical path, if the workspace can provide it.
@@ -580,7 +597,10 @@ pub trait WorkspaceRead: Send + Sync {
         None
     }
 
-    /// Point-in-time VFS provenance counters for observability and benchmarks.
+    /// Point-in-time VFS provenance counters for tests and measurement
+    /// builds. Exists only under the observation gate, where the counters
+    /// are kept.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         crate::types::VfsProvenanceSnapshot::default()
     }
@@ -1068,6 +1088,8 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// Register a VFS audit sink. The returned handle is deregister-able
     /// via [`deregister_audit_sink`]. Default: `NotSupported`.
     /// Concrete workspaces override to maintain a per-sink registry.
+    /// Optional capture: exists only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
     fn register_audit_sink(
         &self,
         _sink: Arc<dyn crate::audit_sink::VfsAuditSink>,
@@ -1078,6 +1100,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// Deregister a previously-registered VFS audit sink. Default:
     /// `NotSupported`. Concrete workspaces override to complete the
     /// RAII-style registration lifecycle.
+    #[cfg(feature = "semantic-observe")]
     fn deregister_audit_sink(
         &self,
         _handle: crate::audit_sink::SinkHandle,
@@ -1227,6 +1250,9 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// [`verter_execution::request_context::current_request_id`]
     /// so a registration installed by the host will already be
     /// visible when the trait method runs.
+    ///
+    /// Optional capture: exists only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
     fn audit_op(&self, op: WorkspaceOp) -> RequestAuditRecord {
         let request_id = verter_execution::request_context::current_request_id().unwrap_or(0);
         let (canonical_id, target_identity) = match &op {
@@ -1347,6 +1373,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
 /// workspace operation visited. Bytes/timing are zero because
 /// `audit_op` does not load file content; the bytes/timing surfaces
 /// belong to the read-loop producers (Slices 3.A/3.B/3.C).
+#[cfg(feature = "semantic-observe")]
 fn workspace_audit_file_entry(canonical_id: &str, role: FileRole) -> FileAudit {
     FileAudit {
         canonical_id: canonical_id.to_string(),

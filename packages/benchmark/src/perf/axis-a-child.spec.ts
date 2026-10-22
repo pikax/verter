@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, copyFileSync, existsSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -34,6 +35,17 @@ const FIXTURES = join(__dirname, "..", "fixtures");
 // present (local + the nightly/worktree runs) the carrier-output assertion is
 // strict: it must produce real carriers, never a vacuous "carrierCount may be 0".
 const nativeBuilt = existsSync(nativeEntry(NATIVE_ROOT));
+// The audited compile attribution (output_bytes, carrierCount) rides the
+// compile audit record, which exists only in a native build with
+// `semantic-observe`. A default build still compiles every SFC but reports
+// those audit-derived metrics as UNAVAILABLE.
+const nativeCaptured =
+  nativeBuilt &&
+  (
+    createRequire(import.meta.url)(nativeEntry(NATIVE_ROOT)) as {
+      captureAvailability?: () => string;
+    }
+  ).captureAvailability?.() === "Available";
 
 // A small slice of REAL .vue fixtures (committed in the benchmark package).
 const SLICE = ["tiny-template.vue", "simple-interactive.vue", "form-component.vue"];
@@ -49,7 +61,23 @@ afterAll(() => {
 });
 
 describe("axis-a-child native compile produces real carrier output", () => {
-  it.skipIf(!nativeBuilt)(
+  it.runIf(nativeBuilt && !nativeCaptured)(
+    "without audit capture the audit-derived metrics are UNAVAILABLE (null), never zero, while the content rail still hashes",
+    () => {
+      const sample = runAxisA({ nativeRoot: NATIVE_ROOT, corpusDir, threads: 1 });
+      expect(sample.sfcCount).toBe(SLICE.length);
+      // No compile record ⇒ no attribution: every audit-derived figure is
+      // null and no carrier is counted from audit output.
+      expect(sample.outputBytes).toBeNull();
+      expect(sample.codeTransformOps).toBeNull();
+      expect(sample.peakRssBytes).toBeNull();
+      expect(sample.carrierCount).toBe(0);
+      // The carrier-content rail reads compileRequest, not the audit record.
+      expect(sample.carrierContentHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    },
+  );
+
+  it.runIf(nativeCaptured)(
     "the chosen IDE carrier target yields carrierCount > 0 with audited output_bytes > 0 over a real .vue slice",
     () => {
       const sample = runAxisA({ nativeRoot: NATIVE_ROOT, corpusDir, threads: 1 });
@@ -198,7 +226,7 @@ describe("axis-A perf-gate metrics are gated ONLY on empirically-present audit s
     expect(axisBPeak!.requiresRust).toMatch(/per-pid|per-engine|process-tree|tsgo/i);
   });
 
-  it.skipIf(!nativeBuilt)(
+  it.runIf(nativeCaptured)(
     "every GATED axis-A metric source is non-null (>0) on a REAL runAxisA sample over the committed fixture slice",
     async () => {
       const axisA = readBaselineManifest().workloads["axis-a-codegen"];

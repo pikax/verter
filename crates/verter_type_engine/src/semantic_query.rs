@@ -1749,11 +1749,14 @@ impl CanonicalTypeSubstitution {
     /// substitution owns its operands in `graph`.
     #[must_use]
     pub fn new(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        graph: impl AsRef<crate::semantic_query_memo::SemanticGraphStore>,
         bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
     ) -> Self {
         Self::rooted(bindings, |operands| {
-            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(graph, operands)
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+                graph.as_ref(),
+                operands,
+            )
         })
     }
 
@@ -6320,6 +6323,7 @@ impl EdgeFence {
         }
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     /// A fence the edge store retains through `hold`.
     pub(crate) fn retained(
         signature: DepSignature,
@@ -6340,24 +6344,22 @@ impl std::ops::Deref for EdgeFence {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Telemetry — first-class observability surface (plan B2 + §7.4)
+// Telemetry — optional store measurement snapshot
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Public snapshot of the semantic graph store's telemetry counters. Read
-/// from `SemanticGraphStore::stats_snapshot()`. Per `SemanticGraphKey`
-/// variant counters are aggregated; per-builder counters are aggregated;
-/// path / projection / origin-edge metrics are reduced to p50 / p95 from
-/// host-side reservoir-sampled histograms (cap 8192 samples per metric).
+/// Snapshot of the semantic graph store's measurement-only counters. Read
+/// from `SemanticGraphStore::stats_snapshot()`, which exists only under the
+/// observation gate (`test`, `test-support` or `semantic-observe`): no
+/// production decision reads these counters, and a default build keeps
+/// none of them. Per-builder counters are aggregated; path-length and
+/// origin-edge metrics are reduced to p50 / p95 (the path-length reservoir
+/// caps at 8192 samples).
 ///
-/// Field set is normative against — every field listed there
-/// (expected-to-fire + exceptional-path) must appear here, and every
-/// field here must appear in one of those lists. F2's
-/// `counter_taxonomy_matches_plan` test enforces the bidirectional
-/// equality.
+/// Every field is listed by `counter_taxonomy_matches_plan` as
+/// expected-to-fire or exceptional-path, and that test enforces the
+/// bidirectional equality.
 ///
-/// Snapshots are immutable and safe to read mid-request. The trace-check
-/// harness, the benchmark pipeline, and the F3 corpus benchmark consume
-/// these snapshots directly.
+/// Snapshots are immutable and safe to read mid-request.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SemanticGraphStats {
     // ── Memo / coordination counters ────────────────────────────────
@@ -6389,7 +6391,6 @@ pub struct SemanticGraphStats {
     pub conditional_deferred_count: u64,
     pub branch_selections_true: u64,
     pub branch_selections_false: u64,
-    pub budget_fallback_count: u64,
     /// Cold `AwaitedNormalize` builds — one per family MISS that actually
     /// ran the reducer. A warm family hit never enters the builder, so a
     /// warm replay of an already-reduced operand leaves this UNCHANGED:
@@ -6402,12 +6403,10 @@ pub struct SemanticGraphStats {
     /// builds, and collapsing the counters would hide exactly the
     /// cross-family aliasing the separation exists to prevent.
     pub async_return_payload_count: u64,
-    // ── Path / projection histogram percentiles (B2 baseline:
-    // reservoir-sampled by C-phase builders; F3 corpus consumes p50/p95).
+    // ── Path-length histogram percentiles (reservoir-sampled by the
+    // `ProjectPath` builder).
     pub path_length_p50: u32,
     pub path_length_p95: u32,
-    pub projection_depth_p50: u32,
-    pub projection_depth_p95: u32,
     // ── F2 navigation-once + relation invariants ────────────────────
     pub decl_subexpression_lowering_count: u64,
     pub relation_check_count: u64,
@@ -12750,13 +12749,12 @@ mod tests {
     ///   conditional_decided_count, conditional_deferred_count,
     ///   branch_selections_true, branch_selections_false,
     ///   origin_edges_emitted, path_length_p50, path_length_p95,
-    ///   projection_depth_p50, projection_depth_p95,
     ///   origin_edges_per_node_p50, origin_edges_per_node_p95,
     ///   decl_subexpression_lowering_count, relation_check_count,
     ///   mapped_per_k_materializations, substitute_memo_hits,
     ///   substitute_memo_misses, evaluate_deferred_memo_hits,
     ///   evaluate_deferred_memo_misses.
-    /// - Exceptional-path: budget_fallback_count, same_path_sentinel_returns,
+    /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
     fn counter_taxonomy_matches_plan() {
@@ -12779,8 +12777,6 @@ mod tests {
             "origin_edges_emitted",
             "path_length_p50",
             "path_length_p95",
-            "projection_depth_p50",
-            "projection_depth_p95",
             "origin_edges_per_node_p50",
             "origin_edges_per_node_p95",
             "decl_subexpression_lowering_count",
@@ -12804,7 +12800,6 @@ mod tests {
         // forcing tests prove they exist and increment under
         // dedicated fixtures).
         let exceptional_path = [
-            "budget_fallback_count",
             "same_path_sentinel_returns",
             "joined_waits",
             "inflight_aborted_retries",

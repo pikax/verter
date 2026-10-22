@@ -30,11 +30,11 @@ use verter_type_engine::semantic_query::ProjectionMode;
 /// whole parent payload for a single binding row would re-expand the parent
 /// shell per row. The typed locator-position identity IS the carrier-skip
 /// signal.
-pub(crate) fn reduce_published_field_types(
+pub(crate) fn reduce_published_field_types<M: verter_audit::observe::ObserveExec>(
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     evaluated_types: &mut verter_session_query::analysis::type_expand::ExpandedComponentTypes,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
 ) {
     verter_audit::attribute_scope!(PublishFieldTypes);
     use verter_type_expr::facts::SemanticTypeSource;
@@ -102,9 +102,9 @@ pub(crate) fn reduce_published_field_types(
 /// untouched (a replay address is a final consumer-demand address — see the
 /// skip rationale in [`reduce_published_field_types`]).
 #[allow(clippy::too_many_arguments)]
-fn finalize_published_prop_source(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn finalize_published_prop_source<M: verter_audit::observe::ObserveExec>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     transit_ctx: verter_type_engine::semantic_query::ProjectionReductionContext,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,

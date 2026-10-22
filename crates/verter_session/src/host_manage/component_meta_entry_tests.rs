@@ -24,6 +24,7 @@
 //!    warm-cache HIT with no new miss. The fix must not break warm
 //!    reuse for the route-only-read-first scenario.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
@@ -82,6 +83,7 @@ fn published_facts(host: &VerterHost, owner: &str) -> Vec<FactVersionRef> {
         .to_vec()
 }
 
+#[cfg(feature = "semantic-observe")]
 fn has_syntactic_route_fact(facts: &[FactVersionRef], owner: &str) -> bool {
     facts.iter().any(|f| {
         matches!(
@@ -93,6 +95,8 @@ fn has_syntactic_route_fact(facts: &[FactVersionRef], owner: &str) -> bool {
     })
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn repeated_query_after_route_only_indexed_read_is_warm_hit() {
     let host = build_host();
@@ -182,6 +186,8 @@ fn repeated_query_after_route_only_indexed_read_is_warm_hit() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn editing_route_dep_still_invalidates_after_route_only_indexed_read() {
     // The filter is narrow — it removes ONLY the owner's own Route
@@ -407,6 +413,8 @@ fn publish_fence_skips_promotion_when_cold_seed_is_non_current() {
 /// fails against such a tree. The corroborating arm disarms the churn,
 /// mutates the dep, and asserts the recompute reflects the NEW dep shape —
 /// never the stale cached payload.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn warm_component_meta_hit_is_suppressed_when_store_view_is_not_current() {
     let host = build_host();
@@ -524,6 +532,8 @@ fn warm_component_meta_hit_is_suppressed_when_store_view_is_not_current() {
 /// increase. Against a tree where the overlay re-rooting ran on a non-current
 /// base and recomputed a validating fingerprint, the warm validator would
 /// hit — so the no-hit assertion fails against such a tree.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn overlay_does_not_launder_non_current_base_into_warm_hit() {
     use rustc_hash::FxHashMap;

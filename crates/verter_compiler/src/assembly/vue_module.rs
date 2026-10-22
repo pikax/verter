@@ -125,6 +125,7 @@ pub(crate) fn rewrite_script(
     fact: Option<&SfcExportPlacement>,
     map: Option<&SourceMap<'_>>,
 ) -> Result<(String, Option<String>), SfcRewriteRefusal> {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let empty = SfcExportPlacement::default();
     let fact = fact.unwrap_or(&empty);
 
@@ -169,7 +170,7 @@ pub(crate) fn rewrite_script(
     };
 
     let allocator = oxc_allocator::Allocator::default();
-    let mut ct = CodeTransform::new(code, &allocator);
+    let mut ct = CodeTransform::<M>::new_in(code, &allocator);
     for range in &fact.binding_ranges {
         if inside_export(range) {
             continue;
@@ -196,6 +197,8 @@ pub(crate) fn rewrite_script(
         .map_err(SfcRewriteRefusal::ChainFailed)?;
 
     Ok((rewritten, chained))
+
+    })
 }
 
 /// One compiler-owned decoration piece contributed to the composed

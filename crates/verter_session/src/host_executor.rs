@@ -282,7 +282,7 @@ impl HostStageExecutor {
 }
 
 impl HostStageExecutor {
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     /// The source stage's snapshot of `content`: see [`StageExecutor::execute_source`].
     fn source_snapshot(
         &self,
@@ -337,7 +337,10 @@ impl HostStageExecutor {
         // on `HostSourceData` keeps its existing semantics; the audit
         // ledger push happens only when timing capture is on AND a
         // request context is installed.
-        let timing_on = verter_execution::request_context::current_timing_enabled();
+        #[cfg(feature = "semantic-observe")]
+        let timing_on = verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            verter_type_engine::request_observers::capture_timing_enabled::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>())
+        });
 
         #[cfg(test)]
         let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.host_instance.get());
@@ -534,6 +537,7 @@ impl HostStageExecutor {
         // `lower_ns` is reported as `0` — the parse total carries the
         // observable `parse_ns` for the request's critical-path
         // accounting.
+        #[cfg(feature = "semantic-observe")]
         if timing_on {
             let total_ns = parse_start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
             if let Some(acc) = verter_type_engine::request_context::current_accumulator() {

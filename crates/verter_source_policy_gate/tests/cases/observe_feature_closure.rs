@@ -1,4 +1,13 @@
-//! Resolve production features with Cargo, independently of the test binary's features.
+//! Architecture guard: no shipped root can gain an optional observation hook.
+//!
+//! Every hook that only measures (work attribution, currency probes, profiler
+//! instrumentation, trace bookkeeping) compiles under one coordinated,
+//! default-off `semantic-observe` feature per owner crate (see
+//! `docs/arch/semantic-observe.md`). This guard resolves production features
+//! with Cargo, independently of the test binary's own features, and proves
+//! that neither a production dependency edge nor the production root's
+//! dev-dependency unification turns one of those features on, for every
+//! shipped root on the host and WASM targets.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -579,34 +588,57 @@ fn read_host_target(root: &Path) -> String {
         .expect("rustc host triple")
 }
 
+/// Every consolidated observation hook, read from the workspace's own feature
+/// tables: each member's coordinated `semantic-observe` gate plus every member
+/// feature that implies a coordinated gate, its own or a dependency's (an
+/// allocation-profiling mode layered on it, for instance). A new owner or mode
+/// joins the guard by declaring the dependency on the gate, with no second
+/// allowlist.
+fn observation_seeds(metadata: &Metadata) -> BTreeSet<(String, String)> {
+    let members: BTreeSet<&str> = metadata
+        .workspace_members
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut seeds = BTreeSet::new();
+    for package in metadata
+        .packages
+        .iter()
+        .filter(|package| members.contains(package.id.as_str()))
+    {
+        for (feature, implied) in &package.features {
+            let gates = feature == "semantic-observe"
+                || implied.iter().any(|entry| {
+                    entry == "semantic-observe" || entry.ends_with("/semantic-observe")
+                });
+            if gates {
+                seeds.insert((package.name.clone(), feature.clone()));
+            }
+        }
+    }
+    seeds
+}
+
 #[test]
 fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
     let root = repository_root();
     let host = host_target(root);
     let metadata = metadata(root, &[]);
     for target in [host.as_str(), "wasm32-unknown-unknown"] {
-        let mut seeds: BTreeSet<(String, String)> = [
-            ("verter_audit", "semantic-observe"),
-            ("verter_scheduler", "semantic-observe"),
-            ("verter_workspace", "semantic-observe"),
-            ("verter_semantic", "semantic-observe"),
-            ("verter_compiler", "semantic-observe"),
-            ("verter_session", "attribution"),
-            ("verter_session", "currency_probe"),
-        ]
-        .iter()
-        .map(|(name, feature)| (name.to_string(), feature.to_string()))
-        .collect();
-        // Includes new forwarding owners as they are introduced, and the
-        // measurement harness's combined opt-in, without a second allowlist.
-        for package in &metadata.packages {
-            if package.features.contains_key("semantic-observe") {
-                seeds.insert((package.name.clone(), "semantic-observe".into()));
-            }
-        }
+        let seeds = observation_seeds(&metadata);
+        assert!(
+            seeds.contains(&("verter_audit".into(), "semantic-observe".into())),
+            "the audit crate declares the coordinated observation gate"
+        );
+        // The shipped roots, each with and without its dev edges, plus the
+        // session's own test build: the canonical gate runs the session
+        // suites without `semantic-observe` (their dev edges enable
+        // `test-support`, a separate capability), so no dev edge of the crate
+        // that owns audit capture may switch observation on for it.
         let requests: Vec<_> = ["verter_napi", "verter_lsp", "verter_wasm", "verter_tsc"]
             .into_iter()
             .flat_map(|package| [false, true].map(|dev| (package, dev)))
+            .chain([("verter_session", true)])
             .collect();
         let production = map_in_parallel::map_in_parallel(&requests, |&(package, include_dev)| {
             let before = TREE_RUNS.get();
@@ -637,16 +669,39 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
         // the repository's build lanes independently compile those profiles.
         // The soak-support seams (the flight rendezvous, the ACTIVE-occupancy
         // window) are test machinery their own crates' test edges carry, so
-        // only the normal/build closures must stay free of them.
-        // The retention account's window also compiles under its own
-        // `test-support`, so that feature is a seed too.
-        let mut support_seeds: BTreeSet<(String, String)> = metadata
+        // only the normal/build closures must stay free of them. Every
+        // member's `test-support` is a seed too: the observation gate
+        // `cfg(any(test, feature = "test-support", feature = "semantic-observe"))`
+        // compiles optional bookkeeping (origin edges, store tallies, VFS
+        // provenance, lowering counters, the retention account's window)
+        // under it, so a production edge enabling one would ship that state.
+        let members: BTreeSet<&str> = metadata
+            .workspace_members
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let support_seeds: BTreeSet<(String, String)> = metadata
             .packages
             .iter()
-            .filter(|package| package.features.contains_key("soak-support"))
-            .map(|package| (package.name.clone(), "soak-support".into()))
+            .filter(|package| members.contains(package.id.as_str()))
+            .flat_map(|package| {
+                ["soak-support", "test-support"]
+                    .into_iter()
+                    .filter(|feature| package.features.contains_key(*feature))
+                    .map(|feature| (package.name.clone(), feature.to_string()))
+            })
             .collect();
-        support_seeds.insert(("verter_retention".into(), "test-support".into()));
+        for owner in [
+            "verter_retention",
+            "verter_workspace",
+            "verter_type_engine",
+            "verter_semantic_source",
+        ] {
+            assert!(
+                support_seeds.contains(&(owner.into(), "test-support".into())),
+                "{owner} declares the test-support capability the observation gate reads"
+            );
+        }
         assert!(
             support_seeds.contains(&("verter_type_engine".into(), "soak-support".into())),
             "the engine declares the soak-support seam"
@@ -674,7 +729,7 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
             assert!(observed.is_empty(), "{package} target={target} dev={include_dev}: optional observation features enabled: {observed:?}");
             if !include_dev {
                 let support = violations(&metadata, &enabled, &support_forbidden);
-                assert!(support.is_empty(), "{package} target={target}: soak-support enabled in a shipped closure: {support:?}");
+                assert!(support.is_empty(), "{package} target={target}: test or soak support enabled in a shipped closure: {support:?}");
             }
         }
     }
@@ -727,8 +782,8 @@ version = "0.0.0"
 edition = "2021"
 [features]
 default = [{audit_default}]
-semantic-observe = ["attribution"]
-attribution = []
+semantic-observe = ["capture-table"]
+capture-table = []
 test-support = []
 "#
             ),
@@ -915,14 +970,14 @@ fn observe_feature_closure_rejects_direct_and_implied_manifest_enablement() {
     assert_eq!(
         direct.violations(false),
         [
-            "verter_audit v0.0.0/attribution",
+            "verter_audit v0.0.0/capture-table",
             "verter_audit v0.0.0/semantic-observe"
         ]
     );
-    let implied = Fixture::new("\"attribution\"", None);
+    let implied = Fixture::new("\"capture-table\"", None);
     assert_eq!(
         implied.violations(false),
-        ["verter_audit v0.0.0/attribution"]
+        ["verter_audit v0.0.0/capture-table"]
     );
     let control = Fixture::new("", Some("\"test-support\""));
     assert!(control.violations(false).is_empty());
@@ -939,7 +994,7 @@ fn observe_feature_closure_rejects_dev_dependency_unification() {
     assert_eq!(
         fixture.violations(true),
         [
-            "verter_audit v0.0.0/attribution",
+            "verter_audit v0.0.0/capture-table",
             "verter_audit v0.0.0/semantic-observe"
         ]
     );
@@ -1095,7 +1150,7 @@ fn observe_feature_closure_rejects_owner_default_activation() {
     assert_eq!(
         defaulted.violations(false),
         [
-            "verter_audit v0.0.0/attribution",
+            "verter_audit v0.0.0/capture-table",
             "verter_audit v0.0.0/semantic-observe"
         ]
     );

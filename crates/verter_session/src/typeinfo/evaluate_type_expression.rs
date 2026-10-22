@@ -38,23 +38,26 @@
 //! `host.remove` (not `host.evict`): a scratch URI is synthetic, so the
 //! "reload from disk later" eviction state would strand it.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use verter_audit::{
-    AuditedResult, ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload, WaitAudit,
+    AuditedResult, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
+    RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload,
 };
+#[cfg(feature = "semantic-observe")]
+use verter_audit::{ProjectionModeTag, WaitAudit};
 
 use super::types::{EvaluateTypeExpressionRequest, ImportSpec, NamedImport};
+#[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
 use crate::types::UpsertRequest;
 use crate::VerterHost;
-use verter_type_engine::instant::Instant;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 use verter_type_engine::semantic_query::{
     ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey, SemanticQueryOutput,
@@ -126,6 +129,7 @@ impl VerterHost {
     > {
         let _node_scope = self.project_type_store.construction_grant().enter_scope();
         let request_id = self.next_request_id();
+        #[cfg(feature = "semantic-observe")]
         verter_type_engine::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
@@ -135,6 +139,7 @@ impl VerterHost {
         // (and the workspace VFS audit sink) so the dispatch path's
         // passive-observer emissions attribute to THIS request — the same
         // scope the component-meta entry installs.
+        #[cfg(feature = "semantic-observe")]
         let footprint_scope = crate::typeinfo::footprint_attach::TypeinfoFootprintScope::install(
             self,
             request_id,
@@ -145,134 +150,146 @@ impl VerterHost {
         // a tripped budget surfaces as a `BudgetExceeded` dispatch
         // fault on the carrier's `Err` arm rather than running to the
         // default 2000-op cap.
-        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        #[cfg(feature = "semantic-observe")]
+        let accumulator = footprint_scope.accumulator();
+        #[cfg(not(feature = "semantic-observe"))]
+        let accumulator = None;
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::clone(&canonical_scope),
-            RequestKind::TypeResolution,
+            || RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
-            footprint_scope.accumulator(),
-            self.config.projection_op_budget,
+            accumulator,
+            verter_execution::cancellation::CancellationToken::new(),
         );
 
-        let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        verter_debug_assert!(ctx.audit_registration.get().is_none());
-        let _ = ctx.install_audit_registration(registration.clone());
+        #[cfg(feature = "semantic-observe")]
+        let registration = {
+            let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
+            verter_debug_assert!(ctx.audit_registration.get().is_none());
+            let _ = ctx.install_audit_registration(registration.clone());
+            registration
+        };
 
-        let request_start = Instant::now();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let scratch_uri = compute_scratch_uri(&req.scope, &req.expression, &req.extra_imports);
 
-        let (outcome, from_cache) = match registration.as_ref() {
-            AuditRequestRegistration::Active(_) => {
-                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                evaluate_inner(self, &req, &scratch_uri)
-            }
-            AuditRequestRegistration::Noop => {
-                let _noop_guard = verter_audit::install_noop_observer();
-                evaluate_inner(self, &req, &scratch_uri)
-            }
+        let (outcome, from_cache) = {
+            // The request runs under its context whether or not it captures:
+            // the context carries its budget and cancellation.
+            let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+            evaluate_inner(self, &req, &scratch_uri)
         };
-        let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
 
-        if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            let state = if self.config.audit_enabled {
-                verter_audit::AuditCaptureState::FilteredNoop
-            } else {
-                verter_audit::AuditCaptureState::AuditDisabled
+        #[cfg(feature = "semantic-observe")]
+        if matches!(registration.as_ref(), AuditRequestRegistration::Active(_)) {
+            let total_ms = request_clock.elapsed_ms();
+            let payload = TypeResolutionPayload {
+                query_mode: ProjectionModeTag::from(req.mode),
+                hops: u32::try_from(ctx.type_resolution_hops.load(Ordering::Relaxed))
+                    .unwrap_or(u32::MAX),
+                navigations: u32::try_from(ctx.type_resolution_navigations.load(Ordering::Relaxed))
+                    .unwrap_or(u32::MAX),
+                expansions: u32::try_from(ctx.type_resolution_expansions.load(Ordering::Relaxed))
+                    .unwrap_or(u32::MAX),
+                conditional_decisions: u32::try_from(
+                    ctx.type_resolution_conditional_decisions
+                        .load(Ordering::Relaxed),
+                )
+                .unwrap_or(u32::MAX),
+                ref_root_cycle_hits: u32::try_from(
+                    ctx.type_resolution_ref_root_cycle_hits
+                        .load(Ordering::Relaxed),
+                )
+                .unwrap_or(u32::MAX),
+                projection_ops_executed: u32::try_from(
+                    ctx.type_resolution_projection_ops.load(Ordering::Relaxed),
+                )
+                .unwrap_or(u32::MAX),
+                depth_high_water: ctx.type_resolution_depth_high_water.load(Ordering::Relaxed),
+                recursion_limit_reached: ctx
+                    .type_resolution_recursion_limit_reached
+                    .load(Ordering::Relaxed),
+                walker_diagnostics: Vec::new(),
+                cache_suppress: false,
+                semantic_query_dispatch_mask: ctx.type_resolution_dispatched_query_tags_mask(),
             };
-            let record = noop_evaluate_record(
+            let timings = RequestTimingAudit {
+                total_ms,
+                ..RequestTimingAudit::default()
+            };
+            let store = RequestStoreAudit {
+                cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+                bypass_diagnostics:
+                    crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
+                ..RequestStoreAudit::default()
+            };
+            let memory = RequestMemoryAudit {
+                process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
+                ..RequestMemoryAudit::default()
+            };
+            let waits = if ctx.timing_capture {
+                Some(WaitAudit {
+                    lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
+                    queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
+                    lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
+                })
+            } else {
+                None
+            };
+
+            // Finalise the footprint through the shared miner (drain +
+            // per-file attribution + deterministic mine). `(None, [])` when
+            // capture is off.
+            let (footprint, files) =
+                crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
+
+            let record = RequestAuditRecord {
                 request_id,
-                &req.scope,
-                ctx.parent_request_id,
+                canonical_id: req.scope.clone(),
+                target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+                    req.scope.clone(),
+                )),
+                kind: RequestKind::TypeResolution,
+                parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
                 from_cache,
-                ctx.trace_id.clone(),
-                state,
-            );
-            return audited_from_outcome(outcome, record, self.project_type_store.semantic_graph());
+                timings,
+                memory,
+                store,
+                footprint,
+                scheduler: ctx.scheduler_audit.lock().clone(),
+                files,
+                waits,
+                kind_payload: RequestKindPayload::TypeResolution(payload),
+                capture_state: verter_audit::AuditCaptureState::ActiveStored,
+                trace_id: ctx.trace_id.clone(),
+            };
+            let cloned = record.clone();
+            registration.finalize(record);
+            return audited_from_outcome(outcome, cloned, self.project_type_store.semantic_graph());
         }
 
-        let payload = TypeResolutionPayload {
-            query_mode: ProjectionModeTag::from(req.mode),
-            hops: u32::try_from(ctx.type_resolution_hops.load(Ordering::Relaxed))
-                .unwrap_or(u32::MAX),
-            navigations: u32::try_from(ctx.type_resolution_navigations.load(Ordering::Relaxed))
-                .unwrap_or(u32::MAX),
-            expansions: u32::try_from(ctx.type_resolution_expansions.load(Ordering::Relaxed))
-                .unwrap_or(u32::MAX),
-            conditional_decisions: u32::try_from(
-                ctx.type_resolution_conditional_decisions
-                    .load(Ordering::Relaxed),
-            )
-            .unwrap_or(u32::MAX),
-            ref_root_cycle_hits: u32::try_from(
-                ctx.type_resolution_ref_root_cycle_hits
-                    .load(Ordering::Relaxed),
-            )
-            .unwrap_or(u32::MAX),
-            projection_ops_executed: u32::try_from(
-                ctx.type_resolution_projection_ops.load(Ordering::Relaxed),
-            )
-            .unwrap_or(u32::MAX),
-            depth_high_water: ctx.type_resolution_depth_high_water.load(Ordering::Relaxed),
-            recursion_limit_reached: ctx
-                .type_resolution_recursion_limit_reached
-                .load(Ordering::Relaxed),
-            walker_diagnostics: Vec::new(),
-            cache_suppress: false,
-            semantic_query_dispatch_mask: ctx.type_resolution_dispatched_query_tags_mask(),
+        // Uncaptured: filtered or disabled by the host, or capture compiled
+        // out. The answer is the same; the record carries no observation.
+        #[cfg(feature = "semantic-observe")]
+        let (parent_request_id, trace_id) = (ctx.parent_request_id, ctx.trace_id.clone());
+        #[cfg(not(feature = "semantic-observe"))]
+        let (parent_request_id, trace_id) = {
+            let _ = (request_clock, footprint_capture, timing_capture);
+            (None::<u64>, String::new())
         };
-        let timings = RequestTimingAudit {
-            total_ms,
-            ..RequestTimingAudit::default()
-        };
-        let store = RequestStoreAudit {
-            cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
-            bypass_diagnostics: crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
-            ..RequestStoreAudit::default()
-        };
-        let memory = RequestMemoryAudit {
-            process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
-            ..RequestMemoryAudit::default()
-        };
-        let waits = if ctx.timing_capture {
-            Some(WaitAudit {
-                lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
-                queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
-                lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
-            })
-        } else {
-            None
-        };
-
-        // Finalise the footprint through the shared miner (drain +
-        // per-file attribution + deterministic mine). `(None, [])` when
-        // capture is off.
-        let (footprint, files) =
-            crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
-
-        let record = RequestAuditRecord {
+        let state = crate::capture::uncaptured_state(self.config.audit_enabled);
+        let record = noop_evaluate_record(
             request_id,
-            canonical_id: req.scope.clone(),
-            target_identity: Some(verter_audit::RequestTargetIdentity::registered(
-                req.scope.clone(),
-            )),
-            kind: RequestKind::TypeResolution,
-            parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
+            &req.scope,
+            parent_request_id,
             from_cache,
-            timings,
-            memory,
-            store,
-            footprint,
-            scheduler: ctx.scheduler_audit.lock().clone(),
-            files,
-            waits,
-            kind_payload: RequestKindPayload::TypeResolution(payload),
-            capture_state: verter_audit::AuditCaptureState::ActiveStored,
-            trace_id: ctx.trace_id.clone(),
-        };
-        let cloned = record.clone();
-        registration.finalize(record);
-        audited_from_outcome(outcome, cloned, self.project_type_store.semantic_graph())
+            trace_id,
+            state,
+        );
+        audited_from_outcome(outcome, record, self.project_type_store.semantic_graph())
     }
 }
 
@@ -431,164 +448,166 @@ fn evaluate_inner(
     // request context is installed, so the cache write below can refuse it.
     let completeness = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx =
-        crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    let scratch_canonical: Arc<str> = Arc::from(scratch_uri);
-    let Some(shallow) = host.shallow_file_state(scratch_uri) else {
-        // Same orphan contract as the non-current branch above: this
-        // request's scratch is upserted but unowned, so drop it
-        // (ownership-aware; a non-fault miss rides `Ok(None)`).
-        remove_scratch(host, scratch_uri);
-        return (Ok(None), false);
-    };
-    let scope_node = verter_type_engine::semantic_query::NodeScopeId::File {
-        canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
-        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        whole_hash: shallow.whole_hash,
-        local_scope: None,
-    };
-    let base = dispatch.type_slot_for(
-        Arc::clone(&scratch_canonical),
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from(SCRATCH_ALIAS_NAME),
-    );
-    let instantiate_key =
-        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
-            base,
-            Arc::from(Vec::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                &scratch_canonical,
-                verter_type_engine::semantic_query::ProjectionReductionContext::published(req.mode),
-            ),
-        ));
-    let resolved_alias_node = match dispatch.execute_type_node(instantiate_key) {
-        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
-        QueryResult::Recursive(node) => node,
-        QueryResult::Error(err) => {
-            // A genuine dispatch fault is a request fault — surface it.
-            // A non-fault miss falls back to the bare-decl path so the
-            // caller sees a node id even when the body could not
-            // materialise (the audit record still emits with the
-            // chosen mode).
-            if let Some(fault) = TypeResolutionRequestError::from_query_error(&err) {
-                // Fault before the cache write: this request's upserted
-                // scratch is unowned — drop it (ownership-aware).
-                remove_scratch(host, scratch_uri);
-                return (Err(fault), false);
-            }
-            let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                scope: ScopeId {
-                    canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
-                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    local_scope: None,
-                    binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
-                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    ),
-                },
-                name: verter_type_expr::OwnedStr::from(SCRATCH_ALIAS_NAME),
-            });
-            match dispatch.execute_type_node(resolve_decl_key) {
-                QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
-                QueryResult::Recursive(n) => n,
-                QueryResult::Error(err) => {
-                    // Resolution failed before the cache write, so this
-                    // request's upserted scratch is unowned — drop it
-                    // (ownership-aware).
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(host, &current_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let scratch_canonical: Arc<str> = Arc::from(scratch_uri);
+        let Some(shallow) = host.shallow_file_state(scratch_uri) else {
+            // Same orphan contract as the non-current branch above: this
+            // request's scratch is upserted but unowned, so drop it
+            // (ownership-aware; a non-fault miss rides `Ok(None)`).
+            remove_scratch(host, scratch_uri);
+            return (Ok(None), false);
+        };
+        let scope_node = verter_type_engine::semantic_query::NodeScopeId::File {
+            canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: shallow.whole_hash,
+            local_scope: None,
+        };
+        let base = dispatch.type_slot_for(
+            Arc::clone(&scratch_canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(SCRATCH_ALIAS_NAME),
+        );
+        let instantiate_key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                base,
+                Arc::from(Vec::new().into_boxed_slice()),
+                dispatch.instantiate_context_for(
+                    &scratch_canonical,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(req.mode),
+                ),
+            ));
+        let resolved_alias_node = match dispatch.execute_type_node(instantiate_key) {
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+            QueryResult::Recursive(node) => node,
+            QueryResult::Error(err) => {
+                // A genuine dispatch fault is a request fault — surface it.
+                // A non-fault miss falls back to the bare-decl path so the
+                // caller sees a node id even when the body could not
+                // materialise (the audit record still emits with the
+                // chosen mode).
+                if let Some(fault) = TypeResolutionRequestError::from_query_error(&err) {
+                    // Fault before the cache write: this request's upserted
+                    // scratch is unowned — drop it (ownership-aware).
                     remove_scratch(host, scratch_uri);
-                    // A genuine dispatch fault rides `Err`; a non-fault
-                    // miss rides `Ok(None)`.
-                    return (
-                        super::resolve_named_symbol::classify_dispatch_error(&err, None),
-                        false,
-                    );
+                    return (Err(fault), false);
+                }
+                let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                    scope: ScopeId {
+                        canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        local_scope: None,
+                        binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        ),
+                    },
+                    name: verter_type_expr::OwnedStr::from(SCRATCH_ALIAS_NAME),
+                });
+                match dispatch.execute_type_node(resolve_decl_key) {
+                    QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
+                    QueryResult::Recursive(n) => n,
+                    QueryResult::Error(err) => {
+                        // Resolution failed before the cache write, so this
+                        // request's upserted scratch is unowned — drop it
+                        // (ownership-aware).
+                        remove_scratch(host, scratch_uri);
+                        // A genuine dispatch fault rides `Err`; a non-fault
+                        // miss rides `Ok(None)`.
+                        return (
+                            super::resolve_named_symbol::classify_dispatch_error(&err, None),
+                            false,
+                        );
+                    }
                 }
             }
-        }
-    };
+        };
 
-    // Apply the requested terminal mode. `Identity` returns the
-    // alias node verbatim. Everything else routes through the SINGLE
-    // canonical materializer in `resolve_named_symbol` — the same helper
-    // the named-resolve path uses — so an operator-bodied alias
-    // (`type X = Y[K]` / `keyof Y`) reduces IDENTICALLY on this FFI path
-    // and the named-resolve path (the one-resolver mandate). There is no
-    // evaluate-local materialiser fork.
-    let final_node = match req.mode {
-        ProjectionMode::Identity => resolved_alias_node,
-        _ => match super::resolve_named_symbol::materialize_through_aliases(
-            host,
-            &dispatch,
-            resolved_alias_node,
-            req.mode,
-            &scope_node,
-        ) {
-            Ok(materialized) => materialized,
-            // A hard dispatch fault during nested materialization
-            // propagates as `Err` rather than silently degrading to the
-            // un-materialised placeholder.
-            Err(fault) => {
-                // Fault before the cache write: this request's upserted
-                // scratch is unowned — drop it (ownership-aware).
-                remove_scratch(host, scratch_uri);
-                return (Err(fault), false);
+        // Apply the requested terminal mode. `Identity` returns the
+        // alias node verbatim. Everything else routes through the SINGLE
+        // canonical materializer in `resolve_named_symbol` — the same helper
+        // the named-resolve path uses — so an operator-bodied alias
+        // (`type X = Y[K]` / `keyof Y`) reduces IDENTICALLY on this FFI path
+        // and the named-resolve path (the one-resolver mandate). There is no
+        // evaluate-local materialiser fork.
+        let final_node = match req.mode {
+            ProjectionMode::Identity => resolved_alias_node,
+            _ => match super::resolve_named_symbol::materialize_through_aliases(
+                host,
+                &dispatch,
+                resolved_alias_node,
+                req.mode,
+                &scope_node,
+            ) {
+                Ok(materialized) => materialized,
+                // A hard dispatch fault during nested materialization
+                // propagates as `Err` rather than silently degrading to the
+                // un-materialised placeholder.
+                Err(fault) => {
+                    // Fault before the cache write: this request's upserted
+                    // scratch is unowned — drop it (ownership-aware).
+                    remove_scratch(host, scratch_uri);
+                    return (Err(fault), false);
+                }
+            },
+        };
+
+        // Publish to cache if asked and the answer is complete. The cached
+        // node id is the one we return so a later cache hit and a fresh
+        // request produce the same value. A partial answer is returned but
+        // never warms the cache: a later request recomputes it.
+        let complete =
+            !verter_type_engine::request_context::current_cold_compute_completeness().is_partial();
+        drop(completeness);
+        if req.cacheable && complete {
+            let mut guard = host.scratch_cache().lock();
+            let roots = dispatch
+                .construction_grant()
+                .root_nodes([final_node])
+                .expect("evaluated scratch node is live");
+            let evicted = guard.insert_rooted(scratch_uri.to_string(), final_node, roots);
+            drop(guard);
+            if let Some(evicted_uri) = evicted {
+                // The LRU dropped an older scratch entry — fully remove its
+                // host file so memory does not grow unbounded. Uses the same
+                // synthetic-file removal as the unowned paths (a scratch has
+                // no workspace backing, so `evict`'s reload-pending semantics
+                // are wrong here). The removal is ownership-aware: between
+                // dropping the guard above and re-locking inside
+                // `remove_scratch`, a concurrent request could cold-resolve
+                // and re-insert the SAME evicted URI (it re-upserts its host
+                // file first); `remove_scratch` re-checks ownership under the
+                // lock and skips removal in that case, so the re-inserted
+                // entry keeps backing a live file.
+                remove_scratch(host, &evicted_uri);
             }
-        },
-    };
-
-    // Publish to cache if asked and the answer is complete. The cached
-    // node id is the one we return so a later cache hit and a fresh
-    // request produce the same value. A partial answer is returned but
-    // never warms the cache: a later request recomputes it.
-    let complete =
-        !verter_type_engine::request_context::current_cold_compute_completeness().is_partial();
-    drop(completeness);
-    if req.cacheable && complete {
-        let mut guard = host.scratch_cache().lock();
-        let roots = dispatch
-            .construction_grant()
-            .root_nodes([final_node])
-            .expect("evaluated scratch node is live");
-        let evicted = guard.insert_rooted(scratch_uri.to_string(), final_node, roots);
-        drop(guard);
-        if let Some(evicted_uri) = evicted {
-            // The LRU dropped an older scratch entry — fully remove its
-            // host file so memory does not grow unbounded. Uses the same
-            // synthetic-file removal as the unowned paths (a scratch has
-            // no workspace backing, so `evict`'s reload-pending semantics
-            // are wrong here). The removal is ownership-aware: between
-            // dropping the guard above and re-locking inside
-            // `remove_scratch`, a concurrent request could cold-resolve
-            // and re-insert the SAME evicted URI (it re-upserts its host
-            // file first); `remove_scratch` re-checks ownership under the
-            // lock and skips removal in that case, so the re-inserted
-            // entry keeps backing a live file.
-            remove_scratch(host, &evicted_uri);
+        } else {
+            // Non-cacheable or partial success: this request kept its
+            // scratch out of `scratch_cache`, so it holds no LRU owner.
+            // EVICT (not full-remove) on this path: a successful resolution
+            // admitted scratch-rooted entries into the semantic-graph memo,
+            // and the typeinfo mode contract pins cross-mode materialized-
+            // point satisfaction over them — a repeat evaluate of the SAME
+            // expression in another publication mode must warm-satisfy from
+            // this resolution's recorded materializations (the
+            // `operator_reduction` evaluate-parity tests pin it). A full
+            // `host.remove` purges the scratch's semantic-graph state and
+            // forces every repeat cold, breaking that pinned equivalence.
+            // `evict` reclaims the compile/derived state while preserving
+            // the memo; the miss/fault terminals below keep FULL removal
+            // (a failed resolution admitted nothing worth preserving —
+            // `cache_suppress` covers the memo side).
+            // Ownership-aware like the removal paths: a concurrent CACHEABLE
+            // request for the same content-addressed URI may own it in
+            // `scratch_cache`; evicting under it would clear that owner's
+            // live compile state.
+            evict_scratch(host, scratch_uri);
         }
-    } else {
-        // Non-cacheable or partial success: this request kept its
-        // scratch out of `scratch_cache`, so it holds no LRU owner.
-        // EVICT (not full-remove) on this path: a successful resolution
-        // admitted scratch-rooted entries into the semantic-graph memo,
-        // and the typeinfo mode contract pins cross-mode materialized-
-        // point satisfaction over them — a repeat evaluate of the SAME
-        // expression in another publication mode must warm-satisfy from
-        // this resolution's recorded materializations (the
-        // `operator_reduction` evaluate-parity tests pin it). A full
-        // `host.remove` purges the scratch's semantic-graph state and
-        // forces every repeat cold, breaking that pinned equivalence.
-        // `evict` reclaims the compile/derived state while preserving
-        // the memo; the miss/fault terminals below keep FULL removal
-        // (a failed resolution admitted nothing worth preserving —
-        // `cache_suppress` covers the memo side).
-        // Ownership-aware like the removal paths: a concurrent CACHEABLE
-        // request for the same content-addressed URI may own it in
-        // `scratch_cache`; evicting under it would clear that owner's
-        // live compile state.
-        evict_scratch(host, scratch_uri);
-    }
 
-    (Ok(Some(final_node)), false)
+        (Ok(Some(final_node)), false)
+    })
 }
 
 /// Drop a scratch file iff no concurrent request owns it in
