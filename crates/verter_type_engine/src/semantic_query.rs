@@ -7637,8 +7637,8 @@ pub struct RelationRecursionFootprint {
     /// relations report it lets a failed argument check fall back to the
     /// structural comparison.
     pub unreliable: bool,
-    /// Per side, the recursion identities the computation stacked with the
-    /// most distinct instantiations of each on one path; `None` when
+    /// Per side, the recursion identities with their largest count on one
+    /// path: distinct reference instances or all function occurrences. `None` when
     /// neither side stacked one (every memo entry carries a footprint, so
     /// the rare list sits behind one pointer).
     pub identities: Option<verter_session_query::retention::owned::Owned<RecursionIdentities>>,
@@ -8546,6 +8546,10 @@ pub enum VariancePolicy {
     /// Method/function parameters relate strictly CONTRAVARIANTLY — the
     /// `strictFunctionTypes` regime with no method-bivariance exemption.
     StrictContravariance,
+    /// One target declared as a method. Its signature enters the common
+    /// relation stack with method parameter variance, independently of the
+    /// program's ordinary function regime.
+    DeclaredMethod,
 }
 
 /// Whether the relation SOURCE carries freshness — part of relation IDENTITY.

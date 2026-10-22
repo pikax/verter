@@ -3510,6 +3510,41 @@ fn method_callback_parameters_relate_contravariantly() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn method_bivariance_does_not_apply_to_returned_function_parameters() {
+    let failures = Matrix::new("")
+        .settings(&[super::differential_harness_tests::STRICT])
+        .types(&[(
+            "{ m(): (x: 'a') => void } extends { m(): (x: string) => void } ? 1 : 0",
+            "0",
+        )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn method_parameters_keep_nested_inference_candidates_covariant() {
+    let failures = Matrix::new("").same(&[
+        (
+            Read::Type("{ m(cb: () => {a:1}): void; n(cb: () => {b:2}): void } extends { m(cb: () => infer U): void; n(cb: () => infer U): void } ? U : never"),
+            "{ a: 1; } | { b: 2; }",
+        ),
+        (
+            Read::Type("{ m: (cb: () => {a:1}) => void; n: (cb: () => {b:2}) => void } extends { m: (cb: () => infer U) => void; n: (cb: () => infer U) => void } ? U : never"),
+            "{ a: 1; } & { b: 2; }",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn rigid_signature_parameters_remain_rigid_during_outer_inference() {
+    let failures = Matrix::new("").types(&[(
+        "{ value: 1; m<T>(): { a: T } } extends { value: infer U; m<T>(): T } ? U : 0",
+        "0",
+    )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Inferring `Peek<infer U>` from `Read<Read<1>>`, whose method returns the
 /// source itself, closes a component whose re-discharge meets the same
 /// component again under another occurrence. The checker answers

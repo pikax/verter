@@ -21,10 +21,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// The target used by contextual signature comparison: unconstrained
     /// cloned binders name their originals, and the instantiated signature
     /// has no local clause. Defaults play no part in that target relation.
-    pub(super) fn canonical_signature_for_relation(
-        &self,
-        signature: SemanticNodeId,
-    ) -> Option<SemanticNodeId> {
+    pub(super) fn canonical_signature(&self, signature: SemanticNodeId) -> Option<SemanticNodeId> {
         let graph = self.graph();
         let data = graph.node_data(signature)?;
         let SemanticNodeData::Signature {

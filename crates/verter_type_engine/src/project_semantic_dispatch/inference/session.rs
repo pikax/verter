@@ -288,6 +288,9 @@ pub struct InferenceSession {
     /// Per-parameter candidate state.
     infos: Vec<InferenceInfo>,
     info_positions: FxHashMap<SemanticNodeId, usize>,
+    /// A recursive inference edge was encountered in the current walk.
+    /// Deposits alone cannot establish a complete fixed-member match.
+    pub(crate) inference_circularity: bool,
     /// The journals of each reverse mapping in flight, innermost last.
     reverse_frames: Vec<ReverseProjectionState>,
     /// Immutable fixed bindings retained across staging and commit.
@@ -326,6 +329,7 @@ impl InferenceSession {
             setup,
             infos,
             info_positions,
+            inference_circularity: false,
             reverse_frames: Vec::new(),
             staged_bindings: None,
             opened_at_depth: 0,

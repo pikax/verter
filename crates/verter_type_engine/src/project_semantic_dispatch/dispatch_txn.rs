@@ -84,13 +84,25 @@ pub struct SessionId(pub(crate) u64);
 pub struct InferenceOccurrence {
     pub(crate) priority: InferenceCandidatePriority,
     pub(crate) variance: VariancePhase,
+    /// A method parameter was crossed. Orientation still flips normally,
+    /// but nested candidates combine covariantly (`inferFromSignature`).
+    pub(crate) bivariant: bool,
 }
 
 impl InferenceOccurrence {
     pub const ARGUMENT_COVARIANT: Self = Self {
         priority: InferenceCandidatePriority::Argument,
         variance: VariancePhase::Covariant,
+        bivariant: false,
     };
+
+    pub(crate) fn candidate_variance(self) -> VariancePhase {
+        if self.bivariant {
+            VariancePhase::Covariant
+        } else {
+            self.variance
+        }
+    }
 }
 
 /// The typed strict-family configuration the relation reducer BRANCHES on,
@@ -313,6 +325,21 @@ impl RelationFrameState {
     }
 }
 
+/// What one occurrence contributes to its origin's recursion count.
+#[derive(Debug, Clone)]
+pub(crate) enum RecursionCountMode {
+    /// Declaration references distinguish their instantiated arguments.
+    DistinctInstantiation(Arc<[SemanticNodeId]>),
+    /// Function symbols count repeated visits to the same instance too.
+    EveryOccurrence,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RelationRecursionIdentity {
+    pub(crate) origin: crate::semantic_query::DeclIdentity,
+    pub(crate) counting: RecursionCountMode,
+}
+
 /// One relation frame's place in its relation chain: the relation frames
 /// stacked directly on one another, which the checker relates in one
 /// `checkTypeRelatedTo` call with one recursion depth, one overflow flag
@@ -340,12 +367,9 @@ pub(crate) struct RelationChainPosition {
     /// source side, bit 2 the target side was found deeply nested at this
     /// frame or one below it in the chain.
     pub(crate) expanding: u8,
-    /// The recursion identities of this counted frame's source and target
-    /// with the instantiation each was read from — its type arguments, none
-    /// for the alias named without any (see
-    /// `ProjectSemanticDispatch::relation_recursion_identity`).
-    pub(crate) identities:
-        [Option<(crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>)>; 2],
+    /// Each operand's origin paired with its counting mode: references
+    /// distinguish argument instances; signatures count repeated visits.
+    pub(crate) identities: [Option<RelationRecursionIdentity>; 2],
     /// The chain's depth when this frame opened — the depth its parent
     /// had reached.
     pub(crate) opened_at: u16,
@@ -367,7 +391,7 @@ pub(crate) struct RelationRecursionUse {
     /// or a replayed memo entry would have reached.
     pub(crate) reached: u16,
     /// Per side (source, target): for each recursion identity, the most
-    /// distinct instantiations of it the computation stacked on one path
+    /// occurrences it counts that the computation stacked on one path
     /// from this frame, a replayed entry's own counts added to the chain's
     /// below it; and the bound a replayed cyclic member carries for every
     /// identity.

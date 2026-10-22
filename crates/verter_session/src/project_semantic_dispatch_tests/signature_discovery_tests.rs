@@ -1266,6 +1266,120 @@ fn generic_identity(
 }
 
 #[test]
+fn contravariant_signature_inference_reads_semantic_return_operands() {
+    use verter_type_engine::semantic_query::RelationResult;
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
+    let void = prim(&d, PrimitiveKind::Void);
+    let u = d.graph().intern_node(SemanticNodeData::TypeParam {
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("U"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: "U".into(),
+    });
+    let tuple = |value| {
+        d.graph().intern_node(SemanticNodeData::Tuple {
+            elements: verter_type_engine::semantic_query::PayloadArray::from([TupleElement {
+                label: None,
+                value,
+                optional: false,
+                rest: false,
+            }]),
+            readonly: false,
+        })
+    };
+    // Return fallback must not hide a missing callback candidate.
+    let no_infer_u = d
+        .graph()
+        .intern_node(SemanticNodeData::IntrinsicApplication {
+            op: verter_type_engine::semantic_query::CompilerIntrinsicTypeOp::NoInfer,
+            args: verter_type_engine::semantic_query::PayloadArray::from([u]),
+        });
+    for kind in [
+        PrimitiveKind::Any,
+        PrimitiveKind::Void,
+        PrimitiveKind::String,
+    ] {
+        let returned = prim(&d, kind);
+        let result = if kind == PrimitiveKind::Any {
+            d.graph().intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(1.0),
+            ))
+        } else {
+            returned
+        };
+        let source_callback = signature(
+            &d,
+            "source_callback",
+            0,
+            SignatureKind::Call,
+            vec![],
+            vec![],
+            u,
+        );
+        let target_callback = signature(
+            &d,
+            "target_callback",
+            0,
+            SignatureKind::Call,
+            vec![],
+            vec![],
+            returned,
+        );
+        let source_parameter = signature(
+            &d,
+            "source_parameter",
+            0,
+            SignatureKind::Call,
+            vec![param(source_callback)],
+            vec![],
+            void,
+        );
+        let target_parameter = signature(
+            &d,
+            "target_parameter",
+            0,
+            SignatureKind::Call,
+            vec![param(target_callback)],
+            vec![],
+            void,
+        );
+        let source = signature(
+            &d,
+            "source",
+            0,
+            SignatureKind::Call,
+            vec![param(source_parameter)],
+            vec![TypeParamDecl {
+                name: "U".into(),
+                param: u,
+                constraint: None,
+                default: None,
+                original: None,
+                is_const: false,
+            }],
+            tuple(no_infer_u),
+        );
+        let target = signature(
+            &d,
+            "target",
+            0,
+            SignatureKind::Call,
+            vec![param(target_parameter)],
+            vec![],
+            tuple(result),
+        );
+        let relation = d.execute_relate_pair_as_result_for_tests(source, target);
+        assert!(
+            matches!(relation, RelationResult::Assignable { .. }),
+            "{kind:?} must infer through a contravariant callback return: {relation:?}"
+        );
+    }
+}
+
+#[test]
 fn inferred_argument_remains_free_when_inserted_into_a_generic_signature() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());

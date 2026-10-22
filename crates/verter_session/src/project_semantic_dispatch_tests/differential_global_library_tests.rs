@@ -619,26 +619,15 @@ pub(super) const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T,
 #[test]
 fn a_mirrored_thenable_relation_terminates() {
     let rows = [
-        (
-            Read::Type("Promise<1> extends PL<infer U> ? U : 0"),
-            vec!["1"],
-        ),
-        (Read::Type("[PP2<1>] extends [PL<1>] ? 1 : 0"), vec!["0"]),
-        (
-            Read::Type("[Promise<1>] extends [PL<1>] ? 1 : 0"),
-            vec!["1"],
-        ),
+        (Read::Type("Promise<1> extends PL<infer U> ? U : 0"), "1"),
+        (Read::Type("[PP2<1>] extends [PL<1>] ? 1 : 0"), "0"),
+        (Read::Type("[Promise<1>] extends [PL<1>] ? 1 : 0"), "1"),
     ];
     let matrix = Matrix::new(MIRRORED_THENABLE)
         .lib(GLOBALS_LIB)
         .settings(&[STRICT]);
-    let verdicts = matrix.verdicts(&rows);
-    let library = &verdicts[0][0];
-    assert!(library.matched, "{}: {}", library.class, library.lane);
-    let user = &verdicts[1][0];
-    assert!(user.matched, "{}: {}", user.class, user.lane);
-    let fixed = &verdicts[2][0];
-    assert!(fixed.matched, "{}: {}", fixed.class, fixed.lane);
+    let failures = matrix.same(&rows);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

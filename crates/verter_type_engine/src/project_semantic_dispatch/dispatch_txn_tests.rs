@@ -679,10 +679,12 @@ fn nested_redischarge_restores_the_enclosing_substitution_and_occurrence() {
     let inner_occurrence = InferenceOccurrence {
         priority: InferenceCandidatePriority::ReturnType,
         variance: VariancePhase::Contravariant,
+        bivariant: true,
     };
     let deepest_occurrence = InferenceOccurrence {
         priority: InferenceCandidatePriority::NakedTypeParameter,
         variance: VariancePhase::Covariant,
+        bivariant: false,
     };
 
     let mut outer_substitution = ProvisionalSubstitution::default();

@@ -169,6 +169,9 @@ pub(crate) enum InferPosition {
     /// Function parameter — the `Argument` rung, contravariant
     /// combination.
     ContravariantParam,
+    /// A method parameter retains covariant candidate combination through
+    /// every nested inference position while reversing orientation.
+    BivariantParam,
     /// Function return — the enclosing occurrence's rung and orientation.
     Return,
 }
@@ -183,13 +186,14 @@ fn inference_occurrence_for_position(
         InferPosition::Covariant => ambient,
         // Entering a function parameter flips orientation and starts the
         // ordinary argument-priority rung.
-        InferPosition::ContravariantParam => InferenceOccurrence {
+        InferPosition::ContravariantParam | InferPosition::BivariantParam => InferenceOccurrence {
             priority: InferenceCandidatePriority::Argument,
             variance: match ambient.variance {
                 VariancePhase::Covariant => VariancePhase::Contravariant,
                 VariancePhase::Contravariant => VariancePhase::Covariant,
                 VariancePhase::Invariant => VariancePhase::Invariant,
             },
+            bivariant: ambient.bivariant || position == InferPosition::BivariantParam,
         },
         // A return keeps the enclosing occurrence whole, its rung included
         // (`inferFromSignature` applies the returns with no priority of
@@ -221,6 +225,12 @@ enum NakedUnionInference {
         source: SemanticNodeId,
         parameter: SemanticNodeId,
     },
+}
+
+enum FixedMemberInference {
+    Matched,
+    Unmatched,
+    Circular,
 }
 
 /// The `infer` declarations a pattern holds, as the relation infers them.
@@ -1284,22 +1294,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // their outer session context even though their immediate target is
         // no longer the mapped root.
         self.upgrade_relation_key_with_inference(key);
-        // inferTypes does no structural work when neither operand can
-        // contribute to this collector. This is empty candidate collection,
-        // not an assignability proof: it returns before opening a memo frame.
-        if self.relation_session_reads_candidates_only() {
-            let parameters = self.type_params_within(&[key.source, key.target]);
-            let txn = self.dispatch_txn.borrow();
-            if txn.active_session().is_some_and(|session| {
-                parameters
-                    .iter()
-                    .all(|parameter| !session.infers(*parameter))
-            }) {
-                return Some(RelationStep::Assignable {
-                    bindings: Arc::from([]),
-                });
-            }
-        }
         // (0) Two literal types relate exactly when they are one value.
         if let Some(step) = self.literal_pair_relation(key) {
             return Some(step);
@@ -1324,8 +1318,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             let mut txn = self.dispatch_txn.borrow_mut();
             if let Some(idx) = txn.reentry().find(&identity) {
+                if let Some(session) = txn.active_session_mut().filter(|session| {
+                    session.context_key().verdict_use
+                        == crate::semantic_query::InferenceVerdictUse::CandidatesOnly
+                }) {
+                    // inferFromTypes records circularity without depending on
+                    // an assignability hypothesis. An undecided fixed-member
+                    // trial must not poison its enclosing proof component.
+                    session.inference_circularity = true;
+                    return Some(RelationStep::Assignable {
+                        bindings: Arc::from([]),
+                    });
+                }
                 let evidence = txn.reentry().assumption_evidence(idx);
                 txn.obligations.record_assumption(idx);
+                if let Some(session) = txn.active_session_mut() {
+                    session.inference_circularity = true;
+                }
                 return Some(RelationStep::Assumed(evidence));
             }
         }
@@ -1567,6 +1576,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !self.checker_recursion_entry(concrete[0], concrete[1]) {
             return None;
         }
+        let carriers = if self.relation_session_reads_candidates_only()
+            && self.relation_current_occurrence().variance == VariancePhase::Contravariant
+        {
+            [carriers[1], carriers[0]]
+        } else {
+            carriers
+        };
         let identities = [
             self.relation_recursion_identity(carriers[0], carriers[1]),
             self.relation_recursion_identity(carriers[1], carriers[0]),
@@ -1619,6 +1635,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return Some(RelationResult::Unknown);
         }
         let depth = chain.depth + 1;
+        let deeply_nested_depth = if self.relation_session_reads_candidates_only() {
+            2
+        } else {
+            CHECKER_DEEPLY_NESTED_DEPTH
+        };
         let mut expanding = chain.expanding;
         {
             let mut txn = self.dispatch_txn.borrow_mut();
@@ -1634,19 +1655,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 state.chain.recursion.frames += 1;
             }
             for (side, flag) in [(0, 1u8), (1, 2u8)] {
-                let Some((identity, arguments)) = identities[side].as_ref() else {
+                let Some(identity) = identities[side].as_ref() else {
                     continue;
                 };
-                let stacked = Self::stack_recursion_identity(
-                    reentry,
-                    chain.base..top + 1,
-                    side,
-                    identity,
-                    arguments,
-                );
+                let stacked =
+                    Self::stack_recursion_identity(reentry, chain.base..top + 1, side, identity);
                 if expanding & flag == 0
-                    && usize::from(depth) >= CHECKER_DEEPLY_NESTED_DEPTH
-                    && stacked >= CHECKER_DEEPLY_NESTED_DEPTH
+                    && usize::from(depth) >= deeply_nested_depth
+                    && stacked >= deeply_nested_depth
                 {
                     expanding |= flag;
                 }
@@ -1659,6 +1675,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         if expanding == 3 {
+            if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
+                session.inference_circularity = true;
+            }
             self.note_relation_context_dependent();
             self.fold_into_top_build_local_taint_with(
                 false,
@@ -2131,14 +2150,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// The checker's `isDeeplyNestedType` count for the entry of
-    /// `identity`, instantiated with `arguments`, on top of `frames` (a
-    /// chain's relation frames, the entry's own last): how many DISTINCT
-    /// instantiations of the identity the `side` stack holds. The checker
-    /// counts the entries whose type id is no older than the one before,
-    /// taking a newer id for a newer instantiation; ids follow allocation
-    /// order, which the memo's history decides here, so the count reads
-    /// instantiation identity instead — an instantiation met again is no
-    /// newer one.
+    /// `identity` on top of `frames` (the entry's own frame last).
+    /// References count distinct instantiations; function-symbol origins
+    /// count every occurrence, including the same instance met again.
+    /// Neither count depends on graph allocation or query order.
     ///
     /// Each frame is credited, per side and identity, with the count from
     /// it up to the entry: the repeats its own footprint carries.
@@ -2146,12 +2161,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         reentry: &mut super::dispatch_txn::ObligationReentryStack,
         frames: std::ops::Range<usize>,
         side: usize,
-        identity: &DeclIdentity,
-        arguments: &Arc<[SemanticNodeId]>,
+        identity: &super::dispatch_txn::RelationRecursionIdentity,
     ) -> usize {
-        let fingerprint = recursion_identity_fingerprint(identity);
+        use super::dispatch_txn::RecursionCountMode;
+        let fingerprint = recursion_identity_fingerprint(&identity.origin);
         let mut instantiations: smallvec::SmallVec<[Arc<[SemanticNodeId]>; 4]> =
-            smallvec::smallvec![Arc::clone(arguments)];
+            smallvec::SmallVec::new();
+        let mut count = 0;
         for index in frames.rev() {
             let Some(state) = reentry
                 .frame_mut_for_update(index)
@@ -2159,15 +2175,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             else {
                 continue;
             };
-            if let Some((entry_identity, entry_arguments)) = state.chain.identities[side].as_ref() {
-                if entry_identity == identity && !instantiations.contains(entry_arguments) {
-                    instantiations.push(Arc::clone(entry_arguments));
+            if let Some(entry) = state.chain.identities[side].as_ref() {
+                if entry.origin == identity.origin {
+                    match &entry.counting {
+                        RecursionCountMode::EveryOccurrence => count += 1,
+                        RecursionCountMode::DistinctInstantiation(arguments) => {
+                            if !instantiations.contains(arguments) {
+                                instantiations.push(Arc::clone(arguments));
+                                count += 1;
+                            }
+                        }
+                    }
                 }
             }
-            let stacked = u16::try_from(instantiations.len()).unwrap_or(u16::MAX);
+            let stacked = u16::try_from(count).unwrap_or(u16::MAX);
             state.chain.recursion.repeats[side].raise(fingerprint, stacked);
         }
-        instantiations.len()
+        count
     }
 
     /// Whether a memo entry of `footprint`, read for a relation opened now,
@@ -2223,43 +2247,56 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
-    /// Per recursion identity (by fingerprint), the distinct instantiations
-    /// of it the `side` stacks of the relation frames of `frames` hold.
+    /// Per recursion identity (by fingerprint), the same count the live
+    /// stack uses, for deciding whether a cold answer can replay here.
     fn chain_recursion_counts(
         reentry: &super::dispatch_txn::ObligationReentryStack,
         frames: std::ops::Range<usize>,
         side: usize,
     ) -> smallvec::SmallVec<[(u64, u16); 4]> {
-        // Per identity, its distinct instantiations' type arguments.
+        use super::dispatch_txn::RecursionCountMode;
         type Instantiations<'a> = smallvec::SmallVec<[&'a Arc<[SemanticNodeId]>; 4]>;
-        let mut stacked: Vec<(&DeclIdentity, Instantiations<'_>)> = Vec::new();
+        struct StackedIdentity<'a> {
+            origin: &'a DeclIdentity,
+            instantiations: Instantiations<'a>,
+            count: u16,
+        }
+        let mut stacked: Vec<StackedIdentity<'_>> = Vec::new();
         for index in frames {
-            let Some((identity, arguments)) = reentry
+            let Some(identity) = reentry
                 .frame(index)
                 .and_then(|frame| frame.relation())
                 .and_then(|state| state.chain.identities[side].as_ref())
             else {
                 continue;
             };
-            let entry = match stacked.iter_mut().position(|(seen, _)| *seen == identity) {
-                Some(position) => &mut stacked[position].1,
+            let entry = match stacked
+                .iter()
+                .position(|seen| seen.origin == &identity.origin)
+            {
+                Some(position) => &mut stacked[position],
                 None => {
-                    stacked.push((identity, smallvec::SmallVec::new()));
-                    &mut stacked.last_mut().expect("just pushed").1
+                    stacked.push(StackedIdentity {
+                        origin: &identity.origin,
+                        instantiations: smallvec::SmallVec::new(),
+                        count: 0,
+                    });
+                    stacked.last_mut().expect("just pushed")
                 }
             };
-            if !entry.contains(&arguments) {
-                entry.push(arguments);
+            match &identity.counting {
+                RecursionCountMode::EveryOccurrence => entry.count = entry.count.saturating_add(1),
+                RecursionCountMode::DistinctInstantiation(arguments) => {
+                    if !entry.instantiations.contains(&arguments) {
+                        entry.instantiations.push(arguments);
+                        entry.count = entry.count.saturating_add(1);
+                    }
+                }
             }
         }
         stacked
             .into_iter()
-            .map(|(identity, instantiations)| {
-                (
-                    recursion_identity_fingerprint(identity),
-                    u16::try_from(instantiations.len()).unwrap_or(u16::MAX),
-                )
-            })
+            .map(|entry| (recursion_identity_fingerprint(entry.origin), entry.count))
             .collect()
     }
 
@@ -2466,13 +2503,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         carrier: SemanticNodeId,
         other: SemanticNodeId,
-    ) -> Option<(crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>)> {
+    ) -> Option<super::dispatch_txn::RelationRecursionIdentity> {
+        use super::dispatch_txn::{RecursionCountMode, RelationRecursionIdentity};
+        if let Some(SemanticNodeData::Signature {
+            signature_span: Some(span),
+            ..
+        }) = self.graph().node_data(carrier).as_deref()
+        {
+            let scope = self.graph().node_scope(carrier)?;
+            return Some(RelationRecursionIdentity {
+                origin: DeclIdentity::from_scope(
+                    &scope,
+                    OwnedStr::from(format!("\u{1}signature@{}:{}", span.start, span.end)),
+                ),
+                counting: RecursionCountMode::EveryOccurrence,
+            });
+        }
         let (identity, arguments) = match self.graph().node_data(carrier).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 (base.clone(), Arc::clone(args.as_arc()))
             }
-            // An alias named without type arguments has one instantiation,
-            // which never makes three.
             _ => return None,
         };
         let identity = self
@@ -2483,11 +2533,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             identity.owner,
             identity.decl_name.as_ref(),
         )?;
+        let identity = RelationRecursionIdentity {
+            origin: identity,
+            counting: RecursionCountMode::DistinctInstantiation(arguments),
+        };
         match prepared.kind {
-            verter_session_query::declarations::TypeDeclKind::Alias => Some((identity, arguments)),
+            verter_session_query::declarations::TypeDeclKind::Alias => Some(identity),
             verter_session_query::declarations::TypeDeclKind::Interface
             | verter_session_query::declarations::TypeDeclKind::Class => {
-                (!self.references_one_declaration(carrier, other)).then_some((identity, arguments))
+                (!self.references_one_declaration(carrier, other)).then_some(identity)
             }
         }
     }
@@ -2875,11 +2929,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None
         };
         // A variance measurement is a relation of its own: it starts a chain.
-        let parent_chain = if self.relation_key_is_variance_measurement(key) {
-            None
-        } else {
-            self.current_relation_chain()
+        let starts_inference_walk = {
+            let txn = self.dispatch_txn.borrow();
+            txn.active_session().is_some_and(|session| {
+                session.context_key().verdict_use
+                    == crate::semantic_query::InferenceVerdictUse::CandidatesOnly
+                    && txn.reentry().depth() == session.opened_at_depth
+            })
         };
+        let parent_chain =
+            if self.relation_key_is_variance_measurement(key) || starts_inference_walk {
+                None
+            } else {
+                self.current_relation_chain()
+            };
         let mut txn = self.dispatch_txn.borrow_mut();
         if txn.reentry().nearest_relate().is_none() {
             // Re-snapshot at every relation ROOT so the behavioral branch
@@ -5689,7 +5752,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             || (self.signature_is_generic(target) && !self.relation_session_reads_candidates_only())
         {
             let target = if self.signature_is_generic(source) {
-                self.canonical_signature_for_relation(target)?
+                self.canonical_signature(target)?
             } else {
                 target
             };
@@ -5703,12 +5766,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // the target's erased signature. Target-local parameters are not
         // sites of the enclosing collector, even when a recursive method
         // reads the same declaration through another owner instantiation.
+        let reversed = self.relation_session_reads_candidates_only()
+            && self.relation_current_occurrence().variance == VariancePhase::Contravariant;
+        let (source, target) = if reversed {
+            (target, source)
+        } else {
+            (source, target)
+        };
         let source = if self.signature_is_generic(source) {
             self.base_signature(source)?
         } else {
             source
         };
-        Some((source, self.erased_signature(target)))
+        let target = self.erased_signature(target);
+        Some(if reversed {
+            (target, source)
+        } else {
+            (source, target)
+        })
     }
 
     /// Whether the active inference session reads its relations for their
@@ -6548,11 +6623,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .active_session()
                     .filter(|session| session.reverse_active())
                     .map(|session| session.context_key().clone());
+                let mut policy = top.policy;
+                // Method variance applies to this signature only. Sticky
+                // inference bivariance travels separately in the occurrence.
+                if policy.variance == crate::semantic_query::VariancePolicy::DeclaredMethod {
+                    policy.variance = txn
+                        .relation
+                        .strict
+                        .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                        .variance_policy();
+                }
                 RelateMemoKey {
                     source,
                     target,
                     relation: top.relation,
-                    policy: top.policy,
+                    policy,
                     source_freshness: top.source_freshness,
                     inference_context,
                     context: top.context.clone(),
@@ -6673,6 +6758,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Only an intersection target's arm itself skips the weak-type
         // check; a relation it opens, a property's, never does.
         key.policy.intersection_target_arm = intersection_target_arm;
+        self.relate_sub_key(key, occurrence, bindings)
+    }
+
+    /// Child judgements share the SCC substitution rail before entering
+    /// the common authority. The SCC root itself still reruns its body.
+    fn relate_sub_key(
+        &self,
+        key: RelateMemoKey,
+        occurrence: InferenceOccurrence,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
         {
             let txn = self.dispatch_txn.borrow();
             if !txn.obligations.substitution().is_empty() {
@@ -6697,7 +6793,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        match self.execute_relate_with_occurrence(key, occurrence) {
+        self.relation_result_from_step(
+            self.execute_relate_with_occurrence(key, occurrence),
+            bindings,
+        )
+    }
+
+    fn relation_result_from_step(
+        &self,
+        step: RelationStep,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        match step {
             RelationStep::Assumed(_) => {
                 // The coinductive hypothesis: assumed to hold; the edge is
                 // recorded on the frame.
@@ -9745,17 +9852,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// A fixed union member matches only when the shared inference walk
     /// actually reaches the naked variable at this priority. Declaration
     /// shape alone says nothing about which members inference can reach.
-    pub(super) fn infers_into_fixed_member(
+    fn infers_into_fixed_member(
         &self,
         member: SemanticNodeId,
         fixed: SemanticNodeId,
         parameter: SemanticNodeId,
-    ) -> bool {
+    ) -> FixedMemberInference {
         let Some(checkpoint) = self.relation_session_checkpoint() else {
-            return false;
+            return FixedMemberInference::Unmatched;
         };
         let occurrence = self.relation_current_occurrence();
         let priority = occurrence.priority;
+        let (session_id, previous_circularity) = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            let Some(session) = txn.active_session_mut() else {
+                return FixedMemberInference::Unmatched;
+            };
+            (
+                session.id,
+                std::mem::take(&mut session.inference_circularity),
+            )
+        };
         let (source, target) = if occurrence.variance == VariancePhase::Contravariant {
             (fixed, member)
         } else {
@@ -9763,13 +9880,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let step =
             self.execute_relate_with_occurrence(self.relate_key_for(source, target), occurrence);
+        let circularity = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            let session = txn
+                .relation
+                .session_mut(session_id)
+                .expect("trial retains its inference session");
+            let circularity = session.inference_circularity;
+            session.inference_circularity |= previous_circularity;
+            circularity
+        };
         let reached = self
             .dispatch_txn
             .borrow()
             .active_session()
             .is_some_and(|session| session.inferred_since(&checkpoint, parameter, priority));
         self.relation_session_rollback(&Some(checkpoint));
-        reached && !matches!(step, super::dispatch_txn::RelationStep::BudgetExceeded(_))
+        if circularity {
+            FixedMemberInference::Circular
+        } else if reached && !matches!(step, super::dispatch_txn::RelationStep::BudgetExceeded(_)) {
+            FixedMemberInference::Matched
+        } else {
+            FixedMemberInference::Unmatched
+        }
     }
 
     /// The inference the members of `source` make against a union `target`
@@ -9896,13 +10029,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Then each takes the remaining members the checker infers into it
         // through another declaration's reference: they relate and infer
         // there, never reaching the variable.
+        let mut circularity = false;
+        let candidates_only = self.relation_session_reads_candidates_only();
+        let mut matched = vec![false; unmatched.len()];
         for target_member in &fixed {
-            let (paired, rest): (Vec<_>, Vec<_>) = unmatched.into_iter().partition(|member| {
-                member != target_member
-                    && self.infers_into_fixed_member(*member, *target_member, *parameter)
+            for (index, member) in unmatched.iter().enumerate() {
+                if !candidates_only && matched[index] {
+                    continue;
+                }
+                if member == target_member {
+                    continue;
+                }
+                let inferred = self.infers_into_fixed_member(*member, *target_member, *parameter);
+                circularity |= matches!(inferred, FixedMemberInference::Circular);
+                let inferred = matches!(inferred, FixedMemberInference::Matched);
+                if candidates_only || inferred {
+                    closely.push((*member, *target_member));
+                }
+                matched[index] |= inferred;
+            }
+        }
+        let unmatched: Vec<_> = unmatched
+            .into_iter()
+            .zip(matched)
+            .filter_map(|(member, matched)| (!matched).then_some(member))
+            .collect();
+        if circularity {
+            return Some(NakedUnionInference::Matched {
+                closely,
+                source: self.intern_normalized_union_or_intersection(source, true),
+                parameter: *parameter,
             });
-            closely.extend(paired.into_iter().map(|member| (member, *target_member)));
-            unmatched = rest;
         }
         Some(match unmatched.as_slice() {
             [] => NakedUnionInference::Matched {
@@ -12964,41 +13121,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> Option<RelationResult> {
-        let graph = self.graph();
-        let result_of = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Signature {
-                kind: crate::semantic_query::SignatureKind::Call,
-                return_type,
-                predicate,
-                ..
-            }) => Some(FunctionResult {
-                return_type: *return_type,
-                predicate: *predicate,
-            }),
-            _ => None,
+        let is_signature = |node| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Signature {
+                    kind: crate::semantic_query::SignatureKind::Call,
+                    ..
+                })
+            )
         };
-        result_of(source)?;
-        result_of(target)?;
-        // The method's source signature is the one any signature relation
-        // compares (a generic source instantiated or read at its base).
-        let Some((source, target)) = self.signature_relation_pair(
-            source,
-            target,
-            crate::semantic_query::SignatureKind::Call,
-        ) else {
-            return Some(RelationResult::Unknown);
-        };
-        let source_result = result_of(source)?;
-        let target_result = result_of(target)?;
-        Some(self.relate_function(
-            source,
-            source_result,
-            target,
-            target_result,
-            crate::semantic_query::SignatureKind::Call,
-            true,
-            bindings,
-        ))
+        if !is_signature(source) || !is_signature(target) {
+            return None;
+        }
+        let mut key = self.relation_sub_key(source, target);
+        key.policy.variance = crate::semantic_query::VariancePolicy::DeclaredMethod;
+        Some(self.relate_sub_key(key, self.relation_current_occurrence(), bindings))
     }
 
     /// A private accessor of the target with no readable value: a source
@@ -13447,6 +13584,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         method_target: bool,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
+        let method_target = method_target
+            || self
+                .dispatch_txn
+                .borrow()
+                .reentry()
+                .nearest_relate()
+                .is_some_and(|(key, _)| {
+                    key.policy.variance == crate::semantic_query::VariancePolicy::DeclaredMethod
+                });
+        let parameter_position = if method_target {
+            InferPosition::BivariantParam
+        } else {
+            InferPosition::ContravariantParam
+        };
         let candidates_only = self.relation_session_reads_candidates_only();
         let Ok(plan) =
             self.signature_comparison_plan(source, target, kind, self.strict_subtype_mode())
@@ -13462,12 +13613,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.note_relation_unreliable();
         }
         if let (Some(src_this), Some(tgt_this)) = (plan.source_receiver, plan.target_receiver) {
-            let this_rel = self.relate_member(
-                tgt_this,
-                src_this,
-                bindings,
-                InferPosition::ContravariantParam,
-            );
+            let this_rel = self.relate_member(tgt_this, src_this, bindings, parameter_position);
             if !candidates_only && matches!(this_rel, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
             }
@@ -13500,12 +13646,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // bivariant regime either direction discharges the pair.
             let checkpoint = self.relation_session_checkpoint();
             let bindings_len = bindings.len();
-            let contravariant = self.relate_member(
-                t_param,
-                s_param,
-                bindings,
-                InferPosition::ContravariantParam,
-            );
+            let contravariant = self.relate_member(t_param, s_param, bindings, parameter_position);
             let pair = if !candidates_only
                 && bivariant
                 && !matches!(contravariant, RelationResult::Assignable { .. })
@@ -13531,12 +13672,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         if let Some((_, target_rest, source_rest)) = rest_inference {
-            let rest = self.relate_member(
-                target_rest,
-                source_rest,
-                bindings,
-                InferPosition::ContravariantParam,
-            );
+            let rest = self.relate_member(target_rest, source_rest, bindings, parameter_position);
             acc = result_and(acc, rest);
             if !candidates_only && matches!(acc, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
@@ -13547,7 +13683,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // source's return nor its type predicate is compared — `() => number`
         // is assignable to `() => void`, and a plain `boolean` function to an
         // assertion signature. The parameters above still are.
-        if self.signature_result_accepts_any(target_result.return_type) {
+        if !candidates_only && self.signature_result_accepts_any(target_result.return_type) {
             return acc;
         }
         if let Some(target_predicate) = target_result
@@ -14930,6 +15066,7 @@ trait RelationDemandDriver {
     ) -> Option<NominalLeaf>;
     fn relation_reads_unread_marker(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool;
     fn relation_session_active(&self) -> bool;
+    fn relation_session_infers_parameter(&self, parameter: SemanticNodeId) -> bool;
     fn relation_session_checkpoint(&self) -> Option<SessionCheckpoint>;
     fn relation_session_rollback(&self, checkpoint: &Option<SessionCheckpoint>);
     fn relation_union_members(&self, members: &Arc<[SemanticNodeId]>) -> Arc<[SemanticNodeId]>;
@@ -15308,6 +15445,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     }
     fn relation_session_active(&self) -> bool {
         ProjectSemanticDispatch::relation_session_active(self)
+    }
+    fn relation_session_infers_parameter(&self, parameter: SemanticNodeId) -> bool {
+        ProjectSemanticDispatch::relation_session_infers_parameter(self, parameter)
     }
     fn relation_session_checkpoint(&self) -> Option<SessionCheckpoint> {
         ProjectSemanticDispatch::relation_session_checkpoint(self)
@@ -15764,6 +15904,9 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     }
     fn relation_session_active(&self) -> bool {
         self.driver.relation_session_active()
+    }
+    fn relation_session_infers_parameter(&self, parameter: SemanticNodeId) -> bool {
+        self.driver.relation_session_infers_parameter(parameter)
     }
     fn relation_session_checkpoint(&self) -> Option<SessionCheckpoint> {
         self.driver.relation_session_checkpoint()
@@ -16863,7 +17006,9 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             let source_against_union = matches!(&*source_data, SemanticNodeData::TypeParam { .. })
                 && matches!(&*target_data, SemanticNodeData::Union(_));
             if !source_against_union {
-                if self.relation_session_active() {
+                if self.relation_session_infers_parameter(source)
+                    || self.relation_session_infers_parameter(target)
+                {
                     results.push(RelationResult::Unknown);
                     return;
                 }
