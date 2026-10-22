@@ -153,18 +153,6 @@ enum Frame<'a> {
     /// Whether the frames after this one render inside a conditional's
     /// `extends` clause, where an `infer` binder is declared.
     InExtends(bool),
-    /// A conditional's `extends` clause begins: the binders it declares are
-    /// collected until its true branch.
-    BeginExtends,
-    /// A conditional's true branch begins: the binders its `extends` clause
-    /// declared are in scope, and the branch renders in the enclosing
-    /// clause context.
-    BindDeclared {
-        in_extends: bool,
-    },
-    /// A conditional's true branch ended: only the binders in scope before
-    /// it remain.
-    UnbindTo(usize),
     Borrowed(&'a str),
     MemberName(&'a str),
     PropertyKey(&'a TypeAuthoredPropertyKey),
@@ -189,31 +177,15 @@ pub fn render_type_expr_display(
     let mut referenced_type_names = Vec::new();
     let mut seen_references = FxHashSet::default();
     let mut work = vec![Frame::Expr(expression, Precedence::Lowest)];
+    // An `infer` inside an `extends` clause declares its binder, as it does
+    // in the typed form (a reference to a binder is a `Ref`), so a nested
+    // clause redeclaring an enclosing binder's name keeps its declaration.
     let mut in_extends = false;
-    // The `infer` binders in scope (declared by an enclosing conditional's
-    // `extends` clause whose true branch is rendering), and per open
-    // `extends` clause the binders it declares. An `infer` inside an
-    // `extends` clause whose binder is already in scope references it; the
-    // typed form carries one variant for both, so a nested clause redeclaring
-    // an in-scope name renders as the reference.
-    let mut bound: Vec<&str> = Vec::new();
-    let mut declaring: Vec<Vec<&str>> = Vec::new();
 
     while let Some(frame) = work.pop() {
         match frame {
             Frame::Text(value) => text.push_str(value),
             Frame::InExtends(value) => in_extends = value,
-            Frame::BeginExtends => {
-                declaring.push(Vec::new());
-                in_extends = true;
-            }
-            Frame::BindDeclared {
-                in_extends: enclosing,
-            } => {
-                bound.extend(declaring.pop().unwrap_or_default());
-                in_extends = enclosing;
-            }
-            Frame::UnbindTo(len) => bound.truncate(len),
             Frame::Borrowed(value) => text.push_str(value),
             Frame::GeneratedParameterName(index) => {
                 write!(&mut text, "_arg{index}").expect("writing to String cannot fail");
@@ -246,7 +218,9 @@ pub fn render_type_expr_display(
                 if !value.is_finite() {
                     return Err(TypeExprDisplayError::NonFiniteNumberLiteral);
                 }
-                write!(&mut text, "{value}").expect("writing to String cannot fail");
+                // The checker's number spelling (`1e+21`, `1e-7`), which
+                // reparses to the same value.
+                text.push_str(&verter_ecma::js_number_to_string(value));
             }
             Frame::BigInt(value) => {
                 if !is_bigint_magnitude(value) {
@@ -258,7 +232,7 @@ pub fn render_type_expr_display(
             Frame::Expr(expr, minimum) => {
                 let declares_infer = matches!(
                     expr,
-                    TypeExpr::Infer { name, .. } if in_extends && !bound.contains(&name.as_str())
+                    TypeExpr::Infer { .. } if in_extends
                 );
                 if expression_precedence(expr, declares_infer) < minimum {
                     work.push(Frame::Text(")"));
@@ -372,17 +346,15 @@ pub fn render_type_expr_display(
                     true_type,
                     false_type,
                 } => {
-                    // An `infer` binder is declared in the `extends` clause
-                    // and in scope in the true branch alone.
-                    work.push(Frame::InExtends(in_extends));
+                    // An `infer` binder is declared in the `extends` clause;
+                    // the branches render in the enclosing clause context.
                     work.push(Frame::Expr(false_type, Precedence::Lowest));
                     work.push(Frame::Text(" : "));
-                    work.push(Frame::UnbindTo(bound.len()));
                     work.push(Frame::Expr(true_type, Precedence::Lowest));
-                    work.push(Frame::BindDeclared { in_extends });
+                    work.push(Frame::InExtends(in_extends));
                     work.push(Frame::Text(" ? "));
                     work.push(Frame::Expr(extends, Precedence::Union));
-                    work.push(Frame::BeginExtends);
+                    work.push(Frame::InExtends(true));
                     work.push(Frame::Text(" extends "));
                     work.push(Frame::Expr(check, Precedence::Union));
                 }
@@ -431,17 +403,13 @@ pub fn render_type_expr_display(
                     work.push(Frame::TemplateQuasi(&quasis[0]));
                     work.push(Frame::Text("`"));
                 }
-                // Outside an `extends` clause, or bound by an enclosing
-                // clause, the binder is a reference: its name.
-                TypeExpr::Infer { name, .. } if !in_extends || bound.contains(&name.as_str()) => {
+                // Outside an `extends` clause no `infer` declares: its name.
+                TypeExpr::Infer { name, .. } if !in_extends => {
                     ensure_type_name(name, "infer binding")?;
                     work.push(Frame::Borrowed(name));
                 }
                 TypeExpr::Infer { name, constraint } => {
                     ensure_type_name(name, "infer binding")?;
-                    if let Some(clause) = declaring.last_mut() {
-                        clause.push(name);
-                    }
                     if let Some(constraint) = constraint {
                         work.push(Frame::Expr(constraint, Precedence::Union));
                         work.push(Frame::Text(" extends "));
@@ -544,7 +512,14 @@ pub fn render_type_expr_display(
                     if method.optional {
                         work.push(Frame::Text("?"));
                     }
-                    work.push(Frame::PropertyKey(&method.key));
+                    // A bare `new(): T` member is a construct signature, so
+                    // a method keyed `new` prints its key quoted.
+                    match &method.key {
+                        AuthoredPropertyKey::String(name) if name.as_ref() == "new" => {
+                            work.push(Frame::SingleQuoted(name));
+                        }
+                        key => work.push(Frame::PropertyKey(key)),
+                    }
                 }
                 ObjectMember::Spread(spread) => {
                     // Diagnostic-only spelling: TS type syntax has no spread
@@ -636,12 +611,20 @@ pub fn render_type_expr_display(
                         kind: "tuple element",
                     });
                 }
-                if !is_rest && element.label.is_none() && element.optional {
+                // An unlabeled optional element is its operand followed by a
+                // postfix `?`, so only a postfix-or-tighter operand stays
+                // bare: `[A | B?]` would make `B?` the optional operand.
+                let unlabeled_optional = !is_rest && element.label.is_none() && element.optional;
+                if unlabeled_optional {
                     work.push(Frame::Text("?"));
                 }
                 work.push(Frame::Expr(
                     nested_rest.unwrap_or(&element.ty),
-                    Precedence::Lowest,
+                    if unlabeled_optional {
+                        Precedence::Postfix
+                    } else {
+                        Precedence::Lowest
+                    },
                 ));
                 if let Some(label) = &element.label {
                     work.push(Frame::Text(": "));
@@ -665,6 +648,9 @@ pub fn render_type_expr_display(
                     work.push(Frame::Text(" extends "));
                 }
                 work.push(Frame::Borrowed(&parameter.name));
+                if parameter.is_const {
+                    work.push(Frame::Text("const "));
+                }
             }
         }
     }
@@ -829,10 +815,11 @@ fn push_member_name(output: &mut String, name: &str) {
     }
 }
 
+/// Whether a string-keyed member name prints bare: an identifier only. A digit
+/// spelling stays quoted, since `{ '7': A }` and `{ 7: A }` address one
+/// property but differ in type identity (`keyof` is `'7'` against `7`); only a
+/// number key prints bare.
 fn is_bare_member_name(name: &str) -> bool {
-    if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
-        return true;
-    }
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;

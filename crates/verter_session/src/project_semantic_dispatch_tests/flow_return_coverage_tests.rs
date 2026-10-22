@@ -520,6 +520,10 @@ export function tlInfer<T>(x: T) {
   return null as unknown as T extends Array<infer E> ? E : never;
 }
 
+export function tlNestedInferReference<T>(x: T) {
+  return null as unknown as T extends Array<infer E> ? (string extends E ? E : 1) : never;
+}
+
 export function tlConditional<T>(x: T) {
   return null as unknown as T extends string ? "yes" : "no";
 }
@@ -3310,8 +3314,27 @@ fn return_position_conditional_stays_open_over_its_clause_binder() {
     assert_eq!(false_type.as_ref(), &string_lit("no"));
 }
 
-/// A return-position `infer` inside a conditional keeps its `Infer`
-/// binder in BOTH the `extends` clause and the true branch.
+/// A nested conditional whose `extends` clause refers to the enclosing
+/// `infer` binder raises that occurrence as a reference: printed as a
+/// declaration, it would shadow the binder and change the type.
+///
+/// Oracle: `const ok: <U>(x: U) => U extends Array<infer E> ? (string extends
+/// E ? E : 1) : never = tlNestedInferReference;` compiles.
+#[test]
+fn nested_extends_reference_to_an_infer_binder_raises_as_a_reference() {
+    let host = ts_host();
+    let ty = value_of(&host, TL, "tlNestedInferReference");
+    let rendered = verter_type_expr::render_type_expr_display(&ty)
+        .expect("the raised conditional renders")
+        .text;
+    assert_eq!(
+        rendered, "T extends Array<infer E> ? string extends E ? E : 1 : never",
+        "raised as {ty:?}"
+    );
+}
+
+/// A return-position `infer` inside a conditional declares its binder in
+/// the `extends` clause and references it by name in the true branch.
 ///
 /// Oracle (bidirectional signature identity):
 /// `const ok: <U>(x: U) => U extends Array<infer E> ? E : never = tlInfer;`
@@ -3343,8 +3366,11 @@ fn return_position_infer_keeps_its_binder_in_both_positions() {
         "the `infer E` binder must survive in the extends clause"
     );
     assert!(
-        matches!(true_type.as_ref(), TypeExpr::Infer { name, .. } if name == "E"),
-        "the true branch must reference the same `infer` binder"
+        matches!(
+            true_type.as_ref(),
+            TypeExpr::Ref { name, type_arguments } if name.as_ref() == "E" && type_arguments.is_empty()
+        ),
+        "the true branch must reference the same `infer` binder by name, not redeclare it"
     );
     assert_eq!(
         false_type.as_ref(),

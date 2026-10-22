@@ -658,16 +658,26 @@ fn frame_is_exact(frame: &super::BuildLocalTaint) -> bool {
     !frame.result_is_partial && !frame.cache_suppress
 }
 
-/// Whether the frame on `frames` producing the instantiation `identity`
-/// and every frame built on top of it are exact. `false` when no frame on
-/// the stack produces it: frames below the producer belong to its callers
-/// and are not consulted.
-fn exact_since_producer(frames: &[super::BuildLocalTaint], identity: u64) -> bool {
+/// Whether the frame on `frames` producing the instantiation `claimed` at
+/// `site` and every frame built on top of it are exact. The producer is
+/// the frame building exactly that key at that site, as the memo claim
+/// matches it; a frame building any other key or site is an ordinary frame
+/// on the way. `false` when no frame on the stack produces it: frames below
+/// the producer belong to its callers and are not consulted.
+fn exact_since_producer(
+    frames: &[super::BuildLocalTaint],
+    claimed: &SemanticQueryKey,
+    site: crate::semantic_query::checker_policy::TupleSplicePosition,
+) -> bool {
     for frame in frames.iter().rev() {
         if !frame_is_exact(frame) {
             return false;
         }
-        if frame.produces == Some(identity) {
+        if frame
+            .produces
+            .as_ref()
+            .is_some_and(|production| production.is(claimed, site))
+        {
             return true;
         }
     }
@@ -6485,14 +6495,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// built on top of it holds a partial or a result its memo would not
     /// keep, and the request is live. `None` — the producer's frame is not
     /// on the stack (a suspended continuation's), or a step read a partial —
-    /// is no proof.
+    /// is no proof. The producer is the frame building exactly `claimed` at
+    /// the current checking site, the claim's own producer.
     fn exact_steps_since(&self, claimed: &SemanticQueryKey) -> Option<ExactSteps> {
         if self.cancellation.is_cancelled() {
             return None;
         }
-        let identity = super::instantiation_frame_identity(claimed)?;
-        exact_since_producer(&self.build_local_taint.borrow(), identity)
-            .then_some(ExactSteps { _proof: () })
+        exact_since_producer(
+            &self.build_local_taint.borrow(),
+            claimed,
+            self.checking_site.get(),
+        )
+        .then_some(ExactSteps { _proof: () })
     }
 
     /// [`UniformGrowth`] for the tail run of `build` stepping from its
@@ -16563,6 +16577,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     key_type: self.primitive_node(PrimitiveKind::String),
                     value_type: source,
                     readonly: false,
+                    key_name: None,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
                     declaration_origin: None,
                 }],
@@ -17235,6 +17250,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     key_type,
                     value_type: value,
                     readonly,
+                    key_name: None,
                     spans: index_key
                         .source
                         .as_ref()
@@ -22473,50 +22489,120 @@ fn modified_readonly(readonly: bool, modifier: crate::semantic_query::ReadonlyMo
 #[cfg(test)]
 mod same_path_witness_tests {
     use super::exact_since_producer;
-    use crate::project_semantic_dispatch::BuildLocalTaint;
+    use crate::project_semantic_dispatch::{BuildLocalTaint, FrameProduction};
+    use crate::semantic_query::checker_policy::TupleSplicePosition;
+    use crate::semantic_query::{SemanticNodeId, SemanticQueryKey};
+    use std::sync::Arc;
 
-    const CLAIMED: u64 = 7;
+    /// An instantiation of one declaration over the single argument `arg`.
+    fn application(arg: u64) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::<str>::from("/a.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::<str>::from("Loop"),
+            ),
+            Arc::from(vec![SemanticNodeId(arg)].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
+        ))
+    }
 
-    fn frame(produces: Option<u64>, partial: bool) -> BuildLocalTaint {
+    /// How a frame's steps so far read.
+    #[derive(Clone, Copy)]
+    enum Steps {
+        Exact,
+        /// A step read a partial.
+        Partial,
+        /// A step read a complete result its memo would not keep.
+        Suppressed,
+    }
+
+    fn frame(produces: Option<(u64, TupleSplicePosition)>, steps: Steps) -> BuildLocalTaint {
         BuildLocalTaint {
-            produces,
-            result_is_partial: partial,
+            produces: produces.and_then(|(arg, site)| FrameProduction::of(&application(arg), site)),
+            result_is_partial: matches!(steps, Steps::Partial),
+            cache_suppress: matches!(steps, Steps::Suppressed),
             ..BuildLocalTaint::default()
         }
     }
 
+    const TYPE: TupleSplicePosition = TupleSplicePosition::Type;
+    const EXPRESSION: TupleSplicePosition = TupleSplicePosition::Expression;
+    const CLAIMED: u64 = 7;
+    const OTHER: u64 = 3;
+
     /// A same-path claim on an application an enclosing build produces is
     /// proved only through every frame from that build's to the top: a
-    /// partial in the producer's frame or in any frame between refuses the
-    /// proof even when the innermost frame is clean, a partial below the
-    /// producer (its callers') does not, and a producer that is not on the
-    /// stack (a suspended continuation's) proves nothing.
+    /// partial, or a complete result its memo would not keep, in the
+    /// producer's frame or in any frame between refuses the proof even when
+    /// the innermost frame is clean; a partial below the producer (its
+    /// callers') does not; and a producer that is not on the stack (a
+    /// suspended continuation's) proves nothing. The producer is the frame
+    /// building exactly the claimed key at the claimed checking site: a
+    /// frame building it at the other site is no producer, neither standing
+    /// in for an absent one nor ending the walk before a tainted frame
+    /// above the real one.
     #[test]
     fn a_same_path_claim_is_exact_only_through_every_frame_since_its_producer() {
+        use Steps::{Exact, Partial, Suppressed};
+        let claimed = Some((CLAIMED, TYPE));
         let cases = [
-            (vec![frame(Some(CLAIMED), false), frame(None, false)], true),
-            (vec![frame(Some(CLAIMED), true), frame(None, false)], false),
+            (vec![frame(claimed, Exact), frame(None, Exact)], true),
+            (vec![frame(claimed, Partial), frame(None, Exact)], false),
+            (vec![frame(claimed, Suppressed), frame(None, Exact)], false),
             (
                 vec![
-                    frame(Some(CLAIMED), false),
-                    frame(Some(3), true),
-                    frame(None, false),
+                    frame(claimed, Exact),
+                    frame(Some((OTHER, TYPE)), Partial),
+                    frame(None, Exact),
                 ],
                 false,
             ),
             (
                 vec![
-                    frame(None, true),
-                    frame(Some(CLAIMED), false),
-                    frame(None, false),
+                    frame(claimed, Exact),
+                    frame(Some((OTHER, TYPE)), Suppressed),
+                    frame(None, Exact),
+                ],
+                false,
+            ),
+            (
+                vec![
+                    frame(None, Partial),
+                    frame(claimed, Exact),
+                    frame(None, Exact),
                 ],
                 true,
             ),
-            (vec![frame(Some(3), false), frame(None, false)], false),
+            (
+                vec![frame(Some((OTHER, TYPE)), Exact), frame(None, Exact)],
+                false,
+            ),
+            (
+                vec![
+                    frame(Some((CLAIMED, EXPRESSION)), Exact),
+                    frame(None, Exact),
+                ],
+                false,
+            ),
+            (
+                vec![
+                    frame(claimed, Exact),
+                    frame(None, Partial),
+                    frame(Some((CLAIMED, EXPRESSION)), Exact),
+                    frame(None, Exact),
+                ],
+                false,
+            ),
         ];
+        let claimed_key = application(CLAIMED);
         for (index, (frames, exact)) in cases.iter().enumerate() {
             assert_eq!(
-                exact_since_producer(frames, CLAIMED),
+                exact_since_producer(frames, &claimed_key, TYPE),
                 *exact,
                 "case {index}"
             );

@@ -894,15 +894,32 @@ describe("independent component facts", () => {
         value: { $typeName: "verter.v1.InferNode", nameId: 2, constraintNodeId: 2 },
       },
     });
+    // A binder declares in a conditional's `extends` clause and is
+    // referenced by name in its true branch.
+    for (const inferNodeId of [6, 7]) {
+      payload.typeGraph!.nodes.push({
+        $typeName: "verter.v1.TypeNode",
+        kind: {
+          case: "conditional",
+          value: {
+            $typeName: "verter.v1.ConditionalNode",
+            checkNodeId: 1,
+            extendsNodeId: inferNodeId,
+            trueTypeNodeId: inferNodeId,
+            falseTypeNodeId: 1,
+          },
+        },
+      });
+    }
     const first = payload.body!.facts!.props!.value!.entries[0];
-    first.typeNodeId = 6;
-    payload.body!.facts!.props!.value!.entries.push({ ...first, nameId: 6, typeNodeId: 7 });
+    first.typeNodeId = 8;
+    payload.body!.facts!.props!.value!.entries.push({ ...first, nameId: 6, typeNodeId: 9 });
     const result = decode(payload);
     expect(typeExprToDescriptor(result.props[0].type!)).toMatchObject({
-      rawType: "infer TreeNode extends string",
+      rawType: "string extends (infer TreeNode extends string) ? TreeNode : string",
     });
     expect(typeExprToDescriptor(result.props[1].type!)).toMatchObject({
-      rawType: "infer TreeNode extends undefined",
+      rawType: "string extends (infer TreeNode extends undefined) ? TreeNode : string",
     });
   });
 

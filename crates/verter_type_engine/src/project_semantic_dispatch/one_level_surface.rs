@@ -390,6 +390,7 @@ impl OneLevelSurface {
                 key_type,
                 value_type: union_value(graph, values, meter, evidence),
                 readonly,
+                key_name: None,
                 spans: verter_type_expr::IndexSignatureSpans::default(),
                 declaration_origin: None,
             }));

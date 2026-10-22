@@ -1340,14 +1340,21 @@ export function weak_member() { return po(um); }
 declare function pn(x: { o: { a?: number } }): void;
 declare const on: { o: number };
 export function weak_nested() { return pn(on); }
+declare function gd<T>(x: T, y: T, z: T): number;
+declare function gd<T>(x: T): string;
+export function differing_return() { return gd<string>(1); }
 "#;
 
 /// An optional target property or parameter reports against its declared
 /// type (`Type 'string' is not assignable to type 'number'.`), an overload
 /// set under explicit type arguments reports its one arity-fitting
-/// candidate's argument error, a union is related and printed in the
-/// checker's own order, and `strictNullChecks: false` leaves `null` and
-/// `undefined` out of every message. Measured on TypeScript 7.0.2.
+/// candidate's argument error and continues with the candidate the checker
+/// recovers with, its first taking as many parameters as the call has
+/// arguments (`getLongestCandidateIndex`): `gd<string>(1)` is `number`, that
+/// candidate's return, beside the fitting one's TS2345. A union is related
+/// and printed in the checker's own order, and `strictNullChecks: false`
+/// leaves `null` and `undefined` out of every message. Measured on
+/// TypeScript 7.0.2.
 #[test]
 fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability() {
     const ARG: &str = "is not assignable to parameter of type";
@@ -1378,6 +1385,12 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
             (
                 "reversed_explicit",
                 "(17,57)",
+                number_string.clone(),
+                number_string.clone(),
+            ),
+            (
+                "differing_return",
+                "(65,56)",
                 number_string.clone(),
                 number_string.clone(),
             ),
@@ -1541,6 +1554,10 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
         }
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        assert_prints(&host, root, "reversed_explicit", "string");
+        assert_prints(&host, root, "differing_return", "number");
+    }
 }
 
 const CALL_REPORT_IDENTITY: &str = r#"declare function assertNever(x: never): never;
@@ -1583,16 +1600,27 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
     }
 }
 
-/// A message the printer cannot reproduce is not reported: the checker
-/// abbreviates a type past its truncation length by a running count this
-/// printer does not model, and an explanation chain past the elaboration
-/// budget would be cut where the checker's is not. Each answers without
-/// the diagnostic, never with a wrong one — and a short sibling call in the
-/// same source still reports.
+/// A long message prints as the checker prints it. Past its node builder's
+/// truncation length a union's remaining members elide as `... N more ...`
+/// before its last, a member it begins past that length as `{ ...; }`, and
+/// an object's remaining properties as `... N more ...;` before its last; a
+/// printed type of twice that length is clipped to its first 317 bytes and
+/// `...`; and a failure through a property path of 70 nested object types
+/// is explained on one path line, never cut. A reference's type arguments
+/// are counted before its name, a tuple label adds nothing, an index
+/// signature counts its authored parameter name, and a mapped type that is
+/// not generic counts as the object type it resolves to, so each is elided exactly
+/// where the checker elides it, and never withheld. Each is reported at its own
+/// call, two calls of one body in source order, cold and warm. Every
+/// expected line is TypeScript 7.0.2's on this fixture, identical with
+/// `strictNullChecks` off.
 #[test]
-fn a_message_beyond_the_printers_reach_is_not_reported() {
+fn long_messages_print_as_the_checker_abbreviates_them() {
     let arms: Vec<String> = (0..40)
         .map(|ordinal| format!("{{ member{ordinal}: {ordinal} }}"))
+        .collect();
+    let properties: Vec<String> = (0..40)
+        .map(|ordinal| format!("p{ordinal}: {ordinal}"))
         .collect();
     let nest = |inner: &str, depth: usize| {
         let mut ty = inner.to_owned();
@@ -1606,26 +1634,382 @@ fn a_message_beyond_the_printers_reach_is_not_reported() {
          declare function nested(x: {}): void;\n\
          declare const wide: {};\n\
          declare const deep: {};\n\
+         declare const wobj: {{ {} }};\n\
          export function wide_union() {{ return one(wide); }}\n\
+         export function wide_object() {{ return one(wobj); }}\n\
          export function deep_chain() {{ return nested(deep); }}\n\
-         export function short() {{ return one(1); }}\n",
+         export function both() {{ return [one(wobj), one(wide)]; }}\n\
+         export function short() {{ return one(1); }}\n\
+         interface Wrapper<T> {{ w: T }}\n\
+         declare const near: {{ a: \"{near}\"; b: Wrapper<string>; c: number }};\n\
+         declare const past: {{ a: \"{past}\"; b: Wrapper<string>; c: number }};\n\
+         declare const index_near: {{ t: {{ [k: string]: \"{index_near}\" }}; b: Wrapper<string> }};\n\
+         declare const index_past: {{ t: {{ [k: string]: \"{index_past}\" }}; b: Wrapper<string> }};\n\
+         declare const labelled: [{label}: string];\n\
+         declare const indexed: {{ [k: string]: {{ {indexed} }} }};\n\
+         export function references() {{ return [one(near), one(past)]; }}\n\
+         export function index_counts() {{ return [one(index_near), one(index_past)]; }}\n\
+         export function labelled_tuple() {{ return one(labelled); }}\n\
+         export function index_signature() {{ return one(indexed); }}\n\
+         declare const mapped: {{ [P in string]: {{ {indexed} }} }};\n\
+         export function mapped_index() {{ return one(mapped); }}\n",
         nest("number", 70),
         arms.join(" | "),
         nest("string", 70),
+        properties.join("; "),
+        near = "x".repeat(150),
+        past = "x".repeat(155),
+        index_near = "x".repeat(138),
+        index_past = "x".repeat(139),
+        label = "a".repeat(90),
+        indexed = properties[..20].join("; "),
     );
+    const ARG: &str = "is not assignable to parameter of type 'string'.";
+    let union = format!(
+        "Argument of type '{} | {{ ...; }} | ... 26 more ... | {{ ...; }}' {ARG}\n  \
+         Type '{{ member0: 0; }}' is not assignable to type 'string'.",
+        (0..12)
+            .map(|ordinal| format!("{{ member{ordinal}: {ordinal}; }}"))
+            .collect::<Vec<_>>()
+            .join(" | "),
+    );
+    let object = format!(
+        "Argument of type '{{ {}; ... 8 more ...; p39: 39; }}' {ARG}",
+        properties[..31].join("; "),
+    );
+    let clipped = format!("{}{{ ...", "{ a: ".repeat(63));
+    let deep = format!(
+        "Argument of type '{clipped}' is not assignable to parameter of type '{clipped}'.\n  \
+         The types of '{}' are incompatible between these types.\n    \
+         Type 'string' is not assignable to type 'number'.",
+        vec!["a"; 70].join("."),
+    );
+    let at = |position: &str, message: &str| format!("{position}: error TS2345: {message}");
+    let rows: Vec<(&str, Vec<String>)> = vec![
+        ("wide_union", vec![at("(7,43)", &union)]),
+        ("wide_object", vec![at("(8,44)", &object)]),
+        ("deep_chain", vec![at("(9,46)", &deep)]),
+        ("both", vec![at("(10,38)", &object), at("(10,49)", &union)]),
+        (
+            "short",
+            vec![at(
+                "(11,38)",
+                "Argument of type 'number' is not assignable to parameter of type 'string'.",
+            )],
+        ),
+        (
+            "references",
+            vec![
+                at(
+                    "(19,44)",
+                    &format!(
+                        "Argument of type '{{ a: \"{}\"; b: Wrapper<string>; c: number; }}' {ARG}",
+                        "x".repeat(150)
+                    ),
+                ),
+                at(
+                    "(19,55)",
+                    &format!(
+                        "Argument of type '{{ a: \"{}\"; b: Wrapper<...>; c: number; }}' {ARG}",
+                        "x".repeat(155)
+                    ),
+                ),
+            ],
+        ),
+        (
+            "index_counts",
+            vec![
+                at(
+                    "(20,46)",
+                    &format!(
+                        "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<string>; }}' {ARG}",
+                        "x".repeat(138)
+                    ),
+                ),
+                at(
+                    "(20,63)",
+                    &format!(
+                        "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<...>; }}' {ARG}",
+                        "x".repeat(139)
+                    ),
+                ),
+            ],
+        ),
+        (
+            "labelled_tuple",
+            vec![at(
+                "(21,47)",
+                &format!("Argument of type '[{}: string]' {ARG}", "a".repeat(90)),
+            )],
+        ),
+        (
+            "index_signature",
+            vec![at(
+                "(22,48)",
+                &format!(
+                    "Argument of type '{{ [k: string]: {{ {}; }}; }}' {ARG}",
+                    properties[..20].join("; ")
+                ),
+            )],
+        ),
+        (
+            "mapped_index",
+            vec![at(
+                "(24,45)",
+                &format!(
+                    "Argument of type '{{ [x: string]: {{ {}; }}; }}' {ARG}",
+                    properties[..20].join("; ")
+                ),
+            )],
+        ),
+    ];
     let host = host_with(&source);
-    for root in [STRICT_ROOT, LOOSE_ROOT] {
-        for function in ["wide_union", "deep_chain"] {
-            let reported = super::signature_predicate_inference_tests::checker_report(
-                &host, root, function, &source,
-            );
-            assert!(reported.is_empty(), "`{function}` in {root}: {reported:#?}");
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in &rows {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, &source,
+                );
+                if reported != *expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
         }
-        let short = super::signature_predicate_inference_tests::checker_report(
-            &host, root, "short", &source,
-        );
-        assert_eq!(short.len(), 1, "`short` in {root}: {short:#?}");
     }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// A message prints a tuple and an object's members as the checker does:
+/// under `strictNullChecks` an optional element's type with `undefined`
+/// added, which also counts toward where the node builder abbreviates; an
+/// object's call, construct and index signatures before its properties; and
+/// an index signature by its authored parameter name, or `x` for one no
+/// declaration wrote; and a mapped type that is not generic, at the top or
+/// nested, as the object type it resolves to, `undefined` printed last; and
+/// an optional `never` element or property as `undefined`.
+/// Every expected line is TypeScript 7.0.2's on this fixture.
+#[test]
+fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
+    let source = format!(
+        "\ndeclare function one(x: string): number;\n\
+         interface IX {{ [k: string]: number }}\n\
+         interface Wrapper<T> {{ w: T }}\n\
+         declare const t1: [lab: string, other?: number];\n\
+         declare const t2: [number?, \"q\"?, (1 | 2)?];\n\
+         declare const t3: {{ t: [lab?: \"{long}\"]; b: Wrapper<string>; c: number }};\n\
+         declare const o1: {{ p: 1; [k: string]: \"q\" | 1 }};\n\
+         declare const o2: {{ [k: string]: number; (): void; new (): void; p: 1 }};\n\
+         declare const m1: {{ [P in keyof IX]: IX[P] }};\n\
+         export function tuples() {{ return [one(t1), one(t2), one(t3)]; }}\n\
+         export function members() {{ return [one(o1), one(o2), one(m1)]; }}\n\
+         declare const m2: {{ [P in string]: 1 }};\n\
+         declare const m3: {{ readonly [P in number]?: \"q\" }};\n\
+         declare const m4: {{ a: {{ [P in \"a\" | \"b\"]?: 1 }} }};\n\
+         export function mapped() {{ return [one(m2), one(m3), one(m4)]; }}\n\
+         declare const n1: [lab?: never];\n\
+         declare const n2: [never?];\n\
+         declare const n3: {{ a?: never }};\n\
+         export function nevers() {{ return [one(n1), one(n2), one(n3)]; }}\n",
+        long = "x".repeat(140),
+    );
+    let at = |position: &str, printed: &str| {
+        format!(
+            "{position}: error TS2345: Argument of type '{printed}' is not assignable to parameter of type 'string'."
+        )
+    };
+    let long = "x".repeat(140);
+    let tuples = |strict: bool| {
+        if strict {
+            vec![
+                at("(11,40)", "[lab: string, other?: number | undefined]"),
+                at(
+                    "(11,49)",
+                    "[(number | undefined)?, (\"q\" | undefined)?, (1 | 2 | undefined)?]",
+                ),
+                at(
+                    "(11,58)",
+                    &format!(
+                        "{{ t: [lab?: \"{long}\" | undefined]; b: Wrapper<...>; c: number; }}"
+                    ),
+                ),
+            ]
+        } else {
+            vec![
+                at("(11,40)", "[lab: string, other?: number]"),
+                at("(11,49)", "[number?, \"q\"?, (1 | 2)?]"),
+                at(
+                    "(11,58)",
+                    &format!("{{ t: [lab?: \"{long}\"]; b: Wrapper<string>; c: number; }}"),
+                ),
+            ]
+        }
+    };
+    let members = vec![
+        at("(12,41)", "{ [k: string]: \"q\" | 1; p: 1; }"),
+        at(
+            "(12,50)",
+            "{ (): void; new (): void; [k: string]: number; p: 1; }",
+        ),
+        at("(12,59)", "{ [x: string]: number; }"),
+    ];
+    let mapped = |strict: bool| {
+        vec![
+            at("(16,40)", "{ [x: string]: 1; }"),
+            at(
+                "(16,49)",
+                if strict {
+                    "{ readonly [x: number]: \"q\" | undefined; }"
+                } else {
+                    "{ readonly [x: number]: \"q\"; }"
+                },
+            ),
+            at(
+                "(16,58)",
+                if strict {
+                    "{ a: { a?: 1 | undefined; b?: 1 | undefined; }; }"
+                } else {
+                    "{ a: { a?: 1; b?: 1; }; }"
+                },
+            ),
+        ]
+    };
+    let nevers = |strict: bool| {
+        if strict {
+            vec![
+                at("(20,40)", "[lab?: undefined]"),
+                at("(20,49)", "[undefined?]"),
+                at("(20,58)", "{ a?: undefined; }"),
+            ]
+        } else {
+            vec![
+                at("(20,40)", "[lab?: never]"),
+                at("(20,49)", "[never?]"),
+                at("(20,58)", "{ a?: never; }"),
+            ]
+        }
+    };
+    let host = host_with(&source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for (root, strict) in [(STRICT_ROOT, true), (LOOSE_ROOT, false)] {
+            for (function, expected) in [
+                ("tuples", tuples(strict)),
+                ("members", members.clone()),
+                ("mapped", mapped(strict)),
+                ("nevers", nevers(strict)),
+            ] {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, &source,
+                );
+                if reported != expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// A failure through a long property path is reported while the checker's
+/// relation stack holds it, and withheld where the checker reports TS2321
+/// instead: the failing pair itself takes a frame when it is two object
+/// types or an intersection target's member, not when it is two primitives
+/// or an object type against a primitive. Every reported line is
+/// TypeScript 7.0.2's on this fixture, identical with `strictNullChecks`
+/// off; each withheld row is one tsc reports as TS2321.
+#[test]
+fn deep_chains_report_until_the_checker_relation_stack_overflows() {
+    let nest = |inner: &str, depth: usize| {
+        let mut ty = inner.to_owned();
+        for _ in 0..depth {
+            ty = format!("{{ a: {ty} }}");
+        }
+        ty
+    };
+    let rows: [(&str, usize, &str, &str); 8] = [
+        ("object_leaf_99", 99, "{ x: number }", "{ y: number }"),
+        ("object_leaf_100", 100, "{ x: number }", "{ y: number }"),
+        ("object_to_primitive_99", 99, "{ x: 1 }", "string"),
+        ("object_to_primitive_100", 100, "{ x: 1 }", "string"),
+        ("primitive_leaf_100", 100, "string", "number"),
+        ("primitive_leaf_101", 101, "string", "number"),
+        ("intersection_98", 98, "string", "{ p: 1 } & { q: 2 }"),
+        ("intersection_99", 99, "string", "{ p: 1 } & { q: 2 }"),
+    ];
+    let mut source = String::from("\n");
+    for (name, depth, leaf_source, leaf_target) in rows {
+        source.push_str(&format!(
+            "declare function {name}_f(x: {}): void;\n\
+             declare const {name}_s: {};\n\
+             export function {name}() {{ return {name}_f({name}_s); }}\n",
+            nest(leaf_target, depth),
+            nest(leaf_source, depth),
+        ));
+    }
+    let clipped = format!("{}{{ ...", "{ a: ".repeat(63));
+    let reported = |position: &str, depth: usize, leaf: &str| {
+        vec![format!(
+            "{position}: error TS2345: Argument of type '{clipped}' is not assignable to parameter of type '{clipped}'.\n  \
+             The types of '{}' are incompatible between these types.\n    {leaf}",
+            vec!["a"; depth].join("."),
+        )]
+    };
+    let expected: [(&str, Vec<String>); 8] = [
+        (
+            "object_leaf_99",
+            reported(
+                "(4,60)",
+                99,
+                "Property 'y' is missing in type '{ x: number; }' but required in type '{ y: number; }'.",
+            ),
+        ),
+        ("object_leaf_100", Vec::new()),
+        (
+            "object_to_primitive_99",
+            reported("(10,76)", 99, "Type '{ x: 1; }' is not assignable to type 'string'."),
+        ),
+        (
+            "object_to_primitive_100",
+            reported("(13,78)", 100, "Type '{ x: 1; }' is not assignable to type 'string'."),
+        ),
+        (
+            "primitive_leaf_100",
+            reported("(16,68)", 100, "Type 'string' is not assignable to type 'number'."),
+        ),
+        ("primitive_leaf_101", Vec::new()),
+        (
+            "intersection_98",
+            reported(
+                "(22,62)",
+                98,
+                "Type 'string' is not assignable to type '{ p: 1; } & { q: 2; }'.\n      \
+                 Type 'string' is not assignable to type '{ p: 1; }'.",
+            ),
+        ),
+        ("intersection_99", Vec::new()),
+    ];
+    let host = host_with(&source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in &expected {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, &source,
+                );
+                if reported != *expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 /// A diagnostic whose position the call's route cannot establish is not

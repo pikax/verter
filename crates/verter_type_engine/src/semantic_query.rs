@@ -4494,6 +4494,13 @@ pub struct IndexSignature {
     pub key_type: SemanticNodeId,
     pub value_type: SemanticNodeId,
     pub readonly: bool,
+    /// The declared index parameter's name (`k` in `[k: string]`), which the
+    /// checker prints for the signature. `None` for a signature no
+    /// declaration wrote (a mapped type's, a join of several), which the
+    /// checker prints as `x`. Presentation only, like
+    /// [`Self::spans`]: it participates in node interning but never in a
+    /// stable key.
+    pub key_name: Option<OwnedStr>,
     /// OXC declaration-site spans for this index signature, carried verbatim
     /// from the `verter_type_expr` IR ([`verter_type_expr::IndexSignatureSpans`]).
     /// Coordinates are in the owning declaration's source file. Participates in
@@ -4528,6 +4535,7 @@ impl IndexSignature {
             key_type: self.key_type.clone(),
             value_type: self.value_type.clone(),
             readonly: self.readonly.clone(),
+            key_name: self.key_name.clone(),
             spans: self.spans.clone(),
             declaration_origin: self.declaration_origin.clone(),
         }
@@ -11153,8 +11161,9 @@ pub enum SemanticNodeData {
     /// conditional whose extends holds only `InferRef`s does NOT
     /// re-declare the name (no shadow), and an `InferRef` is never an
     /// inference-pattern site (never a deposit target). Raises to the
-    /// same `TypeExpr::Infer { name }` as a declaration, so
-    /// TypeExpr-level consumers are unaffected.
+    /// `TypeExpr::Ref { name }` it lowers from: a `TypeExpr::Infer` inside
+    /// an `extends` clause always declares, so raising a reference to it
+    /// would redeclare (shadow) the binder.
     InferRef {
         name: OwnedStr,
         binder: InferBinderId,

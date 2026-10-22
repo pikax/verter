@@ -1229,6 +1229,7 @@ fn conditional_infer_reaches_object_index_call_and_construct_positions() {
         key_type: string,
         value_type: value,
         readonly: false,
+        key_name: None,
         spans: Default::default(),
         declaration_origin: None,
     };
@@ -4091,6 +4092,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
                 key_type: string,
                 value_type: string,
                 readonly: false,
+                key_name: None,
                 spans: verter_type_expr::IndexSignatureSpans {
                     declaration: Some(verter_span::Span::new(span_start, span_start + 12)),
                     key: Some(verter_span::Span::new(span_start + 1, span_start + 4)),
@@ -16421,6 +16423,7 @@ fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_mo
                     key_type: string_key,
                     value_type: boxed(boolean),
                     readonly: true,
+                    key_name: None,
                     spans: Default::default(),
                     declaration_origin: None,
                 }]
@@ -16876,6 +16879,7 @@ fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
                     key_type: primitive(&graph, PrimitiveKind::String),
                     value_type: string,
                     readonly: true,
+                    key_name: None,
                     spans: Default::default(),
                     declaration_origin: None,
                 }]
@@ -19257,6 +19261,7 @@ fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
                         key_type,
                         value_type: string_ty,
                         readonly: false,
+                        key_name: None,
                         spans: Default::default(),
                         declaration_origin: None,
                     }]

@@ -205,6 +205,7 @@ impl<'s> Lowerer<'s> {
                     let value = &signature.type_annotation.type_annotation;
                     index_signatures.push(SliceClassIndexSignature {
                         is_static: signature.r#static,
+                        key_name: Arc::from(parameter.name.as_str()),
                         key: self.gate(lower_ts_type(key, self.source), key.span(), &own_binders),
                         value: self.gate(
                             lower_ts_type(value, self.source),

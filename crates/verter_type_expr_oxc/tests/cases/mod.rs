@@ -6,6 +6,7 @@
 mod compound_lowering_shapes;
 mod const_type_param_lowering;
 mod constructor_type_lowering;
+mod display_reparse;
 mod recursion_depth;
 mod this_receiver_lowering;
 mod type_predicate_lowering;

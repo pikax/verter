@@ -370,6 +370,8 @@ impl MetaProvenance {
             eval_env_builds: self.decl_lowering.eval_env_builds.load(Relaxed),
             decl_bodies_lowered: self.decl_lowering.decl_bodies_lowered.load(Relaxed),
             decl_statements_lowered: self.decl_lowering.decl_statements_lowered.load(Relaxed),
+            macro_field_address_builds: self.decl_lowering.macro_field_address_builds.load(Relaxed),
+            macro_field_address_work: self.decl_lowering.macro_field_address_work.load(Relaxed),
             class_elements_lowered: self.decl_lowering.class_elements_lowered.load(Relaxed),
             shallow_state_builds: self.shallow_state_builds.load(Relaxed),
             indexed_ready_materializes: self.indexed_ready_materializes.load(Relaxed),
@@ -484,6 +486,12 @@ impl MetaProvenance {
         self.decl_lowering.eval_env_builds.store(0, Relaxed);
         self.decl_lowering.decl_bodies_lowered.store(0, Relaxed);
         self.decl_lowering.decl_statements_lowered.store(0, Relaxed);
+        self.decl_lowering
+            .macro_field_address_builds
+            .store(0, Relaxed);
+        self.decl_lowering
+            .macro_field_address_work
+            .store(0, Relaxed);
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         self.decl_lowering.class_elements_lowered.store(0, Relaxed);
         self.shallow_state_builds.store(0, Relaxed);
@@ -608,6 +616,12 @@ pub struct MetaProvenanceSnapshot {
     /// their transient re-borrows (see
     /// `DeclLoweringCounters::decl_statements_lowered`).
     pub decl_statements_lowered: u64,
+    /// Whole-file macro assemblies replayed to address macro field payloads
+    /// (see `DeclLoweringCounters::macro_field_address_builds`).
+    pub macro_field_address_builds: u64,
+    /// Units of macro field-address work (see
+    /// `DeclLoweringCounters::macro_field_address_work`).
+    pub macro_field_address_work: u64,
     /// Class elements lowered by selective class-body lowering; a demand
     /// for one class member lowers only the elements declaring it.
     pub class_elements_lowered: u64,

@@ -2368,6 +2368,12 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract_f
     provider_label: &'static str,
     provider_kind: crate::TypeProviderKind,
 ) {
+    // The provider variants must not overlap. nextest runs each in its own
+    // process and serializes them through the
+    // `progressive-child-contract-completion` test group; `cargo test` runs
+    // them as threads of one process, so hold the same exclusion here.
+    static VARIANTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _exclusive = VARIANTS.lock().await;
     struct Case {
         label: &'static str,
         route: &'static str,

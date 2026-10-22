@@ -1251,6 +1251,24 @@ mod refusal_ledger_tests {
             classify_final_component_retention(depth, FinalComponentAdmissionProof::isolated(true)),
             FinalComponentRetention::Retain(ComponentMetaRefusalClass::IsolatedRoot)
         );
+        // A depth trip beside an operation refusal has two causes: neither
+        // class alone describes it, so it is not retained under either, even
+        // for an isolated root whose request owns its spend.
+        for operation in [
+            PartialReasonSet::OPERATION_BUDGET,
+            PartialReasonSet::BUDGET_EXCEEDED,
+        ] {
+            let depth_and_operation = ResultCompleteness::partial(
+                PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT.union(operation),
+            );
+            let proof = FinalComponentAdmissionProof::isolated(true);
+            assert!(proof.request_spend_owned);
+            assert_eq!(
+                classify_final_component_retention(depth_and_operation, proof),
+                FinalComponentRetention::NotAdmitted,
+                "a depth trip beside {operation:?} is not an isolated-root refusal"
+            );
+        }
         assert_eq!(
             classify_final_component_retention(
                 ResultCompleteness::Complete,

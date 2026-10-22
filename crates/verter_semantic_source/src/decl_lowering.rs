@@ -835,6 +835,13 @@ pub struct DeclLoweringCounters {
     /// per lowering. A cold body demanded for its facts and then for its
     /// body lowers each contributing statement ONCE.
     pub decl_statements_lowered: verter_audit::observe::ObservedU64,
+    /// Whole-file macro assemblies replayed to address macro field
+    /// payloads (`MacroFieldAddressTable` builds): at most one per retained
+    /// snapshot, however many of its fields are demanded.
+    pub macro_field_address_builds: verter_audit::observe::ObservedU64,
+    /// Units of macro field-address work those builds performed
+    /// (`MacroFieldAddressTable::work`): linear in the file's macro surface.
+    pub macro_field_address_work: verter_audit::observe::ObservedU64,
     /// Class elements lowered by selective class-body lowering: one per raw
     /// `ClassBody.body` element a member demand lowered. A demand for one
     /// class member lowers only the elements declaring it, never the

@@ -679,3 +679,20 @@ fn a_promise_member_infers_its_payload_beside_the_naked_union_remainder() {
     let failures = matrix.returns(&[("resolved", "1 | 2")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A single thenable source closely matching the authored thenable arm of a
+/// union with a naked variable: the variable takes the thenable's payload
+/// from that arm, and the whole source only at the lower priority, so it is
+/// `1`, never the thenable itself.
+#[test]
+fn a_closely_matched_thenable_infers_its_payload_not_itself() {
+    let source = format!(
+        "{MIRRORED_THENABLE}declare const v: PL<1>;\n\
+         declare function resolve<T>(x: T | PL<T>): T;\n\
+         export function resolved() {{ return resolve(v); }}\n"
+    );
+    let matrix = Matrix::new(&source).lib(GLOBALS_LIB).settings(&[STRICT]);
+    let mut failures = matrix.types(&[("PL<1> extends PL<infer U> | infer U ? U : 0", "1")]);
+    failures.extend(matrix.returns(&[("resolved", "1")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

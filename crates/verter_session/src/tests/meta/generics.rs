@@ -461,8 +461,8 @@ defineProps<Props<T>>()
                 "the extends clause declares `infer Selected`: {extends:?}"
             );
             assert!(
-                matches!(true_type.as_ref(), TypeExpr::Infer { name, .. } if name == "Selected"),
-                "the true branch reads `Selected`: {true_type:?}"
+                matches!(true_type.as_ref(), TypeExpr::Ref { name, .. } if name.as_ref() == "Selected"),
+                "the true branch references `Selected`: {true_type:?}"
             );
             assert!(matches!(
                 false_type.as_ref(),
