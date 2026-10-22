@@ -24,7 +24,7 @@ fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey
 
 fn route_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "route_dep.ts".to_string(),
+        canonical_id: "route_dep.ts".into(),
         hash: [33u8; 16],
     }
 }

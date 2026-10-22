@@ -10,11 +10,53 @@
 //! compaction, replay ledgers, publication, invalidation,
 //! candidate-retention policy) stays workspace/session-owned.
 
+use std::sync::Arc;
+
 use crate::facts::registry::{FactKey, FactLane, SymbolSpace};
 use crate::facts::resolution::ResolutionFactRef;
 use crate::resolution::resolution_world_identity::{ResolutionPopulation, ResolutionWorldId};
 
 pub type FactHash16 = [u8; 16];
+
+/// One canonical's text for the facts a producer observes on it: allocated
+/// once, on first use, and shared by every fact naming it, so a producer
+/// observing several facts on one file makes one allocation, not one per
+/// fact.
+pub struct SharedCanonical<'a> {
+    text: &'a str,
+    shared: std::cell::OnceCell<Arc<str>>,
+}
+
+impl<'a> SharedCanonical<'a> {
+    /// `text`, not yet allocated.
+    #[must_use]
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            shared: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The shared text, allocated the first time it is asked for.
+    #[must_use]
+    pub fn id(&self) -> Arc<str> {
+        Arc::clone(self.shared.get_or_init(|| Arc::from(self.text)))
+    }
+}
+
+impl AsRef<str> for SharedCanonical<'_> {
+    fn as_ref(&self) -> &str {
+        self.text
+    }
+}
+
+/// Passed by reference to a callee that may decline to emit, the text is
+/// allocated only if the callee does emit.
+impl From<&SharedCanonical<'_>> for Arc<str> {
+    fn from(canonical: &SharedCanonical<'_>) -> Self {
+        canonical.id()
+    }
+}
 
 /// The compaction domain a precise fact belongs to.
 ///
@@ -361,7 +403,7 @@ pub enum DerivedFactKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseFactRef {
-    pub canonical_id: String,
+    pub canonical_id: Arc<str>,
     pub key: FactKey,
     pub lane: FactLane,
     pub expected_hash: FactHash16,
@@ -375,7 +417,7 @@ pub struct ParseFactRef {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResolveImportsFactRef {
     Semantic {
-        canonical_id: String,
+        canonical_id: Arc<str>,
         key: FactKey,
         lane: FactLane,
         expected_hash: FactHash16,
@@ -403,7 +445,7 @@ impl ResolveImportsFactRef {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RouteSurfaceFactRef {
-    pub canonical_id: String,
+    pub canonical_id: Arc<str>,
     pub key: FactKey,
     pub lane: FactLane,
     pub expected_hash: FactHash16,
@@ -460,11 +502,11 @@ pub struct StrictSelfRootWorld {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactVersionRef {
     FileWholeHash {
-        canonical_id: String,
+        canonical_id: Arc<str>,
         hash: FactHash16,
     },
     DerivedFactHash {
-        canonical_id: String,
+        canonical_id: Arc<str>,
         kind: DerivedFactKind,
         hash: FactHash16,
     },
@@ -473,7 +515,7 @@ pub enum FactVersionRef {
     RouteSurface(RouteSurfaceFactRef),
     ProgramAnalysis(ProgramAnalysisFactRef),
     FileSourceEnv {
-        canonical_id: String,
+        canonical_id: Arc<str>,
         parse_env_hash: ParseEnvHash,
         parse_key: verter_language::ParseKey,
         file_language_id: verter_language::FileLanguage,

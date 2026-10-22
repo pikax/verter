@@ -13,11 +13,18 @@ use crate::resolution::dto::{
 };
 use crate::resolution::resolution_world_identity::ResolutionPopulation;
 
+use std::sync::Arc;
+
+/// A canonical path a resolution fact names.
+///
+/// Shared text: cloning a fact that names it, which every read-set merge
+/// does, shares the one allocation instead of copying it. Equality,
+/// ordering and hashing are the text's.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CanonicalResolutionId(String);
+pub struct CanonicalResolutionId(Arc<str>);
 
 impl CanonicalResolutionId {
-    pub fn new(value: impl Into<String>) -> Self {
+    pub fn new(value: impl Into<Arc<str>>) -> Self {
         Self(value.into())
     }
 
@@ -27,28 +34,30 @@ impl CanonicalResolutionId {
     }
 }
 
+/// A normalized specifier, as shared text (see [`CanonicalResolutionId`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NormalizedSpecifier(String);
+pub struct NormalizedSpecifier(Arc<str>);
 
 impl NormalizedSpecifier {
     /// Normalizes a raw specifier: a relative specifier (leading `.`/`\`,
     /// or an embedded `/./`/`\.\`) drops a single trailing slash; anything
     /// else has backslashes rewritten to forward slashes only.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(normalize_specifier(&value.into()))
+    pub fn new(value: impl AsRef<str>) -> Self {
+        Self(normalize_specifier(value.as_ref()))
     }
 }
 
+/// A raw specifier, as shared text (see [`CanonicalResolutionId`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RawSpecifier(String);
+pub struct RawSpecifier(Arc<str>);
 
 impl RawSpecifier {
-    pub fn new(value: impl Into<String>) -> Self {
+    pub fn new(value: impl Into<Arc<str>>) -> Self {
         Self(value.into())
     }
 }
 
-fn normalize_specifier(value: &str) -> String {
+fn normalize_specifier(value: &str) -> Arc<str> {
     if value.starts_with('.')
         || value.starts_with('\\')
         || value.contains("/./")
@@ -60,12 +69,12 @@ fn normalize_specifier(value: &str) -> String {
         // `normalize_relative_specifier` so this module names no
         // workspace type.
         if value.len() > 1 && value.ends_with('/') {
-            value[..value.len() - 1].to_string()
+            Arc::from(&value[..value.len() - 1])
         } else {
-            value.to_string()
+            Arc::from(value)
         }
     } else {
-        value.replace('\\', "/")
+        Arc::from(value.replace('\\', "/"))
     }
 }
 
@@ -294,7 +303,9 @@ pub enum ResolutionFactKey {
     /// root, and a mutation reaching any of them advances this node
     /// through reverse propagation (cache authority, not this module's
     /// concern).
-    Decision { query: Box<ResolutionQueryKey> },
+    ///
+    /// The identity is shared, so cloning the key shares it.
+    Decision { query: Arc<ResolutionQueryKey> },
     /// **Derived node.** One owner's complete set of direct resolution
     /// decisions.
     ///
@@ -312,7 +323,7 @@ impl ResolutionFactKey {
     /// Build the derived node key for one query identity.
     pub fn decision(query: ResolutionQueryKey) -> Self {
         Self::Decision {
-            query: Box::new(query),
+            query: Arc::new(query),
         }
     }
 
@@ -330,35 +341,49 @@ impl ResolutionFactKey {
     }
 
     /// Heap this key owns beyond its inline bytes: its canonical and
-    /// specifier strings by capacity, and a decision's boxed query identity
-    /// with that identity's own strings (see
-    /// [`crate::retention::allocation`]).
+    /// specifier texts and a decision's shared query identity, with that
+    /// identity's own texts, each once per `aliases` (see
+    /// [`crate::retention::allocation::FactMeasure`]).
     #[must_use]
-    pub fn owned_heap_bytes(&self) -> usize {
-        use crate::retention::allocation::{box_bytes, string_bytes};
-        let entry = |entry: &ResolutionEntry| match entry {
-            ResolutionEntry::Importer(canonical) => string_bytes(&canonical.0),
-            ResolutionEntry::ExplicitProject(_) => 0,
+    pub fn owned_heap_bytes(&self, aliases: &mut crate::retention::allocation::AliasSet) -> usize {
+        self.measure_heap(&mut crate::retention::allocation::FactMeasure::new(aliases))
+    }
+
+    /// [`Self::owned_heap_bytes`] within one fact measurement.
+    pub(crate) fn measure_heap<M: crate::retention::allocation::FactMeter>(
+        &self,
+        m: &mut crate::retention::allocation::FactMeasure<'_, M>,
+    ) -> usize {
+        let entry = |entry: &ResolutionEntry,
+                     m: &mut crate::retention::allocation::FactMeasure<'_, M>| {
+            match entry {
+                ResolutionEntry::Importer(canonical) => m.text(&canonical.0),
+                ResolutionEntry::ExplicitProject(_) => 0,
+            }
         };
         match self {
             Self::PathProbe { canonical, .. }
             | Self::Manifest { canonical, .. }
-            | Self::DirectoryMembers { canonical, .. } => string_bytes(&canonical.0),
-            Self::Realpath { requested, .. } => string_bytes(&requested.0),
+            | Self::DirectoryMembers { canonical, .. } => m.text(&canonical.0),
+            Self::Realpath { requested, .. } => m.text(&requested.0),
             Self::RecoveryScope {
                 canonical_prefix, ..
-            } => string_bytes(&canonical_prefix.0),
-            Self::OwnerResolutionSet { owner, .. } => string_bytes(&owner.0),
+            } => m.text(&canonical_prefix.0),
+            Self::OwnerResolutionSet { owner, .. } => m.text(&owner.0),
             Self::ExactResolution {
                 entry: owner,
                 specifier,
                 ..
-            } => entry(owner) + string_bytes(&specifier.0),
-            Self::ContextSelection { entry: owner, .. } => entry(owner),
+            } => entry(owner, m) + m.text(&specifier.0),
+            Self::ContextSelection { entry: owner, .. } => entry(owner, m),
             Self::Decision { query } => {
-                box_bytes::<ResolutionQueryKey>()
-                    + entry(&query.entry)
-                    + string_bytes(&query.normalized_specifier.0)
+                if !m.first_owned(query) {
+                    return 0;
+                }
+                crate::retention::allocation::arc_block_bytes(
+                    std::mem::size_of::<ResolutionQueryKey>(),
+                ) + entry(&query.entry, m)
+                    + m.text(&query.normalized_specifier.0)
             }
         }
     }
@@ -427,7 +452,7 @@ impl ResolutionFactKey {
                 population: current,
                 ..
             } => *current = population,
-            Self::Decision { query } => query.population = population,
+            Self::Decision { query } => Arc::make_mut(query).population = population,
         }
         key
     }

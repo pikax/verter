@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/cases/compile-fail/flow_return_root_rejects_raw_ordinal.rs:8:47
+  |
+8 |     host.project_node_to_type_expr_json_bytes(&result.return_type())
+  |          ------------------------------------ ^^^^^^^^^^^^^^^^^^^^^ expected `&NodeRoot`, found `&SemanticNodeId`
+  |          |
+  |          arguments to this method are incorrect
+  |
+  = note: expected reference `&NodeRoot`
+             found reference `&SemanticNodeId`
+note: method defined here
+ --> src/typeinfo/raise.rs
+  |
+  |     pub fn project_node_to_type_expr_json_bytes(
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

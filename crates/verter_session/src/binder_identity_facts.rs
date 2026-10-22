@@ -1157,7 +1157,7 @@ pub(crate) mod tests {
         let entry = || {
             let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
                 .map(|index| FactVersionRef::FileWholeHash {
-                    canonical_id: format!("/wide/{index:05}.ts"),
+                    canonical_id: format!("/wide/{index:05}.ts").into(),
                     hash: [1u8; 16],
                 })
                 .collect();

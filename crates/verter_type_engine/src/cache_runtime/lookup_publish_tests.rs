@@ -304,7 +304,7 @@ fn lookup_publish_threads_deferred_victims_to_evict() {
 
 fn sig_for(canonical: &str, hash_byte: u8) -> ReadSetSignature {
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: [hash_byte; 16],
     }]);
     ReadSetSignature::new(facts)

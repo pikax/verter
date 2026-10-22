@@ -79,7 +79,7 @@ fn bench_cold_compute_one_observation(c: &mut Criterion) {
     // Construct a representative fact once outside the loop; cloning
     // a `FactVersionRef::FileWholeHash` is the cheapest variant.
     let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-        canonical_id: "/m.ts".to_string(),
+        canonical_id: "/m.ts".into(),
         hash: [0; 16],
     };
     c.bench_function("fact_tracer/cold_compute_one_observation", |b| {

@@ -573,7 +573,7 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
     // Build the `ResolveImportsFactRef` shape the wrapper validator
     // receives at runtime.
     let fact_ref = ResolveImportsFactRef::Semantic {
-        canonical_id: "/owner.ts".to_string(),
+        canonical_id: "/owner.ts".into(),
         key: FactKey::ResolvedImportClause {
             specifier: InternedSpecifier::from(entry.specifier.as_ref()),
             binding: InternedName::from(entry.binding.as_ref()),
@@ -789,7 +789,7 @@ fn a_request_validates_a_shared_receipt_once() {
     let base = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let whole = |level: u8| FactVersionRef::FileWholeHash {
-        canonical_id: format!("/r/{level}.ts"),
+        canonical_id: format!("/r/{level}.ts").into(),
         hash: [level; 16],
     };
     for level in 0..34u8 {

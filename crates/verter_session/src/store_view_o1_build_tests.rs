@@ -363,7 +363,7 @@ fn a_point_miss_rejects_and_enumerates_nothing() {
         !StoreView::validates_parse_domain(
             &view,
             &verter_session_query::facts::fact_cache::ParseFactRef {
-                canonical_id: ABSENT.to_string(),
+                canonical_id: ABSENT.into(),
                 key: FactKey::MemberPresence {
                     exporter: InternedName::from("Missing"),
                     name: FactPropertyKey::identifier("x"),

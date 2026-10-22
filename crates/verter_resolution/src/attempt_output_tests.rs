@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 fn fact(byte: u8) -> verter_session_query::facts::version::FactVersionRef {
     verter_session_query::facts::version::FactVersionRef::FileWholeHash {
-        canonical_id: format!("/ws/{byte}.ts"),
+        canonical_id: format!("/ws/{byte}.ts").into(),
         hash: [byte; 16],
     }
 }

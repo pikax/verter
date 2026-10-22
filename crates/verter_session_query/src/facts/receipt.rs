@@ -239,14 +239,11 @@ fn evidence_storage_bytes(
     canonical_set_bytes: usize,
     pin_names_to: &std::sync::Arc<crate::retention::SemanticRetentionAccount>,
 ) -> usize {
-    use crate::retention::allocation::{arc_block_bytes, fact_heap_bytes, AliasSet};
+    use crate::retention::allocation::{arc_block_bytes, facts_heap_bytes, AliasSet};
     let mut aliases = AliasSet::new();
     let bytes = arc_block_bytes(std::mem::size_of::<ResultEvidence>())
         + arc_block_bytes(std::mem::size_of_val(facts))
-        + facts
-            .iter()
-            .map(|fact| fact_heap_bytes(fact, &mut aliases))
-            .sum::<usize>()
+        + facts_heap_bytes(facts, &mut aliases)
         + arc_block_bytes(aggregated * std::mem::size_of::<CompactionDomain>())
         + canonical_set_bytes;
     aliases
@@ -258,12 +255,10 @@ fn evidence_storage_bytes(
 /// The owned names `facts` reach, each once: charged by their own cells,
 /// pinned with the evidence holding them and held with its retained share.
 fn evidence_names(facts: &[FactVersionRef]) -> crate::retention::owned::OwnedHandles {
-    use crate::retention::allocation::{fact_heap_bytes, AliasSet};
+    use crate::retention::allocation::{facts_heap_bytes, AliasSet};
     let mut aliases = AliasSet::new();
-    for fact in facts {
-        // A raw leaf is counted in the evidence's own charge.
-        let _raw = fact_heap_bytes(fact, &mut aliases);
-    }
+    // A raw leaf is counted in the evidence's own charge.
+    let _raw = facts_heap_bytes(facts, &mut aliases);
     aliases.take_handles()
 }
 

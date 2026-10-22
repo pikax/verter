@@ -185,7 +185,7 @@ impl<E, M: verter_audit::observe::ObserveExec> crate::resolver_core::Declaration
         let serve = self.ctx.ensure_indexed_ready_serve(canonical_source)?;
         self.ctx.observe(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_source.to_owned(),
+                canonical_id: canonical_source.into(),
                 hash: serve.indexed.whole_hash,
             },
         );
@@ -841,7 +841,7 @@ pub(crate) fn read_full_source<M: verter_audit::observe::ObserveExec>(
     let serve = ctx.ensure_indexed_ready_serve(canonical_source)?;
     ctx.observe(
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: canonical_source.to_owned(),
+            canonical_id: canonical_source.into(),
             hash: serve.indexed.whole_hash,
         },
     );
@@ -1048,7 +1048,7 @@ pub(crate) fn resolve_jsdoc_tag_type<M: verter_audit::observe::ObserveExec>(
     let serve = ctx.ensure_indexed_ready_serve(canonical_source)?;
     ctx.observe(
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: canonical_source.to_owned(),
+            canonical_id: canonical_source.into(),
             hash: serve.indexed.whole_hash,
         },
     );

@@ -613,7 +613,7 @@ fn existing_resolution_fact_rail_is_fact_version_ref_resolve_imports() {
     }
 
     let fact = ResolveImportsFactRef::Semantic {
-        canonical_id: "/p/main.ts".to_string(),
+        canonical_id: "/p/main.ts".into(),
         key: verter_session_query::facts::FactKey::ResolvedImportClause {
             specifier: verter_session_query::facts::registry::InternedSpecifier::from("./dep"),
             binding: verter_session_query::facts::registry::InternedName::from("Dep"),

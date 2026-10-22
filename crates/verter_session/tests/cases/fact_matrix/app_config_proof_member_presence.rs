@@ -49,7 +49,7 @@ fn app_config_proof_does_not_observe_member_presence_facts() {
     let has_whole = proof.fact_dep_signature.iter().any(|f| {
         matches!(
             f,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == canonical
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == canonical
         )
     });
     assert!(

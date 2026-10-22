@@ -218,7 +218,10 @@ fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
                     .unwrap()
                     .parse
                     .whole_hash;
-                FactVersionRef::FileWholeHash { canonical_id, hash }
+                FactVersionRef::FileWholeHash {
+                    canonical_id: canonical_id.into(),
+                    hash,
+                }
             })
             .collect();
         let first = compile_with(&host, profile.clone()).unwrap();

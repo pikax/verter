@@ -35,7 +35,7 @@ use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
 fn fake_fact(name: &str) -> FactVersionRef {
     FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/w/a.ts".to_string(),
+        canonical_id: "/w/a.ts".into(),
         key: FactKey::Export {
             name: name.into(),
             space: SymbolSpace::Type,

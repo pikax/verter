@@ -2319,10 +2319,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(Ok)
                 .unwrap_or_else(|| {
                     roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
-                        FactVersionRef::FileWholeHash { canonical_id, hash } => Some((
-                            verter_type_expr::OwnedStr::from(canonical_id.as_str()),
-                            *hash,
-                        )),
+                        FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                            Some((verter_type_expr::OwnedStr::from(&**canonical_id), *hash))
+                        }
                         _ => None,
                     }));
                     self.ctx.complete_graph_signature(&roots, facts.to_vec())

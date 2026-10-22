@@ -20,4 +20,7 @@ fn main() {
     // The production close and release boundary the runner's closed-retained
     // cell reads after, reached with capture off in the same profile.
     tests.pass(fixture_root.join("host_release_completion_through_soak_support.rs"));
+    // A delivered flow return materialized through its own lease in the same
+    // capture-off profile.
+    tests.pass(fixture_root.join("flow_return_root_positive_through_soak_support.rs"));
 }

@@ -228,7 +228,7 @@ impl SkewedDiscriminantQueryNode {
     /// differ between candidates.
     fn fixed_signature() -> ReadSetSignature {
         let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-            canonical_id: "/skew.ts".to_string(),
+            canonical_id: "/skew.ts".into(),
             hash: [7u8; 16],
         }]);
         ReadSetSignature::new(facts)
@@ -501,7 +501,7 @@ impl WideArtifactNode {
     fn new(account: Arc<verter_session_query::retention::SemanticRetentionAccount>) -> Self {
         let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
             .map(|index| FactVersionRef::FileWholeHash {
-                canonical_id: format!("/wide/{index:05}.ts"),
+                canonical_id: format!("/wide/{index:05}.ts").into(),
                 hash: [1u8; 16],
             })
             .collect();
@@ -549,7 +549,10 @@ impl WideArtifactNode {
                     .expect("host source")
                     .parse
                     .whole_hash;
-                FactVersionRef::FileWholeHash { canonical_id, hash }
+                FactVersionRef::FileWholeHash {
+                    canonical_id: canonical_id.into(),
+                    hash,
+                }
             })
             .collect()
     }

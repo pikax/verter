@@ -249,7 +249,7 @@ fn large_positive_chunk_owner_is_compacted_and_warms() {
                         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                             canonical_id,
                             ..
-                        } if canonical_id == &owner
+                        } if **canonical_id == *owner
                     )
                 })
         }),

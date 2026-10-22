@@ -869,7 +869,7 @@ impl crate::VerterHost {
                 };
                 verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                        canonical_id: virtual_id.to_string(),
+                        canonical_id: Arc::clone(virtual_id),
                         hash: serve.indexed.whole_hash,
                     },
                 );

@@ -232,6 +232,11 @@ impl<V> CacheEntry<V> {
     /// Charge an entry for keeping `value` in a map slot keyed by `K`.
     /// `footprint` is what the key and the value keep beyond their inline
     /// bytes: the heap the entry owns alone, and the value's owned cells.
+    /// The signature and the self-roots are measured on one set, so a
+    /// canonical they share is charged once. The footprint was measured
+    /// before, on its own set: a raw text the value also holds is charged
+    /// once more, a bounded overcharge of one block per such text, never an
+    /// undercharge.
     ///
     /// # Errors
     ///
@@ -338,7 +343,8 @@ impl<D, V> Candidate<D, V> {
     /// Charge a candidate keeping `value` in a multi-candidate slot keyed by
     /// `K`. `footprint` is what the key and the value keep beyond their
     /// inline bytes: the heap the candidate owns alone, and the value's
-    /// owned cells. Each candidate pays for its key's slot (a declared
+    /// owned cells (a raw text the value shares with the signature is
+    /// charged by each, as for [`CacheEntry::admit`]). Each candidate pays for its key's slot (a declared
     /// convention: a slot is shared by at most its per-slot cap of
     /// candidates). Its reverse-index registration is not charged here: the
     /// store's index charges everything it holds, the candidates' own

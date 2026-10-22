@@ -171,7 +171,7 @@ pub(super) fn observe_closedness_walk_consult<C: crate::resolver_core::ResolverC
     {
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.to_string(),
+                canonical_id: canonical_id.into(),
                 hash: indexed.whole_hash,
             },
         );

@@ -1064,7 +1064,7 @@ fn scc_batch_plans_member_eviction_invalid_first_against_the_callers_view() {
     // never validate. Generations 1 / 3 / 4 carry empty rails and always
     // validate.
     let stale = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: dep.to_string(),
+        canonical_id: dep.into(),
         hash: [0xEEu8; 16],
     }]));
     for generation in 1..=4u64 {

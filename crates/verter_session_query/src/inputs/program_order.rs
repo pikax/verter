@@ -335,7 +335,7 @@ impl ProgramFileOrder {
     pub fn fact(&self) -> Option<FactVersionRef> {
         let program = self.program.as_ref()?;
         Some(FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-            canonical_id: String::new(),
+            canonical_id: Arc::default(),
             key: FactKey::ProgramFileOrder {
                 program: Arc::clone(program),
             },

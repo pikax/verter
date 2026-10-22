@@ -1023,7 +1023,7 @@ fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
                 upsert_vue(&host, &canonical_id, "<template><div /></template>");
                 FactVersionRef::FileWholeHash {
                     hash: current_whole_hash(&host, &canonical_id),
-                    canonical_id,
+                    canonical_id: canonical_id.into(),
                 }
             })
             .collect();

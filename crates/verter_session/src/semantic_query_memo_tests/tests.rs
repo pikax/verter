@@ -526,7 +526,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     // every canonical `read_set_signature.canonical_ids()` yields.
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/w/helper_test.ts".to_string(),
+            canonical_id: "/w/helper_test.ts".into(),
             hash: [7u8; 16],
         },
     ]));
@@ -1977,7 +1977,7 @@ fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
     let touched_carrier =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: touched.to_string(),
+                canonical_id: touched.into(),
                 hash: [0xAB; 16],
             },
         ]));
@@ -2214,7 +2214,7 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(
         vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_string(),
+                canonical_id: Arc::clone(&canonical),
                 hash: whole_hash,
             },
         ]
@@ -2335,7 +2335,7 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
     let invalid_carrier =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: "/w/relation_never_tracked.ts".to_string(),
+                canonical_id: "/w/relation_never_tracked.ts".into(),
                 hash: [0xCD; 16],
             },
         ]));
@@ -3336,7 +3336,7 @@ fn carrier_naming(
 ) -> verter_session_query::facts::fact_cache::ReadSetSignature {
     verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: [hash; 16],
         },
     ]))
@@ -4655,7 +4655,7 @@ fn prefix_backfill_carries_traced_facts() {
     let parent_dep_signature = dep_sig_for("/test/legacy-dep.ts", 9);
     let parent_traced_facts: Arc<[FactVersionRef]> =
         Arc::from(vec![FactVersionRef::Parse(ParseFactRef {
-            canonical_id: "/test/parent-dep.ts".to_string(),
+            canonical_id: "/test/parent-dep.ts".into(),
             key: verter_session_query::facts::FactKey::SyntacticExportSet,
             lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: [0xABu8; 16],
@@ -4726,7 +4726,7 @@ fn prefix_backfill_carries_traced_facts() {
     let has_parse_fact = prefix_carrier.facts.iter().any(|f| {
         matches!(
             f,
-            FactVersionRef::Parse(p) if p.canonical_id == "/test/parent-dep.ts"
+            FactVersionRef::Parse(p) if &*p.canonical_id == "/test/parent-dep.ts"
         )
     });
     assert!(
@@ -5008,7 +5008,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
     // The winner's fact: a `FileWholeHash` over a synthetic canonical
     // with a recognisable 16-byte pattern.
     let winner_fact = FactVersionRef::FileWholeHash {
-        canonical_id: "winner_dep.ts".to_string(),
+        canonical_id: "winner_dep.ts".into(),
         hash: [0x77u8; 16],
     };
 
@@ -5215,7 +5215,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
     // `validates_self_root_whole_hash` and is genuinely
     // view-discriminating.
     let winner_fact = FactVersionRef::FileWholeHash {
-        canonical_id: keyed_canonical.to_string(),
+        canonical_id: keyed_canonical.into(),
         hash: base_hash,
     };
 
@@ -5480,7 +5480,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
     // BASE content hash — the shape `semantic_graph_read_set_signature`
     // produces for a cold build that observed the base file.
     let winner_fact = FactVersionRef::FileWholeHash {
-        canonical_id: keyed_canonical.to_string(),
+        canonical_id: keyed_canonical.into(),
         hash: base_hash,
     };
 
@@ -5702,7 +5702,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
         name: verter_type_expr::OwnedStr::from("Keyed"),
     });
     let winner_fact = FactVersionRef::FileWholeHash {
-        canonical_id: keyed_canonical.to_string(),
+        canonical_id: keyed_canonical.into(),
         hash: base_hash,
     };
 
@@ -6168,7 +6168,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     // under any view: the carrier cannot discriminate by view.
     let dep_canonical = "/p2_8_unrootable/dep.ts";
     let winner_dep_fact = FactVersionRef::FileWholeHash {
-        canonical_id: dep_canonical.to_string(),
+        canonical_id: dep_canonical.into(),
         hash: [0x3cu8; 16],
     };
 
@@ -6470,7 +6470,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     // view, and `self_root_canonicals` is EMPTY.
     let dep_canonical = "/p2_9_nonsuppressed_miss/dep.ts";
     let winner_dep_fact = FactVersionRef::FileWholeHash {
-        canonical_id: dep_canonical.to_string(),
+        canonical_id: dep_canonical.into(),
         hash: [0x7eu8; 16],
     };
 
@@ -6718,7 +6718,7 @@ fn budget_eviction_prunes_empty_canonical_to_entries_shards() {
         let carrier =
             verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: format!("/w/dist{i}.ts"),
+                    canonical_id: format!("/w/dist{i}.ts").into(),
                     hash: [1u8; 16],
                 },
             ]));
@@ -6788,11 +6788,11 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
     let two_canonical_facts: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> =
         Arc::from(vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: "/w/a.ts".to_string(),
+                canonical_id: "/w/a.ts".into(),
                 hash: [1u8; 16],
             },
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: "/w/b.ts".to_string(),
+                canonical_id: "/w/b.ts".into(),
                 hash: [1u8; 16],
             },
         ]);
@@ -9431,14 +9431,14 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(
         vec![
             FactVersionRef::FileWholeHash {
-                canonical_id: root_owner.as_ref().to_string(),
+                canonical_id: root_owner.as_ref().to_string().into(),
                 hash: [1u8; 16],
             },
             // A whole-hash for a DIFFERENT canonical (a cross-file
             // dependency): the rail is non-empty, but it carries no
             // whole-hash for `root_producer`.
             FactVersionRef::FileWholeHash {
-                canonical_id: String::from("/w/other.ts"),
+                canonical_id: String::from("/w/other.ts").into(),
                 hash: [2u8; 16],
             },
         ]
@@ -9472,12 +9472,12 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     let mut wide: Vec<FactVersionRef> =
         (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1)
             .map(|index| FactVersionRef::FileWholeHash {
-                canonical_id: format!("/w/dep-{index:05}.ts"),
+                canonical_id: format!("/w/dep-{index:05}.ts").into(),
                 hash: [3u8; 16],
             })
             .collect();
     wide.push(FactVersionRef::FileWholeHash {
-        canonical_id: root_producer.as_ref().to_string(),
+        canonical_id: root_producer.as_ref().to_string().into(),
         hash: [4u8; 16],
     });
     let paged = verter_session_query::facts::fact_cache::ReadSetSignature::new(

@@ -1368,7 +1368,7 @@ fn resolve_legacy_slot_inventory<M: verter_audit::observe::ObserveExec>(
     // `.svelte` misses the warm SLOTS entry.
     verter_type_engine::resolver_core::resolver_context::observe_fan_out(
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: owner.to_string(),
+            canonical_id: owner.into(),
             hash: indexed.whole_hash,
         },
     );

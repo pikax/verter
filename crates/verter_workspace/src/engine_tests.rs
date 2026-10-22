@@ -221,7 +221,7 @@ fn compacted_resolution_witness() -> ReadSetSignature {
 /// A precise witness naming exactly `canonical`.
 fn precise_witness(canonical: &str) -> ReadSetSignature {
     ReadSetSignature::new(Arc::from([FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: [7u8; 16],
     }]))
 }

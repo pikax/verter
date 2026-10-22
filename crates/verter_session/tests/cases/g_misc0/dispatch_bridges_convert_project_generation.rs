@@ -84,7 +84,7 @@ fn dispatch_bridge_drops_route_generation() {
     match &result[0] {
         FactVersionRef::FileWholeHash { canonical_id, .. } => {
             assert_eq!(
-                canonical_id, "b.ts",
+                &**canonical_id, "b.ts",
                 "WholeHash entry for b.ts must survive"
             );
         }
@@ -117,7 +117,7 @@ fn dispatch_bridge_mixed_signature_converts_project_drops_route() {
     );
     assert!(
         result.contains(&FactVersionRef::FileWholeHash {
-            canonical_id: "scope.ts".to_string(),
+            canonical_id: "scope.ts".into(),
             hash: [5u8; 16],
         }),
         "the WholeHash dep must convert"
