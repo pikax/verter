@@ -2934,6 +2934,14 @@ function memberName(name: string): string {
 }
 
 /**
+ * A method's printed key: a bare `new(): T` member is a construct
+ * signature, so a method keyed `new` prints its key quoted.
+ */
+function methodKey(key: string): string {
+  return key === "new" ? quoteStringLiteral(key) : key;
+}
+
+/**
  * A string literal type as the checker prints it: double-quoted, with a
  * backslash, a double quote, every control character and U+2028 / U+2029 /
  * U+0085 escaped.
@@ -3209,7 +3217,7 @@ function graphMemberText(
       const text = signature(": ");
       return text === undefined
         ? []
-        : [`${graphMemberKey(graph, member.key, scope)}${optional}${text}`];
+        : [`${methodKey(graphMemberKey(graph, member.key, scope))}${optional}${text}`];
     }
     case MEMBER_SPREAD:
       // Type syntax has no spread member; the pre-fold operand prints as
@@ -3430,7 +3438,7 @@ function nativeMemberText(member: NativeObjectMember, scope: PrintScope): string
       const key = nativeMemberKey(member, scope);
       return key === undefined || !member.function
         ? []
-        : [`${key}${optional}${nativeSignatureText(member.function, ": ", scope)}`];
+        : [`${methodKey(key)}${optional}${nativeSignatureText(member.function, ": ", scope)}`];
     }
     case "spread":
       // Type syntax has no spread member; the pre-fold operand prints as

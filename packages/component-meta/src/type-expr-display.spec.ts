@@ -8,6 +8,7 @@ import {
   type GraphPropertyKeyRecord,
   LITERAL_BIG_INT,
   LITERAL_STRING,
+  MEMBER_METHOD,
   MEMBER_PROPERTY,
   NODE_ARRAY,
   NODE_CONDITIONAL,
@@ -269,6 +270,29 @@ describe("native display text reparses to the printed tree", () => {
       '{ "7": A } | { 7: B }',
     ],
     [
+      // A bare `new(): A` member is a construct signature, not a method.
+      "a method keyed new",
+      {
+        kind: "object",
+        properties: [
+          {
+            memberKind: "method",
+            key: { kind: "string", value: "new" },
+            optional: false,
+            function: { parameters: [], returnType: ref("A") },
+          },
+          {
+            memberKind: "property",
+            key: { kind: "string", value: "new" },
+            ty: ref("B"),
+            optional: false,
+            readonly: false,
+          },
+        ],
+      },
+      '{ "new"(): A; new: B }',
+    ],
+    [
       "an infer binder referenced in the true branch",
       conditional(
         ref("T"),
@@ -352,7 +376,8 @@ describe("graph display text reparses to the printed tree", () => {
   // 23: T extends { a: infer U } ? T extends { a: infer U } ? U : A : A,
   // 24: { a: 25 }, 25: 24 | void (a cycle), 26: U (a reference), 27: { a: U },
   // 28: T extends { a: U } ? U : A,
-  // 29: T extends { a: infer U } ? T extends { a: U } ? U : A : A
+  // 29: T extends { a: infer U } ? T extends { a: U } ? U : A : A,
+  // 30: { "new"(): void } (a method keyed new)
   const property = (key: GraphPropertyKeyRecord, typeNodeId: number) => ({
     kind: MEMBER_PROPERTY,
     key,
@@ -367,7 +392,7 @@ describe("graph display text reparses to the printed tree", () => {
     hasImplementationBody: false,
   });
   const graph = new DecodedTypeGraph(
-    ["A", "B", "C", "0123", "x", "7", "T", "U", "a"],
+    ["A", "B", "C", "0123", "x", "7", "T", "U", "a", "new"],
     [
       { kind: NODE_REF, nameId: 1, typeArgumentNodeIds: [] },
       { kind: NODE_REF, nameId: 2, typeArgumentNodeIds: [] },
@@ -449,6 +474,16 @@ describe("graph display text reparses to the printed tree", () => {
         trueTypeNodeId: 28,
         falseTypeNodeId: 1,
       },
+      {
+        kind: NODE_OBJECT,
+        members: [
+          {
+            ...property({ kind: "string", nameId: 10 }, 0),
+            kind: MEMBER_METHOD,
+            functionNodeId: 8,
+          },
+        ],
+      },
     ],
   );
 
@@ -466,6 +501,8 @@ describe("graph display text reparses to the printed tree", () => {
     // A nested clause redeclaring the enclosing binder keeps its declaration.
     [23, "T extends { a: infer U } ? T extends { a: infer U } ? U : A : A"],
     [29, "T extends { a: infer U } ? T extends { a: U } ? U : A : A"],
+    // A bare `new(): void` member is a construct signature, not a method.
+    [30, '{ "new"(): void }'],
     // A cyclic table has no finite spelling; its back-edge prints `unknown`.
     [24, "{ a: unknown | void }"],
   ] as const) {

@@ -76,7 +76,8 @@ fn print(arms: usize, symbol: &str, projection_op_budget: usize) -> Print {
         .text;
     Print {
         allocations: alloc_count(),
-        peak_live_bytes: u64::try_from(peak_live_bytes()).unwrap_or(0),
+        peak_live_bytes: u64::try_from(peak_live_bytes())
+            .expect("the peak live bytes since the reset are never negative"),
         text,
     }
 }
@@ -85,6 +86,13 @@ fn print(arms: usize, symbol: &str, projection_op_budget: usize) -> Print {
 /// undecided conditional stays flat from 50 to 200 arms behind it.
 #[test]
 fn printing_a_partial_answer_costs_what_it_prints_not_what_it_hides() {
+    // The fuse alone makes the answer partial: without it the request
+    // relates the unions and answers the checker's `1`.
+    assert_eq!(
+        print(50, "__Probe", 0).text,
+        "1",
+        "the unfused request completes"
+    );
     let runs = [50usize, 100, 200].map(|arms| print(arms, "__Probe", 1));
     eprintln!("PARTIAL_PRINT {runs:?}");
     for run in &runs {

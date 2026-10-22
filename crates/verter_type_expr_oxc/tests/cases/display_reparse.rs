@@ -154,6 +154,16 @@ fn a_member_key_keeps_its_string_or_number_spelling() {
 }
 
 #[test]
+fn a_method_keyed_new_stays_a_method() {
+    // A bare `new(): A` member is a construct signature; the property
+    // `new` and an optional method `new?` stay bare.
+    assert_eq!(
+        render_and_reparse("{ 'new'(): A; new?(): B; new: C; new (): D }"),
+        "{ 'new'(): A; 'new'?(): B; new: C; new (): D }"
+    );
+}
+
+#[test]
 fn a_number_literal_prints_its_checker_spelling() {
     assert_eq!(
         render_and_reparse("1e+21 | 1e-7 | -5 | 0.5"),

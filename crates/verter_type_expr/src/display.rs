@@ -512,7 +512,14 @@ pub fn render_type_expr_display(
                     if method.optional {
                         work.push(Frame::Text("?"));
                     }
-                    work.push(Frame::PropertyKey(&method.key));
+                    // A bare `new(): T` member is a construct signature, so
+                    // a method keyed `new` prints its key quoted.
+                    match &method.key {
+                        AuthoredPropertyKey::String(name) if name.as_ref() == "new" => {
+                            work.push(Frame::SingleQuoted(name));
+                        }
+                        key => work.push(Frame::PropertyKey(key)),
+                    }
                 }
                 ObjectMember::Spread(spread) => {
                     // Diagnostic-only spelling: TS type syntax has no spread
