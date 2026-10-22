@@ -1782,6 +1782,102 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// A wide argument whose members are function queries, class-expression
+/// instances or methods with type predicates prints as the checker
+/// abbreviates it, never withheld: a `typeof` of a declared function prints
+/// its signature, a class expression's instance `(Anonymous class)`, each
+/// counted as the checker's node builder counts it, so the members past
+/// the truncation length elide exactly where tsc elides them and a text of
+/// twice that length is clipped. Every expected line is TypeScript 7.0.2's
+/// on this fixture, identical with `strictNullChecks` off, cold and warm.
+#[test]
+fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abbreviates_them() {
+    const WIDE: usize = 30;
+    let mut source = String::from("\ndeclare function one(x: string): number;\n");
+    for ordinal in 0..WIDE {
+        source.push_str(&format!("declare function f{ordinal}(): void;\n"));
+    }
+    let members = |count: usize, member: &dyn Fn(usize) -> String| {
+        (0..count).map(member).collect::<Vec<_>>().join("; ")
+    };
+    source.push_str(&format!(
+        "declare namespace ns {{ function g(): void; }}\n\
+         declare const typeofs: {{ {} }};\n\
+         export function typeof_wide() {{ return one(typeofs); }}\n\
+         declare const qualified: {{ {} }};\n\
+         export function qualified_wide() {{ return one(qualified); }}\n\
+         function mk() {{ return class {{ v = 1 }}; }}\n\
+         const Made = mk();\n\
+         declare const made: InstanceType<typeof Made>;\n\
+         declare const anons: {{ {} }};\n\
+         export function class_wide() {{ return one(anons); }}\n\
+         export function class_short() {{ return one(made); }}\n\
+         declare const preds: {{ {} }};\n\
+         export function predicate_wide() {{ return one(preds); }}\n",
+        members(WIDE, &|i| format!("p{i}: typeof f{i}")),
+        members(WIDE, &|i| format!("q{i}: typeof ns.g")),
+        members(WIDE, &|i| format!("a{i}: typeof made")),
+        members(12, &|i| format!("r{i}(x: unknown): x is string")),
+    ));
+    let at = |position: &str, printed: &str| {
+        format!(
+            "{position}: error TS2345: Argument of type '{printed}' is not assignable to \
+             parameter of type 'string'."
+        )
+    };
+    let elided = |count: usize, member: &dyn Fn(usize) -> String| {
+        format!(
+            "{{ {}; ... {} more ...; {}; }}",
+            members(count, member),
+            WIDE - count - 1,
+            member(WIDE - 1)
+        )
+    };
+    let predicates = format!(
+        "{{ {}; }}",
+        members(12, &|i| format!("r{i}(x: unknown): x is string"))
+    );
+    let rows: Vec<(&str, Vec<String>)> = vec![
+        (
+            "typeof_wide",
+            vec![at("(35,44)", &elided(16, &|i| format!("p{i}: () => void")))],
+        ),
+        (
+            "qualified_wide",
+            vec![at("(37,47)", &elided(16, &|i| format!("q{i}: () => void")))],
+        ),
+        (
+            "class_wide",
+            vec![at(
+                "(42,43)",
+                &elided(5, &|i| format!("a{i}: (Anonymous class)")),
+            )],
+        ),
+        ("class_short", vec![at("(43,44)", "(Anonymous class)")]),
+        (
+            "predicate_wide",
+            vec![at("(45,47)", &format!("{}...", &predicates[..317]))],
+        ),
+    ];
+    let host = host_with(&source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in &rows {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, &source,
+                );
+                if reported != *expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
 /// A message prints a tuple and an object's members as the checker does:
 /// under `strictNullChecks` an optional element's type with `undefined`
 /// added, which also counts toward where the node builder abbreviates; an
@@ -1916,12 +2012,13 @@ fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
 }
 
 /// A failure through a long property path is reported while the checker's
-/// relation stack holds it, and withheld where the checker reports TS2321
-/// instead: the failing pair itself takes a frame when it is two object
-/// types or an intersection target's member, not when it is two primitives
-/// or an object type against a primitive. Every reported line is
-/// TypeScript 7.0.2's on this fixture, identical with `strictNullChecks`
-/// off; each withheld row is one tsc reports as TS2321.
+/// relation stack holds it, and as TS2321 where the stack overflows: the
+/// failing pair itself takes a frame when it is two object types or an
+/// intersection target's member, not when it is two primitives or an
+/// object type against a primitive. An overflow is reported twice, at the
+/// call the checker compares the types in while it chooses the candidate,
+/// then at the argument, in place of TS2345. Every line is TypeScript
+/// 7.0.2's on this fixture, identical with `strictNullChecks` off.
 #[test]
 fn deep_chains_report_until_the_checker_relation_stack_overflows() {
     let nest = |inner: &str, depth: usize| {
@@ -1959,6 +2056,16 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             vec!["a"; depth].join("."),
         )]
     };
+    let overflowed = |call: &str, argument: &str| {
+        [call, argument]
+            .map(|position| {
+                format!(
+                    "{position}: error TS2321: Excessive stack depth comparing types \
+                     '{clipped}' and '{clipped}'."
+                )
+            })
+            .to_vec()
+    };
     let expected: [(&str, Vec<String>); 8] = [
         (
             "object_leaf_99",
@@ -1968,7 +2075,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                 "Property 'y' is missing in type '{ x: number; }' but required in type '{ y: number; }'.",
             ),
         ),
-        ("object_leaf_100", Vec::new()),
+        ("object_leaf_100", overflowed("(7,44)", "(7,62)")),
         (
             "object_to_primitive_99",
             reported("(10,76)", 99, "Type '{ x: 1; }' is not assignable to type 'string'."),
@@ -1981,7 +2088,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             "primitive_leaf_100",
             reported("(16,68)", 100, "Type 'string' is not assignable to type 'number'."),
         ),
-        ("primitive_leaf_101", Vec::new()),
+        ("primitive_leaf_101", overflowed("(19,47)", "(19,68)")),
         (
             "intersection_98",
             reported(
@@ -1991,7 +2098,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                  Type 'string' is not assignable to type '{ p: 1; }'.",
             ),
         ),
-        ("intersection_99", Vec::new()),
+        ("intersection_99", overflowed("(25,44)", "(25,62)")),
     ];
     let host = host_with(&source);
     let mut mismatches = Vec::new();

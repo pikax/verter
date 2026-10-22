@@ -842,10 +842,10 @@ fn display_resolved_type_node(
             literal.printed_name()
         }
         // Error carrier riding through display — a concise token, NOT a panic.
-        SemanticNodeData::Opaque(_) => {
-            unmodeled = true;
-            "<error>".to_string()
-        }
+        // A checker message has no type for it: the part is cut, so a message
+        // that would show it is not reported.
+        SemanticNodeData::Opaque(_) if visited.measuring() => visited.cut(),
+        SemanticNodeData::Opaque(_) => "<error>".to_string(),
         SemanticNodeData::Array { element, readonly } => {
             // The leading-`readonly` postfix-base parenthesisation is handled
             // uniformly inside `render_operand` for `Prec::Postfix` operands.
@@ -1023,10 +1023,17 @@ fn display_resolved_type_node(
             };
             format!("{{ {readonly}[{param} in {key_space}{remap}]{optionality}: {value} }}")
         }
+        // A query is a type query node over the queried name's symbol chain
+        // (`symbolToTypeNode` with a value meaning), its instantiation
+        // arguments built before the name is counted.
         SemanticNodeData::TypeOf(_) => {
-            unmodeled = true;
             let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
             let type_args = data.carrier_type_args();
+            let rendered = type_argument_list(store, type_args, needs, child_depth, visited);
+            visited.add_length(entity_name_length(
+                std::iter::once(value_root.name.as_ref())
+                    .chain(path.iter().map(|seg| seg.as_ref())),
+            ));
             let mut s = format!("typeof {}", value_root.name);
             for seg in path.iter() {
                 s.push('.');
@@ -1035,10 +1042,6 @@ fn display_resolved_type_node(
             // Instantiation args render in a `<...>` segment, matching the
             // `ImportType` / `InstantiationRef` convention; empty stays bare.
             if !type_args.is_empty() {
-                let rendered: Vec<String> = type_args
-                    .iter()
-                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
-                    .collect();
                 s.push('<');
                 s.push_str(&rendered.join(", "));
                 s.push('>');
@@ -1052,13 +1055,16 @@ fn display_resolved_type_node(
             "unique symbol".to_owned()
         }
         SemanticNodeData::TypeOfNominal(_) => {
-            unmodeled = true;
             // Renders the AUTHORED head (`typeof TOKEN` / `typeof Ns.TOKEN`)
             // — the local spelling every display consumer reads; the
             // declaring identity rides the payload and is never spliced into
             // rendered type text. No instantiation segment: the terminal is
             // never an instantiation site.
             let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+            visited.add_length(entity_name_length(
+                std::iter::once(value_root.name.as_ref())
+                    .chain(path.iter().map(|seg| seg.as_ref())),
+            ));
             let mut s = format!("typeof {}", value_root.name);
             for seg in path.iter() {
                 s.push('.');
@@ -1186,20 +1192,16 @@ fn display_resolved_type_node(
             type_arguments,
             ..
         } => {
-            unmodeled = true;
-            let name = qualified_name(
-                needs,
-                &identity.canonical_id,
-                &identity.printed_name_in(store, type_arguments),
-            );
+            // A reference to the class: its own type arguments, then the
+            // symbol chain of its printed name.
+            let printed = identity.printed_name_in(store, type_arguments);
             let own = identity.own_type_arguments(type_arguments);
+            let rendered = type_argument_list(store, own, needs, child_depth, visited);
+            visited.add_length(entity_name_length(printed.split('.')));
+            let name = qualified_name(needs, &identity.canonical_id, &printed);
             if own.is_empty() {
                 name
             } else {
-                let rendered: Vec<String> = own
-                    .iter()
-                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
-                    .collect();
                 format!("{name}<{}>", rendered.join(", "))
             }
         }
@@ -1252,11 +1254,23 @@ fn display_resolved_type_node(
         }
         // Dynamic-import carrier renders the import expression + qualifier
         // path + any type arguments.
+        //
+        // The node builder counts an import type's specifier and its
+        // `import("")`, and each qualifier name and its separator, after its
+        // type arguments.
         SemanticNodeData::ImportType(_) => {
-            unmodeled = true;
             let (specifier, qualifier, typeof_query) =
                 data.import_type_head().expect("ImportType carrier head");
             let type_args = data.carrier_type_args();
+            let rendered = type_argument_list(store, type_args, needs, child_depth, visited);
+            visited.add_length(
+                specifier.len()
+                    + 10
+                    + qualifier
+                        .iter()
+                        .map(|segment| segment.len() + 1)
+                        .sum::<usize>(),
+            );
             let mut out = if typeof_query {
                 format!("typeof import(\"{specifier}\")")
             } else {
@@ -1267,10 +1281,6 @@ fn display_resolved_type_node(
                 out.push_str(segment);
             }
             if !type_args.is_empty() {
-                let rendered: Vec<String> = type_args
-                    .iter()
-                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
-                    .collect();
                 out.push('<');
                 out.push_str(&rendered.join(", "));
                 out.push('>');
@@ -1336,6 +1346,14 @@ fn render_object_surface(
     {
         visited.add_length(2);
         return "{}".to_string();
+    }
+    if checker {
+        if let Some((signature, prefix)) = sole_signature(store, surface) {
+            return format!(
+                "{prefix}{}",
+                display_type_node(store, signature, needs, depth, visited).0
+            );
+        }
     }
     if visited.check_truncation() {
         visited.add_length(2);
@@ -1471,6 +1489,47 @@ fn render_object_surface(
         parts.extend(signatures);
         format!("{{ {} }}", parts.join("; "))
     }
+}
+
+/// The one signature of an object type the checker prints as a function or
+/// constructor type (`createTypeNodeFromObjectType`) — no property and no
+/// index signature, and one call signature and no construct signature, or
+/// one construct signature and no call signature — with the `new ` its
+/// print adds where the signature does not carry its own.
+fn sole_signature(
+    store: &SemanticGraphStore,
+    surface: &crate::semantic_query::SurfaceView,
+) -> Option<(SemanticNodeId, &'static str)> {
+    if !surface.members.is_empty() || !surface.index_signatures.is_empty() {
+        return None;
+    }
+    match (
+        &surface.call_signatures[..],
+        &surface.construct_signatures[..],
+    ) {
+        ([call], []) => Some((*call, "")),
+        ([], [construct]) => {
+            let (resolved, _) =
+                follow_alias_chain(store, *construct, &DisplaySubstitution::default());
+            let carries_new = matches!(
+                store.node_data(resolved).as_deref(),
+                Some(SemanticNodeData::Signature {
+                    kind: crate::semantic_query::SignatureKind::Construct,
+                    ..
+                })
+            );
+            Some((*construct, if carries_new { "" } else { "new " }))
+        }
+        _ => None,
+    }
+}
+
+/// What the node builder counts for an entity name it builds from a symbol
+/// chain (`createAccessFromSymbolChain`): each name and its separator, the
+/// first counted twice.
+fn entity_name_length<'s>(mut segments: impl Iterator<Item = &'s str>) -> usize {
+    segments.next().map_or(0, reference_length)
+        + segments.map(|segment| segment.len() + 1).sum::<usize>()
 }
 
 /// `value` with `undefined` added, as the checker prints an optional
@@ -2051,12 +2110,12 @@ fn render_return(
         rendered.push_str("asserts ");
     }
     rendered.push_str(subject);
+    // The node builder counts a predicate's type alone
+    // (`typePredicateToTypePredicateNode`).
     if let Some(target) = predicate.ty {
         rendered.push_str(" is ");
         rendered.push_str(&display_type_node(store, target, needs, depth, visited).0);
     }
-    // A type predicate's count is not modelled.
-    visited.unmodeled(&rendered);
     rendered
 }
 
@@ -2181,14 +2240,25 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
 }
 
 /// Precedence of a node id, following the transparent `Alias` chain (bounded by
-/// the display depth cap) to the node that actually renders.
+/// the display depth cap) to the node that actually renders. Under
+/// [`DisplayFacet::CheckerSpelling`] an object type the checker prints as its
+/// sole signature binds as loosely as a function type.
 fn node_precedence(
     store: &SemanticGraphStore,
     id: SemanticNodeId,
+    needs: DisplayNeeds,
     visited: &DisplayContext,
 ) -> Prec {
     let (node, _) = follow_alias_chain(store, id, &visited.substitution);
-    store.node_data(node).as_deref().map_or(Prec::Atom, prec_of)
+    match store.node_data(node).as_deref() {
+        Some(SemanticNodeData::Object(surface))
+            if needs.contains(DisplayFacet::CheckerSpelling)
+                && sole_signature(store, surface).is_some() =>
+        {
+            Prec::Loose
+        }
+        data => data.map_or(Prec::Atom, prec_of),
+    }
 }
 /// Follow the transparent `Alias` chain (bounded by the display depth cap) and
 /// report whether the node ultimately renders as a [`SemanticNodeData::Signature`]
@@ -2309,7 +2379,7 @@ fn render_operand(
     if min_prec == Prec::Postfix && element_renders_leading_readonly(store, id, visited, needs) {
         return format!("({rendered})");
     }
-    if node_precedence(store, id, visited) < min_prec {
+    if node_precedence(store, id, needs, visited) < min_prec {
         format!("({rendered})")
     } else {
         rendered

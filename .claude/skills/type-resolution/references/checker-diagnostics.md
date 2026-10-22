@@ -60,8 +60,11 @@ property, an array element, a tuple position, a parameter, a return, a predicate
 on it; so does an intersection target's pair, a union source's pair unless it has fewer than four
 constituents (`boolean` counting two) against a non-union target (`isRelatedTo`'s `skipCaching`), and the
 failing pair itself when it lacks properties or either side is structured or instantiable — never two
-primitives, nor an object type against a primitive. Past it the checker reports TS2321 instead, which is
-not modelled, so nothing is reported.
+primitives, nor an object type against a primitive. Past it the checker reports TS2321
+(`Excessive stack depth comparing types`, both types printed) in place of the relation's message,
+twice: at the call expression (`CheckerDiagnosticSite::expression_start`), where it compares the types
+while choosing the candidate with no error node of its own, then at the argument. An elaborated argument
+whose whole relation overflows, and an overflow under TS2769, are not modelled and record nothing.
 
 Types print as the checker's `typeToString` prints them (`print_diagnostic_type`,
 `DisplayContext::for_checker`): the display walk keeps the node builder's running `approximateLength`
@@ -72,11 +75,18 @@ object its braces after its members, each list entry two bytes before it) and it
 or an intersection's remaining members then print as `... N more ...` before the last, an object's
 remaining properties likewise, a member it begins past the length as `{ ...; }`, a type-argument or
 tuple list as `...` — and the whole text is clipped to its first 317 bytes and `...` at 320. An object
+with no property or index signature and exactly one call (or one construct) signature prints as that
+signature's function (or constructor) type (`createTypeNodeFromObjectType`): a `typeof` of a declared
+function prints `() => void`, never `{ (): void; }`. An object
 prints its call, construct and index signatures before its properties, an index signature by its
 declared parameter name (`IndexSignature::key_name`; `x` for one no declaration wrote), and under
-`strictNullChecks` an optional tuple element's type with `undefined` added. A node kind whose count is
-not modelled (mapped and `typeof` types, predicates, computed keys, …) bounds its count by twice its
-printed text; a type whose bound could reach the truncation
+`strictNullChecks` an optional tuple element's type with `undefined` added. A query (`typeof a.b`) and a class-expression instance (`(Anonymous class)`)
+count their symbol chain — each name and separator, the first twice — after their type arguments; an
+import type its specifier and ten, then each qualifier name and separator; a type predicate its type
+alone. A part with no checker type (an `Opaque` error carrier) is cut. A node kind whose count is
+not modelled (generic mapped types, whose template the checker may reuse from its declaration unelided;
+spread programs, merged declarations, `infer` constraints, computed and unique-symbol property names and
+indexed-access keys, whose escaped names carry checker symbol ids) bounds its count by twice its printed text; a type whose bound could reach the truncation
 length, or whose depth-cap cut lands inside the kept text, is not reported rather than abbreviated where
 the checker's is not.
 
@@ -115,8 +125,11 @@ lines with their chains, cold and warm, two call sites),
 property path, reference arguments, index signatures and a long tuple label at their abbreviation
 boundaries, cold and warm, two call sites of one body),
 `messages_print_tuple_elements_and_object_members_as_the_checker_does`,
+`wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abbreviates_them` (wide
+function-query, qualified-query, class-expression and predicate-method objects at their elision and
+clip, cold and warm),
 `deep_chains_report_until_the_checker_relation_stack_overflows` (the relation stack's boundary per
-leaf kind),
+leaf kind, TS2321 at the call and the argument past it),
 `call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability` (the explicit-overload
 recovery with a differing return), `a_diagnostic_the_route_cannot_place_is_not_reported`, the `checker_diagnostic::tests` recipe-binding
 units, `resolve_symbol_graph_reports_the_checkers_ts2456_at_the_alias_name`,

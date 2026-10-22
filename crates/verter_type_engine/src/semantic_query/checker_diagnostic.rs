@@ -63,7 +63,8 @@ impl CheckerDiagnostic {
             | CheckerDiagnosticCode::NoOverloadExpectsArgumentCount
             | CheckerDiagnosticCode::ExcessProperty
             | CheckerDiagnosticCode::ExcessPropertySuggestion
-            | CheckerDiagnosticCode::RelationTooComplex => None,
+            | CheckerDiagnosticCode::RelationTooComplex
+            | CheckerDiagnosticCode::ExcessiveStackDepth => None,
         }
     }
 }
@@ -145,6 +146,11 @@ pub enum CheckerDiagnosticCode {
     /// TS2561: as [`Self::ExcessProperty`], where the target has a property
     /// whose name is a likely misspelling of it.
     ExcessPropertySuggestion,
+    /// TS2321: a relation nested deeper than the checker's relation stack
+    /// ([`checker_policy::RELATION_STACK_DEPTH`](super::checker_policy::RELATION_STACK_DEPTH)),
+    /// reported in place of the relation's own message. A checker result,
+    /// not an allowance Verter chose: the relation is false.
+    ExcessiveStackDepth,
 }
 
 // Diagnostic codes and message templates, including TS2769 and TS2322:
@@ -176,7 +182,8 @@ impl CheckerDiagnosticCode {
             | Self::ManyPropertiesMissing
             | Self::NoOverloadExpectsArgumentCount
             | Self::ExcessProperty
-            | Self::ExcessPropertySuggestion => false,
+            | Self::ExcessPropertySuggestion
+            | Self::ExcessiveStackDepth => false,
         }
     }
 
@@ -203,6 +210,7 @@ impl CheckerDiagnosticCode {
             Self::NoOverloadExpectsArgumentCount => 2575,
             Self::ExcessProperty => 2353,
             Self::ExcessPropertySuggestion => 2561,
+            Self::ExcessiveStackDepth => 2321,
         }
     }
 
@@ -264,6 +272,7 @@ impl CheckerDiagnosticCode {
                 "Object literal may only specify known properties, but '{0}' does not exist in \
                  type '{1}'. Did you mean to write '{2}'?"
             }
+            Self::ExcessiveStackDepth => "Excessive stack depth comparing types '{0}' and '{1}'.",
         }
     }
 }
@@ -488,6 +497,14 @@ impl CheckerDiagnosticRecipe {
                 ..*self
             }
             .bind(site, printer)?;
+            // A relation that overflows the stack while overloads are chosen
+            // is reported for each candidate it overflows on, which is not
+            // modelled.
+            if failures.iter().any(|failure| {
+                failure.diagnostic.code == CheckerDiagnosticCode::ExcessiveStackDepth
+            }) {
+                return None;
+            }
             return Some(
                 failures
                     .into_iter()
@@ -529,6 +546,7 @@ impl CheckerDiagnosticRecipe {
                         target,
                         self.diagnostic,
                         argument(ordinal)?,
+                        site.expression_start.zip(site.expression_end),
                     );
                 }
                 let (source, target) = printer.relation_operands(source, target)?;
@@ -598,13 +616,16 @@ pub(crate) trait CheckerDiagnosticPrinter {
     /// expression with the relation's message chain
     /// (`checkTypeRelatedToAndOptionallyElaborate`). `None` when the
     /// failure runs through a form or a relation whose elaboration is not
-    /// modelled.
+    /// modelled. `expression` is the whole operation expression's span,
+    /// where the checker reports a relation that overflows its stack while
+    /// it chooses a candidate.
     fn relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         head: CheckerDiagnostic,
         site: &verter_type_expr::IndexedReportSite,
+        expression: Option<(u32, u32)>,
     ) -> Option<Vec<CheckerDiagnosticOccurrence>>;
 }
 
@@ -617,6 +638,13 @@ pub(crate) struct CheckerDiagnosticSite {
     pub(crate) operation_start: Option<u32>,
     /// The end of the node `operation_start` starts.
     pub(crate) operation_end: Option<u32>,
+    /// The start of the whole operation expression (a call expression),
+    /// where the checker reports what it reports at the node it is checking
+    /// rather than at an argument: a relation it compares with no error
+    /// node of its own while it chooses a candidate.
+    pub(crate) expression_start: Option<u32>,
+    /// The end of the expression `expression_start` starts.
+    pub(crate) expression_end: Option<u32>,
     /// Each authored call argument's report site, in argument order.
     pub(crate) arguments: Arc<[verter_type_expr::IndexedReportSite]>,
 }
@@ -792,6 +820,7 @@ mod tests {
             target: SemanticNodeId,
             head: CheckerDiagnostic,
             site: &verter_type_expr::IndexedReportSite,
+            _expression: Option<(u32, u32)>,
         ) -> Option<Vec<CheckerDiagnosticOccurrence>> {
             let (source, target) = self.relation_operands(source, target)?;
             Some(vec![CheckerDiagnosticOccurrence::new(
@@ -808,6 +837,8 @@ mod tests {
         CheckerDiagnosticSite {
             operation_start: Some(operation),
             operation_end: Some(operation + 1),
+            expression_start: None,
+            expression_end: None,
             arguments: arguments
                 .iter()
                 .map(|&point| verter_type_expr::IndexedReportSite {

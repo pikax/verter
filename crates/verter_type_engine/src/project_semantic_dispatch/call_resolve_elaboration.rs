@@ -85,6 +85,24 @@ enum FailedStep {
     },
 }
 
+/// How far a failed relation's explanation reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Explained {
+    /// Its message chain is complete.
+    Chain,
+    /// It needs a frame past the checker's relation stack, so the checker
+    /// reports TS2321 in place of its message.
+    StackOverflow,
+}
+
+/// What `checkTypeRelatedTo` reports for one failed relation.
+enum RelationReport {
+    /// The relation's message with its chain.
+    Reported(CheckerDiagnosticOccurrence),
+    /// The relation overflows the checker's relation stack: TS2321.
+    StackOverflow,
+}
+
 /// One hop of a run of property and return failures the checker prints as
 /// one path (`The types of 'a.b' are incompatible between these types.`).
 enum PathHop {
@@ -100,14 +118,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// literal's first unknown property, else one diagnostic at the
     /// expression with the relation's message chain. `None` when the
     /// failure runs through a form or a step not modelled.
+    ///
+    /// A relation that overflows the checker's relation stack is reported
+    /// as TS2321 naming the two types, twice: at the whole `expression`,
+    /// where the checker compares them while it chooses the candidate with
+    /// no error node of its own, then at the argument, in place of `head`.
     pub(in crate::project_semantic_dispatch) fn checker_relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         head: CheckerDiagnostic,
         site: &IndexedReportSite,
+        expression: Option<(u32, u32)>,
     ) -> Option<Vec<CheckerDiagnosticOccurrence>> {
         if let Some(elaborated) = self.elaborate_failure(site.form.as_ref(), source, target)? {
+            // The whole relation's overflow at the expression beside the
+            // parts the elaboration reports is not modelled.
+            if self.relation_overflows(source, target) {
+                return None;
+            }
             return Some(elaborated);
         }
         if let Some(IndexedElaborationForm::Object(properties)) = &site.form {
@@ -118,13 +147,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // A message that names the whole expression names the checker's
         // REPORTED type for it: a fresh object or array literal's widened
         // literal tree, not the literal one it checked.
-        let source = self.widened_fresh_literal(site.form.as_ref(), source);
-        Some(vec![self.report_relation_failure(
-            source,
-            target,
-            (site.point, site.end),
-            head,
-        )?])
+        let reported = self.widened_fresh_literal(site.form.as_ref(), source);
+        match self.relation_report(reported, target, (site.point, site.end), head)? {
+            RelationReport::Reported(occurrence) => Some(vec![occurrence]),
+            RelationReport::StackOverflow => {
+                let types = vec![
+                    self.print_diagnostic_type(source)?,
+                    self.print_diagnostic_type(target)?,
+                ];
+                let overflow = |span: (u32, u32)| {
+                    CheckerDiagnosticOccurrence::new(
+                        span.0,
+                        span.1,
+                        CheckerDiagnostic {
+                            code: CheckerDiagnosticCode::ExcessiveStackDepth,
+                            operation: head.operation,
+                        },
+                        types.iter().map(|text| text.as_str().into()).collect(),
+                        Box::new([]),
+                    )
+                };
+                Some(vec![
+                    overflow(expression?),
+                    overflow((site.point, site.end)),
+                ])
+            }
+        }
     }
 
     /// The type the checker REPORTS a fresh object or array literal
@@ -491,10 +539,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         )))
     }
 
-    /// `checkTypeRelatedTo` reporting at `point`: `head` naming the two
-    /// types with the failure's message chain below it — or, where the
-    /// pair itself lacks properties its target requires, that message in
-    /// its place.
+    /// `checkTypeRelatedTo` reporting an elaborated part at `span`, as
+    /// [`Self::relation_report`] does. A part whose relation overflows the
+    /// stack is reported at the part beside the whole relation's overflow at
+    /// the operation, which is not modelled.
     fn report_relation_failure(
         &self,
         source: SemanticNodeId,
@@ -502,26 +550,66 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         span: (u32, u32),
         head: CheckerDiagnostic,
     ) -> Option<CheckerDiagnosticOccurrence> {
+        match self.relation_report(source, target, span, head)? {
+            RelationReport::Reported(occurrence) => Some(occurrence),
+            RelationReport::StackOverflow => None,
+        }
+    }
+
+    /// `checkTypeRelatedTo` reporting at `span`: `head` naming the two
+    /// types with the failure's message chain below it — or, where the
+    /// pair itself lacks properties its target requires, that message in
+    /// its place — or the relation's stack overflow, which the checker
+    /// reports as TS2321 in place of either.
+    fn relation_report(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        span: (u32, u32),
+        head: CheckerDiagnostic,
+    ) -> Option<RelationReport> {
         if let FailedStep::Missing { code, arguments } = self.failed_step(source, target)? {
-            return Some(occurrence(span, code, arguments, Vec::new()));
+            return Some(RelationReport::Reported(occurrence(
+                span,
+                code,
+                arguments,
+                Vec::new(),
+            )));
         }
         let mut chain = Vec::new();
-        self.explain_failure(
+        if self.explain_failure(
             source,
             target,
             1,
             false,
             &mut chain,
             crate::semantic_query::checker_policy::RELATION_STACK_DEPTH,
-        )?;
+        )? == Explained::StackOverflow
+        {
+            return Some(RelationReport::StackOverflow);
+        }
         let (source, target) = self.print_relation_operands(source, target)?;
-        Some(CheckerDiagnosticOccurrence::new(
+        Some(RelationReport::Reported(CheckerDiagnosticOccurrence::new(
             span.0,
             span.1,
             head,
             Box::new([source.into_boxed_str(), target.into_boxed_str()]),
             chain.into_boxed_slice(),
-        ))
+        )))
+    }
+
+    /// Whether relating `source` to `target` overflows the checker's
+    /// relation stack along the step it fails at. `false` where that step is
+    /// not modelled.
+    fn relation_overflows(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
+        self.explain_failure(
+            source,
+            target,
+            1,
+            false,
+            &mut Vec::new(),
+            crate::semantic_query::checker_policy::RELATION_STACK_DEPTH,
+        ) == Some(Explained::StackOverflow)
     }
 
     /// Whether the checker's weak-type rule (`isRelatedTo`) decides this
@@ -573,8 +661,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// predicate — holds that pair open on it, and so does a union or
     /// intersection pair the checker relates on it and the failing pair
     /// itself when either side is structured. A failure explained past it
-    /// is one the checker reports as TS2321 instead, which is not modelled,
-    /// so no diagnostic is reported for it.
+    /// is one the checker reports as TS2321 instead:
+    /// [`Explained::StackOverflow`], its chain lines meaningless.
     fn explain_failure(
         &self,
         source: SemanticNodeId,
@@ -583,7 +671,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         own_line: bool,
         chain: &mut Vec<CheckerDiagnosticChainLine>,
         stack: u32,
-    ) -> Option<()> {
+    ) -> Option<Explained> {
+        // A frame the relation stack has no room for: the checker reports
+        // TS2321 for the whole relation in place of its message.
+        macro_rules! frame {
+            ($stack:expr) => {
+                match $stack {
+                    Some(stack) => stack,
+                    None => return Some(Explained::StackOverflow),
+                }
+            };
+        }
         if self.weak_target_decides(source, target)? {
             return None;
         }
@@ -597,9 +695,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if let FailedStep::Missing { code, arguments } = &step {
             // The object pair lacking the properties is itself related on
             // the stack.
-            stack.checked_sub(1)?;
+            frame!(stack.checked_sub(1));
             push(chain, depth, code.format(arguments));
-            return Some(());
+            return Some(Explained::Chain);
         }
         let depth = if own_line {
             let (source, target) = self.print_relation_operands(source, target)?;
@@ -621,19 +719,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // The failing pair itself is related on the stack when it is
             // structured: past the stack the checker reports TS2321 instead.
             FailedStep::Leaf { holds_frame } => {
-                (stack > 0 || holds_frame == Some(false)).then_some(())
+                if stack > 0 || holds_frame == Some(false) {
+                    Some(Explained::Chain)
+                } else {
+                    holds_frame.map(|_| Explained::StackOverflow)
+                }
             }
-            FailedStep::Missing { .. } => Some(()),
+            FailedStep::Missing { .. } => Some(Explained::Chain),
             FailedStep::Member {
                 source,
                 target,
                 holds_frame,
             } => {
-                let stack = if holds_frame { inner? } else { stack };
+                let stack = if holds_frame { frame!(inner) } else { stack };
                 self.explain_failure(source, target, depth, true, chain, stack)
             }
             FailedStep::Element { source, target } | FailedStep::Return { source, target, .. } => {
-                self.explain_failure(source, target, depth, true, chain, inner?)
+                self.explain_failure(source, target, depth, true, chain, frame!(inner))
             }
             FailedStep::Parameter {
                 source_name,
@@ -648,7 +750,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         "Types of parameters '{source_name}' and '{target_name}' are incompatible."
                     ),
                 );
-                self.explain_failure(source, target, below, true, chain, inner?)
+                self.explain_failure(source, target, below, true, chain, frame!(inner))
             }
             FailedStep::Predicate {
                 source_text,
@@ -661,7 +763,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     depth,
                     format!("Type predicate '{source_text}' is not assignable to '{target_text}'."),
                 );
-                self.explain_failure(source, target, below, true, chain, inner?)
+                self.explain_failure(source, target, below, true, chain, frame!(inner))
             }
             FailedStep::Position {
                 index,
@@ -675,7 +777,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         "Type at position {index} in source is not compatible with type at position {index} in target."
                     ),
                 );
-                self.explain_failure(source, target, below, true, chain, inner?)
+                self.explain_failure(source, target, below, true, chain, frame!(inner))
             }
             FailedStep::Property {
                 name,
@@ -687,7 +789,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // line of their own.
                 let mut path = vec![PathHop::Property(name)];
                 let (mut source, mut target) = (source, target);
-                let mut stack = inner?;
+                let mut stack = frame!(inner);
                 loop {
                     match self.failed_step(source, target)? {
                         FailedStep::Property {
@@ -697,7 +799,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         } => {
                             path.push(PathHop::Property(name));
                             (source, target) = (inner_source, inner_target);
-                            stack = stack.checked_sub(1)?;
+                            stack = frame!(stack.checked_sub(1));
                         }
                         FailedStep::Return {
                             source: inner_source,
@@ -706,7 +808,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         } => {
                             path.push(PathHop::Return { arguments });
                             (source, target) = (inner_source, inner_target);
-                            stack = stack.checked_sub(1)?;
+                            stack = frame!(stack.checked_sub(1));
                         }
                         _ => break,
                     }
