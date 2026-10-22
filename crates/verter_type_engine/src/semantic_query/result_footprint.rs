@@ -100,7 +100,7 @@ impl OwnedHeap for CanonicalTypeSubstitution {
     /// The pair list's block and its root attachment's owner.
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         let Self(bindings, roots) = self;
-        bindings.owned_heap_bytes(aliases) + roots.0.owned_heap_bytes(aliases)
+        bindings.owned_heap_bytes(aliases) + roots.owned_heap_bytes(aliases)
     }
 }
 

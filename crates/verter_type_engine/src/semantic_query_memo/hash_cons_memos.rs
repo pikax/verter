@@ -40,14 +40,11 @@ pub(crate) struct SubstituteMemoEntry {
 mod tests;
 
 /// The bytes one memo entry keeps: its map slot and FIFO record, its value
-/// inline, and the root owner it keeps.
-fn hash_cons_entry_bytes<V>(
-    roots: &super::node_roots::NodeRootSet,
-    aliases: &mut verter_session_query::retention::allocation::AliasSet,
-) -> usize {
+/// inline with the root set it embeds, and that set's spilled operands.
+fn hash_cons_entry_bytes<V>(roots: &super::node_roots::NodeRootSet) -> usize {
     std::mem::size_of::<V>()
         + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-        + roots.owned_heap_bytes(aliases)
+        + roots.heap_bytes()
 }
 
 /// The completed cold evaluation handed to admission. The producer creates
@@ -210,23 +207,16 @@ impl SemanticGraphStore {
                 };
                 // Charged like every retained answer; one the account
                 // refuses is computed again on demand.
-                let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
                 let bytes = hash_cons_entry_bytes::<(
                     (SemanticNodeId, SemanticNodeId, SemanticNodeId),
                     SubstituteMemoEntry,
-                )>(&roots, &mut aliases);
-                // The root owner is an owned allocation, charged by its
-                // own cell and held by the entry.
-                let handles = aliases.take_handles();
+                )>(&roots);
                 let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
                     self.retention_account().reserve(
                         verter_session_query::retention::ChargeClass::Retained,
                         bytes,
                     )
                 else {
-                    return;
-                };
-                let Ok(retention) = handles.retained_with(retention, self.charge_ctx()) else {
                     return;
                 };
                 slot.insert(SubstituteMemoEntry {

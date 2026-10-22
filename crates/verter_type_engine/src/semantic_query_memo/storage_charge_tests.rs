@@ -476,3 +476,94 @@ fn the_project_dependency_name_is_charged_at_a_full_account() {
     drop(store);
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
+
+/// A delivery's root sets ride inline in its owner, so its metadata charge
+/// is the owner's block plus a spilled operand list, taken once at mint:
+/// cloning the delivery adds no charge and no count, the delivery keeps its
+/// nodes live across requests (construction scopes) and a cache
+/// invalidation, and its last holder's drop releases both the charge and
+/// the nodes.
+#[test]
+fn a_delivery_charges_its_root_sets_once_and_holds_its_nodes_across_requests() {
+    use super::delivery_lease::SemanticDeliveryLease;
+    use verter_session_query::retention::allocation::heap_block_bytes;
+
+    const NODES: usize = 6;
+    let account = account();
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
+    // Pinned bytes beyond the graph's own storage: what callers hold.
+    let caller_pinned = || {
+        account.snapshot().pinned_bytes
+            - harness.run(|store| store.graph_storage_charge_for_tests())
+    };
+    let before = caller_pinned();
+    let (lease, ids) = harness.run(|store| {
+        let ids: Vec<_> = (0..NODES)
+            .map(|index| {
+                store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                    "delivered-{index}"
+                ))))
+            })
+            .collect();
+        let roots = store.root_nodes(ids.iter().copied()).expect("live nodes");
+        let lease = SemanticDeliveryLease::from_roots(roots, store.retention_account());
+        (lease, ids)
+    });
+    assert_eq!(
+        harness.live_nodes(),
+        NODES,
+        "the delivery outlives its request"
+    );
+    let metadata = lease.own_charge_bytes_for_tests();
+    assert!(
+        metadata
+            > heap_block_bytes(
+                NODES * std::mem::size_of::<crate::semantic_query::SemanticNodeId>()
+            ),
+        "the owner's block and its spilled operand list are charged: {metadata}"
+    );
+    assert_eq!(
+        caller_pinned() - before,
+        metadata,
+        "the delivery's metadata is charged once"
+    );
+
+    let clones: Vec<_> = (0..50).map(|_| lease.clone()).collect();
+    assert_eq!(
+        caller_pinned() - before,
+        metadata,
+        "clones share the one owner and its one charge"
+    );
+    assert!(clones
+        .iter()
+        .all(|clone| clone.own_charge_bytes_for_tests() == metadata));
+
+    harness.run(|store| store.invalidate_all());
+    harness.run(|_| {
+        for id in &ids {
+            assert!(
+                clones[0].node_ref(*id).expect("delivered").read().is_ok(),
+                "a later request reads every delivered node"
+            );
+        }
+    });
+    assert_eq!(harness.live_nodes(), NODES);
+
+    drop(lease);
+    assert_eq!(
+        harness.live_nodes(),
+        NODES,
+        "a clone still holds the delivery"
+    );
+    drop(clones);
+    assert_eq!(
+        harness.live_nodes(),
+        0,
+        "the last holder releases the nodes"
+    );
+    assert_eq!(
+        caller_pinned(),
+        before,
+        "the delivery's metadata charge leaves with its last holder"
+    );
+}

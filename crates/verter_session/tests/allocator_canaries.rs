@@ -800,3 +800,6 @@ mod partial_print_allocation;
 
 #[path = "allocation_cases/canonical_identity.rs"]
 mod canonical_identity_allocation;
+
+#[path = "allocation_cases/root_sets.rs"]
+mod root_set_allocation;

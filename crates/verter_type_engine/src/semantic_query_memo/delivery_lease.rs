@@ -20,9 +20,9 @@ struct DeliveryOwner {
     roots: NodeRootSet,
     signature: Option<SignatureEpochLease>,
     key_roots: NodeRootSet,
-    /// This owner's own block and root-owner metadata, charged
-    /// separately from the shared allocations it holds for exactly as long
-    /// as the owner lives. The owner is its delivery's first holder and
+    /// This owner's own block, its root sets inline in it, and their
+    /// operand lists once they spill, charged separately from the shared
+    /// allocations it holds for exactly as long as the owner lives. The owner is its delivery's first holder and
     /// the delivery is in-flight work — published to no cache yet — so it
     /// is charged ACTIVE, never refused, until a cache retaining the
     /// owner (a memo candidate whose warm reads share it) adopts the
@@ -35,48 +35,35 @@ struct DeliveryOwner {
 
 impl DeliveryOwner {
     /// Charge this owner's own allocations against `account`: its `Arc`
-    /// block, in `phase` — pinned for a delivery its caller keeps, in
-    /// flight for one a publication may still adopt. Its two root owners
-    /// are owned allocations a caller can clone out of a delivered value,
-    /// so each charges itself, in the same phase, for the owner's readers.
-    /// The rooted nodes are the arena's; the signature epoch is its
-    /// owner's; the allocations the delivery hands out carry their own
-    /// charges.
+    /// block, which embeds its two root sets, and their operand lists once
+    /// they spill, in `phase` — pinned for a delivery its caller keeps, in
+    /// flight for one a publication may still adopt. A root set's counts
+    /// live in the arena's slot table, and the rooted nodes are the
+    /// arena's storage; the signature epoch is its owner's; the
+    /// allocations the delivery hands out carry their own charges.
     fn charged(
         mut self,
         account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
         phase: DeliveryPhase,
     ) -> std::sync::Arc<Self> {
-        let footprint = self.own_footprint();
-        let ctx = verter_session_query::retention::owned::ChargeCtx::new(account);
+        let bytes = self.own_bytes();
         let own = match phase {
             DeliveryPhase::Settled => {
-                footprint.handles.pin(ctx);
-                verter_session_query::retention::shared::CallerHold::pin(account, footprint.bytes)
+                verter_session_query::retention::shared::CallerHold::pin(account, bytes)
             }
             DeliveryPhase::InFlight => {
-                footprint.handles.charge_in_flight(ctx);
-                verter_session_query::retention::shared::CallerHold::in_flight(
-                    account,
-                    footprint.bytes,
-                )
+                verter_session_query::retention::shared::CallerHold::in_flight(account, bytes)
             }
         };
         self._own = Some(own);
         std::sync::Arc::new(self)
     }
 
-    /// This owner's own block and the root owners' handles.
-    fn own_footprint(&self) -> verter_session_query::retention::Footprint {
-        use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
-        let mut aliases = AliasSet::new();
-        let bytes = arc_block_bytes(std::mem::size_of::<Self>())
-            + self.roots.owned_heap_bytes(&mut aliases)
-            + self.key_roots.owned_heap_bytes(&mut aliases);
-        verter_session_query::retention::Footprint {
-            bytes,
-            handles: aliases.take_handles(),
-        }
+    /// This owner's own block and its root sets' spilled operand lists.
+    fn own_bytes(&self) -> usize {
+        verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<Self>())
+            + self.roots.heap_bytes()
+            + self.key_roots.heap_bytes()
     }
 }
 
@@ -128,21 +115,22 @@ impl SemanticDeliveryLease {
             .map(|owner| std::sync::Arc::as_ptr(owner) as usize)
     }
     /// The bytes this delivery's own metadata is charged for: its owner's
-    /// block and the root owners it names, each by its own cell.
+    /// block, with the root sets inline in it, and their spilled operand
+    /// lists.
     #[cfg(any(test, feature = "test-support"))]
     pub fn own_charge_bytes_for_tests(&self) -> usize {
         self.0.as_ref().map_or(0, |owner| {
             owner._own.as_ref().map_or(
                 0,
                 verter_session_query::retention::shared::CallerHold::bytes,
-            ) + owner.own_footprint().handles.charged_bytes()
+            )
         })
     }
 
-    /// Observe this delivery's own metadata charges: its owner's block hold,
-    /// against the footprint the owner measures now, and the root-owner
-    /// cells it names. The rooted nodes are the arena's storage and the
-    /// signature epoch its store's, so neither is observed here.
+    /// Observe this delivery's own metadata charge: its owner's block hold,
+    /// against the bytes the owner measures now. The rooted nodes are the
+    /// arena's storage and the signature epoch its store's, so neither is
+    /// observed here.
     #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
     pub(crate) fn observe_metadata(
         &self,
@@ -151,11 +139,9 @@ impl SemanticDeliveryLease {
         let Some(owner) = self.0.as_ref() else {
             return;
         };
-        let footprint = owner.own_footprint();
         if let Some(own) = owner._own.as_ref() {
-            observer.caller_hold(own, footprint.bytes);
+            observer.caller_hold(own, owner.own_bytes());
         }
-        observer.owned_handles(&footprint.handles);
     }
 
     /// A cache's hold on this delivery's metadata charge, for a cache that
@@ -180,29 +166,31 @@ impl SemanticDeliveryLease {
             .transpose()
     }
 
-    /// Settle this delivery's still-in-flight charges at its caller
+    /// Settle this delivery's still-in-flight charge at its caller
     /// handoff: the delivery is complete and its callers hold it, so the
-    /// owner's own hold and the root-owner cells its metadata names
-    /// transfer from ACTIVE to a pin — never released, never charged
-    /// twice. A publication that already adopted them keeps them
+    /// owner's own hold transfers from ACTIVE to a pin — never released,
+    /// never charged twice. A publication that already adopted it keeps it
     /// retained, and a hold that was never in flight keeps its class.
     pub(super) fn hand_off_in_flight(&self) {
-        if let Some(owner) = self.0.as_ref() {
-            let footprint = owner.own_footprint();
-            footprint.handles.hand_off_in_flight();
-            if let Some(own) = owner._own.as_ref() {
-                own.hand_off_in_flight();
-            }
+        if let Some(own) = self.0.as_ref().and_then(|owner| owner._own.as_ref()) {
+            own.hand_off_in_flight();
         }
     }
 
-    /// The root owners this delivery's metadata names, for a cache that
-    /// holds them together with the other allocations it retains.
-    pub(super) fn metadata_handles(&self) -> verter_session_query::retention::owned::OwnedHandles {
-        self.0
-            .as_ref()
-            .map(|owner| owner.own_footprint().handles)
-            .unwrap_or_default()
+    /// A delivery rooting `roots` and holding no shared allocation, its own
+    /// metadata pinned against `account`.
+    #[cfg(test)]
+    pub(crate) fn from_roots(
+        roots: NodeRootSet,
+        account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self(Some(
+            DeliveryOwner {
+                roots,
+                ..Default::default()
+            }
+            .charged(account, DeliveryPhase::Settled),
+        ))
     }
 }
 

@@ -284,7 +284,7 @@ fn crossing_a_small_ceiling_cannot_abort_the_admitted_read() {
 /// Reused by the reopen proof below through the public host in
 /// `tests/cases/g_session`.
 #[test]
-fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
+fn an_inline_member_flight_is_charged_in_flight_until_its_batch_ends() {
     let account = account(usize::MAX / 2);
     let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let before = account.snapshot().active_bytes;
@@ -297,11 +297,12 @@ fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
             after_flight > before,
             "the member's flight storage charges in flight"
         );
-        // The held VALUE is its own charge, beyond the flight's storage:
-        // the root set the hold keeps for the member's decided value
-        // charges ACTIVE — never a pin, never free. The construction scope
-        // stays open until the hold has rooted the value, so the node is
-        // live for it.
+        // The hold roots the member's decided value with a root set held
+        // inline in the flight: its counts live in the arena's slot table
+        // and an operand list that fits inline has no heap of its own, so
+        // the hold adds no charge in any class — only a spilled operand
+        // list would, in flight. The construction scope stays open until
+        // the hold has rooted the value, so the node is live for it.
         let (_scope, held_value) = {
             let scope = store.enter_node_root_scope();
             let node = store.intern_node(
@@ -319,12 +320,10 @@ fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
         let pinned_at_hold = account.snapshot().pinned_bytes;
         flight.hold_value_for_tests(store, &held_value);
         let after_hold = account.snapshot();
-        assert!(
-            after_hold.active_bytes
-                >= after_flight
-                    + std::mem::size_of::<verter_type_engine::semantic_query::SemanticNodeId>(),
-            "the held value's root set charges ACTIVE beyond the flight's \
-             storage: {after_hold:?} vs {after_flight} charged before the hold"
+        assert_eq!(
+            after_hold.active_bytes, after_flight,
+            "an inline root set adds nothing to the flight's in-flight charge: \
+             {after_hold:?} vs {after_flight} charged before the hold"
         );
         assert_eq!(
             after_hold.pinned_bytes, pinned_at_hold,

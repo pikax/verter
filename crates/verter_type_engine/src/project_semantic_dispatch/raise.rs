@@ -96,7 +96,7 @@ impl ReducedOutputNode {
         crate::semantic_query_memo::node_roots::NodeRef<'_>,
         crate::semantic_query::QueryError,
     > {
-        self._roots.0.node_ref(self.node_id)
+        self._roots.node_ref(self.node_id)
     }
 }
 
