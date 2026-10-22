@@ -1023,6 +1023,7 @@
           "observe_request",
           "project_semantic_dispatch",
           "request_context",
+          "request_observers",
           "resolver_core",
           "semantic_query",
           "semantic_query_memo"
