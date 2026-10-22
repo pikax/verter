@@ -15,6 +15,7 @@
 //! `intern_ordered_union_in_scope`) answer only inside a held lane, and a
 //! macro spread-formula merge runs only through a dispatcher.
 
+use verter_audit::observe::ObserveExec;
 use verter_session_query::flow::completion::NormalCompletion;
 use verter_session_query::flow::policy::NullabilityPolicy;
 use verter_type_engine::project_semantic_dispatch::{canonical_algebra, relation_predicates, walk};
@@ -76,14 +77,14 @@ fn release_kernel_roots(graph: &SemanticGraphStore, id: SemanticNodeId) {
     let _epoch = graph.release_signature_records_naming([id]);
 }
 
-fn record_an_origin_edge(
-    graph: &SemanticGraphStore,
+fn record_an_origin_edge<M: ObserveExec>(
+    graph: GraphIn<'_, M>,
     id: SemanticNodeId,
     kind: OriginEdgeKind,
     meta: OriginMeta,
     fence: DepSignature,
 ) {
-    GraphIn::of(graph).record_origin_edge(id, kind, std::sync::Arc::from([id]), meta, fence);
+    graph.record_origin_edge(id, kind, std::sync::Arc::from([id]), meta, fence);
 }
 
 fn key_an_ordinal(graph: &SemanticGraphStore, id: SemanticNodeId, ids: &mut Vec<SemanticNodeId>) {
@@ -100,12 +101,11 @@ fn view_a_union(graph: &SemanticGraphStore, id: SemanticNodeId, ctx: &SemanticCo
     let _members = stable_key::semantic_union_members(graph, id, ctx);
 }
 
-fn build_over_ordinals(
-    graph: &SemanticGraphStore,
+fn build_over_ordinals<M: ObserveExec>(
+    graph: GraphIn<'_, M>,
     id: SemanticNodeId,
     nullability: NullabilityPolicy,
 ) {
-    let graph = GraphIn::of(graph);
     let _union = canonical_algebra::intern_ordered_union(graph, &[id], nullability);
     let unmetered = canonical_algebra::ConstructionMeter::UNMETERED;
     let _intersection =
@@ -143,13 +143,12 @@ fn render_and_judge(graph: &SemanticGraphStore, id: SemanticNodeId, completion: 
     let _verdict = FlowReturnResult::new(graph, id, completion, None);
 }
 
-fn merge_caller_surfaces(
-    graph: &SemanticGraphStore,
+fn merge_caller_surfaces<M: ObserveExec>(
+    graph: GraphIn<'_, M>,
     arms: &[Option<walk::ShallowSurface>],
     alternatives: &[ObjectProjectionAlternative],
     evidence: &mut canonical_algebra::CanonicalEvidence,
 ) {
-    let graph = GraphIn::of(graph);
     let unmetered = canonical_algebra::ConstructionMeter::UNMETERED;
     let _common = walk::merge_union_surfaces(graph, arms, unmetered, evidence);
     let _macro = walk::merge_union_surfaces_for_macro(graph, arms, unmetered, evidence);
