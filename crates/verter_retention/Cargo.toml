@@ -13,10 +13,12 @@ publish = false
 # Exposes isolated-account constructors and test-only observability to
 # cross-crate test code. Production binaries MUST NOT enable this feature.
 test-support = []
-# The soak/tooling runner's opt-in to the ACTIVE-occupancy measurement
-# window alone (`active_window`), without the isolated-account constructors
+# The soak/tooling runner's opt-in to its seams alone — the ACTIVE-occupancy
+# measurement window (`active_window`) and the allocation charge observer
+# (`witness`) — without the isolated-account constructors
 # of `test-support`. Default-off; forwarded only by
-# `verter_session_query/soak-support` and `verter_session/soak-support`, and
+# `verter_session_query/soak-support` (reached through `verter_type_engine` and
+# `verter_session` soak-support), and
 # no production edge enables it.
 soak-support = []
 

@@ -369,6 +369,56 @@ calls. The task inventory
 [`SKR-OWN-PUBLIC.md`](../../../../crates/verter_type_engine/observe-inventory/SKR-OWN-PUBLIC.md)
 lists every carrier, its route, its rule and its proof.
 
+## Held-answer charge witness
+
+`semantic_query_memo::charge_witness::HeldChargeWitness` (compiled only under
+`test`, `test-support` or the default-off `soak-support`, which
+`verter_session/soak-support` forwards with capture and `semantic-observe`
+off) reads what a held answer keeps charged, allocation by allocation:
+`of_flow_return(&FlowReturnResult)` for the flow return a public
+`get_flow_return_type_with_audit` delivers, `of_read(&CacheRead<_>)` for a
+dispatch read. It is built on the retention account's observer
+(`verter_retention::witness::ChargeObserver`, re-exported under
+`verter_session_query::retention::witness`) and reads each allocation's own
+charge in place — no estimate from source size, no second ledger, no minted
+root.
+
+Three disjoint sections, each allocation in the first that reaches it:
+
+- **payload** — the self-charged carriers every copy of the answer shares
+  (a flow return's fresh-literal and checker-diagnostic slices and
+  independence proofs; a read's walker diagnostics, dependency rail and the
+  owned names its value holds) with the owned children they answer for;
+- **cost receipts** — a read's priced receipt and its closure, each receipt
+  once, with the names its charge holds; a receipt keeps its retained
+  reservation for its whole life, so one a reader outlives the cache with
+  stays `Retained`;
+- **root metadata** — the delivery owner's own block hold and its
+  root-owner cells, charged apart from the payload.
+
+Store backing is not observed: rooted node payloads are the arena's
+granular-pinned storage and a signature epoch's records the signature
+store's. Each entry carries the allocation's identity (its address, valid
+only while the observed holder keeps it), its charge class and bytes, the
+bytes it MEASURES — the same measurement a first charge takes, read from the
+value, so the expectation is independent of the transfer being checked, of
+a repeat execution and of unrelated account occupancy — and, for an
+allocation weak views may keep allocated, its pinned block share. The
+closure is the answer's delivery stage: the allocations it holds when
+observed, not a cache candidate's own rail, roots or owner. Shared children
+are deduplicated by allocation identity across the whole witness: an owned
+child two carriers reach is one entry, charged by its own cell once.
+Reading a witness takes no reservation, adopts no pin, releases nothing and
+keeps no handle. The class lifecycle a consumer observes: a payload the cache
+admitted is `Retained` while a cache candidate holds it and moves to
+`Pinned`, same bytes, when the last cache hold drops (a public `close`), until
+its last reader drops it; the bookkeeping is pinned for its reader. The
+public-host proofs (cold and warm, copies, both release orders, dropped /
+doubled / partial transfer controls) live in
+`crates/verter_session/tests/cases/g_session/held_charge_witness.rs`; the
+inventory rows in
+[`SKR-OWN-CHARGE-WITNESS.md`](../../../../crates/verter_retention/observe-inventory/SKR-OWN-CHARGE-WITNESS.md).
+
 ## Current counts and observation policy
 
 `SemanticGraphStore::node_ownership_counts` derives current live nodes, roots,

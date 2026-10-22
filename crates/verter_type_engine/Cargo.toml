@@ -15,11 +15,14 @@ publish = false
 # this feature; `verter_session`'s own `test-support` forwards it so one
 # session opt-in turns on the matching seams here.
 test-support = ["verter_execution/test-support", "verter_session_query/test-support"]
-# The flight rendezvous alone (`semantic_query_memo::FlightRendezvous`): holds a
-# real cold producer at its build boundary until a subscriber registers on its
-# flight, for the soak/tooling runner. `test-support` already carries it.
-# Forwarded by `verter_session`'s `soak-support`; no production edge enables it.
-soak-support = []
+# The soak/tooling runner's seams alone: the flight rendezvous
+# (`semantic_query_memo::FlightRendezvous`), which holds a real cold producer at
+# its build boundary until a subscriber registers on its flight, and the held
+# answer's allocation charge witness (`semantic_query_memo::charge_witness`),
+# which reads through the retention account's observer — hence the forwarding.
+# `test-support` already carries both. Forwarded by `verter_session`'s
+# `soak-support`; no production edge enables it.
+soak-support = ["verter_session_query/soak-support"]
 # The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
 # also compiles this crate's `hotpath` measurement attributes. Forwarded by
 # `verter_session`; no production edge enables it.

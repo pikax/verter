@@ -526,6 +526,40 @@ impl DemandCostReceipt {
         }
     }
 
+    /// Observe this receipt's own charge and, once each, every receipt of
+    /// its closure: each against its retained footprint and the slice of
+    /// cache holds its charge keeps on the owned names its identity reaches
+    /// (observed as nested children).
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn observe_retention(
+        self: &Arc<Self>,
+        observer: &mut verter_session_query::retention::witness::ChargeObserver,
+    ) {
+        use verter_session_query::retention::witness::Reach;
+        let mut stack = vec![(self, Reach::Direct)];
+        while let Some((receipt, reach)) = stack.pop() {
+            let footprint = receipt.retained_footprint();
+            let measured = footprint.bytes
+                + verter_session_query::retention::owned::HeldHandles::backing_bytes_for(
+                    footprint.handles.len(),
+                );
+            if observer.self_charged(
+                receipt,
+                reach,
+                receipt.retention.get(),
+                measured,
+                &footprint.handles,
+            ) {
+                stack.extend(
+                    receipt
+                        .prerequisites
+                        .iter()
+                        .map(|dependency| (&dependency.receipt, Reach::Nested)),
+                );
+            }
+        }
+    }
+
     /// Reserve this receipt, and every receipt of its closure not yet
     /// reserved, against `account`: a store is about to retain a result it
     /// costs. Each receipt is reserved once, by whichever store retains it

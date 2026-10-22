@@ -126,6 +126,25 @@ impl SemanticDeliveryLease {
         })
     }
 
+    /// Observe this delivery's own metadata charges: its owner's block hold,
+    /// against the footprint the owner measures now, and the root-owner
+    /// cells it names. The rooted nodes are the arena's storage and the
+    /// signature epoch its store's, so neither is observed here.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn observe_metadata(
+        &self,
+        observer: &mut verter_session_query::retention::witness::ChargeObserver,
+    ) {
+        let Some(owner) = self.0.as_ref() else {
+            return;
+        };
+        let footprint = owner.own_footprint();
+        if let Some(own) = owner._own.as_ref() {
+            observer.caller_hold(own, footprint.bytes);
+        }
+        observer.owned_handles(&footprint.handles);
+    }
+
     /// A cache's hold on this delivery's metadata charge, for a cache that
     /// retains the delivery (its warm reads share the owner): retained while
     /// the cache holds it, handed back to the owner's readers when it drains.

@@ -1,0 +1,13 @@
+error[E0432]: unresolved import `verter_type_engine::semantic_query_memo::charge_witness`
+ --> tests/cases/compile-fail/held_charge_witness_absent_without_support.rs:6:46
+  |
+6 | use verter_type_engine::semantic_query_memo::charge_witness::HeldChargeWitness;
+  |                                              ^^^^^^^^^^^^^^ could not find `charge_witness` in `semantic_query_memo`
+  |
+note: found an item that was configured out
+ --> $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/mod.rs
+  |
+  | #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+  |          ---------------------------------------------------------- the item is gated here
+  | pub mod charge_witness;
+  |         ^^^^^^^^^^^^^^
