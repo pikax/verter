@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use verter_session_query::flow::binding::FlowBindingRef as FlowProductSubject;
+use verter_type_engine::project_semantic_dispatch::flow_products::FlowNarrowed;
 use verter_type_engine::project_semantic_dispatch::flow_return::*;
 use verter_type_engine::semantic_query::SemanticNodeId;
 
@@ -49,8 +50,12 @@ fn established(ordinal: u32, path: &[&str], node: u64) -> NarrowingLedgerEntry {
     NarrowingLedgerEntry::Established {
         root: param(ordinal),
         subject: authored(ordinal, path),
-        node: SemanticNodeId(node),
+        node: narrowed(node),
     }
+}
+
+fn narrowed(node: u64) -> FlowNarrowed {
+    FlowNarrowed::Node(SemanticNodeId(node))
 }
 
 /// A window whose only movement RE-WRITES the value the position
@@ -68,7 +73,7 @@ fn a_re_established_fact_is_reported_as_the_windows_contribution() {
     let window = [established(0, &["v"], 7)];
     assert_eq!(
         standing_narrowings(&window),
-        vec![(authored(0, &["v"]), SemanticNodeId(7))],
+        vec![(authored(0, &["v"]), narrowed(7))],
     );
 }
 
@@ -86,9 +91,9 @@ fn a_position_written_twice_reports_both_writes_in_order() {
     assert_eq!(
         standing_narrowings(&window),
         vec![
-            (authored(0, &["v"]), SemanticNodeId(7)),
-            (authored(1, &[]), SemanticNodeId(9)),
-            (authored(0, &["v"]), SemanticNodeId(8)),
+            (authored(0, &["v"]), narrowed(7)),
+            (authored(1, &[]), narrowed(9)),
+            (authored(0, &["v"]), narrowed(8)),
         ],
     );
 }
@@ -112,8 +117,8 @@ fn a_kill_retracts_only_the_facts_its_own_root_established() {
     assert_eq!(
         standing_narrowings(&window),
         vec![
-            (authored(1, &[]), SemanticNodeId(9)),
-            (authored(0, &["w"]), SemanticNodeId(11)),
+            (authored(1, &[]), narrowed(9)),
+            (authored(0, &["w"]), narrowed(11)),
         ],
     );
 }

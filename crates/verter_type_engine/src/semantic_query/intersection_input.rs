@@ -22,13 +22,20 @@ use super::semantic_context::SemanticContextId;
 use super::SemanticNodeId;
 use crate::semantic_query_memo::intern_table::{intern_domain, Interned};
 
-/// Closed intersection purpose. Production has one mapping; callers cannot
-/// supply a contradictory version.
+/// Closed intersection purpose. Production has one mapping per purpose;
+/// callers cannot supply a contradictory version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum IntersectionPurpose {
-    /// Checker intersection reduction under the context-selected policy.
+    /// Checker intersection reduction under the context-selected policy: an
+    /// intersection a construction derives (an instantiation, a merge), so
+    /// every redundant supertype drops.
     #[default]
     CheckerReduction,
+    /// The intersection the checker constructs from a WRITTEN intersection
+    /// type node (`getTypeFromIntersectionTypeNode`) under the file's
+    /// `null` / `undefined` algebra: the same reduction, except that the
+    /// written `string & {}` pair the checker keeps stays as written.
+    WrittenTypeNode(verter_session_query::flow::policy::NullabilityPolicy),
 }
 
 /// Owning interned recipe identity.

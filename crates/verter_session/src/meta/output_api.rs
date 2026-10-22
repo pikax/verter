@@ -262,60 +262,62 @@ impl MetaSession {
             }
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-                host,
-                view,
-                fixed.cold_seed(),
-                overlay,
-            );
-            let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
-            let dispatch =
-                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-            let analysis = retained.recovery.analysis.0.clone();
-            let signature = retained.read_set_signature.clone();
-            let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
-                &retained.recovery.resolution_template,
-            );
-            let completeness = crate::meta_resolve::PublishedCompleteness::from_retained_refusal(
-                retained.completeness,
-            );
-            let (output_result, _output_read_set) =
-                verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
-                    .with_fact_tracer(|| {
-                        verter_type_engine::fact_signature_helpers::observe_fact_signature(
-                            &signature.facts,
-                        );
-                        crate::meta_resolve::projectors::build_component_meta_output(
-                            ctx,
-                            dispatch,
-                            canonical.as_str(),
-                            analysis,
-                            Some(seed),
-                            completeness,
-                        )
-                    });
-            let output = output_result?;
-
-            let payload = encode_fn(output);
-            host.provenance().payload_encodes.fetch_add(1, Relaxed);
-            // The cold path records this beside the encode. A replay that
-            // returns here never reaches that insert, so a batch probe of
-            // a retained partial sees no row for the canonical.
-            #[cfg(test)]
-            if let Some(map) = PAYLOAD_ITEM_COMPLETENESS_PROBE.lock().unwrap().as_mut() {
-                let partial = completeness.get().is_partial();
-                map.insert(
-                    canonical.to_string(),
-                    (
-                        partial,
-                        retained
-                            .recovery
-                            .resolution_template
-                            .synthesis_should_suppress,
-                    ),
+            verter_audit::specialise!(crate::capture::installed_mode() => M, {
+                let session_ctx = crate::resolver_core::SessionResolverContext::<'_, M>::from_cold_seed(
+                    host,
+                    view,
+                    fixed.cold_seed(),
+                    overlay,
                 );
-            }
-            return Ok(Some(payload));
+                let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &session_ctx;
+                let dispatch =
+                    &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+                let analysis = retained.recovery.analysis.0.clone();
+                let signature = retained.read_set_signature.clone();
+                let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
+                    &retained.recovery.resolution_template,
+                );
+                let completeness = crate::meta_resolve::PublishedCompleteness::from_retained_refusal(
+                    retained.completeness,
+                );
+                let (output_result, _output_read_set) =
+                    verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+                        .with_fact_tracer(|| {
+                            verter_type_engine::fact_signature_helpers::observe_fact_signature(
+                                &signature.facts,
+                            );
+                            crate::meta_resolve::projectors::build_component_meta_output(
+                                ctx,
+                                dispatch,
+                                canonical.as_str(),
+                                analysis,
+                                Some(seed),
+                                completeness,
+                            )
+                        });
+                let output = output_result?;
+
+                let payload = encode_fn(output);
+                host.provenance().payload_encodes.fetch_add(1, Relaxed);
+                // The cold path records this beside the encode. A replay that
+                // returns here never reaches that insert, so a batch probe of
+                // a retained partial sees no row for the canonical.
+                #[cfg(test)]
+                if let Some(map) = PAYLOAD_ITEM_COMPLETENESS_PROBE.lock().unwrap().as_mut() {
+                    let partial = completeness.get().is_partial();
+                    map.insert(
+                        canonical.to_string(),
+                        (
+                            partial,
+                            retained
+                                .recovery
+                                .resolution_template
+                                .synthesis_should_suppress,
+                        ),
+                    );
+                }
+                return Ok(Some(payload));
+            })
         }
 
         // (2) The traced cold body. It resolves, extracts, and admits an
@@ -327,169 +329,171 @@ impl MetaSession {
             fixed.is_current(),
         );
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-            host,
-            view,
-            fixed.cold_seed(),
-            overlay,
-        );
-        let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
-        let dispatch =
-            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-        let Some(cold) = host
-            .component_meta_via_view_cold(
-                canonical.as_str(),
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let session_ctx = crate::resolver_core::SessionResolverContext::<'_, M>::from_cold_seed(
+                host,
                 view,
-                fixed,
-                ctx,
-                dispatch,
-                &seed_fence,
-                validated_at_generation,
-            )
-            .map_err(MetaError::Aborted)?
-        else {
-            return Ok(None);
-        };
-        let resolved = cold.resolved;
-        let analysis = cold.analysis;
-        let final_completeness = cold.completeness;
-        #[cfg(test)]
-        if let Some(map) = PAYLOAD_ITEM_COMPLETENESS_PROBE.lock().unwrap().as_mut() {
-            map.insert(
-                canonical.to_string(),
-                (
-                    final_completeness.get().is_partial(),
-                    resolved.synthesis_should_suppress,
-                ),
+                fixed.cold_seed(),
+                overlay,
             );
-        }
+            let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &session_ctx;
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let Some(cold) = host
+                .component_meta_via_view_cold(
+                    canonical.as_str(),
+                    view,
+                    fixed,
+                    ctx,
+                    dispatch,
+                    &seed_fence,
+                    validated_at_generation,
+                )
+                .map_err(MetaError::Aborted)?
+            else {
+                return Ok(None);
+            };
+            let resolved = cold.resolved;
+            let analysis = cold.analysis;
+            let final_completeness = cold.completeness;
+            #[cfg(test)]
+            if let Some(map) = PAYLOAD_ITEM_COMPLETENESS_PROBE.lock().unwrap().as_mut() {
+                map.insert(
+                    canonical.to_string(),
+                    (
+                        final_completeness.get().is_partial(),
+                        resolved.synthesis_should_suppress,
+                    ),
+                );
+            }
 
-        // An aborted computation publishes nothing.
-        if let Some(abort) = verter_type_engine::semantic_query::ExecutionAbort::observed_in(
-            final_completeness.get(),
-        ) {
-            return Err(MetaError::Aborted(abort));
-        }
-        if let Some(err) =
-            component_meta_resolution_budget_error(canonical.as_str(), Some(&analysis), &resolved)
-        {
-            return Err(err);
-        }
+            // An aborted computation publishes nothing.
+            if let Some(abort) = verter_type_engine::semantic_query::ExecutionAbort::observed_in(
+                final_completeness.get(),
+            ) {
+                return Err(MetaError::Aborted(abort));
+            }
+            if let Some(err) =
+                component_meta_resolution_budget_error(canonical.as_str(), Some(&analysis), &resolved)
+            {
+                return Err(err);
+            }
 
-        // (3b) Materialize the session-owned OUTPUT envelope under the SAME
-        // request-bound context the extract ran under (the batch cold-seed —
-        // the analysis and the output observe one snapshot), in its OWN
-        // fact-tracer scope so the output-materialization dependencies are
-        // traced SEPARATELY and folded into the ENCODED-payload cache rail
-        // below (never into any analysis-entry signature). A typed failure
-        // propagates as `MetaError::OutputMaterialization` — the encoded
-        // payload is refused, while the analysis/resolved caches published
-        // by step (2) stay warm (output failure suppresses ONLY
-        // output/encoded-payload admission).
-        let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(
-            &resolved,
-        );
-        // Keep using the SAME live session-bound context. An output-time
-        // raise that replays a producing route (`ensure_indexed_ready_serve`
-        // on the owning SFC — the macro hot mirror, member-path, or callable-
-        // params replay) therefore observes the same view as extraction.
-        let (output_result, output_read_set) =
-            verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
-                .with_fact_tracer(|| {
-                    crate::meta_resolve::projectors::build_component_meta_output(
-                        ctx,
-                        dispatch,
-                        canonical.as_str(),
-                        analysis.0.clone(),
-                        Some(seed),
-                        // The SAME merged signal the payload-write fence below
-                        // refuses on. The resolve term alone drops the whole
-                        // extract scope (the pre-choke macro-DTO read and the
-                        // fallthrough compute), which would serialize this
-                        // payload as complete while the fence permanently
-                        // declines to warm it.
-                        final_completeness,
-                    )
-                });
-        let output = output_result?;
-        let output_complete = !output.completeness().is_partial();
-        // Snapshot the output-materialization tracer's non-cacheability bit
-        // BEFORE `finalise` consumes the read-set below. A fenced (ReturnOnly,
-        // `store_published == false`) `IndexedReady` serve consumed inside
-        // `build_component_meta_output` (an output-time raise replaying a
-        // producing route — the macro hot mirror, member-path / callable-params
-        // replays) fans onto this tracer: the encoded payload was computed from
-        // a served-without-publication (superseded) artifact while its fact
-        // stamps validate against the live view, so it MUST NOT warm the payload
-        // cache. Orthogonal to completeness — the payload is still returned to
-        // this caller; only the shared-cache write is refused.
-        let output_non_cacheable = output_read_set.non_cacheable_read_observed();
+            // (3b) Materialize the session-owned OUTPUT envelope under the SAME
+            // request-bound context the extract ran under (the batch cold-seed —
+            // the analysis and the output observe one snapshot), in its OWN
+            // fact-tracer scope so the output-materialization dependencies are
+            // traced SEPARATELY and folded into the ENCODED-payload cache rail
+            // below (never into any analysis-entry signature). A typed failure
+            // propagates as `MetaError::OutputMaterialization` — the encoded
+            // payload is refused, while the analysis/resolved caches published
+            // by step (2) stay warm (output failure suppresses ONLY
+            // output/encoded-payload admission).
+            let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(
+                &resolved,
+            );
+            // Keep using the SAME live session-bound context. An output-time
+            // raise that replays a producing route (`ensure_indexed_ready_serve`
+            // on the owning SFC — the macro hot mirror, member-path, or callable-
+            // params replay) therefore observes the same view as extraction.
+            let (output_result, output_read_set) =
+                verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+                    .with_fact_tracer(|| {
+                        crate::meta_resolve::projectors::build_component_meta_output(
+                            ctx,
+                            dispatch,
+                            canonical.as_str(),
+                            analysis.0.clone(),
+                            Some(seed),
+                            // The SAME merged signal the payload-write fence below
+                            // refuses on. The resolve term alone drops the whole
+                            // extract scope (the pre-choke macro-DTO read and the
+                            // fallthrough compute), which would serialize this
+                            // payload as complete while the fence permanently
+                            // declines to warm it.
+                            final_completeness,
+                        )
+                    });
+            let output = output_result?;
+            let output_complete = !output.completeness().is_partial();
+            // Snapshot the output-materialization tracer's non-cacheability bit
+            // BEFORE `finalise` consumes the read-set below. A fenced (ReturnOnly,
+            // `store_published == false`) `IndexedReady` serve consumed inside
+            // `build_component_meta_output` (an output-time raise replaying a
+            // producing route — the macro hot mirror, member-path / callable-params
+            // replays) fans onto this tracer: the encoded payload was computed from
+            // a served-without-publication (superseded) artifact while its fact
+            // stamps validate against the live view, so it MUST NOT warm the payload
+            // cache. Orthogonal to completeness — the payload is still returned to
+            // this caller; only the shared-cache write is refused.
+            let output_non_cacheable = output_read_set.non_cacheable_read_observed();
 
-        let payload = encode_fn(output);
-        host.provenance().payload_encodes.fetch_add(1, Relaxed);
+            let payload = encode_fn(output);
+            host.provenance().payload_encodes.fetch_add(1, Relaxed);
 
-        // (4) Payload-write fence. Promote the encoded payload
-        // into the per-file payload cache ONLY when the fixed view is still
-        // promotable (current + not externally superseded since capture).
-        // Otherwise return the payload but do NOT warm the cache with a
-        // result computed against a now-stale snapshot.
-        let mut facts = resolved.fact_versions.clone();
-        // Output-materialization dependencies join the ENCODED-payload
-        // validation rail: an edit to any file the materialization observed
-        // misses the warm payload read. A refused output read set refuses
-        // payload admission (ReturnOnly) — the payload is still returned.
-        let output_facts_admissible = match output_read_set.finalise() {
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(output_facts) => {
-                let mut seen: rustc_hash::FxHashSet<
-                    verter_session_query::facts::fact_cache::FactVersionRef,
-                > = facts.iter().cloned().collect();
-                for fact in output_facts.iter() {
-                    if seen.insert(fact.clone()) {
-                        facts.push(fact.clone());
+            // (4) Payload-write fence. Promote the encoded payload
+            // into the per-file payload cache ONLY when the fixed view is still
+            // promotable (current + not externally superseded since capture).
+            // Otherwise return the payload but do NOT warm the cache with a
+            // result computed against a now-stale snapshot.
+            let mut facts = resolved.fact_versions.clone();
+            // Output-materialization dependencies join the ENCODED-payload
+            // validation rail: an edit to any file the materialization observed
+            // misses the warm payload read. A refused output read set refuses
+            // payload admission (ReturnOnly) — the payload is still returned.
+            let output_facts_admissible = match output_read_set.finalise() {
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(output_facts) => {
+                    let mut seen: rustc_hash::FxHashSet<
+                        verter_session_query::facts::fact_cache::FactVersionRef,
+                    > = facts.iter().cloned().collect();
+                    for fact in output_facts.iter() {
+                        if seen.insert(fact.clone()) {
+                            facts.push(fact.clone());
+                        }
                     }
+                    true
                 }
-                true
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
+                    false
+                }
+                // A compaction domain moved mid-scope: the observation set
+                // cannot be merged into the output signature, so the output
+                // facts are inadmissible.
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+                    false
+                }
+            };
+            // Conjunctive rails: the token fence (external supersession /
+            // currentness) AND the output-materialization non-cacheability rail
+            // (`output_non_cacheable` — a fenced/lease-miss serve consumed while
+            // building the output) AND the per-result completeness rail — a partial
+            // (budget-fail-closed / carrier-stopped) payload is returned but
+            // never admitted, so a transient trip cannot warm-replay as a
+            // sticky degraded payload. The completeness rail is ONE merged signal:
+            // `final_completeness = resolved.completeness.merge(extract_completeness)`
+            // — the resolve-phase completeness merged with the WHOLE-extract scope
+            // (the pre-choke macro-DTO read + the fallthrough cold compute). The
+            // former `synthesis_should_suppress` term is SUBSUMED (it is the bool
+            // projection of `resolved.completeness`, already a merge operand).
+            if output_facts_admissible
+                && !output_non_cacheable
+                && fixed.payload_promotion_admissible(host)
+                && !final_completeness.get().is_partial()
+                && output_complete
+            {
+                // Stamp from the FLIGHT-CAPTURED generation (the fixed
+                // view's captured token), never the live counter: a project
+                // bump landing between the fence above and this store must
+                // leave the payload stamped under the graph it was computed
+                // from, so the warm read's generation backstop rejects it.
+                host.store_meta_payload(
+                    canonical.as_str(),
+                    &facts,
+                    payload.clone(),
+                    fixed.captured_validation_token().project_generation,
+                );
             }
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
-                false
-            }
-            // A compaction domain moved mid-scope: the observation set
-            // cannot be merged into the output signature, so the output
-            // facts are inadmissible.
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
-                false
-            }
-        };
-        // Conjunctive rails: the token fence (external supersession /
-        // currentness) AND the output-materialization non-cacheability rail
-        // (`output_non_cacheable` — a fenced/lease-miss serve consumed while
-        // building the output) AND the per-result completeness rail — a partial
-        // (budget-fail-closed / carrier-stopped) payload is returned but
-        // never admitted, so a transient trip cannot warm-replay as a
-        // sticky degraded payload. The completeness rail is ONE merged signal:
-        // `final_completeness = resolved.completeness.merge(extract_completeness)`
-        // — the resolve-phase completeness merged with the WHOLE-extract scope
-        // (the pre-choke macro-DTO read + the fallthrough cold compute). The
-        // former `synthesis_should_suppress` term is SUBSUMED (it is the bool
-        // projection of `resolved.completeness`, already a merge operand).
-        if output_facts_admissible
-            && !output_non_cacheable
-            && fixed.payload_promotion_admissible(host)
-            && !final_completeness.get().is_partial()
-            && output_complete
-        {
-            // Stamp from the FLIGHT-CAPTURED generation (the fixed
-            // view's captured token), never the live counter: a project
-            // bump landing between the fence above and this store must
-            // leave the payload stamped under the graph it was computed
-            // from, so the warm read's generation backstop rejects it.
-            host.store_meta_payload(
-                canonical.as_str(),
-                &facts,
-                payload.clone(),
-                fixed.captured_validation_token().project_generation,
-            );
-        }
-        Ok(Some(payload))
+            Ok(Some(payload))
+        })
     }
 }

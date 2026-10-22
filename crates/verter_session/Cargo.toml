@@ -20,6 +20,7 @@ default = []
 # enables it.
 semantic-observe = [
   "verter_audit/semantic-observe",
+  "verter_execution/semantic-observe",
   "verter_scheduler/semantic-observe",
   "verter_workspace/semantic-observe",
   "verter_semantic/semantic-observe",
@@ -29,7 +30,6 @@ semantic-observe = [
   "verter_parser/semantic-observe",
   "verter_session_query/semantic-observe",
   "dep:hotpath",
-  "hotpath/hotpath",
 ]
 # Opt-in test-support seam for items the SEPARATE integration-test binary
 # (`tests/cases/**`) must see but a normal `cargo build` / `pnpm run build:lsp`
@@ -257,6 +257,9 @@ windows-sys = { version = "0.61.2", features = [
 # Phase 9b — Rayon-backed batch compile (`host_compile.rs`) is native-only.
 # WASM continues to use the single-file `upsert` + `get_virtual_file` path.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
 rayon = { workspace = true }
 # uuid 1.22 split RNG into explicit features. Native targets use
 # `rng-getrandom` for v4 generation.
@@ -328,12 +331,12 @@ verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_type_expr = { workspace = true }
 # The integration-test binary is its own crate, so the observer substrate
-# must be a dev-dependency for tests that install an `AuditObserver`
-# (the deterministic mid-loop cancellation discriminators). This test edge
-# also requests the audit crate's OWN `semantic-observe` — and nothing beyond
-# it — so the CSS-domain chargeability tests can read the work-attribution
-# counters. It does not enable any other layer's capture.
-verter_audit = { path = "../verter_audit", features = ["semantic-observe"] }
+# must be a dev-dependency for tests that install an `AuditObserver`. The
+# edge enables no capture: tests that read audit records, observer events or
+# work-attribution counters build with this crate's `semantic-observe` in the
+# instrumentation lane, so the default test build stays the shipped
+# configuration.
+verter_audit = { path = "../verter_audit" }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }

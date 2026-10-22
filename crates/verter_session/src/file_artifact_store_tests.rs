@@ -63,6 +63,70 @@ fn augmentation_completion_flushes_contributors_after_in_flight_membership() {
     );
 }
 
+/// A guarded augmenter install that rejects the held set still completes a
+/// membership transition: an edit that landed while its epoch was in flight
+/// skipped its own publish, so the rejecting install must flush it.
+///
+/// Mutation recipe: return from the rejected arm without publishing. The
+/// completed edit's contributor then stays unpublished.
+#[test]
+fn rejected_guarded_augmenter_install_flushes_contributors_completed_meanwhile() {
+    let store = FileArtifactStore::new();
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([7u8; 16]),
+        resolve_env_hash: [1u8; 16],
+        lib_env_hash: [2u8; 16],
+        population: crate::file_artifact_store::AugmentationPopulation::Base,
+        target: AugmentationTargetKind::GlobalAugmentation,
+    };
+    // A script-global contributor: it carries no augmentation fact, so its
+    // insert never takes the augmentation-index entry the install guards.
+    let source: Arc<str> = Arc::from("interface Window { x: 1 }");
+    let state = crate::resolver_core::ShallowFileState::service_backed_for_test_at(
+        "/globals.d.ts",
+        &source,
+    );
+    let indexed = Arc::new(IndexedReady::new_for_test_with_state(
+        state.whole_hash,
+        state,
+        Arc::clone(&source),
+        source,
+    ));
+    let installed = store.install_augmenter_set_if(
+        key,
+        Arc::new(verter_session_query::resolution::AugmenterSet {
+            entries: smallvec::smallvec![],
+            fingerprint: [4u8; 16],
+        }),
+        |_| {
+            // The guarded install's epoch is in flight here.
+            store.insert(Arc::from("/globals.d.ts"), indexed);
+            assert_eq!(
+                store.global_contributor_index().snapshot().revision,
+                0,
+                "a completed edit must not publish past an in-flight transition"
+            );
+            false
+        },
+    );
+    assert!(installed.is_none(), "the rejected install writes nothing");
+    let population = store.global_contributor_index().snapshot();
+    assert_eq!(population.program_snapshot, store.membership_epoch());
+    assert_eq!(
+        population
+            .lookup(
+                &AugmentationTargetKind::GlobalAugmentation,
+                "Window",
+                None,
+                true
+            )
+            .entries
+            .len(),
+        1,
+        "the rejecting install must flush the edit completed while it was in flight"
+    );
+}
+
 fn vue_key(source: &str, options: &verter_language::ParseOptions) -> FileArtifactKey {
     let language = verter_language::FileLanguage::vue();
     let syntax_profile =
@@ -1084,6 +1148,90 @@ fn populate_augmenter_set_is_bump_iff_fingerprint_changed() {
     );
 }
 
+/// A key refresh re-keys the set the index holds and never installs one: a
+/// set served to its request only — its scan consumed a resolution the
+/// process did not keep — stays out of the shared index once its keys heal,
+/// and a set the index has since superseded is not written back over the
+/// newer one.
+///
+/// Mutation recipe: publish the healed set without checking what the index
+/// holds. The unheld refresh then installs its entry.
+#[test]
+fn augmenter_key_refresh_rekeys_only_the_set_the_index_holds() {
+    use smallvec::smallvec;
+
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
+
+    let store = FileArtifactStore::new();
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([7u8; 16]),
+        resolve_env_hash: [1u8; 16],
+        lib_env_hash: [2u8; 16],
+        population: crate::file_artifact_store::AugmentationPopulation::Base,
+        target: AugmentationTargetKind::GlobalAugmentation,
+    };
+    let set = |content_hash: Hash16, fingerprint: Hash16| AugmenterSet {
+        entries: smallvec![AugmenterEntry {
+            artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), content_hash),
+            parse_stable_hash: [3u8; 16],
+        }],
+        fingerprint,
+    };
+    let healed = || {
+        vec![(
+            0,
+            FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [8u8; 16]),
+        )]
+    };
+    let held_hash = |store: &FileArtifactStore| {
+        store
+            .get_augmenter_set(&key)
+            .map(|held| held.entries[0].artifact_key.content_hash)
+    };
+
+    let served = set([9u8; 16], [4u8; 16]);
+    assert!(
+        !store.refresh_augmenter_set_keys(&key, &served, healed()),
+        "a set the index does not hold is not written"
+    );
+    assert_eq!(
+        held_hash(&store),
+        None,
+        "the unheld set stays out of the index"
+    );
+
+    store.populate_augmenter_set(key.clone(), Arc::new(set([9u8; 16], [5u8; 16])));
+    assert!(
+        !store.refresh_augmenter_set_keys(&key, &served, healed()),
+        "a set the index has superseded is not written back"
+    );
+    assert_eq!(held_hash(&store), Some([9u8; 16]), "the newer set stays");
+
+    let observed = set([9u8; 16], [5u8; 16]);
+    assert!(
+        store.refresh_augmenter_set_keys(&key, &observed, healed()),
+        "control: the held set is re-keyed"
+    );
+    assert_eq!(
+        held_hash(&store),
+        Some([8u8; 16]),
+        "control: the healed key is held"
+    );
+
+    // The refresh's held-set check is decided under the install's own entry
+    // guard, so a set superseded after a caller's look still is not written.
+    assert!(
+        store
+            .install_augmenter_set_if(key.clone(), Arc::new(served.clone()), |held| {
+                held.is_some_and(|held| held.fingerprint == served.fingerprint)
+            })
+            .is_none(),
+        "a guarded install that rejects the held set writes nothing"
+    );
+    assert_eq!(held_hash(&store), Some([8u8; 16]), "the held set stays");
+}
+
 // ── Gap-free no-op: a base-equivalent no-op legacy replace must expose NO
 //    absent window for the current key. The legacy `insert` drains every
 //    prior version
@@ -1276,6 +1424,18 @@ fn synth_augmenter_artifacts_for_specifier(
     specifier: &str,
     parse_stable_hash: Hash16,
 ) -> Arc<FileArtifacts> {
+    synth_augmenter_artifacts_declared_in(
+        specifier,
+        parse_stable_hash,
+        verter_session_query::inputs::contributors::FileModuleKind::Module,
+    )
+}
+
+fn synth_augmenter_artifacts_declared_in(
+    specifier: &str,
+    parse_stable_hash: Hash16,
+    declaring_file: verter_session_query::inputs::contributors::FileModuleKind,
+) -> Arc<FileArtifacts> {
     use super::FileFacts;
     use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
     use verter_session_query::source::augmentation::ModuleAugmentationFact;
@@ -1290,6 +1450,7 @@ fn synth_augmenter_artifacts_for_specifier(
             augmented_name: InternedName::from("Augmented"),
             space: SymbolSpace::Type,
             augmented_member_shape_fingerprint: [0u8; 16],
+            declaring_file,
         }]),
     })
 }
@@ -1406,6 +1567,146 @@ fn backslash_relative_augmentation_fact_classifies_relative_not_external() {
 }
 
 #[test]
+fn package_augmentation_fact_augments_the_file_its_specifier_resolves_to() {
+    // `declare module "@vue/reactivity"` in a file of another package
+    // augments the module FILE the specifier resolves to from that file, as
+    // a relative specifier does: it is discovered for that resolved-file
+    // target, never for a file it does not resolve to, and a change to it
+    // retires the resolved-file entries.
+    let store = FileArtifactStore::new();
+    store.insert_artifacts(
+        FileArtifactKey::base_for_test(Arc::from("/nm/core/index.d.ts"), [9u8; 16]),
+        synth_augmenter_artifacts_for_specifier("@vue/reactivity", [0x55u8; 16]),
+    );
+    let resolve = |augmenter: &str, specifier: &str| {
+        assert_eq!(augmenter, "/nm/core/index.d.ts");
+        (specifier == "@vue/reactivity").then(|| Arc::<str>::from("/nm/reactivity/index.d.ts"))
+    };
+    let resolved_key = target_key_for(AugmentationTargetKind::ResolvedRelativeCanonical(
+        Arc::from("/nm/reactivity/index.d.ts"),
+    ));
+    let set = store.ensure_augmentation_index_populated(&resolved_key, resolve, None);
+    assert_eq!(
+        set.entries.len(),
+        1,
+        "the package augmentation is discovered for the file its specifier resolves to"
+    );
+    let other_key = target_key_for(AugmentationTargetKind::ResolvedRelativeCanonical(
+        Arc::from("/nm/other/index.d.ts"),
+    ));
+    let set = store.ensure_augmentation_index_populated(&other_key, resolve, None);
+    assert!(
+        set.entries.is_empty(),
+        "a file the specifier does not resolve to is not augmented"
+    );
+
+    let fact = verter_session_query::source::augmentation::ModuleAugmentationFact {
+        specifier: super::InternedSpecifier::from("@vue/reactivity"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        augmented_name: verter_session_query::facts::registry::InternedName::from("Augmented"),
+        space: verter_session_query::facts::registry::SymbolSpace::Type,
+        augmented_member_shape_fingerprint: [0u8; 16],
+        declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
+    };
+    assert_eq!(
+        store.invalidate_augmentation_index_for_augmenter(std::slice::from_ref(&fact)),
+        2,
+        "a package augmentation's change retires every resolved-file entry"
+    );
+    assert!(store.get_augmenter_set(&resolved_key).is_none());
+}
+
+#[test]
+fn script_file_package_declaration_is_an_ambient_module_not_an_augmentation() {
+    // `declare module "@vue/reactivity"` in a script (no import or export)
+    // declares an ambient module of that name; only the same block in a
+    // module augments the package file the name resolves to. The script
+    // declaration stays an ambient-specifier contributor, is never merged
+    // into the resolved package file, and its change retires no
+    // resolved-file entry.
+    use super::augmentation_contribution_equivalent;
+    use verter_session_query::inputs::contributors::FileModuleKind;
+
+    let store = FileArtifactStore::new();
+    store.insert_artifacts(
+        FileArtifactKey::base_for_test(Arc::from("/nm/core/index.d.ts"), [9u8; 16]),
+        synth_augmenter_artifacts_declared_in(
+            "@vue/reactivity",
+            [0x55u8; 16],
+            FileModuleKind::Module,
+        ),
+    );
+    store.insert_artifacts(
+        FileArtifactKey::base_for_test(Arc::from("/src/shims.d.ts"), [8u8; 16]),
+        synth_augmenter_artifacts_declared_in(
+            "@vue/reactivity",
+            [0x66u8; 16],
+            FileModuleKind::Script,
+        ),
+    );
+    let resolve = |_: &str, specifier: &str| {
+        (specifier == "@vue/reactivity").then(|| Arc::<str>::from("/nm/reactivity/index.d.ts"))
+    };
+    let resolved_key = target_key_for(AugmentationTargetKind::ResolvedRelativeCanonical(
+        Arc::from("/nm/reactivity/index.d.ts"),
+    ));
+    let set = store.ensure_augmentation_index_populated(&resolved_key, resolve, None);
+    let augmenters: Vec<&str> = set
+        .entries
+        .iter()
+        .map(|entry| entry.canonical().as_ref())
+        .collect();
+    assert_eq!(
+        augmenters,
+        ["/nm/core/index.d.ts"],
+        "only the module-file declaration augments the resolved package file"
+    );
+    let ambient_key = target_key_for(AugmentationTargetKind::ExternalSpecifier(
+        "@vue/reactivity".into(),
+    ));
+    let set = store.ensure_augmentation_index_populated(&ambient_key, resolve, None);
+    assert_eq!(
+        set.entries.len(),
+        2,
+        "both declarations still contribute under the ambient specifier"
+    );
+
+    let script_fact = verter_session_query::source::augmentation::ModuleAugmentationFact {
+        specifier: super::InternedSpecifier::from("@vue/reactivity"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        augmented_name: verter_session_query::facts::registry::InternedName::from("Augmented"),
+        space: verter_session_query::facts::registry::SymbolSpace::Type,
+        augmented_member_shape_fingerprint: [0u8; 16],
+        declaring_file: FileModuleKind::Script,
+    };
+    let retired =
+        store.invalidate_augmentation_index_for_augmenter(std::slice::from_ref(&script_fact));
+    assert_eq!(
+        retired, 1,
+        "a script declaration retires its ambient-specifier entry only"
+    );
+    assert!(
+        store.get_augmenter_set(&resolved_key).is_some(),
+        "a script declaration never retires a resolved-file entry"
+    );
+
+    // Adding `export {}` turns the script declaration into an augmentation:
+    // the replacement changes which entries it contributes to.
+    assert!(!augmentation_contribution_equivalent(
+        &synth_augmenter_artifacts_declared_in(
+            "@vue/reactivity",
+            [0x66u8; 16],
+            FileModuleKind::Script
+        ),
+        &synth_augmenter_artifacts_declared_in(
+            "@vue/reactivity",
+            [0x66u8; 16],
+            FileModuleKind::Module
+        ),
+    ));
+}
+
+#[test]
 fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
     // The resolver-free invalidation variant
     // (`augmenter_fact_could_contribute`) must agree with the exact
@@ -1443,6 +1744,7 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
         augmented_name: InternedName::from("Augmented"),
         space: SymbolSpace::Type,
         augmented_member_shape_fingerprint: [0u8; 16],
+        declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
     };
     let removed = store.invalidate_augmentation_index_for_augmenter(std::slice::from_ref(&fact));
     assert_eq!(
@@ -1674,6 +1976,7 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
                 space: SymbolSpace::Type,
                 // CHANGED member-shape fingerprint → genuine contribution change.
                 augmented_member_shape_fingerprint: [0x77u8; 16],
+                declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
             }]),
         })
     };
@@ -1828,6 +2131,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
                 augmented_name: InternedName::from("Augmented"),
                 space: SymbolSpace::Type,
                 augmented_member_shape_fingerprint: [0x77u8; 16],
+                declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
             }]),
         })
     };
@@ -1851,6 +2155,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
                 augmented_name: InternedName::from("Augmented"),
                 space: SymbolSpace::Type,
                 augmented_member_shape_fingerprint: [0u8; 16],
+                declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
             }]),
         })
     };
@@ -2560,6 +2865,7 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
         augmented_name: InternedName::from("Augmented"),
         space: SymbolSpace::Type,
         augmented_member_shape_fingerprint: [0u8; 16],
+        declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
     }]);
     assert_eq!(retired, 1, "the matching index entry must retire");
     assert!(

@@ -113,18 +113,18 @@ pub(crate) mod allocation_footprint;
 pub(crate) mod node_payload_footprint;
 /// Selector-aware projection facts for authored object-spread programs.
 ///
-/// The result is an opaque correlated formula. Exact absence, emptiness,
-/// `keyof`, exhaustive iteration, and closed materialisation are available
-/// only through the module's sealed complete-domain witnesses.
+/// The result is an opaque, factored correlated formula whose alternatives
+/// are read on demand. Exact absence, emptiness, `keyof`, exhaustive
+/// iteration, and closed materialisation are available only through the
+/// module's sealed complete-domain witness.
 pub mod object_spread_projection;
 pub use object_spread_projection::{
-    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionFormula,
-    ClosedObjectProjectionSurface, CompleteObjectDomain, ExactOptionalPropertyPolicy,
-    ExcessEligibility, IndexDomain, MemberFacets, ObjectProjectionAlternative,
-    ObjectProjectionFormula, ObjectProjectionIndex, ObjectProjectionSelector,
-    ObjectProjectionSignature, ObjectSignatureKind, ObjectSpreadProjectionContext,
-    OpenSafeKeyEvidence, PositiveAlternativeEvidence, PositiveKeyFact, PositiveKeyPresence,
-    ProjectionEvidence,
+    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionSurface,
+    CompleteObjectDomain, ExactOptionalPropertyPolicy, ExcessEligibility, IndexDomain,
+    MemberFacets, ObjectProjectionAlternative, ObjectProjectionFormula, ObjectProjectionIndex,
+    ObjectProjectionSelector, ObjectProjectionSignature, ObjectSignatureKind,
+    ObjectSpreadProjectionContext, OpenSafeKeyEvidence, PositiveAlternativeEvidence,
+    PositiveKeyFact, PositiveKeyPresence, ProjectionEvidence,
 };
 
 /// The [`IndexKey::Number`] payload domain: the proof-carrying
@@ -264,6 +264,7 @@ mod object_spread_program_contract_tests {
         let spread = SemanticNodeId(22);
         let construct = SemanticNodeId(33);
         let program = ObjectSpreadProgram {
+            is_literal: true,
             effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectCall(call),
                 ObjectConstructionEffect::Spread(spread),
@@ -272,6 +273,7 @@ mod object_spread_program_contract_tests {
         };
         let node = SemanticNodeData::ObjectSpreadProgram(program.share());
         let reordered = SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+            is_literal: true,
             effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::Spread(spread),
                 ObjectConstructionEffect::DirectCall(call),
@@ -281,6 +283,11 @@ mod object_spread_program_contract_tests {
 
         assert_ne!(node, reordered);
         assert_ne!(hash_of(&node), hash_of(&reordered));
+        let mut regular = program.share();
+        regular.is_literal = false;
+        let regular = SemanticNodeData::ObjectSpreadProgram(regular);
+        assert_ne!(node, regular);
+        assert_ne!(hash_of(&node), hash_of(&regular));
         assert_eq!(
             program.child_nodes().collect::<Vec<_>>(),
             vec![call, spread, construct],
@@ -345,6 +352,7 @@ mod object_spread_program_contract_tests {
             member_path: verter_type_expr::OwnedSlice::from([]),
         };
         let program = ObjectSpreadProgram {
+            is_literal: true,
             effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectProperty(property),
                 ObjectConstructionEffect::DirectMethod(method),
@@ -374,6 +382,7 @@ mod object_spread_program_contract_tests {
             (1..=10).map(SemanticNodeId).collect::<Vec<_>>()
         );
         let mapped = program.map_child_nodes(|node| SemanticNodeId(node.0 + 100));
+        assert!(mapped.is_literal);
         assert_eq!(
             mapped.child_nodes().collect::<Vec<_>>(),
             (101..=110).map(SemanticNodeId).collect::<Vec<_>>()
@@ -1723,11 +1732,14 @@ impl CanonicalTypeSubstitution {
     /// substitution owns its operands in `graph`.
     #[must_use]
     pub fn new(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        graph: impl AsRef<crate::semantic_query_memo::SemanticGraphStore>,
         bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
     ) -> Self {
         Self::rooted(bindings, |operands| {
-            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(graph, operands)
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+                graph.as_ref(),
+                operands,
+            )
         })
     }
 
@@ -2133,6 +2145,9 @@ pub enum ArgumentPathStep {
     Member(SemanticNodeId),
     /// An array literal's element at this index.
     Element(u32),
+    /// The one element type an array literal's elements join into when a
+    /// spread or an elision makes it no tuple.
+    Elements,
 }
 
 /// One authored nested position of a call argument a regular contributor
@@ -2158,6 +2173,14 @@ pub struct ArgumentRegularPosition {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArgumentLiteralProvenance {
     pub positions: Arc<[ArgumentRegularPosition]>,
+    /// The paths of the nested positions an expression writes by reading a
+    /// binding that keeps a widening literal (`{ v: s }` for `const s =
+    /// "a"`): their literals are fresh, but the read is no literal of its
+    /// own (`isValidConstAssertionArgument`), so a `const` type parameter
+    /// typing the position is no const context for it and the literal
+    /// widens there (`f<const T>(x: { v: T })` over `{ v: s }` infers
+    /// `string`).
+    pub fresh_reads: Arc<[Arc<[ArgumentPathStep]>]>,
 }
 
 impl ArgumentLiteralProvenance {
@@ -2167,6 +2190,13 @@ impl ArgumentLiteralProvenance {
         self.positions
             .iter()
             .find(|position| &*position.path == path)
+    }
+
+    /// Whether an expression writing the position at `path` reads a binding
+    /// that keeps a widening literal.
+    #[must_use]
+    pub fn reads_fresh(&self, path: &[ArgumentPathStep]) -> bool {
+        self.fresh_reads.iter().any(|read| &**read == path)
     }
 }
 
@@ -2870,6 +2900,30 @@ construction_ordinal_seam! {
     }
 }
 
+construction_ordinal_seam! {
+    /// TypeScript's modifiers type for a mapping over the lowered key source
+    /// `key_source` that is not written `keyof X`
+    /// ([`MapperKey::modifiers_type`]): when the key source is a type
+    /// parameter constrained to `keyof X`, `X`; otherwise none.
+    #[must_use]
+    fn modifiers_type_of_key_parameter(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        key_source: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let constraint = match graph.node_data(key_source).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            }) => *constraint,
+            _ => return None,
+        };
+        match graph.node_data(constraint).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => Some(*base),
+            _ => None,
+        }
+    }
+}
+
 /// Mapper identity for mapped-type queries. Separates the key space from the
 /// value expression so two mappers that share the same key space but differ
 /// in the value expression do not alias.
@@ -2901,6 +2955,14 @@ pub struct MapperKey {
     /// written over a concrete type (`{ [K in keyof (A | B)]: … }`) maps
     /// that type's own keys.
     pub over_type_variable: bool,
+    /// TypeScript's modifiers type (`getModifiersTypeFromMappedType`) when it
+    /// is not `source`: for a mapping whose key source is a type parameter
+    /// constrained to `keyof X` (`{ [P in K]: X[P] }` with `K extends keyof
+    /// X`, the shape of `Pick`), `X` or the type that instantiated it. Each
+    /// produced property keeps the `readonly` and `?` of `X`'s member under a
+    /// `Keep` modifier. `None` for a `keyof` mapping, whose modifiers type is
+    /// `source`, and for any other key source, which has none.
+    pub modifiers_type: Option<SemanticNodeId>,
 }
 
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
@@ -4602,19 +4664,19 @@ impl<'a> ClosedSurfaceView<'a> {
 
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
-    /// How many members this thread's key lookups compared by scanning a
-    /// surface; test-only.
+    /// Key lookup work on this thread: scanned members and canonical-index
+    /// hashing/equality operations; test-only.
     static KEY_SCAN_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Count one member a key lookup compared by scanning a surface.
+/// Count one scanned member or canonical-index hashing/equality operation.
 pub(crate) fn note_key_scan_comparison() {
     #[cfg(any(test, feature = "test-support"))]
     KEY_SCAN_COMPARISONS.with(|count| count.set(count.get() + 1));
 }
 
-/// How many members this thread's key lookups compared by scanning a
-/// surface; test-only.
+/// Key lookup work on this thread: scanned members and canonical-index
+/// hashing/equality operations; test-only.
 #[cfg(any(test, feature = "test-support"))]
 pub fn key_scan_comparisons_for_tests() -> usize {
     KEY_SCAN_COMPARISONS.with(std::cell::Cell::get)
@@ -4641,6 +4703,171 @@ fn known_key_accessor<'a>(
         }
     }
     (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
+}
+
+/// The accessors among a mapping source's `members`, by the property each
+/// names: for every property whose public members are all `get` / `set`,
+/// whether the accessor is `readonly` (it has no setter). Keys that spell
+/// one property ([`property_spelling`]: `get 1` and `set "1"`) are one
+/// accessor, as [`accessor_property_slots`] reads them. A mapping maps such
+/// a key as the one property its readers see, reading its value through the
+/// key ([`SurfaceView::project_known_key_accessor`]) only when the mapping
+/// needs it, never as the accessor function.
+#[derive(Default)]
+pub(crate) struct AccessorReadonlyByProperty(std::collections::HashMap<PropertyKey, bool>);
+
+impl AccessorReadonlyByProperty {
+    pub(crate) fn of(members: &[SurfaceMember]) -> Self {
+        if !members.iter().any(is_public_accessor) {
+            return Self::default();
+        }
+        let mut groups: std::collections::HashMap<PropertyKey, Option<bool>> =
+            std::collections::HashMap::new();
+        for member in members
+            .iter()
+            .filter(|member| member.visibility.is_public())
+        {
+            let Some(key) = member.key.cloned_known().map(property_spelling) else {
+                continue;
+            };
+            let kind = member.method_kind;
+            let group = groups.entry(key).or_insert(Some(true));
+            *group = match (*group, kind) {
+                (Some(readonly), Some(verter_type_expr::ObjectMethodKind::Get)) => Some(readonly),
+                (Some(_), Some(verter_type_expr::ObjectMethodKind::Set)) => Some(false),
+                _ => None,
+            };
+        }
+        Self(
+            groups
+                .into_iter()
+                .filter_map(|(key, readonly)| Some((key, readonly?)))
+                .collect(),
+        )
+    }
+
+    /// Whether the accessor `key` names is `readonly`; `None` when no
+    /// accessor names it.
+    pub(crate) fn readonly(&self, key: &PropertyKey) -> Option<bool> {
+        self.0.get(&property_spelling(key.clone())).copied()
+    }
+}
+
+/// `members` with every accessor read as the one PROPERTY its readers see
+/// ([`KnownKeyAccessor::property_member`]): the public `get` / `set`
+/// members one key names become a single member at the position of the
+/// first, valued at the accessor's read type and `readonly` when it has no
+/// setter. The checker's `getPropertiesOfType` gives one property per
+/// accessor, so a mapped type, `keyof` or `Pick` reading a source's members
+/// reads these. A key whose members are not all accessors, or whose
+/// accessor carries no read type, keeps its members as declared.
+pub(crate) fn members_with_accessors_as_properties(
+    members: Vec<SurfaceMember>,
+    graph: &impl NodeRead,
+    materialize: impl Fn(SemanticNodeId) -> SemanticNodeId,
+) -> Vec<SurfaceMember> {
+    match accessor_property_slots(&members, graph, materialize) {
+        Some(slots) => slots.into_iter().flatten().collect(),
+        None => members,
+    }
+}
+
+/// [`members_with_accessors_as_properties`] slot by slot: for each of
+/// `members`, the member a reader sees in its place, `None` where an
+/// accessor's earlier member already stands for it. `None` overall when no
+/// member is an accessor, so a caller keeps its members untouched.
+pub(crate) fn accessor_property_slots(
+    members: &[SurfaceMember],
+    graph: &impl NodeRead,
+    materialize: impl Fn(SemanticNodeId) -> SemanticNodeId,
+) -> Option<Vec<Option<SurfaceMember>>> {
+    let is_accessor = is_public_accessor;
+    if !members.iter().any(is_accessor) {
+        return None;
+    }
+    let spelling = |member: &SurfaceMember| member.key.cloned_known().map(property_spelling);
+    let mut by_spelling: std::collections::HashMap<PropertyKey, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (ordinal, member) in members.iter().enumerate() {
+        if member.visibility.is_public() {
+            if let Some(key) = spelling(member) {
+                by_spelling.entry(key).or_default().push(ordinal);
+            }
+        }
+    }
+    let mut collapsed: std::collections::HashSet<PropertyKey> = std::collections::HashSet::new();
+    let slots = members
+        .iter()
+        .map(|member| {
+            let Some(key) = spelling(member).filter(|_| is_accessor(member)) else {
+                return Some(member.clone());
+            };
+            if collapsed.contains(&key) {
+                return None;
+            }
+            let property = by_spelling.get(&key).and_then(|ordinals| {
+                known_key_accessor(ordinals.iter().map(|ordinal| &members[*ordinal]))
+                    .and_then(|accessor| accessor.property_member(graph, &materialize))
+            });
+            match property {
+                Some(mut property) => {
+                    property.key = member.key.clone();
+                    collapsed.insert(key);
+                    Some(property)
+                }
+                None => Some(member.clone()),
+            }
+        })
+        .collect();
+    Some(slots)
+}
+
+/// The `keyof` key that selects each accessor of a source's members: the
+/// key of the property's first `get` / `set`, so the members of one
+/// accessor whose keys spell one property ([`property_spelling`]:
+/// `get 1` and `set "1"`) are selected or omitted together, by the key the
+/// checker names that property with. Empty, and allocation-free, when no
+/// member is an accessor.
+#[derive(Default)]
+pub(crate) struct AccessorSelectionKeys(std::collections::HashMap<PropertyKey, PropertyKey>);
+
+impl AccessorSelectionKeys {
+    pub(crate) fn of<'m>(members: impl IntoIterator<Item = &'m SurfaceMember>) -> Self {
+        let mut keys = std::collections::HashMap::new();
+        for member in members
+            .into_iter()
+            .filter(|member| is_public_accessor(member))
+        {
+            if let Some(key) = member.key.cloned_known() {
+                keys.entry(property_spelling(key.clone())).or_insert(key);
+            }
+        }
+        Self(keys)
+    }
+
+    /// The key `member` is selected by: its accessor's `keyof` key, else
+    /// its own known key.
+    pub(crate) fn selection_key(&self, member: &SurfaceMember) -> Option<PropertyKey> {
+        let key = member.key.cloned_known()?;
+        if self.0.is_empty() || !is_public_accessor(member) {
+            return Some(key);
+        }
+        Some(
+            self.0
+                .get(&property_spelling(key.clone()))
+                .cloned()
+                .unwrap_or(key),
+        )
+    }
+}
+
+/// Whether `member` is a public `get` / `set` accessor.
+pub(crate) fn is_public_accessor(member: &SurfaceMember) -> bool {
+    member.visibility.is_public()
+        && matches!(
+            member.method_kind,
+            Some(verter_type_expr::ObjectMethodKind::Get | verter_type_expr::ObjectMethodKind::Set)
+        )
 }
 
 /// The one spelling of the JS property `key` addresses: a string that is
@@ -5952,6 +6179,8 @@ impl<T> CacheRead<T> {
 
 mod retained_nodes;
 
+pub(crate) mod small_node_set;
+
 // ──────────────────────────────────────────────────────────────────────────
 // Derivation / origin layer (plan B2 + Derivation/Origin Layer Contract)
 // ──────────────────────────────────────────────────────────────────────────
@@ -6077,6 +6306,7 @@ impl EdgeFence {
         }
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     /// A fence the edge store retains through `hold`.
     pub(crate) fn retained(
         signature: DepSignature,
@@ -8387,8 +8617,6 @@ pub enum InferencePassKind {
     Ordinary,
     /// Candidate-local inference while deciding call applicability.
     CallApplicability,
-    /// Exact `{ [P in keyof infer T]: X }` reverse projection.
-    ReverseHomomorphicMapped,
 }
 
 /// Content-free identity of the set of inferable (open) type parameters in an
@@ -8475,9 +8703,15 @@ pub enum InferenceCandidatePriority {
     Argument,
     /// The whole source of an inference to a union target holding one
     /// naked type variable, when a fixed target member matched every source
-    /// member (the checker's `InferencePriority.NakedTypeVariable`): kept
-    /// only when no direct inference reaches the variable.
+    /// member, or to the sole naked variable of an intersection (the checker's
+    /// `InferencePriority.NakedTypeVariable`): kept only when no direct
+    /// inference reaches the variable.
     MatchedUnionRemainder,
+    /// The slice of a tuple inferred to a variadic element of a target
+    /// tuple ending in an optional element (the checker's
+    /// `InferencePriority.SpeculativeTuple`): kept only when no direct
+    /// inference reaches the variable.
+    SpeculativeTuple,
     /// A complete reverse-homomorphic mapped candidate.
     HomomorphicMapped,
     /// A reverse-homomorphic candidate with one or more unrecovered
@@ -8493,10 +8727,11 @@ pub enum InferenceCandidatePriority {
 #[must_use]
 pub const fn inference_candidate_precedence(priority: InferenceCandidatePriority) -> u8 {
     match priority {
-        InferenceCandidatePriority::NakedTypeParameter => 5,
-        InferenceCandidatePriority::ReturnType => 4,
-        InferenceCandidatePriority::Argument => 3,
-        InferenceCandidatePriority::MatchedUnionRemainder => 2,
+        InferenceCandidatePriority::NakedTypeParameter => 6,
+        InferenceCandidatePriority::ReturnType => 5,
+        InferenceCandidatePriority::Argument => 4,
+        InferenceCandidatePriority::MatchedUnionRemainder => 3,
+        InferenceCandidatePriority::SpeculativeTuple => 2,
         InferenceCandidatePriority::HomomorphicMapped => 1,
         InferenceCandidatePriority::PartialHomomorphicMapped => 0,
     }
@@ -9923,6 +10158,21 @@ impl SemanticQueryKey {
         }
     }
 
+    /// `ReduceIntersection` of a WRITTEN intersection type node's arms
+    /// under `nullability` ([`IntersectionPurpose::WrittenTypeNode`]).
+    #[must_use]
+    pub fn reduce_written_intersection_operands(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: &[SemanticNodeId],
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> Self {
+        Self::ReduceIntersection {
+            input: IntersectionInputRef::from_operands(graph, members),
+            purpose: IntersectionPurpose::WrittenTypeNode(nullability),
+            context: SemanticContextId::production(),
+        }
+    }
+
     /// The content-free discriminant tag for this key. EXHAUSTIVE by
     /// construction — a new enum variant cannot compile until it gains a tag
     /// arm here, which is the mechanism that keeps the spec table honest.
@@ -10501,12 +10751,35 @@ impl ObjectSpreadProgram {
     /// Share the program's effects with a payload the engine is building.
     pub(crate) fn share(&self) -> Self {
         Self {
+            is_literal: self.is_literal,
             effects: self.effects.share(),
         }
     }
 }
 
 impl ObjectConstructionEffect {
+    /// This effect's child in its slot `slot` (`0` or `1`), in
+    /// [`Self::for_each_child_node`] order: a computed or index key first,
+    /// then the value. A one-child effect holds it in slot `1`.
+    fn child_in_slot(&self, slot: usize) -> Option<SemanticNodeId> {
+        match (self, slot) {
+            (Self::DirectProperty(effect), 0) => authored_property_key_child(&effect.key),
+            (Self::DirectProperty(effect), _) => Some(effect.value),
+            (Self::DirectMethod(effect), 0) => authored_property_key_child(&effect.key),
+            (Self::DirectMethod(effect), _) => Some(effect.signature),
+            (Self::DirectGet(effect) | Self::DirectSet(effect), 0) => {
+                authored_property_key_child(&effect.key)
+            }
+            (Self::DirectGet(effect) | Self::DirectSet(effect), _) => Some(effect.signature),
+            (Self::DirectIndex(effect), 0) => Some(effect.key_type),
+            (Self::DirectIndex(effect), _) => Some(effect.value_type),
+            (Self::DirectCall(_) | Self::DirectConstruct(_) | Self::Spread(_), 0) => None,
+            (Self::DirectCall(node) | Self::DirectConstruct(node) | Self::Spread(node), _) => {
+                Some(*node)
+            }
+        }
+    }
+
     fn for_each_child_node(&self, visit: &mut impl FnMut(SemanticNodeId)) {
         match self {
             Self::DirectProperty(effect) => {
@@ -10538,9 +10811,12 @@ impl ObjectConstructionEffect {
     }
 }
 
-/// Immutable source-ordered authority for a spread-bearing object.
+/// Immutable source-ordered authority for an object construction.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ObjectSpreadProgram {
+    /// Whether this construction still carries expression-site literal
+    /// freshness, consumed when its declaration type is published.
+    pub is_literal: bool,
     pub effects: PayloadArray<ObjectConstructionEffect>,
 }
 
@@ -10556,6 +10832,22 @@ impl ObjectSpreadProgram {
     pub fn for_each_child_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
         for effect in self.effects.iter() {
             effect.for_each_child_node(&mut visit);
+        }
+    }
+
+    /// The first child at or after cursor slot `slot`, with the slot it
+    /// occupies; `None` past the last child. Effect `e` owns two slots,
+    /// `2e` and `2e + 1`, holding its children in [`Self::child_nodes`]
+    /// order and vacant where it has fewer, so a child is found without
+    /// counting the children of the effects before it.
+    pub fn child_at_slot(&self, slot: usize) -> Option<(usize, SemanticNodeId)> {
+        let mut slot = slot;
+        loop {
+            let effect = self.effects.get(slot / 2)?;
+            if let Some(child) = effect.child_in_slot(slot % 2) {
+                return Some((slot, child));
+            }
+            slot += 1;
         }
     }
 
@@ -10615,6 +10907,7 @@ impl ObjectSpreadProgram {
             })
             .collect::<Vec<_>>();
         Self {
+            is_literal: self.is_literal,
             effects: effects.into(),
         }
     }

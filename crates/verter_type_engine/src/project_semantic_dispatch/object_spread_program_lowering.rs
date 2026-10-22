@@ -292,6 +292,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         self.graph().intern_node_with_scope(
             SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+                is_literal: true,
                 effects: crate::semantic_query::PayloadArray::from(effects),
             }),
             scope.clone(),

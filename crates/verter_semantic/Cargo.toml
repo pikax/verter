@@ -18,7 +18,6 @@ semantic-observe = [
   "verter_session_query/semantic-observe",
   "verter_parser/semantic-observe",
   "dep:hotpath",
-  "hotpath/hotpath",
 ]
 # Test-only observability accessors: the flow-slice hash invocation
 # counter behind the hash-then-lower behavioral guard
@@ -91,3 +90,8 @@ verter_test_support = { path = "../verter_test_support" }
 # production builds compile `parse_inline_style_declarations` without the
 # counter TLS or its increment.
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }

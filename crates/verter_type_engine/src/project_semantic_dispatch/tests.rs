@@ -52,6 +52,7 @@ fn expand_variant_and_expand_mode_absent_from_workspace() {
         "tmp-plan.md",
     ];
 
+    let matcher = aho_corasick::AhoCorasick::new(needles).expect("valid source needles");
     let mut violations: Vec<String> = Vec::new();
     let mut visit = |path: &Path| {
         let lossy = path.to_string_lossy();
@@ -66,36 +67,15 @@ fn expand_variant_and_expand_mode_absent_from_workspace() {
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
         };
-        for needle in &needles {
-            if content.contains(needle) {
+        for (needle, found) in needles.iter().zip(matching_needles(&matcher, &content)) {
+            if found {
                 violations.push(format!("{}: contains `{}`", path.display(), needle));
             }
         }
     };
 
-    fn walk(dir: &std::path::Path, exts: &[&str], visit: &mut dyn FnMut(&std::path::Path)) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            let name = entry.file_name();
-            if p.is_dir() {
-                if matches!(
-                    name.to_string_lossy().as_ref(),
-                    "target" | "node_modules" | ".git" | "dist" | "build" | "out"
-                ) {
-                    continue;
-                }
-                walk(&p, exts, visit);
-            } else if exts.iter().any(|e| p.extension().is_some_and(|x| x == *e)) {
-                visit(&p);
-            }
-        }
-    }
-
-    walk(&workspace_root.join("crates"), &["rs"], &mut visit);
-    walk(
+    walk_sources(&workspace_root.join("crates"), &["rs"], &mut visit);
+    walk_sources(
         &workspace_root.join("packages"),
         &["ts", "tsx", "js", "mjs", "cjs"],
         &mut visit,
@@ -105,6 +85,137 @@ fn expand_variant_and_expand_mode_absent_from_workspace() {
         "Found forbidden Expand/ExpandMode/build_expand references (not part of the four-mode surface):\n{}",
         violations.join("\n")
     );
+}
+
+/// Scan each source once for all patterns. Overlapping matches are required:
+/// `fn build_expand(` also contains `build_expand(`, and both diagnostics
+/// belong to the original rule. Pattern order and one report per pattern
+/// remain independent of the number and order of matches in the file.
+fn matching_needles(matcher: &aho_corasick::AhoCorasick, content: &str) -> Vec<bool> {
+    let mut found = vec![false; matcher.patterns_len()];
+    for hit in matcher.find_overlapping_iter(content) {
+        found[hit.pattern().as_usize()] = true;
+    }
+    found
+}
+
+fn walk_sources(dir: &std::path::Path, exts: &[&str], visit: &mut dyn FnMut(&std::path::Path)) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // DirEntry caches ordinary entry types. Only links (or an unavailable
+        // entry type) need metadata; following them preserves the scan scope.
+        let is_dir = match entry.file_type() {
+            Ok(kind) if !kind.is_symlink() => kind.is_dir(),
+            _ => path.is_dir(),
+        };
+        if is_dir {
+            if matches!(
+                entry.file_name().to_string_lossy().as_ref(),
+                "target" | "node_modules" | ".git" | "dist" | "build" | "out"
+            ) {
+                continue;
+            }
+            walk_sources(&path, exts, visit);
+        } else if exts
+            .iter()
+            .any(|e| path.extension().is_some_and(|x| x == *e))
+        {
+            visit(&path);
+        }
+    }
+}
+
+#[test]
+fn source_matching_preserves_overlaps_repetitions_and_identifier_boundaries() {
+    let needles = [
+        "build_expand(",
+        "fn build_expand(",
+        "ExpandMode::",
+        "fn expand(",
+    ];
+    let matcher = aho_corasick::AhoCorasick::new(needles).unwrap();
+    for content in [
+        "fn build_expand( fn build_expand( ExpandMode::Value",
+        "fn expand( ExpandMode::Value fn build_expand(",
+        "fn build_expanded_type_text( ExpandedMode::Value fn expanded(",
+        "文字 fn build_expand( // fn expand(",
+        "",
+    ] {
+        assert_eq!(
+            matching_needles(&matcher, content),
+            needles.map(|needle| content.contains(needle)),
+            "all original substring predicates must agree for {content:?}"
+        );
+    }
+}
+
+#[test]
+fn source_walk_preserves_nested_extensions_and_excluded_directories() {
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("remove source-walk fixture");
+        }
+    }
+    let root = std::env::temp_dir().join(format!("verter-source-walk-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let fixture = Fixture(root);
+    for dir in [
+        "src/nested",
+        "target",
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        "out",
+    ] {
+        std::fs::create_dir_all(fixture.0.join(dir)).unwrap();
+        std::fs::write(fixture.0.join(dir).join("covered.ts"), "").unwrap();
+    }
+    for name in [
+        "a.rs",
+        "b.ts",
+        "c.tsx",
+        "d.js",
+        "e.mjs",
+        "f.cjs",
+        "ignore.txt",
+    ] {
+        std::fs::write(fixture.0.join(name), "").unwrap();
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(fixture.0.join("src"), fixture.0.join("linked")).unwrap();
+    let mut found = Vec::new();
+    walk_sources(
+        &fixture.0,
+        &["ts", "tsx", "js", "mjs", "cjs"],
+        &mut |path| {
+            found.push(path.strip_prefix(&fixture.0).unwrap().to_path_buf());
+        },
+    );
+    let mut expected: Vec<_> = [
+        "b.ts",
+        "c.tsx",
+        "d.js",
+        "e.mjs",
+        "f.cjs",
+        "src/nested/covered.ts",
+    ]
+    .map(std::path::PathBuf::from)
+    .into();
+    #[cfg(unix)]
+    expected.push("linked/nested/covered.ts".into());
+    found.sort();
+    expected.sort();
+    assert_eq!(found, expected);
+    let mut rust = Vec::new();
+    walk_sources(&fixture.0, &["rs"], &mut |path| {
+        rust.push(path.to_path_buf())
+    });
+    assert_eq!(rust, [fixture.0.join("a.rs")]);
 }
 
 /// If `src` declares `enum <enum_name> { ... }` and that enum body declares a
@@ -238,6 +349,7 @@ fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
         "tmp-plan.md",
     ];
 
+    let matcher = aho_corasick::AhoCorasick::new(needles).expect("valid source needles");
     let mut violations: Vec<String> = Vec::new();
     let mut visit = |path: &Path| {
         let lossy = path.to_string_lossy();
@@ -247,34 +359,15 @@ fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
         };
-        for needle in &needles {
-            if content.contains(needle) {
+        for (needle, found) in needles.iter().zip(matching_needles(&matcher, &content)) {
+            if found {
                 violations.push(format!("{}: contains `{}`", path.display(), needle));
             }
         }
     };
-    fn walk(dir: &std::path::Path, exts: &[&str], visit: &mut dyn FnMut(&std::path::Path)) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            let name = entry.file_name();
-            if p.is_dir() {
-                if matches!(
-                    name.to_string_lossy().as_ref(),
-                    "target" | "node_modules" | ".git" | "dist" | "build" | "out"
-                ) {
-                    continue;
-                }
-                walk(&p, exts, visit);
-            } else if exts.iter().any(|e| p.extension().is_some_and(|x| x == *e)) {
-                visit(&p);
-            }
-        }
-    }
-    walk(&workspace_root.join("crates"), &["rs"], &mut visit);
-    walk(
+
+    walk_sources(&workspace_root.join("crates"), &["rs"], &mut visit);
+    walk_sources(
         &workspace_root.join("packages"),
         &["ts", "tsx", "js", "mjs", "cjs"],
         &mut visit,
@@ -400,3 +493,64 @@ fn strip_line_comments(src: &str) -> String {
 }
 
 mod substitution;
+
+/// The active-instantiation index answers as the stack it indexes: an
+/// instantiation is refused while it is active, a declaration stays
+/// active while any instantiation of it is, and an entry left from the
+/// middle of the stack — a continuation frame stopped between its steps —
+/// leaves every index without disturbing the entries around it.
+#[test]
+fn active_instantiation_index_follows_its_stack() {
+    use std::sync::Arc;
+
+    use super::{ActiveInstantiation, ActiveInstantiations};
+    use crate::semantic_query::SemanticNodeId;
+
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let declaration = |name: &str| {
+        (
+            verter_type_expr::OwnedStr::from("/a.ts"),
+            owner,
+            verter_type_expr::OwnedStr::from(name),
+        )
+    };
+    let entry = |name: &str, arg: u64| ActiveInstantiation {
+        identity: declaration(name),
+        args: Arc::from([SemanticNodeId(arg)]),
+    };
+    let mut active = ActiveInstantiations::default();
+    assert!(active.push(entry("A", 1)));
+    assert!(active.push(entry("B", 1)));
+    assert!(
+        active.push(entry("A", 2)),
+        "A over other arguments is another instantiation"
+    );
+    assert!(
+        !active.push(entry("A", 1)),
+        "A over the same arguments is active"
+    );
+    assert_eq!(active.len(), 3);
+
+    active.leave(&entry("A", 1));
+    assert_eq!(active.len(), 2);
+    assert!(
+        active.declares("/a.ts", owner, "A"),
+        "A over 2 is still active"
+    );
+    assert!(
+        active.push(entry("A", 1)),
+        "A over 1 left the index with the stack"
+    );
+
+    active.pop();
+    active.pop();
+    assert!(!active.declares("/a.ts", owner, "A"));
+    assert!(active.declares("/a.ts", owner, "B"));
+    active.pop();
+    assert_eq!(active.len(), 0);
+    assert!(!active.declares("/a.ts", owner, "B"));
+    assert!(
+        active.push(entry("B", 1)),
+        "nothing is left once the stack is empty"
+    );
+}

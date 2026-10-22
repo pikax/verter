@@ -1,7 +1,9 @@
 //! Bounded memos for structural substitution and deferred evaluation.
 //!
-//! Substitution is a pure function of immutable interned nodes. Deferred
-//! evaluation can read declarations and export routes, so each retained
+//! Complete substitution results depend on immutable interned nodes and
+//! carry construction receipts. Refused or unpaid substitutions never
+//! publish. Deferred evaluation can read declarations and export routes,
+//! so each retained
 //! answer carries its observed fact signature and strict self roots.
 //! Production evaluation reads validate and replay that proof against the
 //! caller's view. A changed dependency replaces the stale evaluated answer;
@@ -28,6 +30,7 @@ pub(super) const HASH_CONS_MEMO_RETENTION_CAP: usize = 100_000;
 /// result's nodes, and the reservation of the entry's storage.
 pub(crate) struct SubstituteMemoEntry {
     result: SemanticNodeId,
+    receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
     roots: super::node_roots::NodeRootSet,
     _retention: verter_session_query::retention::RetentionCharge,
 }
@@ -62,33 +65,59 @@ impl SemanticGraphStore {
         /// `substitute_semantic_type_param`. Bumps
         /// `substitute_memo_hits` on hit, `substitute_memo_misses` on
         /// miss.
+        #[cfg_attr(
+            not(any(test, feature = "test-support")),
+            expect(dead_code, reason = "Fixture and compile-fail privacy seam; production substitution reads priced entries.")
+        )]
         fn substitute_memo_get(
             &self,
             value_expr: SemanticNodeId,
             parameter_node: SemanticNodeId,
             arg: SemanticNodeId,
         ) -> Option<SemanticNodeId> {
-            let hit =
-                self.substitute_memo
-                    .get(&(value_expr, parameter_node, arg))
-                    .map(|entry| {
-                        let SubstituteMemoEntry { result, roots, .. } = entry.value();
-                        super::node_roots::NodeRootScope::capture(
-                            super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
-                        );
-                        *result
-                    });
-            if hit.is_some() {
-                self.stats
-                    .substitute_memo_hits
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.stats
-                    .substitute_memo_misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            hit
+            self.substitute_memo_get_priced::<verter_audit::observe::Uncaptured>(value_expr, parameter_node, arg)
+                .map(|(result, _)| result)
         }
+    }
+
+    /// The immutable first-writer-wins result and its receipt, read from
+    /// one entry: a concurrent eviction misses whole, so the caller
+    /// recomputes rather than serve an unpriced node. A hit roots the
+    /// result in the active scope and bumps `substitute_memo_hits`; a miss
+    /// bumps `substitute_memo_misses`.
+    pub(crate) fn substitute_memo_get_priced<M: verter_audit::observe::ObserveExec>(
+        &self,
+        node: SemanticNodeId,
+        parameter: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> Option<(
+        SemanticNodeId,
+        Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+    )> {
+        let hit =
+            self.substitute_memo
+                .get(&(node, parameter, arg))
+                .map(|entry| {
+                    let SubstituteMemoEntry {
+                        result,
+                        receipt,
+                        roots,
+                        ..
+                    } = entry.value();
+                    super::node_roots::NodeRootScope::capture(
+                        super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
+                    );
+                    (*result, Arc::clone(receipt))
+                });
+        if super::records_telemetry::<M>() {
+            let counter = if hit.is_some() {
+                &self.stats.substitute_memo_hits
+            } else {
+                &self.stats.substitute_memo_misses
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        hit
     }
 
     construction_ordinal_seam! {
@@ -98,6 +127,10 @@ impl SemanticGraphStore {
         /// `Entry::Occupied` collision (a concurrent publisher already
         /// landed an identical-result write) does NOT push into the
         /// FIFO since the key is already tracked.
+        #[cfg_attr(
+            not(any(test, feature = "test-support")),
+            expect(dead_code, reason = "Fixture and compile-fail privacy seam; production substitution publishes priced receipts.")
+        )]
         fn substitute_memo_publish(
             &self,
             value_expr: SemanticNodeId,
@@ -105,79 +138,96 @@ impl SemanticGraphStore {
             arg: SemanticNodeId,
             result: SemanticNodeId,
         ) {
-            let key = (value_expr, parameter_node, arg);
-            match self.substitute_memo.entry(key) {
-                Entry::Occupied(_) => {
-                    // First-writer-wins: another thread already
-                    // published. No FIFO bookkeeping required.
-                }
-                Entry::Vacant(slot) => {
-                    let Ok(roots) =
-                        self.root_nodes([value_expr, parameter_node, arg, result])
-                    else {
-                        return;
-                    };
-                    // Charged like every retained answer; one the account
-                    // refuses is computed again on demand.
-                    let mut aliases =
-                        verter_session_query::retention::allocation::AliasSet::new();
-                    let bytes = hash_cons_entry_bytes::<(
-                        (SemanticNodeId, SemanticNodeId, SemanticNodeId),
-                        SubstituteMemoEntry,
-                    )>(&roots, &mut aliases);
-                    // The root owner is an owned allocation, charged by its
-                    // own cell and held by the entry.
-                    let handles = aliases.take_handles();
-                    let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
-                        self.retention_account().reserve(
-                            verter_session_query::retention::ChargeClass::Retained,
-                            bytes,
-                        )
-                    else {
-                        return;
-                    };
-                    let Ok(retention) = handles.retained_with(retention, self.charge_ctx())
-                    else {
-                        return;
-                    };
-                    slot.insert(SubstituteMemoEntry {
-                        result,
-                        roots,
-                        _retention: retention,
-                    });
-                    let mut fifo = self.substitute_memo_fifo.lock();
-                    fifo.push_back(key);
-                    while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
-                        if let Some(victim) = fifo.pop_front() {
-                            // Drop the FIFO lock BEFORE touching
-                            // `substitute_memo` to avoid blocking
-                            // concurrent publishers while DashMap's
-                            // shard lock is taken; re-acquire on the
-                            // next loop iteration if we still need
-                            // to evict.
-                            drop(fifo);
-                            self.substitute_memo.remove(&victim);
-                            fifo = self.substitute_memo_fifo.lock();
-                        } else {
-                            break;
-                        }
+            use crate::project_semantic_dispatch::cost_receipt::{CostIdentity, DemandCostReceipt, LogicalUsage};
+            let receipt = DemandCostReceipt::new(
+                CostIdentity::of_key((value_expr, parameter_node, arg)),
+                LogicalUsage::default(), Vec::new());
+            self.substitute_memo_publish_priced(value_expr, parameter_node, arg, result, receipt);
+        }
+    }
+
+    /// Publish only a complete substitution with the cost of constructing
+    /// it. The receipt's reservation follows the same retention account as
+    /// the entry and its counted roots.
+    pub(crate) fn substitute_memo_publish_priced(
+        &self,
+        value_expr: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+        result: SemanticNodeId,
+        receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+    ) {
+        if receipt.reserve_retention(self.retention_account()).is_err() {
+            return;
+        }
+        let key = (value_expr, parameter_node, arg);
+        match self.substitute_memo.entry(key) {
+            Entry::Occupied(_) => {
+                // First-writer-wins: another thread already
+                // published. No FIFO bookkeeping required.
+            }
+            Entry::Vacant(slot) => {
+                let Ok(roots) = self.root_nodes([value_expr, parameter_node, arg, result]) else {
+                    return;
+                };
+                // Charged like every retained answer; one the account
+                // refuses is computed again on demand.
+                let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+                let bytes = hash_cons_entry_bytes::<(
+                    (SemanticNodeId, SemanticNodeId, SemanticNodeId),
+                    SubstituteMemoEntry,
+                )>(&roots, &mut aliases);
+                // The root owner is an owned allocation, charged by its
+                // own cell and held by the entry.
+                let handles = aliases.take_handles();
+                let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
+                    self.retention_account().reserve(
+                        verter_session_query::retention::ChargeClass::Retained,
+                        bytes,
+                    )
+                else {
+                    return;
+                };
+                let Ok(retention) = handles.retained_with(retention, self.charge_ctx()) else {
+                    return;
+                };
+                slot.insert(SubstituteMemoEntry {
+                    result,
+                    receipt,
+                    roots,
+                    _retention: retention,
+                });
+                let mut fifo = self.substitute_memo_fifo.lock();
+                fifo.push_back(key);
+                while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
+                    if let Some(victim) = fifo.pop_front() {
+                        // Drop the FIFO lock BEFORE touching
+                        // `substitute_memo` to avoid blocking
+                        // concurrent publishers while DashMap's
+                        // shard lock is taken; re-acquire on the
+                        // next loop iteration if we still need
+                        // to evict.
+                        drop(fifo);
+                        self.substitute_memo.remove(&victim);
+                        fifo = self.substitute_memo_fifo.lock();
+                    } else {
+                        break;
                     }
                 }
             }
         }
     }
-
     /// A deferred operator can read declarations and export routes. Its
     /// interned input is immutable, but its evaluated answer needs the
     /// complete read proof to validate against this request's view.
-    pub(crate) fn evaluate_deferred_memo_get(
+    pub(crate) fn evaluate_deferred_memo_get<M: verter_audit::observe::ObserveExec>(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         demand: DeferredEvaluationDemand,
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
     ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
-        self.read_deferred_evaluation(node, context, demand, |entry| {
+        self.read_deferred_evaluation::<M>(node, context, demand, |entry| {
             verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
                 &entry.evidence.0,
             ))
@@ -185,7 +235,7 @@ impl SemanticGraphStore {
         })
     }
 
-    fn read_deferred_evaluation(
+    fn read_deferred_evaluation<M: verter_audit::observe::ObserveExec>(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -220,14 +270,16 @@ impl SemanticGraphStore {
                     receipt: crate::semantic_query::ReadReceipt::Priced(Arc::clone(&entry.receipt)),
                 }
             });
-        if hit.is_some() {
-            self.stats
-                .evaluate_deferred_memo_hits
-                .fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.stats
-                .evaluate_deferred_memo_misses
-                .fetch_add(1, Ordering::Relaxed);
+        if super::records_telemetry::<M>() {
+            if hit.is_some() {
+                self.stats
+                    .evaluate_deferred_memo_hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.stats
+                    .evaluate_deferred_memo_misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
         hit
     }
@@ -333,15 +385,15 @@ impl SemanticGraphStore {
             .then_some(())
     }
 
-    /// Inspect admission of a selected value, independently of its shell.
+    /// Inspect mapped-member admission, independently of shell and whole-value demands.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn peek_selected_value_memo_for_tests(
+    pub fn peek_mapped_member_value_memo_for_tests(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> Option<()> {
         self.evaluate_deferred_memo
-            .contains_key(&(node, context, DeferredEvaluationDemand::SelectedValue))
+            .contains_key(&(node, context, DeferredEvaluationDemand::MappedMemberValue))
             .then_some(())
     }
 

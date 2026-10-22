@@ -196,6 +196,7 @@ pub use resolution_currency::{
     AdmittedResolution, CapturedResolutionWorld, ContentRevision, ResolutionEpoch,
     ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome, ResolutionOverlaySnapshot,
     ResolutionPublication, ResolutionPublicationRefusal, ResolutionQueryKey, ResolveContextId,
+    UnretainedResolution,
 };
 pub use resolver::ide_project_config;
 pub use snapshot_builder::build_workspace_snapshot_simple;
@@ -208,9 +209,9 @@ pub use traits::{
     EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, WorkspaceAccess, WorkspaceRead,
     WorkspaceResourceSnapshot,
 };
-pub use types::{
-    ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge, VfsProvenanceSnapshot,
-};
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+pub use types::VfsProvenanceSnapshot;
+pub use types::{ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge};
 pub use verter_session_query::resolution::InputResolutionBudgets;
 #[cfg(not(target_arch = "wasm32"))]
 pub use virtual_config::{compute_virtual_config_identity, VirtualConfigIdentity};

@@ -1223,6 +1223,7 @@ mod tests {
 
         let source_with = |vis: MemberVisibility| {
             Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
                     "x".to_string().into(),
                     TypeExpr::Primitive(PrimitiveName::Number),
@@ -1266,6 +1267,7 @@ mod tests {
         // fingerprint identically to one built via `synthetic` (both Public) —
         // the marker is only-for-non-public.
         let via_synthetic = Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::Property(
                 ObjectProperty::synthetic_public_key(
                     "x".to_string().into(),

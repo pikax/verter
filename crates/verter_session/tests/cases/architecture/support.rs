@@ -629,9 +629,11 @@ pub(super) fn audit_counter_helper_violations(src: &str) -> Vec<String> {
     // at top-level — match their `fn` signature, then walk forward
     // to the next top-level `}\n` (i.e. a `}` followed by a newline,
     // appearing at column 0).
+    // A helper may be generic over the recording unit's capture mode, so the
+    // signature is matched up to its name.
     let helper_signatures = [
-        "fn record_inflight_aborted_retry(",
-        "fn record_cold_abort_swept(",
+        "fn record_inflight_aborted_retry",
+        "fn record_cold_abort_swept",
     ];
     let mut helper_ranges: Vec<(usize, usize)> = Vec::new();
     for sig in &helper_signatures {
@@ -2278,18 +2280,26 @@ pub(super) const STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS: &[&str] = &[
 /// the shape is correct OR the builder is absent from `body` (absence is handled
 /// by the caller's anti-vacuity + single-definition assertions, NOT here). Looks
 /// at the DEFINITION line only.
+/// The definition heads a producer builder may take: plain, or generic over
+/// the execution mode it is compiled for.
+pub(super) fn structural_builder_definition_heads(builder: &str) -> [String; 2] {
+    [format!("fn {builder}("), format!("fn {builder}<")]
+}
+
 pub(super) fn structural_carrier_producer_builder_privacy_violation(
     body: &str,
     builder: &str,
 ) -> Option<String> {
-    let needle = format!("fn {builder}(");
-    let def_line = body.lines().find(|l| l.contains(&needle))?;
+    let heads = structural_builder_definition_heads(builder);
+    let def_line = body
+        .lines()
+        .find(|l| heads.iter().any(|head| l.contains(head.as_str())))?;
     let trimmed = def_line.trim_start();
     // The ONLY accepted shape is the bare module-private `fn` — the definition
     // line starts directly with `fn <builder>(`. ANY visibility modifier (`pub`,
     // `pub(crate)`, `pub(super)`, `pub(in …)`) lets some other module name the
     // entry and is the forbidden second/third-producer shape.
-    if trimmed.starts_with(&needle) {
+    if heads.iter().any(|head| trimmed.starts_with(head.as_str())) {
         return None;
     }
     Some(format!(

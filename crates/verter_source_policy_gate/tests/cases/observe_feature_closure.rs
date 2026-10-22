@@ -630,9 +630,15 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
             seeds.contains(&("verter_audit".into(), "semantic-observe".into())),
             "the audit crate declares the coordinated observation gate"
         );
+        // The shipped roots, each with and without its dev edges, plus the
+        // session's own test build: the canonical gate runs the session
+        // suites without `semantic-observe` (their dev edges enable
+        // `test-support`, a separate capability), so no dev edge of the crate
+        // that owns audit capture may switch observation on for it.
         let requests: Vec<_> = ["verter_napi", "verter_lsp", "verter_wasm", "verter_tsc"]
             .into_iter()
             .flat_map(|package| [false, true].map(|dev| (package, dev)))
+            .chain([("verter_session", true)])
             .collect();
         let production = map_in_parallel::map_in_parallel(&requests, |&(package, include_dev)| {
             let before = TREE_RUNS.get();
@@ -663,16 +669,39 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
         // the repository's build lanes independently compile those profiles.
         // The soak-support seams (the flight rendezvous, the ACTIVE-occupancy
         // window) are test machinery their own crates' test edges carry, so
-        // only the normal/build closures must stay free of them.
-        // The retention account's window also compiles under its own
-        // `test-support`, so that feature is a seed too.
-        let mut support_seeds: BTreeSet<(String, String)> = metadata
+        // only the normal/build closures must stay free of them. Every
+        // member's `test-support` is a seed too: the observation gate
+        // `cfg(any(test, feature = "test-support", feature = "semantic-observe"))`
+        // compiles optional bookkeeping (origin edges, store tallies, VFS
+        // provenance, lowering counters, the retention account's window)
+        // under it, so a production edge enabling one would ship that state.
+        let members: BTreeSet<&str> = metadata
+            .workspace_members
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let support_seeds: BTreeSet<(String, String)> = metadata
             .packages
             .iter()
-            .filter(|package| package.features.contains_key("soak-support"))
-            .map(|package| (package.name.clone(), "soak-support".into()))
+            .filter(|package| members.contains(package.id.as_str()))
+            .flat_map(|package| {
+                ["soak-support", "test-support"]
+                    .into_iter()
+                    .filter(|feature| package.features.contains_key(*feature))
+                    .map(|feature| (package.name.clone(), feature.to_string()))
+            })
             .collect();
-        support_seeds.insert(("verter_retention".into(), "test-support".into()));
+        for owner in [
+            "verter_retention",
+            "verter_workspace",
+            "verter_type_engine",
+            "verter_semantic_source",
+        ] {
+            assert!(
+                support_seeds.contains(&(owner.into(), "test-support".into())),
+                "{owner} declares the test-support capability the observation gate reads"
+            );
+        }
         assert!(
             support_seeds.contains(&("verter_type_engine".into(), "soak-support".into())),
             "the engine declares the soak-support seam"
@@ -700,7 +729,7 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
             assert!(observed.is_empty(), "{package} target={target} dev={include_dev}: optional observation features enabled: {observed:?}");
             if !include_dev {
                 let support = violations(&metadata, &enabled, &support_forbidden);
-                assert!(support.is_empty(), "{package} target={target}: soak-support enabled in a shipped closure: {support:?}");
+                assert!(support.is_empty(), "{package} target={target}: test or soak support enabled in a shipped closure: {support:?}");
             }
         }
     }

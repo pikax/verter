@@ -23,7 +23,7 @@ use verter_type_engine::semantic_query::{
 };
 use verter_type_engine::semantic_query_memo::node_data_lease::{NodeDataLease, SurfaceLease};
 use verter_type_engine::semantic_query_memo::node_roots::{NodeRoot, NodeRootScope};
-use verter_type_engine::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::semantic_query_memo::{GraphIn, SemanticGraphStore};
 use verter_type_engine::signature_kernel::SignatureSetValue;
 
 fn read_children(graph: &SemanticGraphStore, lease: &NodeDataLease) -> Result<usize, QueryError> {
@@ -108,7 +108,7 @@ fn render_and_build_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> b
         DisplayNeeds::empty(),
     );
     let union =
-        canonical_algebra::intern_ordered_union_in_scope(graph, &[id], NullabilityPolicy::Strict);
+        canonical_algebra::intern_ordered_union_in_scope(GraphIn::of(graph), &[id], NullabilityPolicy::Strict);
     shown.is_some() && union.is_some()
 }
 
@@ -120,7 +120,8 @@ fn spread_through_a_dispatcher<C: ResolverCapabilities>(
         .owning()
         .spread_formula_positive_members_for_macro(formula)
         .value()
-        .len()
+        .as_ref()
+        .map_or(0, |members| members.len())
 }
 
 fn keep_error(error: &QueryError) -> QueryError {

@@ -239,11 +239,11 @@ pub fn dispatch_inject_parse_fact_for_tests(
 /// — a recursion result included, which is an allocated opaque node — so a
 /// failed rooting is a lost handoff and panics rather than leaving the caller
 /// an ordinal nothing owns.
-fn hand_to_caller_scope<'h>(
+fn hand_to_caller_scope<'h, M: verter_audit::observe::ObserveExec>(
     host: &'h crate::VerterHost,
     dispatch: verter_type_engine::project_semantic_dispatch::ThreadDispatch<
         'h,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     builder: verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     nodes: impl IntoIterator<Item = verter_type_engine::semantic_query::SemanticNodeId>,
@@ -302,17 +302,23 @@ pub fn dispatch_execute_type_node_for_tests(
     >,
 > {
     use verter_type_engine::semantic_query::SemanticQueryApi;
-    let dispatch =
-        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    let builder = dispatch.enter_construction_scope();
-    let read = dispatch.execute_type_node(key);
-    let node = match &read {
-        verter_type_engine::semantic_query::QueryResult::Value(output) => Some(output.value),
-        verter_type_engine::semantic_query::QueryResult::Recursive(node) => Some(*node),
-        verter_type_engine::semantic_query::QueryResult::Error(_) => None,
-    };
-    hand_to_caller_scope(host, dispatch, builder, node);
-    read
+    // A test entry starts outside any typed execution, so it adopts the
+    // installed request's capture mode like every plain entry.
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        host.with_base_resolver_context::<_, M>(|ctx| {
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let builder = dispatch.enter_construction_scope();
+            let read = dispatch.execute_type_node(key);
+            let node = match &read {
+                verter_type_engine::semantic_query::QueryResult::Value(output) => Some(output.value),
+                verter_type_engine::semantic_query::QueryResult::Recursive(node) => Some(*node),
+                verter_type_engine::semantic_query::QueryResult::Error(_) => None,
+            };
+            hand_to_caller_scope(host, dispatch, builder, node);
+            read
+        })
+    })
 }
 
 /// Production-shaped, NON-DECONSTRUCTABLE builder of a sealed
@@ -363,8 +369,8 @@ pub fn instantiate_key_for_tests(
 /// `Intersection`). Exposed so display guards can assert the read-only display
 /// projection renders byte-identically to this canonical reduced surface — the
 /// two paths share one peer-merge engine, so any divergence is a regression.
-pub fn reduce_merged_decl_to_graph_node(
-    store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+pub fn reduce_merged_decl_to_graph_node<M: verter_audit::observe::ObserveExec>(
+    store: verter_type_engine::semantic_query_memo::GraphIn<'_, M>,
     contributors: &[verter_type_engine::semantic_query::SemanticNodeId],
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
     verter_type_engine::project_semantic_dispatch::walk::reduce_merged_decl_with_graph(
@@ -382,12 +388,18 @@ pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
     expr: &verter_type_expr::TypeExpr,
     context: verter_type_engine::semantic_query::ProjectionReductionContext,
 ) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
-    let dispatch =
-        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    let builder = dispatch.enter_construction_scope();
-    let node = dispatch.lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context);
-    hand_to_caller_scope(host, dispatch, builder, node);
-    node
+    // A test entry starts outside any typed execution, so it adopts the
+    // installed request's capture mode like every plain entry.
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        host.with_base_resolver_context::<_, M>(|ctx| {
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let builder = dispatch.enter_construction_scope();
+            let node = dispatch.lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context);
+            hand_to_caller_scope(host, dispatch, builder, node);
+            node
+        })
+    })
 }
 
 /// Relate the type named `source` to the type named `target`, both declared
@@ -508,12 +520,18 @@ pub fn dispatch_substitute_for_tests(
     parameter_node: verter_type_engine::semantic_query::SemanticNodeId,
     arg: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
-    let dispatch =
-        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    let builder = dispatch.enter_construction_scope();
-    let node = dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg);
-    hand_to_caller_scope(host, dispatch, builder, [node]);
-    node
+    // A test entry starts outside any typed execution, so it adopts the
+    // installed request's capture mode like every plain entry.
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        host.with_base_resolver_context::<_, M>(|ctx| {
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let builder = dispatch.enter_construction_scope();
+            let node = dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg);
+            hand_to_caller_scope(host, dispatch, builder, [node]);
+            node
+        })
+    })
 }
 
 /// Integration-test shim that drives the
@@ -555,11 +573,12 @@ pub fn dispatch_evaluate_deferred_for_tests(
 /// The lifecycle stays behind the request ports even in integration tests.
 pub fn active_session_view_is_none_for_tests(host: &crate::VerterHost) -> bool {
     let view = host.resolver_store_view().into_owned_view();
-    let ctx = crate::resolver_core::HostResolverContext::new(
-        host,
-        &view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
     !ctx.has_session_view_for_tests()
 }
 
@@ -570,11 +589,12 @@ pub fn with_host_resolver_context_for_tests<R>(
     f: impl FnOnce(&crate::resolver_core::HostResolverContext<'_>) -> R,
 ) -> R {
     let view = host.resolver_store_view().into_owned_view();
-    let ctx = crate::resolver_core::HostResolverContext::new(
-        host,
-        &view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
     f(&ctx)
 }
 
@@ -865,9 +885,14 @@ pub mod signature_kernel_bench_support {
         host: &VerterHost,
         function: &FlowFunctionReturnIdentity,
     ) {
-        let _ = host.flow_return_request(function, None, |_| {
-            Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-        });
+        let _ = verter_audit::specialise!(
+            crate::capture::entry_mode(host, || verter_audit::RequestKind::FlowReturnInference) => M,
+            {
+                host.flow_return_request::<M>(function, None, |_| {
+                    Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
+                })
+            }
+        );
     }
 
     /// Every function of `functions` answered through the dispatch's
@@ -882,19 +907,24 @@ pub mod signature_kernel_bench_support {
         let Some(&first) = functions.peek() else {
             return;
         };
-        let outcome = host.flow_return_request(first, None, |dispatch| {
-            let mut last = None;
-            for function in functions {
-                let key = dispatch
-                    .flow_return_key_with_demand(function, ReturnProjectionDemand::whole_return());
-                match dispatch.execute_flow_return(key) {
-                    FlowReturnStep::Complete(result) => last = Some(result),
-                    other => panic!("a warm flow-return query completes, got {other:?}"),
-                }
+        let outcome = verter_audit::specialise!(
+            crate::capture::entry_mode(host, || verter_audit::RequestKind::FlowReturnInference) => M,
+            {
+                host.flow_return_request::<M>(first, None, |dispatch| {
+                    let mut last = None;
+                    for function in functions {
+                        let key = dispatch
+                            .flow_return_key_with_demand(function, ReturnProjectionDemand::whole_return());
+                        match dispatch.execute_flow_return(key) {
+                            FlowReturnStep::Complete(result) => last = Some(result),
+                            other => panic!("a warm flow-return query completes, got {other:?}"),
+                        }
+                    }
+                    last.map(Arc::new)
+                        .ok_or(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
+                })
             }
-            last.map(Arc::new)
-                .ok_or(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-        });
+        );
         assert!(outcome.as_result().is_ok(), "the request completes");
     }
 
@@ -908,26 +938,31 @@ pub mod signature_kernel_bench_support {
         functions: &[FlowFunctionReturnIdentity],
         reads: impl IntoIterator<Item = usize>,
     ) {
-        let outcome = host.flow_return_request(&functions[0], None, |dispatch| {
-            let keys: Vec<_> = functions
-                .iter()
-                .map(|function| {
-                    dispatch.flow_return_key_with_demand(
-                        function,
-                        ReturnProjectionDemand::whole_return(),
-                    )
+        let outcome = verter_audit::specialise!(
+            crate::capture::entry_mode(host, || verter_audit::RequestKind::FlowReturnInference) => M,
+            {
+                host.flow_return_request::<M>(&functions[0], None, |dispatch| {
+                    let keys: Vec<_> = functions
+                        .iter()
+                        .map(|function| {
+                            dispatch.flow_return_key_with_demand(
+                                function,
+                                ReturnProjectionDemand::whole_return(),
+                            )
+                        })
+                        .collect();
+                    let mut last = None;
+                    for index in reads {
+                        let result = dispatch
+                            .warm_flow_return_read(&keys[index % keys.len()])
+                            .expect("a warm memo read hits");
+                        last = Some(result);
+                    }
+                    last.map(Arc::new)
+                        .ok_or(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
                 })
-                .collect();
-            let mut last = None;
-            for index in reads {
-                let result = dispatch
-                    .warm_flow_return_read(&keys[index % keys.len()])
-                    .expect("a warm memo read hits");
-                last = Some(result);
             }
-            last.map(Arc::new)
-                .ok_or(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-        });
+        );
         assert!(outcome.as_result().is_ok(), "the request completes");
     }
 }

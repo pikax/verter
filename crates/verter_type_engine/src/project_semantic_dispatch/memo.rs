@@ -10,10 +10,7 @@ use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
 use crate::resolver_core::resolver_context::{RequestFlags, RequestSnapshot};
 use dashmap::DashMap;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::{atomic::Ordering, Arc};
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
@@ -21,8 +18,7 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 /// Finalized evidence of one traced component computation. Only the engine
 /// can mint it; admission consumes it under its publication fence.
 ///
-/// The refusal charges, the isolation flag and the divergence certificate
-/// are this compute's. A later compute does not replace them.
+/// The refusal charges and the isolation flag are this compute's. A later compute does not replace them.
 pub struct ComponentMetaEvidence {
     facts: Arc<[FactVersionRef]>,
     generation: u64,
@@ -32,23 +28,19 @@ pub struct ComponentMetaEvidence {
     /// operation counter moved only by what this thread recorded, or there
     /// was no request to interleave with.
     spent_alone: bool,
-    /// A producer proved an exact same-path recurrence during this compute.
-    /// A same-path reason bit is not this flag.
-    divergence_certificate: bool,
     /// A schedule cut was noted during this compute.
     schedule_cut: bool,
 }
 
 impl ComponentMetaEvidence {
-    /// Admission proof for this compute. The certificate, the schedule cut
-    /// and the isolation flag are the ones recorded on this evidence.
+    /// Admission proof for this compute. The schedule cut and the isolation
+    /// flag are the ones recorded on this evidence.
     #[must_use]
     pub fn admission_proof(
         &self,
         query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
     ) -> crate::component_meta_result_db::FinalComponentAdmissionProof {
         crate::component_meta_result_db::FinalComponentAdmissionProof {
-            divergence_certificate: self.divergence_certificate,
             schedule_cut: self.schedule_cut,
             entered_isolated: query.entered_isolated && self.spent_alone && !self.schedule_cut,
             request_spend_owned: self.spent_alone,
@@ -68,7 +60,7 @@ pub enum ComponentMetaTrace {
 pub(crate) struct SingleEntryAttachment<'a, K: Eq + std::hash::Hash + Clone, V> {
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
-    live_counter: &'a AtomicU64,
+    live_counter: &'a crate::cache_runtime::OccupancyCounter,
     schema_version: u32,
     /// The account an entry of this cache is charged to.
     account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
@@ -77,7 +69,7 @@ impl<'a, K: Eq + std::hash::Hash + Clone, V> SingleEntryAttachment<'a, K, V> {
     pub(crate) fn new(
         entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
         inflight: &'a InflightTable<QueryFlightKey<K>>,
-        live_counter: &'a AtomicU64,
+        live_counter: &'a crate::cache_runtime::OccupancyCounter,
         schema_version: u32,
         account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
@@ -213,7 +205,7 @@ where
 {
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
-    live_counter: &'a AtomicU64,
+    live_counter: &'a crate::cache_runtime::OccupancyCounter,
     /// The account the cache's entries are charged to.
     account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     /// The canonicals the warm-read validator checks STRICTLY. Owned by
@@ -557,24 +549,35 @@ where
 /// [`MemoPublish::with_owner_scope`] can construct it, and its tracer borrow
 /// cannot escape the callback. All production Shape-cache writes require this
 /// capability, so key classification, gates, and the complete cold compute can
-/// share one driver-owned scope.
+/// share one driver-owned scope. `M` is the opening dispatcher's capture
+/// execution: only a captured scope counts its peeks into the request.
 pub struct ShapeCacheOwnerScope<
     'db,
     't,
     W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    M: verter_audit::observe::ObserveExec,
 > {
     db: &'db ShapeCacheDb,
     ctx: &'db dyn LiveFactValidation<Clocks = W>,
     snapshot: &'db RequestSnapshot<W>,
     probe: &'t crate::fact_signature_helpers::CacheabilityProbe<'t, W>,
+    mode: std::marker::PhantomData<M>,
+    #[cfg(feature = "semantic-observe")]
+    observation: &'db crate::request_observers::CaptureTargets,
 }
 
-impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
-    ShapeCacheOwnerScope<'_, '_, W>
+impl<
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+        M: verter_audit::observe::ObserveExec,
+    > ShapeCacheOwnerScope<'_, '_, W, M>
 {
     #[must_use]
     pub fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
-        MemoRead::new(self.db, self.ctx, self.snapshot.flags()).peek(key)
+        #[cfg(feature = "semantic-observe")]
+        let observation = self.observation;
+        #[cfg(not(feature = "semantic-observe"))]
+        let observation = &crate::request_observers::CaptureTargets::EMPTY;
+        MemoRead::new(self.db, self.ctx, self.snapshot.flags()).peek::<M>(observation, key)
     }
 
     pub fn get_or_compute<F>(
@@ -648,7 +651,12 @@ impl MemoRead<'_, ImportedRegistryDb> {
 impl MemoRead<'_, ShapeCacheDb> {
     /// Peek-only lookup: returns the cached value only if its
     /// fact_dep_signature is still valid against `ctx`.
-    pub(crate) fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
+    pub(crate) fn peek<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &crate::request_observers::CaptureTargets,
+        key: &ShapeCacheKey,
+    ) -> Option<MaterializedOutputTypeExpr> {
+        let _ = observation;
         let storage = self.db.attach_output();
         let ctx = self.facts;
 
@@ -659,7 +667,7 @@ impl MemoRead<'_, ShapeCacheDb> {
         // strict warm-read validation rejects a same-scope content edit.
         // The entry carries its own self-roots, validated strictly.
         let result = single_entry_peek(storage.entries, key, ctx, self.flags);
-        if let Some(rctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(M => on observation.request.as_deref() => |rctx| {
             // Every ShapeCacheDb subject is a member-shape-route identity
             // now that the TypeExpr-START route also keys its LOWERED
             // settled node (`MemberValueNode`) — so all peeks count into
@@ -672,7 +680,7 @@ impl MemoRead<'_, ShapeCacheDb> {
             } else {
                 counter.misses.fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 }
@@ -1149,14 +1157,23 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
 {
     #[cfg(any(test, feature = "test-support"))]
     pub fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
-        MemoRead::new(self.db, self.facts, self.snapshot.flags()).peek(key)
+        MemoRead::new(self.db, self.facts, self.snapshot.flags())
+            .peek::<verter_audit::observe::Uncaptured>(
+                &crate::request_observers::CaptureTargets::EMPTY,
+                key,
+            )
     }
     /// Open the sole production admission scope for this DB. The sealed
     /// capability passed to `f` is the only route to a Shape-cache write.
-    pub(crate) fn with_owner_scope<'db, F, R>(&'db self, f: F) -> R
+    pub(crate) fn with_owner_scope<'db, M: verter_audit::observe::ObserveExec, F, R>(
+        &'db self,
+        observation: &'db crate::request_observers::CaptureTargets,
+        f: F,
+    ) -> R
     where
-        F: for<'t> FnOnce(ShapeCacheOwnerScope<'db, 't, W>) -> R,
+        F: for<'t> FnOnce(ShapeCacheOwnerScope<'db, 't, W, M>) -> R,
     {
+        let _ = observation;
         let ctx = self.facts;
 
         crate::fact_signature_helpers::with_cacheability_scope(
@@ -1170,6 +1187,9 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                     ctx,
                     snapshot: self.snapshot,
                     probe,
+                    mode: std::marker::PhantomData,
+                    #[cfg(feature = "semantic-observe")]
+                    observation,
                 })
             },
         )
@@ -1281,7 +1301,10 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     where
         F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
     {
-        self.with_owner_scope(|scope| scope.get_or_compute(key, compute))
+        self.with_owner_scope::<verter_audit::observe::Uncaptured, _, _>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            |scope| scope.get_or_compute(key, compute),
+        )
     }
     /// Test-only sibling of [`Self::get_or_compute_traced_for_test`] for
     /// [`Self::admit_computed`].
@@ -1292,7 +1315,10 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         value: MaterializedOutputTypeExpr,
         fact_dep_signature: Arc<[FactVersionRef]>,
     ) -> MaterializedOutputTypeExpr {
-        self.with_owner_scope(|scope| scope.admit_computed(key, value, fact_dep_signature))
+        self.with_owner_scope::<verter_audit::observe::Uncaptured, _, _>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            |scope| scope.admit_computed(key, value, fact_dep_signature),
+        )
     }
 }
 impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
@@ -1328,9 +1354,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     }
     pub fn with_shape_scope<F, R>(&self, f: F) -> R
     where
-        F: for<'t> FnOnce(ShapeCacheOwnerScope<'_, 't, C::Clocks>) -> R,
+        F: for<'t> FnOnce(ShapeCacheOwnerScope<'_, 't, C::Clocks, C::Observe>) -> R,
     {
-        MemoPublish::new(self.binding.shapes.as_ref(), self.ctx, self.snapshot).with_owner_scope(f)
+        MemoPublish::new(self.binding.shapes.as_ref(), self.ctx, self.snapshot)
+            .with_owner_scope(&self.observation, f)
     }
 }
 
@@ -1491,8 +1518,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
 
     /// Admission proof for the compute `evidence` finalised.
     ///
-    /// A same-path recursion bit is not, by itself, a certificate. A
-    /// schedule cut and a spend that was not this compute's alone both
+    /// A schedule cut and a spend that was not this compute's alone both
     /// refuse isolated-root retention. The current demand root is not
     /// consulted: two outstanding computes keep their own proofs.
     #[must_use]
@@ -1528,7 +1554,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             // request spend above is the charge that outlives this dispatch.
             let demand = self.connected_demand();
             if demand.is_active() {
-                demand.apply_refusal(effects.work, effects.bytes, effects.trip);
+                demand.apply_refusal(
+                    effects.work,
+                    effects.bytes,
+                    effects.advisory_bytes,
+                    effects.trip,
+                );
             }
         }
         true
@@ -1631,9 +1662,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             request: request_spent,
             work: span.work,
             bytes: span.bytes,
+            advisory_bytes: span.advisory_bytes,
             trip: span.trip,
         };
-        let divergence_certificate = span.certificates > 0;
         let schedule_cut = span.schedule_cuts > 0;
         let trace = match finalise {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
@@ -1648,7 +1679,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                         .expect("checked captured fingerprint"),
                     effects,
                     spent_alone,
-                    divergence_certificate,
                     schedule_cut,
                 })
             }

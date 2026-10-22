@@ -243,6 +243,12 @@ fn assert_retained_multiset(data: &SemanticNodeData, mut retained: SmallVec<[u64
         }
     }
     retained.retain(|held| *held < UNALLOCATABLE_ID_FLOOR);
+    // The walk and the printed form usually visit the operands in the same
+    // order, and equal sequences are equal multisets: only a differing
+    // order is sorted before the multiset comparison.
+    if retained == expected {
+        return;
+    }
     sort_small(&mut retained);
     sort_small(&mut expected);
     assert_eq!(
@@ -378,6 +384,7 @@ fn chunk_storage_bytes() -> usize {
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<usize>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<bool>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<std::sync::atomic::AtomicBool>())
+        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<u64>())
         + std::mem::size_of::<Option<Box<Chunk>>>()
 }
 
@@ -581,6 +588,9 @@ struct Chunk {
     /// sidecar cleanup. Atomic so a sidecar writer marks a slot under the
     /// arena's read lock.
     tracked: Box<[std::sync::atomic::AtomicBool]>,
+    /// Each live slot's dedup fingerprint, recorded when it was interned:
+    /// a release finds the slot's bucket without hashing its payload again.
+    fingerprints: Box<[u64]>,
     /// Slots of this chunk still holding a payload; the chunk is dropped
     /// when it reaches zero.
     live: usize,
@@ -596,6 +606,7 @@ impl Chunk {
             tracked: (0..CHUNK_LEN)
                 .map(|_| std::sync::atomic::AtomicBool::new(false))
                 .collect(),
+            fingerprints: vec![0; CHUNK_LEN].into_boxed_slice(),
             live: 0,
         }
     }
@@ -629,33 +640,52 @@ struct ChunkTable {
     older: std::collections::BTreeMap<u64, Box<Chunk>>,
     /// The chunk number of `window[0]`.
     base: u64,
-    window: Vec<Option<Box<Chunk>>>,
+    /// A boxed slice rather than a `Vec`: a read indexes it in place, with
+    /// no slice conversion, which a debug build would otherwise call out
+    /// for on every node read. `window[window_len..]` is empty headroom:
+    /// the slice grows geometrically when a chunk lands past its end, so
+    /// adding a chunk costs amortised constant time, and shrinks only once
+    /// the headroom exceeds the entries in use several times over.
+    window: Box<[Option<Box<Chunk>>]>,
+    /// Entries of `window` in use: every live window chunk sits below it.
+    window_len: usize,
     /// Live chunks in `window`.
     window_live: usize,
 }
 
 impl ChunkTable {
-    // Every node read resolves its chunk here, so the lookup is written as
-    // one indexed match rather than a chain of option adaptors.
-    #[inline]
+    // Every node read resolves its chunk here, so the lookup is written
+    // with integer operators and a direct index — no adaptor or conversion
+    // a debug build would call out for.
+    #[inline(always)]
     fn get(&self, key: &u64) -> Option<&Chunk> {
-        let Some(offset) = key.checked_sub(self.base) else {
-            return self.older.get(key).map(Box::as_ref);
-        };
-        match self.window.get(usize::try_from(offset).ok()?) {
-            Some(Some(chunk)) => Some(chunk),
-            _ => None,
+        let key = *key;
+        if key < self.base {
+            return self.older.get(&key).map(Box::as_ref);
+        }
+        let offset = key - self.base;
+        if offset >= self.window.len() as u64 {
+            return None;
+        }
+        match &self.window[offset as usize] {
+            Some(chunk) => Some(chunk),
+            None => None,
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn get_mut(&mut self, key: &u64) -> Option<&mut Chunk> {
-        let Some(offset) = key.checked_sub(self.base) else {
-            return self.older.get_mut(key).map(Box::as_mut);
-        };
-        match self.window.get_mut(usize::try_from(offset).ok()?) {
-            Some(Some(chunk)) => Some(chunk),
-            _ => None,
+        let key = *key;
+        if key < self.base {
+            return self.older.get_mut(&key).map(Box::as_mut);
+        }
+        let offset = key - self.base;
+        if offset >= self.window.len() as u64 {
+            return None;
+        }
+        match &mut self.window[offset as usize] {
+            Some(chunk) => Some(chunk),
+            None => None,
         }
     }
 
@@ -668,8 +698,12 @@ impl ChunkTable {
         };
         let index = usize::try_from(offset).expect("chunk number fits the address space");
         if self.window.len() <= index {
-            self.window.resize_with(index + 1, || None);
+            let capacity = (index + 1)
+                .max(self.window.len() * 2)
+                .max(CHUNK_WINDOW_SLACK);
+            self.resize_window(capacity);
         }
+        self.window_len = self.window_len.max(index + 1);
         let slot = &mut self.window[index];
         if slot.is_none() {
             self.window_live += 1;
@@ -695,15 +729,15 @@ impl ChunkTable {
     }
 
     /// Move the window's leading entries out while it is sparse: an empty
-    /// entry is dropped, a live chunk moves to `older`. One drain per
-    /// compaction, and a compaction runs only once the empty entries exceed
-    /// the live ones, so its cost is amortised over the releases that made
-    /// the window sparse.
+    /// entry is dropped, a live chunk moves to `older`. One in-place
+    /// rotation per compaction, and a compaction runs only once the empty
+    /// entries exceed the live ones, so its cost is amortised over the
+    /// releases that made the window sparse.
     fn compact_window(&mut self) {
-        if self.window.len() <= 2 * self.window_live + CHUNK_WINDOW_SLACK {
+        if self.window_len <= 2 * self.window_live + CHUNK_WINDOW_SLACK {
             return;
         }
-        let len = self.window.len();
+        let len = self.window_len;
         let mut leading = 0;
         let mut live_left = self.window_live;
         while len - leading > 2 * live_left + CHUNK_WINDOW_SLACK / 2 {
@@ -713,16 +747,30 @@ impl ChunkTable {
             }
             leading += 1;
         }
-        self.window.drain(..leading);
+        // The leading entries are all empty now: rotating them to the end
+        // turns them into headroom.
+        self.window[..len].rotate_left(leading);
+        self.window_len = len - leading;
         self.base += leading as u64;
         self.window_live = live_left;
+        let wanted = 2 * self.window_len.max(CHUNK_WINDOW_SLACK);
+        if self.window.len() > 2 * wanted {
+            self.resize_window(wanted);
+        }
+    }
+
+    /// Reallocate the window to `capacity` entries, keeping the ones in use.
+    fn resize_window(&mut self, capacity: usize) {
+        let mut resized = std::mem::take(&mut self.window).into_vec();
+        resized.resize_with(capacity, || None);
+        self.window = resized.into_boxed_slice();
     }
 
     /// Live chunk numbers in ascending order.
     fn keys(&self) -> impl Iterator<Item = u64> + '_ {
         let base = self.base;
         self.older.keys().copied().chain(
-            self.window
+            self.window[..self.window_len]
                 .iter()
                 .enumerate()
                 .filter(|(_, chunk)| chunk.is_some())
@@ -731,20 +779,28 @@ impl ChunkTable {
     }
 
     fn values(&self) -> impl Iterator<Item = &Chunk> {
-        self.older
-            .values()
-            .map(Box::as_ref)
-            .chain(self.window.iter().filter_map(Option::as_deref))
+        self.older.values().map(Box::as_ref).chain(
+            self.window[..self.window_len]
+                .iter()
+                .filter_map(Option::as_deref),
+        )
     }
 
     fn len(&self) -> usize {
         self.older.len() + self.window_live
     }
 
-    /// Entries the table holds, live or empty: what it costs to keep.
+    /// Entries the table holds, live, empty or headroom: what it costs to
+    /// keep.
     #[cfg(test)]
     fn held_entries(&self) -> usize {
         self.older.len() + self.window.len()
+    }
+
+    /// Entries the table addresses, live or empty, headroom excluded.
+    #[cfg(test)]
+    fn entries_in_use(&self) -> usize {
+        self.older.len() + self.window_len
     }
 
     #[cfg(test)]
@@ -966,6 +1022,7 @@ impl Drop for ArenaInner {
 }
 
 impl ArenaInner {
+    #[inline(always)]
     fn slot(&self, id: SemanticNodeId) -> Slot<'_> {
         if id.0 >= self.next_id {
             return Slot::Unallocated;
@@ -986,6 +1043,7 @@ impl ArenaInner {
         &mut self,
         payload: NodeData,
         scope: NodeScopeId,
+        fingerprint: u64,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> SemanticNodeId {
         let id = SemanticNodeId(self.next_id);
@@ -1003,6 +1061,7 @@ impl ArenaInner {
         let index = (id.0 & CHUNK_MASK) as usize;
         chunk.nodes[index] = Some(payload);
         chunk.scopes[index] = Some(scope);
+        chunk.fingerprints[index] = fingerprint;
         chunk.live += 1;
         self.live += 1;
         id
@@ -1574,8 +1633,11 @@ impl NodeArenaCore {
         ids: &[SemanticNodeId],
     ) -> Result<(), crate::semantic_query::QueryError> {
         let mut inner = self.inner.write();
-        for id in ids {
-            match inner.slot(*id) {
+        // Index loops: every rooted delivery retains here, and a debug
+        // build runs them without an iterator call per id.
+        let mut index = 0;
+        while index < ids.len() {
+            match inner.slot(ids[index]) {
                 Slot::Live(..) => {}
                 Slot::Released => {
                     return Err(crate::semantic_query::QueryError::StaleSemanticOperand)
@@ -1584,10 +1646,16 @@ impl NodeArenaCore {
                     return Err(crate::semantic_query::QueryError::ForeignSemanticOperand)
                 }
             }
+            index += 1;
         }
-        for id in ids {
-            inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
-                [(id.0 & CHUNK_MASK) as usize] += 1;
+        let mut index = 0;
+        while index < ids.len() {
+            let id = ids[index];
+            match inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) {
+                Some(chunk) => chunk.owners[(id.0 & CHUNK_MASK) as usize] += 1,
+                None => unreachable!("a live slot's chunk is held"),
+            }
+            index += 1;
         }
         Ok(())
     }
@@ -1605,41 +1673,29 @@ impl NodeArenaCore {
     }
 
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
-        let mut pending = SmallVec::<[SemanticNodeId; 16]>::from_slice(ids);
-        let mut retired = SmallVec::<[(SemanticNodeId, u64, bool); 4]>::new();
+        // Most releases only drop a count; the stack of dying nodes' children
+        // and the retired list allocate only once a node reaches zero.
+        let mut pending: Vec<SemanticNodeId> = Vec::new();
+        let mut retired: Vec<(SemanticNodeId, u64, bool)> = Vec::new();
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeRootRelease {
             blocked: self.inner.try_write().is_none(),
         });
         let mut inner = self.inner.write();
-        while let Some(id) = pending.pop() {
-            let Some(chunk) = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) else {
-                continue;
-            };
-            let index = (id.0 & CHUNK_MASK) as usize;
-            if chunk.nodes[index].is_none() {
-                continue;
+        // Last id first, each dying node's descendants before the next id:
+        // the order of one stack seeded with `ids`.
+        for &id in ids.iter().rev() {
+            Self::release_root_locked(&mut inner, id, &mut pending, &mut retired);
+            while let Some(child) = pending.pop() {
+                Self::release_root_locked(&mut inner, child, &mut pending, &mut retired);
             }
-            assert!(chunk.owners[index] > 0, "live root released twice");
-            chunk.owners[index] -= 1;
-            if chunk.owners[index] != 0 || chunk.permanent[index] {
-                continue;
-            }
-            let data = chunk.nodes[index].as_ref().unwrap();
-            data.for_each_retained_child(|child| {
-                if child.0 < UNALLOCATABLE_ID_FLOOR {
-                    pending.push(child);
-                }
-            });
-            let fingerprint = structural_fingerprint(data, chunk.scopes[index].as_ref().unwrap());
-            let tracked = inner
-                .release(id)
-                .expect("the slot was live under the held lock");
-            retired.push((id, fingerprint, tracked));
         }
         drop(inner);
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::AfterRootRelease);
+        if retired.is_empty() {
+            return;
+        }
         // Intern always confirms slot liveness under `inner` after a weak
         // upgrade. Removing the index after the tombstone cannot resurrect it.
         let mut logged = Vec::new();
@@ -1664,30 +1720,81 @@ impl NodeArenaCore {
             }
         }
     }
+
+    /// Drop one count of `id` under the held arena lock. A node whose last
+    /// count goes, and is not permanent, is released: its allocatable
+    /// children go on `pending` and it joins `retired` with its
+    /// fingerprint and whether a sidecar tracks it.
+    fn release_root_locked(
+        inner: &mut ArenaInner,
+        id: SemanticNodeId,
+        pending: &mut Vec<SemanticNodeId>,
+        retired: &mut Vec<(SemanticNodeId, u64, bool)>,
+    ) {
+        let Some(chunk) = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) else {
+            return;
+        };
+        let index = (id.0 & CHUNK_MASK) as usize;
+        if chunk.nodes[index].is_none() {
+            return;
+        }
+        assert!(chunk.owners[index] > 0, "live root released twice");
+        chunk.owners[index] -= 1;
+        if chunk.owners[index] != 0 || chunk.permanent[index] {
+            return;
+        }
+        let data = chunk.nodes[index].as_ref().unwrap();
+        data.for_each_retained_child(|child| {
+            if child.0 < UNALLOCATABLE_ID_FLOOR {
+                pending.push(child);
+            }
+        });
+        let fingerprint = chunk.fingerprints[index];
+        let tracked = inner
+            .release(id)
+            .expect("the slot was live under the held lock");
+        retired.push((id, fingerprint, tracked));
+    }
 }
 
 impl NodeArena {
     /// Intern `data` with the `Global` scope tag. Helper intermediates and
     /// purely structural nodes use this path — most existing interning
     /// sites fall into this bucket.
+    #[cfg(test)]
     pub(super) fn push(&self, data: SemanticNodeData) -> SemanticNodeId {
-        self.push_with_scope(data, NodeScopeId::Global)
+        self.push_with_scope::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            data,
+            NodeScopeId::Global,
+        )
     }
 
     /// Intern `data` and record `scope` in the origin sidecar. Called by
     /// builders that know the declaration origin — `build_resolve_decl`,
     /// `build_typeof`, `build_instantiate`, etc.
-    pub(super) fn push_with_scope(
+    ///
+    /// `M` is the capture execution of the unit interning: only a captured
+    /// one times or counts its shard-lock acquisitions.
+    pub(super) fn push_with_scope<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &crate::request_observers::CaptureTargets,
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> SemanticNodeId {
-        let id = self.push_impl(data, scope);
+        let _ = observation;
+        let id = self.push_impl::<M>(observation, data, scope);
         super::node_roots::NodeRootScope::capture_constructed(&self.core, id);
         id
     }
 
-    fn push_impl(&self, mut data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
+    fn push_impl<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &crate::request_observers::CaptureTargets,
+        mut data: SemanticNodeData,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
+        let _ = observation;
         // TS literal-type identity boundary: the checker interns numeric
         // literal types by SameValueZero, so `-0` IS the literal type `0`
         // (verified against the pinned checker: `0 & -0` is `0`, `0 | -0`
@@ -1707,7 +1814,7 @@ impl NodeArena {
         // routing and the bucket key derive from this single hash of the
         // payload; the map probe then only hashes a `u64`.
         let fingerprint = structural_fingerprint(&data, &scope);
-        self.intern_with_fingerprint(data, scope, fingerprint)
+        self.intern_with_fingerprint::<M>(observation, data, scope, fingerprint)
     }
 
     /// Core intern path. `fingerprint` narrows to a shard + bucket; the
@@ -1715,34 +1822,68 @@ impl NodeArena {
     /// authority. Split out from [`push_impl`] so tests can force a
     /// fingerprint — driving two distinct payloads into one bucket — and
     /// assert the content-`Eq` split (collision safety).
-    fn intern_with_fingerprint(
+    fn intern_with_fingerprint<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &crate::request_observers::CaptureTargets,
         data: SemanticNodeData,
         scope: NodeScopeId,
         fingerprint: u64,
     ) -> SemanticNodeId {
-        match self.try_intern_with_fingerprint(data, scope.clone(), fingerprint) {
+        let _ = observation;
+        match self.try_intern_with_fingerprint_in::<M>(
+            observation,
+            data,
+            scope.clone(),
+            fingerprint,
+        ) {
             Ok(id) => id,
-            Err(error) => self.push_impl(SemanticNodeData::Opaque(error), scope),
+            Err(error) => self.push_impl::<M>(observation, SemanticNodeData::Opaque(error), scope),
         }
     }
 
+    /// Explicit bucket selection for arena collision/release fixtures.
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "Fixture seam for explicit fingerprint configurations"
+    )]
     fn try_intern_with_fingerprint(
         &self,
         data: SemanticNodeData,
         scope: NodeScopeId,
         fingerprint: u64,
     ) -> Result<SemanticNodeId, crate::semantic_query::QueryError> {
+        self.try_intern_with_fingerprint_in::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            data,
+            scope,
+            fingerprint,
+        )
+    }
+
+    fn try_intern_with_fingerprint_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &crate::request_observers::CaptureTargets,
+        data: SemanticNodeData,
+        scope: NodeScopeId,
+        fingerprint: u64,
+    ) -> Result<SemanticNodeId, crate::semantic_query::QueryError> {
+        let _ = observation;
         // Capture the variant bucket before moving `data` so the
         // contention instrumentation can bucket per-variant pushes.
-        let discriminant = data.node_tag().bucket_index();
+        #[cfg(feature = "semantic-observe")]
+        let discriminant = if super::records_telemetry::<M>() {
+            data.node_tag().bucket_index()
+        } else {
+            0
+        };
         let shard_idx = (fingerprint & SHARD_MASK) as usize;
 
         // Sharded dedup hot path. The fingerprint routes to its shard and
         // the bucket scan checks for an existing id; the miss path acquires
         // `inner.write()` briefly to push the new slot.
         let (id, is_miss) = {
-            let timing_on = verter_execution::request_context::current_timing_enabled();
+            let timing_on = crate::request_observers::capture_timing_enabled::<M>(observation);
             // Fast path: shard-hit. Shard Mutex is short-lived; parallel
             // across shards.
             let lock_start = if timing_on {
@@ -1754,10 +1895,13 @@ impl NodeArena {
             let lock_wait = lock_start
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
-            crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
+            crate::request_observers::record_node_arena_lock_acquisition::<M>(
+                observation,
+                lock_wait,
+            );
             #[cfg(test)]
             self.race_event(ArenaRaceEvent::BeforeDedupLookup);
-            let mut inner = self.write_for_intern();
+            let mut inner = self.write_for_intern::<M>();
             let hit = shard
                 .lookup(fingerprint, &data, &scope, |id| {
                     matches!(inner.slot(id), Slot::Live(..))
@@ -1787,8 +1931,11 @@ impl NodeArena {
                 let lock_wait = lock_start
                     .map(|t| t.elapsed())
                     .unwrap_or(std::time::Duration::ZERO);
-                crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
-                let mut inner = self.write_for_intern();
+                crate::request_observers::record_node_arena_lock_acquisition::<M>(
+                    observation,
+                    lock_wait,
+                );
+                let mut inner = self.write_for_intern::<M>();
                 if let Some(existing) = shard.lookup(fingerprint, &data, &scope, |id| {
                     matches!(inner.slot(id), Slot::Live(..))
                 }) {
@@ -1832,8 +1979,12 @@ impl NodeArena {
                             .unwrap()
                             .owners[(child.0 & CHUNK_MASK) as usize] += 1;
                     }
-                    let id =
-                        inner.allocate(payload.clone(), scope.clone(), self.retention_account());
+                    let id = inner.allocate(
+                        payload.clone(),
+                        scope.clone(),
+                        fingerprint,
+                        self.retention_account(),
+                    );
                     let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
                     let index = (id.0 & CHUNK_MASK) as usize;
                     chunk.owners[index] = 1;
@@ -1850,26 +2001,41 @@ impl NodeArena {
             }
         };
 
-        if let Some(prov) = self.provenance.as_ref() {
-            use std::sync::atomic::Ordering::Relaxed;
-            prov.node_arena_pushes.fetch_add(1, Relaxed);
-            if is_miss {
-                prov.node_arena_intern_miss.fetch_add(1, Relaxed);
+        #[cfg(feature = "semantic-observe")]
+        if super::records_telemetry::<M>() {
+            if let Some(prov) = self.provenance.as_ref() {
+                use std::sync::atomic::Ordering::Relaxed;
+                prov.node_arena_pushes.fetch_add(1, Relaxed);
+                if is_miss {
+                    prov.node_arena_intern_miss.fetch_add(1, Relaxed);
+                }
+                // In range by construction: the array is sized to the tag bound.
+                prov.node_arena_pushes_per_discriminant[discriminant].fetch_add(1, Relaxed);
             }
-            // In range by construction: the array is sized to the tag bound.
-            prov.node_arena_pushes_per_discriminant[discriminant].fetch_add(1, Relaxed);
         }
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = is_miss;
 
         Ok(id)
     }
 
     /// Record acquisition time on every intern write, including dedup hits
-    /// and writes that subsequently refuse an invalid operand.
-    fn write_for_intern(&self) -> parking_lot::RwLockWriteGuard<'_, ArenaInner> {
+    /// and writes that subsequently refuse an invalid operand. The clock is
+    /// read only under `semantic-observe`.
+    fn write_for_intern<M: verter_audit::observe::ObserveExec>(
+        &self,
+    ) -> parking_lot::RwLockWriteGuard<'_, ArenaInner> {
+        let _ = std::marker::PhantomData::<M>;
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeInnerWrite);
-        let start = self.provenance.as_ref().map(|prov| (prov, Instant::now()));
+        #[cfg(feature = "semantic-observe")]
+        let start = if super::records_telemetry::<M>() {
+            self.provenance.as_ref().map(|prov| (prov, Instant::now()))
+        } else {
+            None
+        };
         let inner = self.inner.write();
+        #[cfg(feature = "semantic-observe")]
         if let Some((prov, start)) = start {
             prov.node_arena_inner_write_wait_ns.fetch_add(
                 start.elapsed().as_nanos() as u64,
@@ -1879,11 +2045,13 @@ impl NodeArena {
         inner
     }
 
-    pub(super) fn try_intern_owned(
+    pub(super) fn try_intern_owned<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &crate::request_observers::CaptureTargets,
         mut data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> Result<super::node_roots::NodeRoot, crate::semantic_query::QueryError> {
+        let _ = observation;
         if let SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) = &mut data
         {
             if *n == 0.0 {
@@ -1891,7 +2059,7 @@ impl NodeArena {
             }
         }
         let fingerprint = structural_fingerprint(&data, &scope);
-        let id = self.try_intern_with_fingerprint(data, scope, fingerprint)?;
+        let id = self.try_intern_with_fingerprint_in::<M>(observation, data, scope, fingerprint)?;
         Ok(super::node_roots::NodeRoot::adopt(
             Arc::clone(&self.core),
             id,
@@ -1906,7 +2074,11 @@ impl NodeArena {
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> super::node_roots::NodeRoot {
-        let id = self.push_impl(data, scope);
+        let id = self.push_impl::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            data,
+            scope,
+        );
         super::node_roots::NodeRoot::adopt(Arc::clone(&self.core), id)
     }
 
@@ -1984,8 +2156,13 @@ impl NodeArena {
     /// Touches every shard mutex once. Each shard's retain walk is
     /// O(shard size). When `node_arena_lock_acquisitions` is wired
     /// into the audit context, each shard lock acquisition is recorded.
-    pub(super) fn invalidate_for_canonical(&self, canonical_id: &str) {
-        let timing_on = verter_execution::request_context::current_timing_enabled();
+    pub(super) fn invalidate_for_canonical<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &crate::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) {
+        let _ = observation;
+        let timing_on = crate::request_observers::capture_timing_enabled::<M>(observation);
         for shard in self.shards.iter() {
             let lock_start = if timing_on {
                 Some(Instant::now())
@@ -1996,7 +2173,10 @@ impl NodeArena {
             let lock_wait = lock_start
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
-            crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
+            crate::request_observers::record_node_arena_lock_acquisition::<M>(
+                observation,
+                lock_wait,
+            );
             let mut bucket_delta = 0isize;
             shard.index.retain(|_fingerprint, bucket| {
                 let before = bucket_heap_bytes(bucket);
@@ -2388,6 +2568,45 @@ mod arena_intern_tests {
         );
     }
 
+    /// A released node leaves the dedup bucket it was interned into, even
+    /// when that bucket's key is not its payload's structural fingerprint:
+    /// the release uses the fingerprint recorded at intern rather than
+    /// hashing the payload again, so no stale candidate survives it.
+    #[test]
+    fn released_node_leaves_the_bucket_it_was_interned_into() {
+        let arena = NodeArena::default();
+        let payload =
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("forced".into()));
+        // The fingerprint hasher is keyed per process, so a fixed forced
+        // fingerprint shares the payload's shard in some runs. Flipping the
+        // lowest shard bit of the payload's own fingerprint never does.
+        let forced_fp = structural_fingerprint(&payload, &NodeScopeId::Global) ^ 1;
+        assert_ne!(
+            forced_fp & SHARD_MASK,
+            structural_fingerprint(&payload, &NodeScopeId::Global) & SHARD_MASK,
+            "the forced bucket must sit in another shard than the payload's own"
+        );
+        let id = arena
+            .try_intern_with_fingerprint(payload, NodeScopeId::Global, forced_fp)
+            .expect("a fresh literal interns");
+        let holds_candidate = |arena: &NodeArena| {
+            arena.shards.iter().any(|shard| {
+                shard
+                    .lock()
+                    .index
+                    .values()
+                    .any(|bucket| bucket.iter().any(|(_, _, candidate)| *candidate == id))
+            })
+        };
+        assert!(holds_candidate(&arena));
+        arena.release_roots(&[id]);
+        assert!(!arena.is_live(id));
+        assert!(
+            !holds_candidate(&arena),
+            "the released node's candidate must leave its interned bucket"
+        );
+    }
+
     /// Collision-bucket authority. Two structurally DISTINCT payloads,
     /// forced into ONE fingerprint bucket via the intern seam, must NOT
     /// alias: the fingerprint only narrows, the per-bucket content `Eq`
@@ -2400,8 +2619,18 @@ mod arena_intern_tests {
         let b = SemanticNodeData::Primitive(PrimitiveKind::Number);
         let forced_fp = 0x00C0_FFEE_u64;
 
-        let id_a = arena.intern_with_fingerprint(a.clone(), NodeScopeId::Global, forced_fp);
-        let id_b = arena.intern_with_fingerprint(b.clone(), NodeScopeId::Global, forced_fp);
+        let id_a = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            a.clone(),
+            NodeScopeId::Global,
+            forced_fp,
+        );
+        let id_b = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            b.clone(),
+            NodeScopeId::Global,
+            forced_fp,
+        );
         assert_ne!(
             id_a, id_b,
             "distinct payloads sharing one fingerprint bucket must get distinct ids (no aliasing)",
@@ -2409,8 +2638,18 @@ mod arena_intern_tests {
 
         // Re-intern of each SAME payload into the SAME (collided) bucket
         // still dedups to its own id.
-        let id_a2 = arena.intern_with_fingerprint(a, NodeScopeId::Global, forced_fp);
-        let id_b2 = arena.intern_with_fingerprint(b, NodeScopeId::Global, forced_fp);
+        let id_a2 = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            a,
+            NodeScopeId::Global,
+            forced_fp,
+        );
+        let id_b2 = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            b,
+            NodeScopeId::Global,
+            forced_fp,
+        );
         assert_eq!(id_a, id_a2, "same payload in a collided bucket must dedup");
         assert_eq!(id_b, id_b2, "same payload in a collided bucket must dedup");
 
@@ -2435,9 +2674,18 @@ mod arena_intern_tests {
         let payload = SemanticNodeData::Primitive(PrimitiveKind::Boolean);
         let forced_fp = 0x0000_ABCD_u64;
 
-        let id_global =
-            arena.intern_with_fingerprint(payload.clone(), NodeScopeId::Global, forced_fp);
-        let id_file = arena.intern_with_fingerprint(payload, file_scope("/w/a.ts"), forced_fp);
+        let id_global = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            payload.clone(),
+            NodeScopeId::Global,
+            forced_fp,
+        );
+        let id_file = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            payload,
+            file_scope("/w/a.ts"),
+            forced_fp,
+        );
         assert_ne!(
             id_global, id_file,
             "same payload at different scopes in one bucket must get distinct ids (scope is identity)",

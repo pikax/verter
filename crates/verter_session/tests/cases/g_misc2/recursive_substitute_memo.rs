@@ -228,6 +228,8 @@ fn install_audit_ctx() -> (Arc<RequestContext>, RequestContextGuard) {
     (ctx, guard)
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn recursive_substitution_repeated_triples_hit_memo() {
     let host = make_host(NESTED_K_FIXTURE);
@@ -292,6 +294,8 @@ fn recursive_substitution_repeated_triples_hit_memo() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn recursive_substitution_unique_triples_do_not_false_hit() {
     let host = make_host(SINGLE_K_FIXTURE);

@@ -7,6 +7,9 @@ mod collect;
 pub mod constraints;
 pub mod fixation;
 pub mod session;
+mod tuple;
+
+pub(in crate::project_semantic_dispatch) use tuple::{slice_occurrence, VariadicElementFacts};
 
 pub use fixation::{winning_candidates, WinningCandidates};
 
@@ -18,6 +21,8 @@ use crate::semantic_query::{
 use std::sync::Arc;
 /// Fixed inference demands enter the same concrete query driver.
 pub(in crate::project_semantic_dispatch) trait InferenceDemandDriver {
+    /// The capture execution the driver's dispatcher is compiled for.
+    type Observe: verter_audit::observe::ObserveExec;
     fn call_relation(
         &self,
         source: SemanticNodeId,
@@ -76,6 +81,7 @@ pub(in crate::project_semantic_dispatch) trait InferenceDemandDriver {
 impl<C: crate::resolver_core::ResolverCapabilities> InferenceDemandDriver
     for ProjectSemanticDispatch<'_, C>
 {
+    type Observe = C::Observe;
     fn call_relation(
         &self,
         source: SemanticNodeId,
@@ -165,14 +171,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> InferenceDemandDriver
         ProjectSemanticDispatch::substitute_semantic_type_param(self, node, parameter_node, arg)
     }
     fn nodes_provably_equal(&self, a: SemanticNodeId, b: SemanticNodeId) -> bool {
-        crate::semantic_query::stable_key::provably_equal(self.graph(), a, b)
+        crate::semantic_query::stable_key::provably_equal(self.graph().store(), a, b)
     }
 }
 /// Selected arena/source authority; no whole transaction, query lease, or
 /// ambient resolver can be obtained through this view.
 pub(in crate::project_semantic_dispatch) struct InferenceTxn<'a, D: InferenceDemandDriver> {
     driver: &'a D,
-    arena: super::arena_ops::ArenaOps<'a>,
+    arena: super::arena_ops::ArenaOps<'a, D::Observe>,
     source: &'a dyn crate::resolver_core::request_ports::OwnedLowering,
 }
 impl<'b, 'a, C: crate::resolver_core::ResolverCapabilities>
@@ -187,7 +193,7 @@ impl<'b, 'a, C: crate::resolver_core::ResolverCapabilities>
     }
 }
 impl<D: InferenceDemandDriver> InferenceTxn<'_, D> {
-    fn graph(&self) -> &super::arena_ops::ArenaOps<'_> {
+    fn graph(&self) -> &super::arena_ops::ArenaOps<'_, D::Observe> {
         &self.arena
     }
     pub(in crate::project_semantic_dispatch) fn call_relation(

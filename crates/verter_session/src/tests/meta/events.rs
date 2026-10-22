@@ -64,6 +64,8 @@ defineProps<{ ui: typeof theme }>()
 ///
 /// CONTROL: a resolvable literal event name publishes, stays COMPLETE, and
 /// WARMS.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn an_unresolvable_emit_event_name_never_publishes_complete_or_warm() {

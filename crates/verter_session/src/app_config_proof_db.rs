@@ -47,7 +47,7 @@
 //! proof's `fact_dep_signature` so an edit to the interface
 //! invalidates the proof.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -128,15 +128,17 @@ pub struct AppConfigNoOverrideProofEntry {
 /// [`crate::project_type_store::ProjectTypeStore`].
 pub struct AppConfigNoOverrideProofDb {
     entries: DashMap<AppConfigNoOverrideProofKey, Arc<AppConfigNoOverrideProofEntry>>,
-    live_counter: Arc<AtomicU64>,
+    live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
 }
 
 impl AppConfigNoOverrideProofDb {
     pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
+        Self::with_counter(verter_type_engine::cache_runtime::OccupancyCounter::new())
     }
 
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counter(
+        live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             live_counter,
@@ -238,10 +240,7 @@ impl AppConfigNoOverrideProofDb {
     pub fn invalidate_all(&self) {
         let n = self.entries.len() as u64;
         self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
+        self.live_counter.saturating_sub(n);
     }
 
     pub fn live_count(&self) -> usize {

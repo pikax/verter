@@ -46,7 +46,7 @@ use super::{
 pub(super) fn process_companion_for_tsx<'alloc>(
     companion: &RootNodeScript,
     source: &str,
-    ct: &mut CodeTransform<'_>,
+    ct: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
     out: &mut CodeGenOutput<'alloc>,
     bindings: &mut FxHashMap<&'alloc str, BindingType>,
     alloc: &'alloc Allocator,

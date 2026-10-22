@@ -11,7 +11,7 @@ fn unalias_one_hop<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &super::ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> SemanticNodeId {
-    match super::node_data_for(dispatch.graph(), node).as_deref() {
+    match super::node_data_for(dispatch.graph().store(), node).as_deref() {
         Some(SemanticNodeData::Alias(target)) => *target,
         _ => node,
     }
@@ -61,7 +61,7 @@ pub fn walk_reference_carriers<C: crate::resolver_core::ResolverCapabilities>(
         if !visited.insert(node) {
             continue;
         }
-        let Some(data) = super::node_data_for(dispatch.graph(), node) else {
+        let Some(data) = super::node_data_for(dispatch.graph().store(), node) else {
             continue;
         };
         if let Some((name, args)) = reference_carrier_head(dispatch, node) {
@@ -147,7 +147,7 @@ pub fn reference_carrier_head<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<(String, Vec<SemanticNodeId>)> {
-    let data = super::node_data_for(dispatch.graph(), unalias_one_hop(dispatch, node))?;
+    let data = super::node_data_for(dispatch.graph().store(), unalias_one_hop(dispatch, node))?;
     if let Some((name, _scope)) = data.bare_ref_head() {
         return Some((name.to_string(), data.carrier_type_args().to_vec()));
     }

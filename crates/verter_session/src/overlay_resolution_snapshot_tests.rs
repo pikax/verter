@@ -80,7 +80,7 @@ fn with_session_under<T>(
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(host, &view);
-    let ctx = SessionResolverContext::new(
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         host,
         &view,
         &store_view,
@@ -120,11 +120,12 @@ fn resolve_through_host(
     name: &str,
 ) -> Option<(String, String)> {
     let store_view = host.resolver_store_view_read().into_owned_view();
-    let ctx = crate::resolver_core::HostResolverContext::new(
-        host,
-        &store_view,
-        Arc::new(CanonicalCompletionOverlay::new()),
-    );
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            Arc::new(CanonicalCompletionOverlay::new()),
+        );
     ctx.resolve_named_type_export_target_shallow(barrel, name)
 }
 
@@ -145,15 +146,18 @@ fn type_route_through_session(
 /// host's own context.
 fn type_route_through_host(host: &Arc<VerterHost>, owner: &str, specifier: &str) -> Option<String> {
     let store_view = host.resolver_store_view_read().into_owned_view();
-    let ctx = crate::resolver_core::HostResolverContext::new(
-        host,
-        &store_view,
-        Arc::new(CanonicalCompletionOverlay::new()),
-    );
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            Arc::new(CanonicalCompletionOverlay::new()),
+        );
     ctx.resolve_type_dependency_canonical(owner, specifier)
 }
 
 /// How many times the workspace's resolution producer has run.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn producer_runs(host: &VerterHost) -> u64 {
     host.ws()
         .vfs_provenance_snapshot()
@@ -247,9 +251,7 @@ fn the_overlay_type_route_normalizes_an_esm_fallback_like_the_workspace_one() {
     );
     let workspace_route = match host.resolve_type_dependency_canonical(owner, "runtimedep") {
         verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
-        verter_workspace::ResolutionPublication::Refused(refusal) => {
-            panic!("precondition: the workspace type-route admits: {refusal:?}")
-        }
+        other => panic!("precondition: the workspace type-route admits: {other:?}"),
     };
     assert_eq!(
         workspace_route.as_deref(),
@@ -339,6 +341,8 @@ fn every_view_answers_the_same_whatever_was_read_first() {
 /// One warm session walked through create, body edit, export change, revert
 /// and reveal answers every step exactly as a cold host does — and a body
 /// edit that changes no resolution fact runs no resolver.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn create_edit_revert_and_reveal_answer_as_cold() {
     let steps: [&[(&str, &str)]; 6] = [
@@ -496,7 +500,7 @@ fn a_pinned_session_request_outlives_overlay_churn() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &pinned,
@@ -536,6 +540,8 @@ fn a_pinned_session_request_outlives_overlay_churn() {
 /// the workspace's answers; and the overlay-side work — root construction,
 /// probes, manifest parses — is counted apart so a relocated cost cannot
 /// pass for an eliminated one.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn repeated_overlay_requests_run_each_resolution_producer_once() {
     const DEPS: usize = 6;
@@ -619,6 +625,8 @@ fn repeated_overlay_requests_run_each_resolution_producer_once() {
 /// answer an unresolved-wildcard route from the route cache, validated
 /// against each request's own effective world — no resolver run, no
 /// witness rebuilt, no witness replayed.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn repeated_session_route_reads_rebuild_nothing() {
     use crate::host_manage::import_route_witness::{
@@ -737,7 +745,7 @@ fn a_thousand_overlay_sessions_open_edit_and_close_to_a_plateau() {
                     .resolver_store_view_read()
                     .into_owned_view()
                     .with_session_overlay(project.host(), view);
-                let ctx = SessionResolverContext::new(
+                let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
                     project.host(),
                     view,
                     &store_view,

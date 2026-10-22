@@ -517,6 +517,45 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         ))
     }
 
+    /// Whether the checker's weak-type rule (`isRelatedTo`) decides this
+    /// failure: a target whose properties are all optional, with no
+    /// signatures, and a source with apparent members of its own (a
+    /// primitive, an enum member, an array or a tuple) report TS2559 where
+    /// they share no property with it — as the diagnostic itself, or as the
+    /// chain line of a union member or property the failure descends into.
+    /// Those apparent members are not modelled, so the diagnostic is not
+    /// reported rather than reported with a head or chain line the checker
+    /// does not print.
+    fn weak_target_decides(&self, source: SemanticNodeId, target: SemanticNodeId) -> Option<bool> {
+        let Some(target_view) = self.object_view(target) else {
+            return Some(false);
+        };
+        let members = target_view.positive_members();
+        if members.is_empty()
+            || !members.iter().all(|member| member.optional)
+            || !target_view.call_signatures().is_empty()
+            || !target_view.construct_signatures().is_empty()
+            || !target_view.index_signatures().is_empty()
+        {
+            return Some(false);
+        }
+        Some(matches!(
+            self.settled_data(source)?.as_ref(),
+            SemanticNodeData::Primitive(
+                PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol,
+            ) | SemanticNodeData::Literal(_)
+                | SemanticNodeData::EnumLiteral(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::TypeOfNominal(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+        ))
+    }
+
     /// Push the chain lines explaining why `source` fails `target`, from
     /// `depth`: the pair's own line when `own_line` (a pair below the
     /// diagnostic's own message), then its failed step's.
@@ -530,6 +569,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         steps: &mut u32,
     ) -> Option<()> {
         *steps = steps.checked_sub(1)?;
+        if self.weak_target_decides(source, target)? {
+            return None;
+        }
         let step = self.failed_step(source, target)?;
         let push = |chain: &mut Vec<CheckerDiagnosticChainLine>, depth, text: String| {
             chain.push(CheckerDiagnosticChainLine::new(
@@ -800,9 +842,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             for target_member in target_view.positive_members() {
                 let Some(source_member) = source_view.as_ref().and_then(|view| {
-                    view.positive_members()
-                        .iter()
-                        .find(|member| member.key == target_member.key)
+                    view.positive_members().iter().find(|member| {
+                        super::context::same_property_key(&member.key, &target_member.key)
+                    })
                 }) else {
                     continue;
                 };
@@ -1012,7 +1054,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         ordered.sort_by_key(|&node| {
-            crate::semantic_query::display::checker_relation_order_rank(graph, node)
+            crate::semantic_query::display::checker_relation_order_rank(graph.store(), node)
         });
         ordered
     }
@@ -1044,17 +1086,30 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 crate::semantic_query::ProjectionMode::Navigate,
             );
         match self.normalize_node_for_structural_fact_demand(node, transit) {
-            super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
-                self.graph().node_data(node)
-            }
+            super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => self
+                .graph()
+                .node_data(self.regularized_empty_object_program(node)),
             _ => None,
         }
     }
 
-    /// `node`'s object surface, when it is one.
+    /// `node`'s object surface, when it is one. A mapped type over a closed
+    /// key domain is the object its keys map to, the object the relation
+    /// decides against.
     fn object_view(&self, node: SemanticNodeId) -> Option<SurfaceView> {
         match self.structural_data(node)?.as_ref() {
             SemanticNodeData::Object(view) => Some(view.clone()),
+            SemanticNodeData::Mapped { source, mapper } => {
+                let object = self.mapped_object_for_relation(
+                    *source,
+                    mapper,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )?;
+                match self.graph().node_data(object)?.as_ref() {
+                    SemanticNodeData::Object(view) => Some(view.clone()),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -1128,9 +1183,11 @@ fn member_named<'v>(
     view: &'v SurfaceView,
     name: &str,
 ) -> Option<&'v crate::semantic_query::SurfaceMember> {
-    view.positive_members()
-        .iter()
-        .find(|member| matches!(&member.key, AuthoredPropertyKey::String(key) if **key == *name))
+    view.positive_members().iter().find(|member| {
+        member.key.as_known().is_some_and(|known| {
+            known.element_access_collides(&verter_type_expr::PropertyKey::from(name))
+        })
+    })
 }
 
 /// The message of a run of incompatible properties and returns

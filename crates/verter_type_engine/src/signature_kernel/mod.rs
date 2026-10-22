@@ -29,8 +29,9 @@ pub use discovery::{
 pub use lifetime::{SignatureEpochLease, SignatureStore, StoreError, EPOCH_RECORD_CAP};
 #[allow(unused_imports)]
 pub use positional::{
-    MinArityFlags, PositionalMode, PositionalShape, ProjectedElement, ProjectedKind,
-    ProjectedTuple, SlotTypeFacts, TypeAt,
+    tuple_inference_plan, MinArityFlags, PositionalMode, PositionalShape, ProjectedElement,
+    ProjectedKind, ProjectedTuple, SlotTypeFacts, TupleElementKind, TupleInferenceStep, TypeAt,
+    VariadicArityFacts,
 };
 #[allow(unused_imports)]
 pub use provenance::{

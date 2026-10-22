@@ -68,6 +68,7 @@ pub mod locator_identity;
 pub mod loop5_instrumentation;
 pub mod mapper_binder_registry;
 pub mod project_semantic_dispatch;
+pub mod projection;
 pub mod request_budget;
 pub mod request_context;
 pub mod request_footprint;

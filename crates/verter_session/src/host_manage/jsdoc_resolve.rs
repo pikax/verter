@@ -40,24 +40,34 @@ use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 /// Declaration-only uses carry `()`; semantic callbacks require the caller's
 /// existing facade and captured private view at the type level.
-pub(crate) struct HostComponentMetaResolver<'a, E = ()> {
+pub(crate) struct HostComponentMetaResolver<
+    'a,
+    E = (),
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
     pub(crate) host: &'a VerterHost,
     pub(crate) ctx: &'a dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     pub(crate) engine: E,
 }
 
-pub(crate) struct ComponentMetaSemanticServices<'dispatch, 'request> {
+pub(crate) struct ComponentMetaSemanticServices<
+    'dispatch,
+    'request,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
     pub(crate) dispatch:
         &'dispatch verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             'request,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
     pub(crate) session_view: Option<&'request dyn crate::session_view::SessionView>,
 }
 
-impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaResolver<'_, E> {
+impl<E, M: verter_audit::observe::ObserveExec> crate::resolver_core::DeclarationMetadataResolver
+    for HostComponentMetaResolver<'_, E, M>
+{
     fn resolve_export_target(
         &self,
         dep_canonical: &str,
@@ -206,7 +216,9 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
     }
 }
 
-impl HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>> {
+impl<M: verter_audit::observe::ObserveExec>
+    HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_, M>, M>
+{
     /// Shared owner-local macro-root presence gate, decided in NODE DOMAIN.
     ///
     /// Lowers the bare root reference in its exact lexical `owner` at
@@ -285,8 +297,8 @@ impl HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>> {
     }
 }
 
-impl crate::resolver_core::ComponentMetaResolverHost
-    for HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>>
+impl<M: verter_audit::observe::ObserveExec> crate::resolver_core::ComponentMetaResolverHost
+    for HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_, M>, M>
 {
     type Snapshot = FileAnalysisSnapshot;
     type EvalContext = CapturedComponentMetaInputs;
@@ -423,7 +435,7 @@ impl crate::resolver_core::ComponentMetaResolverHost
         let payload = raised.value().clone().at_optional_boundary()?;
         Some(node_has_direct_macro_reference(
             self.engine.dispatch,
-            dispatch.graph(),
+            dispatch.graph().store(),
             payload.node(),
             type_name,
         ))
@@ -665,10 +677,10 @@ fn absolutize_macro_payload_locator(
 /// / mapped / keyof / indexed-access / function signatures — never through
 /// Object MEMBERS, which encode "nested" deps. Visited-guarded (graph nodes
 /// may be shared or cyclic).
-fn node_has_direct_macro_reference(
+fn node_has_direct_macro_reference<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     node: verter_type_engine::semantic_query::SemanticNodeId,
@@ -793,10 +805,10 @@ pub(crate) fn resolve_type_declaration(
 /// resolver-host construction through the supplied `ResolverContext`
 /// so session-bearing entries observe overlay-aware reads when the
 /// declaration walker dereferences cross-file types.
-pub(crate) fn resolve_type_declaration_with_context(
+pub(crate) fn resolve_type_declaration_with_context<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dep_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
@@ -815,9 +827,9 @@ pub(crate) fn resolve_type_declaration_with_context(
     crate::resolver_core::resolve_type_declaration(&resolver, dep_canonical, owner, requested_name)
 }
 
-pub(crate) fn read_full_source(
+pub(crate) fn read_full_source<M: verter_audit::observe::ObserveExec>(
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     canonical_source: &str,
 ) -> Option<String> {
@@ -836,14 +848,14 @@ pub(crate) fn read_full_source(
     Some(serve.indexed.raw_source.to_string())
 }
 
-pub(crate) fn resolve_jsdoc_block(
+pub(crate) fn resolve_jsdoc_block<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     canonical_source: &str,
     span: verter_span::Span,
@@ -880,14 +892,14 @@ pub(crate) fn resolve_jsdoc_block(
     })
 }
 
-pub(crate) fn map_jsdoc_tag(
+pub(crate) fn map_jsdoc_tag<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     canonical_source: &str,
     mode: ProjectionMode,
@@ -1001,14 +1013,14 @@ fn jsdoc_payload_spells_legacy_sentinel(raw: &str) -> bool {
     verter_type_engine::semantic_query::compat_spelling::spells_legacy_sentinel_family(raw)
 }
 
-pub(crate) fn resolve_jsdoc_tag_type(
+pub(crate) fn resolve_jsdoc_tag_type<M: verter_audit::observe::ObserveExec>(
     _host: &VerterHost,
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     canonical_source: &str,
     raw_type: &str,

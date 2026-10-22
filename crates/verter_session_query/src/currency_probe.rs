@@ -94,7 +94,7 @@ mod imp {
 
     pub struct Guard {
         site: &'static Site,
-        start: std::time::Instant,
+        start: verter_audit::instant::Instant,
     }
 
     impl Guard {
@@ -102,7 +102,7 @@ mod imp {
         pub fn new(site: &'static Site) -> Self {
             Self {
                 site,
-                start: std::time::Instant::now(),
+                start: verter_audit::instant::Instant::now(),
             }
         }
     }

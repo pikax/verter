@@ -77,9 +77,9 @@ pub use facts::{
 mod indexed_expression;
 pub use indexed_expression::{
     DeclaredReadPosition, DeclaredReadProvenance, DeclaredReadStep, IndexedElaboratedProperty,
-    IndexedElaborationForm, IndexedLiteralPosition, IndexedLiteralProvenance, IndexedLiteralStep,
-    IndexedRegularLiteralSource, IndexedReportSite, IndexedValueCall, IndexedValueCallArg,
-    IndexedValueCallKind, IndexedValueExpression, IndexedValueLiteralMode,
+    IndexedElaborationForm, IndexedLiteralArm, IndexedLiteralPosition, IndexedLiteralProvenance,
+    IndexedLiteralStep, IndexedRegularLiteralSource, IndexedReportSite, IndexedValueCall,
+    IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression, IndexedValueLiteralMode,
 };
 
 /// Property-key identity stored by authored type IR.
@@ -683,7 +683,6 @@ pub struct TupleElement {
     Clone,
     PartialEq,
     Eq,
-    Hash,
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
@@ -691,7 +690,24 @@ pub struct TupleElement {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectExpr {
+    /// An empty source object literal. Nonempty literals carry their origin on
+    /// their members; this preserves the same distinction when there are none.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub empty_literal: bool,
     pub properties: Vec<ObjectMember>,
+}
+
+fn bool_is_false(value: &bool) -> bool {
+    !value
+}
+
+impl std::hash::Hash for ObjectExpr {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.properties, state);
+        if self.empty_literal {
+            std::hash::Hash::hash(&true, state);
+        }
+    }
 }
 
 /// A member of an object type.
@@ -1692,6 +1708,22 @@ impl TypeExpr {
             n
         };
         Self::Literal(LiteralValue::Number(n))
+    }
+
+    /// Create a bigint literal type from its base-10 `magnitude` (no sign, no
+    /// `n` suffix) and the sign of the literal that wrote it.
+    ///
+    /// TypeScript keys a bigint literal type by `pseudoBigIntToString`, which
+    /// drops the sign of zero, so `-0n` IS the literal type `0n` (and
+    /// interpolates as `"0"`). The constructor applies that rule: a negated
+    /// zero yields the unsigned literal, every other negative keeps its `-`.
+    pub fn bigint_literal(negative: bool, magnitude: &str) -> Self {
+        let value = if negative && !magnitude.bytes().all(|digit| digit == b'0') {
+            format!("-{magnitude}")
+        } else {
+            magnitude.to_string()
+        };
+        Self::Literal(LiteralValue::BigInt(value))
     }
 
     /// Create a boolean literal type.

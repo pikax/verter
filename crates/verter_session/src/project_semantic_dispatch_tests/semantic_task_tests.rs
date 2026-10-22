@@ -14,8 +14,8 @@ use verter_type_engine::project_semantic_dispatch::{
 };
 use verter_type_engine::resolver_core::fact_validation_port::FactValidation as _;
 use verter_type_engine::semantic_query::{
-    ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId, SemanticQueryKey,
-    SemanticQueryValue, ValueRootKey,
+    PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId,
+    SemanticNodeData, SemanticQueryKey, SemanticQueryValue, ValueRootKey,
 };
 use verter_type_engine::semantic_query_memo::{Claim, ReadCapture};
 
@@ -357,6 +357,170 @@ fn a_pending_semantic_task_dropped_on_another_thread_releases_its_frames() {
             assert_eq!(graph.resident_flight_keys_for_tests(), vec![x2.clone()]);
         })
         .expect("the cold root runs as a task");
+    drop(lease);
+    drop(other);
+}
+
+/// A conditional over two interned primitives: deciding it asks the
+/// free-type-variable summary of each operand, so its drive composes the
+/// summaries of `check` and `extends` in the driving dispatcher.
+fn primitive_conditional_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    check: verter_type_engine::semantic_query::SemanticNodeId,
+    extends: verter_type_engine::semantic_query::SemanticNodeId,
+) -> SemanticQueryKey {
+    let graph = dispatch.graph_arc();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    SemanticQueryKey::Conditional {
+        check,
+        extends,
+        true_branch: string,
+        false_branch: number,
+        distributive: false,
+        pending: None,
+    }
+}
+
+/// The free-type-variable summaries a request composes are request state
+/// like every other the semantic task borrows: the task's dispatcher starts
+/// from the summaries its lender already composed, the summaries its own
+/// drive composes — on whatever thread resumes it — come back to the lender
+/// with the rest of the borrowed state, and a read afterwards reuses them
+/// instead of recomposing them.
+#[test]
+fn a_semantic_task_inherits_and_returns_the_free_type_variable_summaries() {
+    let host = chain_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = dispatch.graph_arc();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let read = dispatch.execute_read(primitive_conditional_key(&dispatch, number, string));
+    assert!(
+        matches!(read.value(), QueryResult::Value(_)),
+        "a decided conditional answers a value: {read:?}"
+    );
+    let composed = dispatch.free_type_variable_summaries_for_tests();
+    assert!(
+        composed >= 2,
+        "deciding a conditional composes a summary per operand"
+    );
+
+    let waker = Waker::from(Arc::new(CountingWaker::default()));
+    let resume_answered = |slot: &mut Option<
+        SemanticTask<'_, '_, crate::resolver_core::HostCapabilities>,
+    >,
+                           inherited: usize| {
+        let task = slot.as_mut().expect("the task is lent");
+        assert_eq!(
+            task.free_type_variable_summaries_for_tests(),
+            inherited,
+            "the lent state carries the composed summaries"
+        );
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| match task.poll_for_tests(&waker) {
+                    Poll::Ready(TaskOutcomeForTests::Answered(answer)) => answer,
+                    Poll::Ready(TaskOutcomeForTests::Stopped) => panic!("nothing stops the task"),
+                    Poll::Pending => panic!("a decided conditional answers at once"),
+                })
+                .join()
+                .expect("the resumed task answers")
+        })
+    };
+    // A conditional over the operands the request already summarised: the
+    // task inherits their summaries and composes nothing new.
+    dispatch
+        .with_semantic_task_for_tests(
+            primitive_conditional_key(&dispatch, string, number),
+            |slot| resume_answered(slot, composed),
+        )
+        .expect("the cold conditional runs as a task");
+    assert_eq!(
+        dispatch.free_type_variable_summaries_for_tests(),
+        composed,
+        "a conditional over already-summarised operands composes nothing new"
+    );
+
+    // A conditional over a fresh operand: the one new summary its drive
+    // composes on the other thread comes back with the request state.
+    let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    dispatch
+        .with_semantic_task_for_tests(
+            primitive_conditional_key(&dispatch, boolean, number),
+            |slot| resume_answered(slot, composed),
+        )
+        .expect("the cold conditional runs as a task");
+    let returned = dispatch.free_type_variable_summaries_for_tests();
+    assert!(
+        returned > composed,
+        "the summaries the task composed come back with the request state"
+    );
+
+    dispatch.execute_read(primitive_conditional_key(&dispatch, number, string));
+    assert_eq!(
+        dispatch.free_type_variable_summaries_for_tests(),
+        returned,
+        "the returned summaries are reused, not recomposed"
+    );
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+}
+
+/// A task abandoned while it holds the lent state — left pending on another
+/// producer and dropped on another thread without being returned — gives
+/// its lender the summaries it inherited back: nothing the request already
+/// composed is lost with the abandoned task, and the lender holds nothing
+/// open afterwards.
+#[test]
+fn an_abandoned_semantic_task_returns_the_summaries_it_inherited() {
+    let host = chain_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = host.project_type_store().semantic_graph();
+    let number = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let read = dispatch.execute_read(primitive_conditional_key(&dispatch, number, string));
+    assert!(
+        matches!(read.value(), QueryResult::Value(_)),
+        "a decided conditional answers a value: {read:?}"
+    );
+    let composed = dispatch.free_type_variable_summaries_for_tests();
+    assert!(
+        composed >= 2,
+        "deciding a conditional composes a summary per operand"
+    );
+
+    let (other, lease) = hold_producer(&host, graph, typeof_key(&dispatch, "x2"));
+    let waker = Waker::from(Arc::new(CountingWaker::default()));
+    dispatch
+        .with_semantic_task_for_tests(typeof_key(&dispatch, "x5"), |slot| {
+            let mut task = slot.take().expect("the task is lent");
+            assert_eq!(
+                task.free_type_variable_summaries_for_tests(),
+                composed,
+                "the lent state carries the composed summaries"
+            );
+            assert!(
+                task.poll_for_tests(&waker).is_pending(),
+                "the task waits on the other producer"
+            );
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || drop(task))
+                    .join()
+                    .expect("the task drops on another thread");
+            });
+        })
+        .expect("the cold root runs as a task");
+    assert_eq!(
+        dispatch.free_type_variable_summaries_for_tests(),
+        composed,
+        "the abandoned task returns the summaries it inherited"
+    );
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
     drop(lease);
     drop(other);
 }

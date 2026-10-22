@@ -254,6 +254,7 @@ fn ptr_cache_fast_path_avoids_memo_key_on_pointer_based_variants() {
     // Function, IndexedAccess, Array) and verify that repeat lookups hit
     // the ptr cache without building ExprMemoKey or GraphNode.
     let inner_obj = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![],
     }));
     let union = TypeExpr::Union(Arc::from(vec![
@@ -351,6 +352,7 @@ fn object_node_wire_omits_non_public_members() {
     // Inner object surface with a non-public member, used as the value type
     // of the public outer member `a` — exercises recursive sanitisation.
     let inner = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::with_key_visibility(
                 "pub_inner".into(),
@@ -372,6 +374,7 @@ fn object_node_wire_omits_non_public_members() {
     }));
 
     let outer = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::with_key_visibility(
                 "a".into(),
@@ -600,6 +603,7 @@ fn representative_recursive_mapped_type() -> TypeExpr {
     // `{ deep: { tree: Tree<string> } }` — nested object members whose
     // value types recurse through the same node-interning path.
     let inner_object = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
             "tree".into(),
             recursive,
@@ -610,6 +614,7 @@ fn representative_recursive_mapped_type() -> TypeExpr {
         ))],
     }));
     let outer_object = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(ObjectProperty::with_key_visibility(
             "deep".into(),
             inner_object,

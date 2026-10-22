@@ -311,8 +311,8 @@ impl<'a> AdmittedPublishedMember<'a> {
 /// probes). Mints the token ONLY on a real resolved node; on a cycle / error /
 /// unresolved-decl it pushes a diagnostic and returns `None`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn resolve_macro_payload(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn resolve_macro_payload<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -346,8 +346,8 @@ pub(crate) fn resolve_macro_payload(
 /// Wraps [`super::resolve_payload_surface`]; the surface provenance is taken
 /// from the single-source-of-truth [`super::macro_payload_surface_provenance`]
 /// for the payload's macro kind.
-pub(crate) fn resolve_payload_surface(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn resolve_payload_surface<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     payload: &ResolvedMacroPayload,
     expansion_kind: MacroExpansionKind,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
@@ -381,8 +381,8 @@ pub(crate) fn resolve_payload_surface(
 /// object payloads (undecided `Conditional` branch merge); other scopes fall
 /// through to the single-dispatch surface. The kind is DERIVED from the
 /// payload's macro kind exactly as in [`resolve_payload_surface`].
-pub(crate) fn resolve_payload_surface_with_scope(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn resolve_payload_surface_with_scope<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     payload: &ResolvedMacroPayload,
     expansion_kind: MacroExpansionKind,
     scope: PayloadSurfaceScope,
@@ -419,11 +419,11 @@ pub(crate) fn resolve_payload_surface_with_scope(
 /// second reader — it is the candidate-tokenising wrapper
 /// over that one reader). Each candidate carries the surface's derived kind so
 /// admission can compare against the cursor's surface kind.
-pub(crate) fn read_surface_member_candidates(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(crate) fn read_surface_member_candidates<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     surface: &ResolvedPayloadSurface,
 ) -> Vec<SurfaceMemberCandidate> {
@@ -476,10 +476,10 @@ pub(crate) fn read_surface_member_candidates(
 /// Returns `None` (no mint, no edge recorded) when (1) or (2) fail, and `None`
 /// (no mint) when (3) fails — the member is simply not part of the demanded
 /// published surface.
-pub(crate) fn admit_published_member<'a>(
+pub(crate) fn admit_published_member<'a, M: verter_audit::observe::ObserveExec>(
     candidate: SurfaceMemberCandidate,
     cursor: &ProjectionCursor<'a>,
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
 ) -> Option<AdmittedPublishedMember<'a>> {
     // (1) Visibility gate.
     if !candidate.member.visibility.is_public() {

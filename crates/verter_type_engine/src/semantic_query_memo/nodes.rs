@@ -3,6 +3,9 @@
 //! the retention counters over it in `observability.rs`.
 
 use super::*;
+use verter_audit::observe::ObserveExec;
+#[cfg(any(test, feature = "test-support"))]
+use verter_audit::observe::Uncaptured;
 
 impl SemanticGraphStore {
     /// Retain a multiset of live operands from this arena. Production close
@@ -72,12 +75,17 @@ impl SemanticGraphStore {
 
     /// Intern a node whose retained operands are covered by arena-qualified
     /// roots. A foreign scope or an uncovered operand is a typed refusal.
-    pub fn intern_rooted_node(
+    ///
+    /// `M` is the capture execution of the unit interning
+    /// ([`GraphIn`] supplies it).
+    pub fn intern_rooted_node_in<M: ObserveExec>(
         &self,
+        observation: &crate::request_observers::CaptureTargets,
         data: SemanticNodeData,
         scope: NodeScopeId,
         operands: &node_roots::NodeRootSet,
     ) -> Result<node_roots::NodeRoot, QueryError> {
+        let _ = observation;
         if !operands.belongs_to(&self.arena.core) {
             return Err(QueryError::ForeignSemanticOperand);
         }
@@ -88,7 +96,23 @@ impl SemanticGraphStore {
         if !covered {
             return Err(QueryError::ForeignSemanticOperand);
         }
-        self.arena.try_intern_owned(data, scope)
+        self.arena.try_intern_owned::<M>(observation, data, scope)
+    }
+
+    /// [`Self::intern_rooted_node_in`] for an uncaptured fixture.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn intern_rooted_node(
+        &self,
+        data: SemanticNodeData,
+        scope: NodeScopeId,
+        operands: &node_roots::NodeRootSet,
+    ) -> Result<node_roots::NodeRoot, QueryError> {
+        self.intern_rooted_node_in::<Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            data,
+            scope,
+            operands,
+        )
     }
 
     /// Read a node through an arena-qualified capability. A capability
@@ -154,10 +178,29 @@ impl SemanticGraphStore {
     /// [`Self::intern_node_with_scope`] when the node's origin scope is
     /// known (declaration anchors, instantiated shells, surface members
     /// whose value carries a declaration identity, etc.).
+    ///
+    /// `M` is the capture execution of the unit interning: only a captured
+    /// one times or counts the arena's shard locks. Execution units reach
+    /// this through [`GraphIn`], which supplies their mode.
+    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
+    pub fn intern_node_in<M: ObserveExec>(
+        &self,
+        observation: &crate::request_observers::CaptureTargets,
+        data: SemanticNodeData,
+    ) -> SemanticNodeId {
+        let _ = observation;
+        self.arena.push_with_scope::<M>(
+            observation,
+            crate::semantic_query::DeferredCallable::seal_signature_header(data),
+            NodeScopeId::Global,
+        )
+    }
+
+    /// [`Self::intern_node_in`] for an uncaptured fixture.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
     pub fn intern_node(&self, data: SemanticNodeData) -> SemanticNodeId {
-        self.arena
-            .push(crate::semantic_query::DeferredCallable::seal_signature_header(data))
+        self.intern_node_in::<Uncaptured>(&crate::request_observers::CaptureTargets::EMPTY, data)
     }
 
     /// Intern `data` and record `scope` in the origin sidecar. Dispatch
@@ -166,13 +209,31 @@ impl SemanticGraphStore {
     /// this entry point so per-base-scope routing via [`Self::node_scope`]
     /// returns the originating scope later.
     #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
+    pub fn intern_node_with_scope_in<M: ObserveExec>(
+        &self,
+        observation: &crate::request_observers::CaptureTargets,
+        data: SemanticNodeData,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
+        let _ = observation;
+        self.arena.push_with_scope::<M>(
+            observation,
+            crate::semantic_query::DeferredCallable::seal_signature_header(data),
+            scope,
+        )
+    }
+
+    /// [`Self::intern_node_with_scope_in`] for an uncaptured fixture.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
     pub fn intern_node_with_scope(
         &self,
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> SemanticNodeId {
-        self.arena.push_with_scope(
-            crate::semantic_query::DeferredCallable::seal_signature_header(data),
+        self.intern_node_with_scope_in::<Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            data,
             scope,
         )
     }
@@ -207,20 +268,37 @@ impl SemanticGraphStore {
         /// is empty (`origin` is out of bounds) — these cases are
         /// already scope-less.
         #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
-        fn intern_preserving_scope(
+        fn intern_preserving_scope_in<M: ObserveExec>(
             &self,
+        observation: &crate::request_observers::CaptureTargets,
             origin: SemanticNodeId,
             data: SemanticNodeData,
         ) -> SemanticNodeId {
-            self.stats
-                .intern_preserving_scope_calls
-                .fetch_add(1, Ordering::Relaxed);
+        let _ = observation;
+            if super::records_telemetry::<M>() {
+                self.stats.intern_preserving_scope_calls.fetch_add(1, Ordering::Relaxed);
+            }
             let scope = self.node_scope(origin).unwrap_or(NodeScopeId::Global);
-            self.arena.push_with_scope(
+            self.arena.push_with_scope::<M>(observation,
                 crate::semantic_query::DeferredCallable::seal_signature_header(data),
                 scope,
             )
         }
+    }
+
+    /// [`Self::intern_preserving_scope_in`] for an uncaptured fixture.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
+    pub fn intern_preserving_scope(
+        &self,
+        origin: SemanticNodeId,
+        data: SemanticNodeData,
+    ) -> SemanticNodeId {
+        self.intern_preserving_scope_in::<Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            origin,
+            data,
+        )
     }
 
     /// Test/diagnostic — read the cumulative count of
@@ -312,6 +390,10 @@ impl SemanticGraphStore {
         /// however long the chain is; `visit` sees each node on it, the end
         /// included. A node that is not an alias costs one read and no
         /// allocation.
+        #[cfg_attr(
+            not(any(test, feature = "test-support")),
+            expect(dead_code, reason = "Fixture and compile-fail privacy seam; production alias traversal consumes bounded work credit.")
+        )]
         fn alias_chain_end(
             &self,
             start: SemanticNodeId,

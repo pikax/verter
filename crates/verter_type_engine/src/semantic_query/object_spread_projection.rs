@@ -1,10 +1,11 @@
 //! Selector-aware, correlated object-spread projection facts.
 //!
-//! The formula deliberately keeps finite-union alternatives separate. An
+//! The formula deliberately keeps finite-union alternatives separate, and
+//! keeps them factored: it owns the sum of its spread layers, and a consumer
+//! reads one correlated alternative at a time through the dispatch cursor. An
 //! ordinary alternative exposes positive evidence only; exact absence,
 //! emptiness, `keyof`, exhaustive iteration, and closed materialisation require
-//! one of the borrowed witnesses minted by [`ObjectProjectionAlternative::closed`]
-//! or [`ObjectProjectionFormula::closed`].
+//! the borrowed witness minted by [`ObjectProjectionAlternative::closed`].
 
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use super::{
 std::thread_local! {
     static MEMBER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static COLLISION_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static NARROWING_DEDUP_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) fn note_member_visit() {
@@ -26,6 +28,13 @@ pub(crate) fn note_member_visit() {
 pub(crate) fn note_collision_comparison() {
     #[cfg(any(test, feature = "test-support"))]
     COLLISION_COMPARISONS.with(|count| count.set(count.get() + 1));
+}
+
+/// One structural comparison between narrowed product arms that share a
+/// fingerprint, on this thread. Test-support only.
+pub(crate) fn note_narrowing_dedup_comparison() {
+    #[cfg(any(test, feature = "test-support"))]
+    NARROWING_DEDUP_COMPARISONS.with(|count| count.set(count.get() + 1));
 }
 
 /// The finite selector vocabulary of [`super::SemanticQueryKey::ProjectObjectSpread`].
@@ -458,6 +467,11 @@ pub struct ObjectProjectionAlternative {
 }
 
 impl ObjectProjectionAlternative {
+    /// How many member and index facts copying this alternative moves.
+    pub(crate) fn fact_count(&self) -> usize {
+        self.positive.len() + self.indices.len()
+    }
+
     /// Borrow the positive facts. Omission is not absence evidence.
     #[must_use]
     pub const fn positive(&self) -> PositiveAlternativeEvidence<'_> {
@@ -522,8 +536,52 @@ impl ObjectProjectionAlternative {
         &self.indices
     }
 
+    /// The selector this alternative answers.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn selector(&self) -> ObjectProjectionSelector {
+        match &self.selected {
+            SelectedProjection::Key(key) => ObjectProjectionSelector::Key(key.clone()),
+            SelectedProjection::RelationShape(keys) => {
+                ObjectProjectionSelector::RelationShape(keys.clone())
+            }
+            SelectedProjection::Surface => ObjectProjectionSelector::Surface,
+            SelectedProjection::IndexDomain(domain) => {
+                ObjectProjectionSelector::IndexDomain(*domain)
+            }
+            SelectedProjection::Signature(kind) => ObjectProjectionSelector::Signature(*kind),
+            SelectedProjection::EnumerableValueEnvelope(domain) => {
+                ObjectProjectionSelector::EnumerableValueEnvelope(*domain)
+            }
+            SelectedProjection::ExcessEligibility => ObjectProjectionSelector::ExcessEligibility,
+        }
+    }
+
+    /// Visit every graph node the alternative names.
+    pub(crate) fn for_each_retained_node(&self, visit: &mut dyn FnMut(SemanticNodeId)) {
+        for fact in self.positive.iter() {
+            if let ProjectionEvidence::Proven(node) = fact.value() {
+                visit(*node);
+            }
+        }
+        for index in self.indices.iter() {
+            visit(index.key_type());
+            if let ProjectionEvidence::Proven(node) = index.value() {
+                visit(*node);
+            }
+        }
+        for signature in self.signatures.iter() {
+            visit(signature.node());
+        }
+        match &self.domain {
+            AlternativeDomain::Closed(_) => {}
+            AlternativeDomain::Open(open) => open.residual_operands.iter().copied().for_each(visit),
+        }
+    }
+
     /// Whole-program excess eligibility. A semantic generic spread suppresses
-    /// freshness even when the named-key domain remains open.
+    /// freshness even when the named-key domain remains open. A selector that
+    /// reads only some facts (`Key`, `RelationShape`, index and signature
+    /// selectors) reports `Indeterminate`: excess is a whole-construction fact.
     #[must_use]
     pub const fn excess(&self) -> &ExcessEligibility {
         &self.excess
@@ -565,97 +623,56 @@ pub enum OpenSafeKeyEvidence<'a> {
 }
 
 /// Opaque correlated finite-union formula.
+///
+/// The alternatives are kept FACTORED (see
+/// `project_semantic_dispatch::object_spread_product`): the formula owns the
+/// sum of its spread layers, never their Cartesian product. A consumer reads
+/// alternatives on demand through
+/// `ProjectSemanticDispatch::object_spread_cursor`, which charges each one
+/// to its connected demand before building it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectProjectionFormula {
-    alternatives: verter_session_query::retention::owned::OwnedSlice<ObjectProjectionAlternative>,
-    closed_keyof: Option<verter_type_expr::OwnedSlice<PropertyKey>>,
+    product: verter_session_query::retention::owned::Owned<
+        crate::project_semantic_dispatch::object_spread_product::SpreadProduct,
+    >,
 }
 
 impl ObjectProjectionFormula {
-    pub(crate) fn for_each_retained_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
-        for alternative in self.alternatives.iter() {
-            for fact in alternative.positive.iter() {
-                if let ProjectionEvidence::Proven(node) = fact.value() {
-                    visit(*node);
-                }
-            }
-            for index in alternative.indices.iter() {
-                visit(index.key_type());
-                if let ProjectionEvidence::Proven(node) = index.value() {
-                    visit(*node);
-                }
-            }
-            for signature in alternative.signatures.iter() {
-                visit(signature.node());
-            }
-            match &alternative.domain {
-                AlternativeDomain::Closed(_) => {}
-                AlternativeDomain::Open(open) => {
-                    open.residual_operands.iter().copied().for_each(&mut visit)
-                }
-            }
-        }
-    }
-    #[must_use]
-    pub fn alternatives(&self) -> &[ObjectProjectionAlternative] {
-        &self.alternatives
-    }
-
-    /// Obtain a formula-wide complete-domain witness only when every
-    /// alternative is closed.
-    #[must_use]
-    pub const fn closed(&self) -> Option<ClosedObjectProjectionFormula<'_>> {
-        match self.closed_keyof {
-            Some(_) => Some(ClosedObjectProjectionFormula { formula: self }),
-            None => None,
-        }
-    }
-
-    #[allow(dead_code)] // Evaluator-owned constructor; unit builders reuse it.
-    fn new(alternatives: Vec<ObjectProjectionAlternative>) -> Self {
-        verter_debug_assert!(
-            alternatives.first().is_none_or(|first| alternatives
-                .iter()
-                .all(|alternative| alternative.selected == first.selected)),
-            "all alternatives in one projection formula must carry the same selector"
-        );
-        let closed_keyof = if alternatives
-            .iter()
-            .all(|alternative| matches!(alternative.domain, AlternativeDomain::Closed(_)))
-        {
-            // Formula-wide exact keyof: keys present in EVERY alternative,
-            // intersected as the checker's `keyof (A | B)` is: nominally,
-            // so `1` in one alternative and `"1"` in another are no common
-            // key (`1 & "1"` is never), though an element access reads
-            // them as one property.
-            let mut common: Vec<PropertyKey> = alternatives
-                .first()
-                .map(|alternative| match &alternative.domain {
-                    AlternativeDomain::Closed(closed) => closed.complete_keys.to_vec(),
-                    AlternativeDomain::Open(_) => unreachable!("all alternatives checked closed"),
-                })
-                .unwrap_or_default();
-            common.retain(|key| {
-                alternatives.iter().skip(1).all(|alternative| {
-                    matches!(
-                        &alternative.domain,
-                        AlternativeDomain::Closed(closed)
-                            if closed.complete_keys.iter().any(|candidate| candidate == key)
-                    )
-                })
-            });
-            Some(verter_type_expr::OwnedSlice::from(common))
-        } else {
-            None
-        };
+    pub(crate) fn from_product(
+        product: crate::project_semantic_dispatch::object_spread_product::SpreadProduct,
+    ) -> Self {
         Self {
-            alternatives: alternatives.into(),
-            closed_keyof,
+            product: verter_session_query::retention::owned::Owned::new(product),
         }
+    }
+
+    pub(crate) fn product(
+        &self,
+    ) -> &crate::project_semantic_dispatch::object_spread_product::SpreadProduct {
+        &self.product
+    }
+
+    pub(crate) fn for_each_retained_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        self.product.for_each_retained_node(&mut visit);
+    }
+
+    /// How many correlated alternatives the formula has — the size of the
+    /// product, known without building one of them.
+    #[must_use]
+    pub fn width(&self) -> u64 {
+        self.product.width()
+    }
+
+    /// Whether every alternative is closed (carries no residual operand).
+    /// Decided on the factored product; whether an alternative's closed
+    /// domain is WHOLE or selector-local is still that alternative's own
+    /// witness to give.
+    #[must_use]
+    pub fn all_alternatives_closed(&self) -> bool {
+        self.product.closed()
     }
 }
-
-/// Exact lookup result available only on a closed alternative witness.
+// Exact lookup result available only on a closed alternative witness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClosedKeyLookup<'a> {
     Present(&'a PositiveKeyFact),
@@ -890,125 +907,80 @@ impl<'a> ClosedObjectProjectionSurface<'a> {
     }
 }
 
-/// Borrowed proof that every alternative in a formula is closed.
-#[derive(Clone, Copy)]
-pub struct ClosedObjectProjectionFormula<'a> {
-    formula: &'a ObjectProjectionFormula,
-}
-
-impl complete_domain_seal::Sealed for ClosedObjectProjectionFormula<'_> {}
-impl CompleteObjectDomain for ClosedObjectProjectionFormula<'_> {}
-
-impl<'a> ClosedObjectProjectionFormula<'a> {
-    /// Exhaustively iterate correlated alternatives without flattening them.
-    pub fn alternatives(
-        self,
-    ) -> impl ExactSizeIterator<Item = ClosedObjectProjectionAlternative<'a>> {
-        self.formula
-            .alternatives
-            .iter()
-            .map(|alternative| ClosedObjectProjectionAlternative { alternative })
-    }
-
-    /// Formula-wide exact keyof — WHOLE-domain only: `None` when any
-    /// alternative's closed domain is selector-local (see
-    /// [`ClosedDomainScope`]).
-    #[must_use]
-    pub fn keyof(self) -> Option<&'a [PropertyKey]> {
-        let whole = self.formula.alternatives.iter().all(|alternative| {
-            matches!(
-                alternative.domain,
-                AlternativeDomain::Closed(ClosedDomainData {
-                    scope: ClosedDomainScope::Whole,
-                    ..
-                })
-            )
-        });
-        whole.then(|| {
-            self.formula
-                .closed_keyof
-                .as_deref()
-                .expect("closed witness requires formula-wide exact keyof")
-        })
-    }
-
-    #[must_use]
-    pub fn exact_keyof(self) -> Option<&'a [PropertyKey]> {
-        self.keyof()
-    }
-
-    /// Formula emptiness — WHOLE-domain only.
-    #[must_use]
-    pub fn is_empty(self) -> Option<bool> {
-        let whole = self.formula.alternatives.iter().all(|alternative| {
-            matches!(
-                alternative.domain,
-                AlternativeDomain::Closed(ClosedDomainData {
-                    scope: ClosedDomainScope::Whole,
-                    ..
-                })
-            )
-        });
-        whole.then(|| {
-            self.formula
-                .alternatives
-                .iter()
-                .all(|alternative| alternative.positive.is_empty())
-        })
-    }
-
-    /// Exhaustively materialise each correlated closed surface —
-    /// WHOLE-domain alternatives only (`None` per selector-local
-    /// alternative; see [`ClosedDomainScope`]).
-    pub fn surfaces(
-        self,
-    ) -> impl ExactSizeIterator<Item = Option<ClosedObjectProjectionSurface<'a>>> {
-        self.alternatives().map(|alternative| alternative.surface())
-    }
-
-    pub(crate) fn to_closed_surface_views(
-        self,
-    ) -> impl ExactSizeIterator<Item = Option<super::SurfaceView>> + 'a {
-        self.alternatives()
-            .map(ClosedObjectProjectionAlternative::to_closed_surface_view)
-    }
-
-    pub fn iterate_exhaustively(
-        self,
-    ) -> impl ExactSizeIterator<Item = ClosedObjectProjectionAlternative<'a>> {
-        self.alternatives()
-    }
-}
-
 impl super::allocation_footprint::OwnedHeap for ObjectProjectionFormula {
-    /// The alternative list — an owned allocation charged by its own cell —
-    /// and the closed key list.
+    /// The product — an owned allocation charged by its own cell.
     fn owned_heap_bytes(
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
-        let Self {
-            alternatives,
-            closed_keyof,
-        } = self;
-        alternatives.offer(aliases) + closed_keyof.as_ref().map_or(0, |keys| keys.offer(aliases))
+        let Self { product } = self;
+        product.offer(aliases)
     }
 }
 
-fn projection_evidence<T>(
-    evidence: &ProjectionEvidence<T>,
-    heap: impl FnOnce(&T) -> usize,
-) -> usize {
-    match evidence {
-        ProjectionEvidence::Proven(value) => heap(value),
-        ProjectionEvidence::Indeterminate => 0,
+impl super::allocation_footprint::OwnedHeap for MemberFacets {
+    /// The declaration origin's text; every other facet is inline.
+    fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use super::allocation_footprint::copy_inline;
+        let MemberFacets {
+            readonly,
+            method_kind,
+            has_implementation_body,
+            visibility,
+            spans,
+            declaration_origin,
+            declared_in_macro_type_arg,
+            merge_role,
+            excess_origin,
+        } = self;
+        copy_inline(readonly)
+            + copy_inline(method_kind)
+            + copy_inline(has_implementation_body)
+            + copy_inline(visibility)
+            + copy_inline(spans)
+            + declaration_origin.owned_heap_bytes(aliases)
+            + copy_inline(declared_in_macro_type_arg)
+            + copy_inline(merge_role)
+            + copy_inline(excess_origin)
+    }
+}
+
+impl super::allocation_footprint::OwnedHeap for ObjectProjectionIndex {
+    /// The declaration origin's text; every other field is inline.
+    fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use super::allocation_footprint::copy_inline;
+        let ObjectProjectionIndex {
+            domain,
+            key_type,
+            value,
+            readonly,
+            spans,
+            declaration_origin,
+        } = self;
+        copy_inline(domain)
+            + copy_inline(key_type)
+            + match value {
+                ProjectionEvidence::Proven(node) => copy_inline(node),
+                ProjectionEvidence::Indeterminate => 0,
+            }
+            + match readonly {
+                ProjectionEvidence::Proven(readonly) => copy_inline(readonly),
+                ProjectionEvidence::Indeterminate => 0,
+            }
+            + copy_inline(spans)
+            + declaration_origin.owned_heap_bytes(aliases)
     }
 }
 
 impl verter_session_query::retention::owned::Measured for PositiveKeyFact {
     /// The key's text and the facets' declaration origin, each an owned
-    /// allocation charged by its own cell; proven values are graph
-    /// ordinals. Destructured exhaustively.
+    /// allocation charged by its own cell; proven values are graph ordinals.
     fn heap_bytes(
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
@@ -1022,53 +994,24 @@ impl verter_session_query::retention::owned::Measured for PositiveKeyFact {
         } = self;
         key.owned_heap_bytes(aliases)
             + copy_inline(presence)
-            + projection_evidence(value, copy_inline)
-            + projection_evidence(facets, |facets| {
-                let MemberFacets {
-                    readonly,
-                    method_kind,
-                    has_implementation_body,
-                    visibility,
-                    spans,
-                    declaration_origin,
-                    declared_in_macro_type_arg,
-                    merge_role,
-                    excess_origin,
-                } = facets;
-                copy_inline(readonly)
-                    + copy_inline(method_kind)
-                    + copy_inline(has_implementation_body)
-                    + copy_inline(visibility)
-                    + copy_inline(spans)
-                    + declaration_origin.owned_heap_bytes(aliases)
-                    + copy_inline(declared_in_macro_type_arg)
-                    + copy_inline(merge_role)
-                    + copy_inline(excess_origin)
-            })
+            + match value {
+                ProjectionEvidence::Proven(node) => copy_inline(node),
+                ProjectionEvidence::Indeterminate => 0,
+            }
+            + match facets {
+                ProjectionEvidence::Proven(facets) => facets.owned_heap_bytes(aliases),
+                ProjectionEvidence::Indeterminate => 0,
+            }
     }
 }
 
 impl verter_session_query::retention::owned::Measured for ObjectProjectionIndex {
-    /// The index's declaration origin. Destructured exhaustively.
     fn heap_bytes(
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
-        use super::allocation_footprint::{copy_inline, OwnedHeap as _};
-        let ObjectProjectionIndex {
-            domain,
-            key_type,
-            value,
-            readonly,
-            spans,
-            declaration_origin,
-        } = self;
-        copy_inline(domain)
-            + copy_inline(key_type)
-            + projection_evidence(value, copy_inline)
-            + projection_evidence(readonly, copy_inline)
-            + copy_inline(spans)
-            + declaration_origin.owned_heap_bytes(aliases)
+        use super::allocation_footprint::OwnedHeap as _;
+        self.owned_heap_bytes(aliases)
     }
 }
 
@@ -1192,11 +1135,17 @@ pub(crate) mod evaluator_support {
         }
     }
 
+    /// A formula of finished alternatives, read back verbatim.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub(crate) fn formula(
         alternatives: impl IntoIterator<Item = ObjectProjectionAlternative>,
     ) -> ObjectProjectionFormula {
-        ObjectProjectionFormula::new(alternatives.into_iter().collect())
+        ObjectProjectionFormula::from_product(
+            crate::project_semantic_dispatch::object_spread_product::SpreadProduct::sealed(
+                alternatives.into_iter().collect(),
+            ),
+        )
     }
 
     #[must_use]
@@ -1279,6 +1228,12 @@ pub mod test_support {
         )
     }
 
+    /// Structural comparisons between narrowed product arms that share a
+    /// fingerprint, on this thread.
+    pub fn narrowing_dedup_comparisons() -> usize {
+        NARROWING_DEDUP_COMPARISONS.with(std::cell::Cell::get)
+    }
+
     #[must_use]
     pub fn context(
         projection_reduction: ProjectionReductionContext,
@@ -1298,6 +1253,17 @@ pub mod test_support {
             substitution,
             optional_property_policy,
         }
+    }
+
+    /// The formula's retained allocation through the owned-heap account —
+    /// an accounting independent of the connected-work ledger construction
+    /// charges: it walks the factored product the formula actually retains.
+    #[must_use]
+    pub fn retained_heap_bytes(formula: &ObjectProjectionFormula) -> usize {
+        use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+        formula.owned_heap_bytes(
+            &mut verter_session_query::retention::allocation::AliasSet::estimating(),
+        )
     }
 
     #[must_use]
@@ -1325,6 +1291,14 @@ pub mod test_support {
                 direct_candidates: verter_type_expr::OwnedSlice::from([]),
             },
         })
+    }
+
+    /// The alternatives of a fixture formula, read back verbatim.
+    #[must_use]
+    pub fn sealed_alternatives(
+        formula: &ObjectProjectionFormula,
+    ) -> Vec<ObjectProjectionAlternative> {
+        formula.product().sealed_alternatives()
     }
 
     #[must_use]
@@ -1368,36 +1342,36 @@ pub mod test_support {
         positive: impl IntoIterator<Item = PositiveKeyFact>,
         residual_operands: impl IntoIterator<Item = SemanticNodeId>,
     ) -> ObjectProjectionFormula {
-        open_formula_with_possible_writes(positive, residual_operands, [])
+        evaluator_support::formula([open_alternative_with_possible_writes(
+            positive,
+            residual_operands,
+            [],
+        )])
     }
 
     #[must_use]
     #[cfg(test)]
-    pub(crate) fn open_formula_with_possible_writes(
+    pub(crate) fn open_alternative_with_possible_writes(
         positive: impl IntoIterator<Item = PositiveKeyFact>,
         residual_operands: impl IntoIterator<Item = SemanticNodeId>,
         indeterminate_possible_writes: impl IntoIterator<Item = PropertyKey>,
-    ) -> ObjectProjectionFormula {
-        evaluator_support::formula([evaluator_support::alternative(
-            evaluator_support::AlternativeInput {
-                positive: verter_type_expr::OwnedSlice::from(
-                    positive.into_iter().collect::<Vec<_>>(),
-                ),
-                selector: ObjectProjectionSelector::Surface,
-                closed: false,
-                residual_operands: verter_type_expr::OwnedSlice::from(
-                    residual_operands.into_iter().collect::<Vec<_>>(),
-                ),
-                indeterminate_possible_writes: verter_type_expr::OwnedSlice::from(
-                    indeterminate_possible_writes
-                        .into_iter()
-                        .collect::<Vec<_>>(),
-                ),
-                indices: verter_type_expr::OwnedSlice::from([]),
-                signatures: verter_type_expr::OwnedSlice::from([]),
-                excess: ExcessEligibility::SuppressedByGenericSpread,
-            },
-        )])
+    ) -> ObjectProjectionAlternative {
+        evaluator_support::alternative(evaluator_support::AlternativeInput {
+            positive: verter_type_expr::OwnedSlice::from(positive.into_iter().collect::<Vec<_>>()),
+            selector: ObjectProjectionSelector::Surface,
+            closed: false,
+            residual_operands: verter_type_expr::OwnedSlice::from(
+                residual_operands.into_iter().collect::<Vec<_>>(),
+            ),
+            indeterminate_possible_writes: verter_type_expr::OwnedSlice::from(
+                indeterminate_possible_writes
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+            ),
+            indices: verter_type_expr::OwnedSlice::from([]),
+            signatures: verter_type_expr::OwnedSlice::from([]),
+            excess: ExcessEligibility::SuppressedByGenericSpread,
+        })
     }
 
     #[allow(dead_code)]

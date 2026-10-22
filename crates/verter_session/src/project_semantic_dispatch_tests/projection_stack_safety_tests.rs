@@ -2,7 +2,7 @@ use crate::output_sinks::DispatchOutputTestExt;
 use std::process::Command;
 use std::sync::Arc;
 
-use super::locator_view::{LocatorViewInputs, ViewMemo};
+use super::locator_view::{LocatorViewInputs, ProjectionSlot, ViewMemo};
 use super::walk::ShallowDiagnostic;
 use super::ProjectSemanticDispatch;
 use crate::{HostConfig, UpsertRequest, VerterHost};
@@ -415,11 +415,11 @@ fn missing_projection_nodes_remain_unavailable_on_repeated_visits() {
                 .reasons()
                 .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT));
             assert!(
-                !memo.contains_key(&(missing, context)),
+                !memo.contains_key(&(missing, context, ProjectionSlot::Plain)),
                 "missing nodes must not enter the exact memo"
             );
             assert!(
-                !memo.contains_key(&(root, context)),
+                !memo.contains_key(&(root, context, ProjectionSlot::Plain)),
                 "a missing child cannot certify its parent"
             );
         }
@@ -462,6 +462,7 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
     };
     let root = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from([
                 verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                     verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -546,7 +547,10 @@ fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing
     );
     assert_eq!(exact.completeness, ResultCompleteness::Complete);
     assert_eq!(exact.node, root, "unchanged arrays must preserve identity");
-    assert_eq!(exact_memo.get(&(root, context)), Some(&root));
+    assert_eq!(
+        exact_memo.get(&(root, context, ProjectionSlot::Plain)),
+        Some(&root)
+    );
 
     dispatch.set_connected_limits_for_tests(exact_limit - 1, 24);
     let mut over_memo = ViewMemo::default();
@@ -563,7 +567,7 @@ fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing
     assert!(reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
     assert_eq!(over.node, root, "a work trip must carrier-stop at the root");
     assert!(
-        !over_memo.contains_key(&(root, context)),
+        !over_memo.contains_key(&(root, context, ProjectionSlot::Plain)),
         "an unfinished projection root must never enter the view memo"
     );
 }
@@ -622,7 +626,10 @@ fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
             verter_type_engine::semantic_query::QueryError::RecursiveRef { name, .. }
         )) if name.as_ref() == "Recursive"
     ));
-    assert_eq!(memo.get(&(recursive, context)), Some(&outcome.node));
+    assert_eq!(
+        memo.get(&(recursive, context, ProjectionSlot::Plain)),
+        Some(&outcome.node)
+    );
 }
 
 #[test]
@@ -705,8 +712,12 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
             input_id: "/runaway.ts".to_string(),
             // Through its own conditional type the self-application is the
             // checker's tail loop over ever-new arguments; applied directly it
-            // would be a circular declaration (TS2456), not growth.
-            source: Arc::from("export type Runaway<T> = T extends never ? never : Runaway<[T]>;\n"),
+            // would be a circular declaration (TS2456), not growth. Its check
+            // wraps the parameter (`[T]`), so no uniform-growth certificate
+            // covers it and the run falls back to the work rail.
+            source: Arc::from(
+                "export type Runaway<T> = [T] extends [never] ? never : Runaway<[T]>;\n",
+            ),
             file_language: crate::LanguageRegistry::global()
                 .classify_static("/runaway.ts")
                 .static_resolution(),

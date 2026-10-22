@@ -45,10 +45,10 @@ pub(crate) const PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER: &str =
 /// object-literal type arguments, intersections, unions, and other
 /// composite shapes do not produce a root name (the predicate
 /// downstream falls back to `false` for those cases).
-pub(crate) fn collect_define_props_root_names(
+pub(crate) fn collect_define_props_root_names<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
@@ -102,10 +102,10 @@ pub(crate) fn collect_define_props_root_names(
 ///   the owner's defineProps root) → does NOT fire.
 /// - `Primitive(_)` / `Object(_)` / fully-expanded fields whose
 ///   raw type was None → does NOT fire (no work to skip).
-pub(crate) fn slot_binding_targets_define_props_root(
+pub(crate) fn slot_binding_targets_define_props_root<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,

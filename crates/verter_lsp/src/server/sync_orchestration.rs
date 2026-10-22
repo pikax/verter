@@ -604,9 +604,10 @@ impl VerterLanguageServer {
             self.publish_full_diagnostics(uri).await;
             return;
         }
-        let target_identity = crate::audit_harness::target_identity_for_uri(&self.documents, uri);
+        let target_identity =
+            || crate::audit_harness::target_identity_for_uri(&self.documents, uri);
         let uri_for_body = uri.clone();
-        let _ = crate::audit_harness::run_with_audit::<usize, _, _>(
+        let _ = crate::audit_harness::run_with_audit::<usize, _, _, _>(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Diagnostics,
             target_identity,
@@ -1130,17 +1131,9 @@ impl VerterLanguageServer {
             return;
         };
 
-        self.documents.host().set_import_dependencies(
-            canonical_id,
-            resolved_dependencies
-                .iter()
-                .map(|entry| verter_session::DependencyResolution {
-                    specifier: entry.provider_specifier.clone(),
-                    resolved_canonical_id: Some(entry.source_id.clone()),
-                    possible_canonical_ids: Vec::new(),
-                })
-                .collect(),
-        );
+        self.documents
+            .host()
+            .set_import_dependencies(canonical_id, resolved_dependencies.route_snapshot());
     }
 
     /// Tell the provider what changed on disk. An engine that watches the disk
@@ -1249,15 +1242,7 @@ impl VerterLanguageServer {
         if !prepared.resolved_dependencies.is_empty() {
             self.documents.host().set_import_dependencies(
                 canonical_id,
-                prepared
-                    .resolved_dependencies
-                    .iter()
-                    .map(|entry| verter_session::DependencyResolution {
-                        specifier: entry.provider_specifier.clone(),
-                        resolved_canonical_id: Some(entry.source_id.clone()),
-                        possible_canonical_ids: Vec::new(),
-                    })
-                    .collect(),
+                prepared.resolved_dependencies.route_snapshot(),
             );
         }
 
@@ -1374,20 +1359,12 @@ impl VerterLanguageServer {
 
             let resolved_dependencies = prepared.resolved_dependencies;
             if !resolved_dependencies.is_empty() {
-                self.documents.host().set_import_dependencies(
-                    &canonical_id,
-                    resolved_dependencies
-                        .iter()
-                        .map(|entry| verter_session::DependencyResolution {
-                            specifier: entry.provider_specifier.clone(),
-                            resolved_canonical_id: Some(entry.source_id.clone()),
-                            possible_canonical_ids: Vec::new(),
-                        })
-                        .collect(),
-                );
+                self.documents
+                    .host()
+                    .set_import_dependencies(&canonical_id, resolved_dependencies.route_snapshot());
             }
 
-            for dependency in resolved_dependencies {
+            for dependency in resolved_dependencies.into_results() {
                 if dependency.provider_target
                     == verter_session_query::resolution::ProviderTarget::CarrierPublicApi
                 {
@@ -1944,11 +1921,15 @@ impl VerterLanguageServer {
 
         match result {
             Ok(CarrierDelivery::Refused) => {
-                // The document moved while this repair waited for the delivery
-                // lock, or the engine is holding a newer copy of the path: the
-                // newer revision's own repair delivers its bytes. Every
-                // remaining leg of THIS transaction is cancelled with it.
-                self.cancel_legs_after_moved_revision(&canonical_id);
+                // Either the document moved while this repair waited for the
+                // delivery lock, so the newer revision's own repair delivers
+                // its bytes, or the serving engine did not certify these bytes.
+                // Every remaining leg of THIS transaction stays owed either way.
+                if still_current() {
+                    self.defer_legs_until_certified(&canonical_id);
+                } else {
+                    self.cancel_legs_after_moved_revision(&canonical_id);
+                }
             }
             Ok(delivery) => {
                 // The receipt this transaction's own delivery produced. It is

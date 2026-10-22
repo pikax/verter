@@ -111,7 +111,12 @@ fn evaluate(
 ) -> Option<TypeExpr> {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = FlowReturnKey {
         function: dispatch.flow_function_slot_for(
@@ -349,9 +354,12 @@ pub(crate) fn every_site_row_is_reached_and_every_reached_row_is_listed() {
         // recording exercises them here rather than exempting them.
         let store_view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let node = graph.intern_node(
             verter_type_engine::semantic_query::SemanticNodeData::Primitive(
                 verter_type_engine::semantic_query::PrimitiveKind::Number,

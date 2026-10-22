@@ -65,6 +65,19 @@ impl InternedRelateKey {
         });
         handle
     }
+
+    /// Whether this handle already roots every node of `nodes` in `arena`:
+    /// an identity holding it then needs no root set of its own over them.
+    pub(super) fn roots_all_in(
+        &self,
+        arena: &IssuingArena,
+        nodes: &[crate::semantic_query::SemanticNodeId],
+    ) -> bool {
+        let roots = &self.1 .0;
+        !roots.operands().is_empty()
+            && roots.belongs_to(arena)
+            && nodes.iter().all(|node| roots.operands().contains(node))
+    }
 }
 
 impl InternedResolveCallKey {

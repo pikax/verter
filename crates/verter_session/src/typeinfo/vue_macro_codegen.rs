@@ -147,8 +147,8 @@ pub(crate) struct VueMacroCodegenScheduleIdentity {
     pub(crate) input_pin: VueMacroCodegenInputPin,
 }
 
-pub(crate) fn vue_macro_codegen_schedule_identity(
-    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
+pub(crate) fn vue_macro_codegen_schedule_identity<M: verter_audit::observe::ObserveExec>(
+    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
     owner_canonical: &str,
     demand: VueMacroCodegenDemand,
 ) -> VueMacroCodegenScheduleIdentity {
@@ -191,18 +191,82 @@ pub(crate) fn vue_macro_codegen_schedule_identity_from_compat(
 }
 
 /// Deterministic work counters for one producer invocation.
+///
+/// Only this crate's contract suites read the counts, so the fields exist
+/// only under `cfg(test)`. Elsewhere the struct is zero-size and every
+/// `record_*` method is a no-op, so threading it through the producer costs
+/// nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct VueMacroCodegenCounters {
     /// Always one for an output returned by this producer.
+    #[cfg(test)]
     pub producer_invocations: u32,
     /// Empty-path Shallow root-surface demands.
+    #[cfg(test)]
     pub root_shallow_demands: u32,
     /// In-process `ClassifyBroadRuntime` demands.
+    #[cfg(test)]
     pub runtime_classifier_calls: u32,
     /// Terminal TypeInfo display materializations for TSC.
+    #[cfg(test)]
     pub tsc_materializations: u32,
     /// Exactly one scheduler admission attempt for this SFC demand.
+    #[cfg(test)]
     pub scheduler_submissions: u32,
+}
+
+impl VueMacroCodegenCounters {
+    /// The counters of one producer invocation, before any demand ran.
+    #[inline]
+    pub(crate) fn for_invocation() -> Self {
+        #[cfg(test)]
+        {
+            Self {
+                producer_invocations: 1,
+                ..Self::default()
+            }
+        }
+        #[cfg(not(test))]
+        {
+            Self::default()
+        }
+    }
+
+    /// Record the one scheduler admission attempt of this SFC demand.
+    #[inline]
+    pub(crate) fn record_scheduler_submission(&mut self) {
+        #[cfg(test)]
+        {
+            self.scheduler_submissions = 1;
+        }
+    }
+
+    /// Record one empty-path Shallow root-surface demand.
+    #[inline]
+    pub(crate) fn record_root_shallow_demand(&mut self) {
+        #[cfg(test)]
+        {
+            self.root_shallow_demands += 1;
+        }
+    }
+
+    /// Record one in-process `ClassifyBroadRuntime` demand.
+    #[inline]
+    pub(crate) fn record_runtime_classifier_call(&mut self) {
+        #[cfg(test)]
+        {
+            self.runtime_classifier_calls += 1;
+        }
+    }
+
+    /// Record one terminal TypeInfo display materialization for TSC.
+    #[inline]
+    pub(crate) fn record_tsc_materialization(&mut self) {
+        #[cfg(test)]
+        {
+            self.tsc_materializations += 1;
+        }
+    }
 }
 
 /// Typed missing-dependency provenance produced by the same graph projection
@@ -566,8 +630,8 @@ fn refuse_rooting_on_abort(abort: ExecutionAbort) -> ExecutionAbort {
 /// Identity is the request-pinned store view's captured published root,
 /// not live `host_view_project_identity_for`: a republish between pin and
 /// callback must not bind a new `InputBasisId` onto the old snapshot.
-fn enter_vue_macro_semantic_attempt<'a>(
-    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
+fn enter_vue_macro_semantic_attempt<'a, M: verter_audit::observe::ObserveExec>(
+    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
     owner_canonical: &'a str,
 ) -> CompileAttempt<'a> {
     CompileAttempt::enter_semantic_for_project(
@@ -583,8 +647,8 @@ fn enter_vue_macro_semantic_attempt<'a>(
 /// demanded macro retains its stable identity and typed `Partial` outcome;
 /// the result is explicitly non-cacheable and is never published by the
 /// request-scoped scheduler rendezvous.
-fn terminal_partial_vue_macro_codegen_output(
-    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
+fn terminal_partial_vue_macro_codegen_output<M: verter_audit::observe::ObserveExec>(
+    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
     owner_canonical: &str,
     demand: VueMacroCodegenDemand,
     completeness_reason: PartialReasonSet,
@@ -681,10 +745,10 @@ fn terminal_partial_vue_macro_codegen_output(
         // refuses the consumer's admission rather than pretending an empty
         // signature validated.
         fact_footprint: MacroFactFootprint::Unobserved,
-        counters: VueMacroCodegenCounters {
-            producer_invocations: 1,
-            scheduler_submissions: 1,
-            ..VueMacroCodegenCounters::default()
+        counters: {
+            let mut counters = VueMacroCodegenCounters::for_invocation();
+            counters.record_scheduler_submission();
+            counters
         },
     }
 }
@@ -725,9 +789,11 @@ impl VerterHost {
     ) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
         let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx =
-            crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
-        self.produce_vue_macro_codegen_with_ctx(&ctx, owner_canonical, demand)
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(self, &cold_seed, overlay);
+            self.produce_vue_macro_codegen_with_ctx(&ctx, owner_canonical, demand)
+        })
     }
 
     /// Produce the requested Vue macro codegen bundle from one request-bound
@@ -741,9 +807,9 @@ impl VerterHost {
     /// down scheduler, or a computation that read a superseded or torn view
     /// returns the abort, never a bundle of refusals standing in for the
     /// answer.
-    pub(crate) fn produce_vue_macro_codegen_with_ctx(
+    pub(crate) fn produce_vue_macro_codegen_with_ctx<M: verter_audit::observe::ObserveExec>(
         &self,
-        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
+        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
@@ -816,9 +882,9 @@ impl VerterHost {
         }
     }
 
-    fn compute_vue_macro_codegen_output(
+    fn compute_vue_macro_codegen_output<M: verter_audit::observe::ObserveExec>(
         &self,
-        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
+        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> VueMacroCodegenOutput {
@@ -848,7 +914,7 @@ impl VerterHost {
                 state
             },
         );
-        state.counters.scheduler_submissions = 1;
+        state.counters.record_scheduler_submission();
 
         let (transitive_canonicals, fact_footprint) = MacroFactFootprint::from_finalise(finalise);
         VueMacroCodegenOutput {
@@ -871,9 +937,9 @@ impl VerterHost {
         }
     }
 
-    fn produce_vue_macro_codegen_inner(
+    fn produce_vue_macro_codegen_inner<M: verter_audit::observe::ObserveExec>(
         &self,
-        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
+        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> ProducerState {
@@ -882,10 +948,7 @@ impl VerterHost {
             runtime_entries: Vec::new(),
             tsc_entries: Vec::new(),
             dependency_failures: Vec::new(),
-            counters: VueMacroCodegenCounters {
-                producer_invocations: 1,
-                ..VueMacroCodegenCounters::default()
-            },
+            counters: VueMacroCodegenCounters::for_invocation(),
             published: Vec::new(),
             completeness: ResultCompleteness::Complete,
         };
@@ -1204,10 +1267,10 @@ impl VerterHost {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn project_tsc_macro(
+    fn project_tsc_macro<M: verter_audit::observe::ObserveExec>(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
         attempt: &mut CompileAttempt<'_>,
         payload: verter_type_engine::semantic_query::SemanticNodeId,
         mac: &AnalyzedMacro,
@@ -1226,7 +1289,7 @@ impl VerterHost {
                 if probe_definitely_non_object_root(dispatch, payload) {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 }
-                counters.root_shallow_demands += 1;
+                counters.record_root_shallow_demand();
                 let surface = self.project_shallow_surface_graph_only(
                     ctx,
                     dispatch,
@@ -1323,7 +1386,7 @@ impl VerterHost {
                 if probe_definitely_non_object_root(dispatch, payload) {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 }
-                counters.root_shallow_demands += 1;
+                counters.record_root_shallow_demand();
                 let surface = self.project_shallow_surface_graph_only(
                     ctx,
                     dispatch,
@@ -1439,9 +1502,9 @@ impl VerterHost {
     /// [`TscExposeMemberType::Unavailable`] row instead of a silent
     /// `unknown` masquerading as success; the compiler falls back to its own
     /// authored-syntax-derived type (or `unknown`) for that member.
-    fn project_expose_runtime_object(
+    fn project_expose_runtime_object<M: verter_audit::observe::ObserveExec>(
         &self,
-        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
         attempt: &mut CompileAttempt<'_>,
         mac: &AnalyzedMacro,
         payload_index: usize,
@@ -1571,10 +1634,10 @@ impl VerterHost {
 
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
-    fn project_runtime_props(
+    fn project_runtime_props<M: verter_audit::observe::ObserveExec>(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
         attempt: &mut CompileAttempt<'_>,
         payload: verter_type_engine::semantic_query::SemanticNodeId,
         runtime_subject: &BroadRuntimeSubjectLocator,
@@ -1591,7 +1654,7 @@ impl VerterHost {
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
-        counters.root_shallow_demands += 1;
+        counters.record_root_shallow_demand();
         let surface = self.project_shallow_surface_graph_only(
             ctx,
             dispatch,
@@ -1729,10 +1792,10 @@ impl VerterHost {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn project_runtime_emits(
+    fn project_runtime_emits<M: verter_audit::observe::ObserveExec>(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
         attempt: &mut CompileAttempt<'_>,
         payload: verter_type_engine::semantic_query::SemanticNodeId,
         owner_canonical: &str,
@@ -1746,7 +1809,7 @@ impl VerterHost {
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
-        counters.root_shallow_demands += 1;
+        counters.record_root_shallow_demand();
         let runtime_context = ProjectionReductionContext::vue_runtime_object_surface(
             ProjectionMode::Shallow,
             SurfaceProvenanceContext::Structural,
@@ -1847,10 +1910,10 @@ impl VerterHost {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn project_runtime_model(
+    fn project_runtime_model<M: verter_audit::observe::ObserveExec>(
         &self,
         attempt: &mut CompileAttempt<'_>,
-        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
         runtime_subject: BroadRuntimeSubjectLocator,
         owner_canonical: &str,
         payload_index: usize,

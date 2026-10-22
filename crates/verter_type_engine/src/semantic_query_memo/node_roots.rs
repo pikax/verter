@@ -318,6 +318,18 @@ impl NodeRoot {
     pub fn node_ref(&self) -> Result<NodeRef<'_>, QueryError> {
         self.roots.node_ref(self.id)
     }
+    /// The checker diagnostic code when this node is the checker's recovered
+    /// error type (a TS2590 cross product, say) rather than a built type.
+    pub fn checker_recovery_code(&self) -> Option<u32> {
+        let data = self.node_ref().ok()?.read().ok()?;
+        match &*data {
+            crate::semantic_query::SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                diagnostic,
+                ..
+            }) => Some(diagnostic.code.code()),
+            _ => None,
+        }
+    }
 }
 
 /// The authority to open construction scopes on one graph: the producer
@@ -427,7 +439,7 @@ impl ScopeStack {
             // A repeat is another handle on an owner the heir keeps.
             let _ = heir.adopt(lease);
         }
-        owners.delivered.clear();
+        owners.delivered = DeliveredOwners::default();
         None
     }
 
@@ -455,7 +467,7 @@ impl ScopeStack {
                 // A repeat is another handle on an owner the heir keeps.
                 let _ = heir.adopt(lease);
             }
-            owners.delivered.clear();
+            owners.delivered = DeliveredOwners::default();
         }
         owners
     }
@@ -533,7 +545,7 @@ struct ConstructionOwners {
     /// The shared delivery owners `deliveries` already holds. Every clone
     /// of one delivery names the same owner, so an owner keeps it once
     /// however often it is read or cloned under this owner.
-    delivered: rustc_hash::FxHashSet<usize>,
+    delivered: DeliveredOwners,
 }
 
 impl Drop for ConstructionOwners {
@@ -541,6 +553,47 @@ impl Drop for ConstructionOwners {
         if !self.constructed.is_empty() {
             self.arena.release_roots(&self.constructed);
         }
+    }
+}
+
+/// The delivery owners one construction owner holds: the first few in an
+/// inline array scanned with integer compares — most owners hold a handful
+/// — then an open-addressed address set, which records each further owner
+/// in constant time with a multiply and a few compares rather than the
+/// calls a general hash set's probe takes in a debug build.
+#[derive(Default)]
+struct DeliveredOwners {
+    inline: [usize; DELIVERED_INLINE],
+    inline_len: usize,
+    spilled: Option<verter_retention::word_set::WordSet>,
+}
+
+/// Delivery owners [`DeliveredOwners`] keeps before it spills to a set.
+const DELIVERED_INLINE: usize = 8;
+
+impl DeliveredOwners {
+    /// Record `owner`; `false` when it was already recorded.
+    fn insert(&mut self, owner: usize) -> bool {
+        if let Some(set) = self.spilled.as_mut() {
+            return set.insert(owner as u64);
+        }
+        let mut index = 0;
+        while index < self.inline_len {
+            if self.inline[index] == owner {
+                return false;
+            }
+            index += 1;
+        }
+        if self.inline_len < DELIVERED_INLINE {
+            self.inline[self.inline_len] = owner;
+            self.inline_len += 1;
+            return true;
+        }
+        let mut set: verter_retention::word_set::WordSet =
+            self.inline.iter().map(|&held| held as u64).collect();
+        set.insert(owner as u64);
+        self.spilled = Some(set);
+        true
     }
 }
 
@@ -562,6 +615,7 @@ impl ConstructionOwners {
 
     /// Whether this entry owns what is captured into it: every scope and
     /// operation does, a dispatcher's construction lane does not.
+    #[inline(always)]
     fn is_owner(&self) -> bool {
         self.dispatchers == 0
     }
@@ -832,7 +886,12 @@ impl NodeRootScope {
         let mut lease = Some(lease);
         SCOPES.with(|scopes| {
             let mut scopes = scopes.borrow_mut();
-            let owner = match arena {
+            // Every read and clone of a delivery lands here, so the owner is
+            // found with index loops over the stack, which a debug build runs
+            // without an iterator call per entry.
+            let entries: &mut [ConstructionOwners] = &mut scopes.entries;
+            let mut owner = None;
+            match arena {
                 Some(arena) => {
                     let of_arena = |candidate: &ConstructionOwners| {
                         candidate.is_owner() && Arc::as_ptr(&candidate.arena) as usize == arena
@@ -841,30 +900,51 @@ impl NodeRootScope {
                     // polling thread opened before the task was installed
                     // may close while the task is pending, so the search
                     // starts at the newest installed task owner.
-                    let floor = scopes
-                        .entries
-                        .iter()
-                        .rposition(|candidate| candidate.task && of_arena(candidate))
-                        .unwrap_or(0);
-                    let entries = &mut scopes.entries[floor..];
+                    let mut floor = 0;
+                    let mut index = entries.len();
+                    while index > 0 {
+                        index -= 1;
+                        let candidate = &entries[index];
+                        if candidate.task && of_arena(candidate) {
+                            floor = index;
+                            break;
+                        }
+                    }
                     // A carrier under construction keeps every delivery its
                     // build reads; otherwise the oldest owner does.
-                    match entries
-                        .iter()
-                        .rposition(|candidate| candidate.carrier && of_arena(candidate))
-                    {
-                        Some(carrier) => entries.get_mut(carrier),
-                        None => entries.iter_mut().find(|candidate| of_arena(candidate)),
+                    let mut index = entries.len();
+                    while index > floor {
+                        index -= 1;
+                        let candidate = &entries[index];
+                        if candidate.carrier && of_arena(candidate) {
+                            owner = Some(index);
+                            break;
+                        }
+                    }
+                    if owner.is_none() {
+                        let mut index = floor;
+                        while index < entries.len() {
+                            if of_arena(&entries[index]) {
+                                owner = Some(index);
+                                break;
+                            }
+                            index += 1;
+                        }
                     }
                 }
-                None => scopes
-                    .entries
-                    .iter_mut()
-                    .rev()
-                    .find(|candidate| candidate.is_owner()),
-            };
+                None => {
+                    let mut index = entries.len();
+                    while index > 0 {
+                        index -= 1;
+                        if entries[index].is_owner() {
+                            owner = Some(index);
+                            break;
+                        }
+                    }
+                }
+            }
             if let Some(owner) = owner {
-                lease = owner.adopt(lease.take().unwrap());
+                lease = entries[owner].adopt(lease.take().unwrap());
             }
         });
         drop(lease);
@@ -1115,5 +1195,46 @@ impl<T> Constructed<T> {
             value: f(self.value),
             hold: self.hold,
         }
+    }
+}
+
+#[cfg(test)]
+mod delivered_owners_tests {
+    use super::{DeliveredOwners, DELIVERED_INLINE};
+
+    /// Each owner is recorded once, in the inline array and in the set,
+    /// whatever order the owners arrive in.
+    #[test]
+    fn each_owner_is_recorded_once_across_the_spill() {
+        let owners: Vec<usize> = (0..600usize).map(|i| (i * 7919) % 631 * 16).collect();
+        let mut delivered = DeliveredOwners::default();
+        for (arrived, owner) in owners.iter().enumerate() {
+            assert!(delivered.insert(*owner), "first delivery of {owner}");
+            for earlier in &owners[..=arrived] {
+                assert!(
+                    !delivered.insert(*earlier),
+                    "{earlier} after {arrived} deliveries"
+                );
+            }
+        }
+    }
+
+    /// Owners past the inline array move to the set together with the
+    /// inline ones, each once.
+    #[test]
+    fn many_deliveries_move_to_the_set() {
+        let mut delivered = DeliveredOwners::default();
+        for owner in 0..DELIVERED_INLINE {
+            assert!(delivered.insert(owner * 16));
+        }
+        assert!(delivered.spilled.is_none());
+        let total = DELIVERED_INLINE * 64;
+        for owner in DELIVERED_INLINE..total {
+            assert!(delivered.insert(owner * 16));
+        }
+        let Some(set) = &delivered.spilled else {
+            panic!("owners past the inline array must move to the set");
+        };
+        assert_eq!(set.len(), total);
     }
 }

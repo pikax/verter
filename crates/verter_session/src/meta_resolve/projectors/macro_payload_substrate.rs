@@ -159,8 +159,8 @@ pub(crate) enum PayloadSurfaceScope {
 ///
 /// Every alias body the walk resolves is handed to `builder`, which keeps the
 /// returned root live for as long as the caller holds it open.
-pub(crate) fn resolve_emit_payload_to_conditional_root(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn resolve_emit_payload_to_conditional_root<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     node: SemanticNodeId,
     depth: u16,
@@ -245,8 +245,8 @@ pub(crate) const EMIT_CARRIER_WALK_FUSE: usize = 1024;
 /// `args` is empty — a bare named-decl demand carries no explicit type
 /// arguments. The body node arrives in the carrier that owns it, which the
 /// walk holds while it descends from it.
-fn lower_decl_body_to_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn lower_decl_body_to_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
@@ -266,8 +266,8 @@ fn lower_decl_body_to_node(
 }
 
 #[allow(dead_code)]
-pub(crate) fn resolve_payload_surface_with_scope(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn resolve_payload_surface_with_scope<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     payload_node: SemanticNodeId,
     macro_index: usize,
     expansion_kind: MacroExpansionKind,
@@ -469,7 +469,8 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     let members = dispatch
                         .owning()
                         .spread_formula_positive_members_for_macro(&formula)
-                        .into_value_in(&builder);
+                        .into_value_in(&builder)
+                        .map_err(NonEmptyReasons::from_demand_trip)?;
                     Ok(Some(members))
                 }
                 other => {
@@ -577,32 +578,34 @@ pub(crate) fn resolve_payload_surface_with_scope(
 /// restrictive across both branches (an open conditional can resolve to
 /// either branch, so a member is only safely public when public in
 /// both). Dual spellings of one JS property (`Number(1)` / `String("1")`)
-/// merge under element-access collision. Branch member lists are small
-/// (emit rows), so a linear collides scan replaces the strict-key map.
+/// merge under element-access collision, found through one canonical
+/// property-identity probe per row; a computed key is never merged.
 pub(crate) fn merge_emit_branch_members(
     true_members: Vec<SurfaceMember>,
     false_members: Vec<SurfaceMember>,
 ) -> Vec<SurfaceMember> {
     let mut merged: Vec<SurfaceMember> =
         Vec::with_capacity(true_members.len() + false_members.len());
+    let mut known_rows =
+        verter_type_engine::projection::aggregation::OrderedMemberAggregation::new();
     for member in true_members.into_iter().chain(false_members) {
         let Some(key) = member.key.cloned_known() else {
             merged.push(member);
             continue;
         };
-        if let Some(existing) = merged.iter_mut().find(|existing| {
-            existing
-                .key
-                .cloned_known()
-                .is_some_and(|known| known.element_access_collides(&key))
-        }) {
+        let next = merged.len();
+        let slot = *known_rows.entry(
+            &verter_type_engine::semantic_query::AuthoredPropertyKey::from_known(key),
+            || next,
+        );
+        if slot == next {
+            merged.push(member);
+        } else {
             // Already represented (true-branch row wins for the
             // value/optional/readonly fields); fold in this
             // contributor's visibility to the most restrictive.
-            let folded = existing.visibility.most_restrictive(member.visibility);
-            existing.visibility = folded;
-        } else {
-            merged.push(member);
+            let existing = &mut merged[slot];
+            existing.visibility = existing.visibility.most_restrictive(member.visibility);
         }
     }
     merged

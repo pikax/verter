@@ -24,7 +24,6 @@ use super::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
     RecoveryBasis, SemanticNodeData, SemanticNodeId,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
 
 /// The checker's `instantiationDepth` limit: an instantiation nested this
 /// deep fails with TS2589.
@@ -103,11 +102,14 @@ pub(crate) fn instantiation_budget(within: bool) -> Result<(), OperationRefusal>
 
 /// A sound, budget-independent proof that one operation can never reach a
 /// value: a CERTIFIED divergence. It is minted only by the constructors
-/// below, each of which names the one proof class it stands for, so a
-/// divergence can never be claimed from growth, from repeated names with
-/// different arguments, or from a query that merely meets itself on its
-/// path (a deferred position legitimately does, and a circular declaration
-/// is the checker's TS2456 instead).
+/// below, each of which names the one proof class it stands for and takes
+/// that class's witness, so a divergence can never be claimed from growth,
+/// from repeated names with different arguments, from a step that read a
+/// partial, or from a query that merely meets itself on its path (a
+/// deferred position legitimately does, and a circular declaration is the
+/// checker's TS2456 instead). Its dependencies are the reads of the
+/// computation that holds it: an edit to any declaration the run went
+/// through retires the kept answer with that computation's read set.
 #[must_use = "a certified divergence decides its operation's answer"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CertifiedDivergence {
@@ -118,11 +120,33 @@ impl CertifiedDivergence {
     /// The operation reached a state IDENTICAL to one it is still
     /// evaluating on its own path: the same declaration with the same
     /// arguments under the same evaluation context and phase, each step a
-    /// deterministic function of that state. The run from there repeats
-    /// forever. Only the operation that holds both states may claim it —
-    /// a conditional tail run meeting arguments it already took, or the lib
-    /// `Awaited<T>` conditional re-entering itself with the same argument.
-    pub(crate) const fn exact_recurrence(operation: CheckerDiagnosticOperation) -> Self {
+    /// deterministic, complete function of that state. The run from there
+    /// repeats forever. Only the operation that holds both states may claim
+    /// it — a conditional tail run meeting arguments it already took, or the
+    /// lib `Awaited<T>` conditional re-entering itself with the same
+    /// argument — and only with `exact`, the dispatcher's witness that no
+    /// step on the way read a partial.
+    pub(crate) fn exact_recurrence(
+        operation: CheckerDiagnosticOperation,
+        exact: crate::project_semantic_dispatch::build::ExactSteps,
+    ) -> Self {
+        let _ = exact;
+        Self { operation }
+    }
+
+    /// The operation's tail run wraps one argument in the same structural
+    /// constructor at every step while the others stay fixed, and the
+    /// checker's own generic test selects the recursive branch for
+    /// whatever that constructor holds: no step can ever take the other
+    /// branch, so the run grows forever. Only a conditional tail run may
+    /// claim it, with `growth`, the dispatcher's witness of that uniform
+    /// decision, and `exact`, its witness that no step read a partial.
+    pub(crate) fn uniform_growth(
+        operation: CheckerDiagnosticOperation,
+        exact: crate::project_semantic_dispatch::build::ExactSteps,
+        growth: crate::project_semantic_dispatch::build::UniformGrowth,
+    ) -> Self {
+        let _ = (exact, growth);
         Self { operation }
     }
 
@@ -139,8 +163,8 @@ impl CertifiedDivergence {
 /// carrier: a complete answer, kept like any semantic answer, because the
 /// proof holds under every allowance. `origin` is the diverging
 /// operation's authored form, if one already exists.
-pub(crate) fn divergence_recovery(
-    graph: &SemanticGraphStore,
+pub(crate) fn divergence_recovery<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     divergence: CertifiedDivergence,
     origin: Option<SemanticNodeId>,
 ) -> SemanticNodeId {
@@ -157,8 +181,8 @@ pub(crate) fn divergence_recovery(
 /// recovery is a resource partial: the caller marks its result incomplete.
 /// A relation refusal (TS2859) recovers as a false relation instead, never
 /// as a type.
-pub(crate) fn resource_recovery(
-    graph: &SemanticGraphStore,
+pub(crate) fn resource_recovery<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     refusal: OperationRefusal,
     origin: Option<SemanticNodeId>,
 ) -> SemanticNodeId {
@@ -195,11 +219,30 @@ pub(crate) const fn circular_type_alias() -> CheckerDiagnostic {
     }
 }
 
+/// The checker's TS2304 for a type reference to a conditional type's
+/// `infer` declaration outside the scope its `extends` clause gives it: the
+/// false branch, or another declaration's constraint in the same pattern
+/// (read where the conditional is written). A name an outer declaration
+/// also binds reads that declaration instead. A checker error: the
+/// reference is `any`.
+///
+/// Measured on TypeScript 7.0.2, all four `strictNullChecks` ×
+/// `noImplicitAny` settings: `type I<T> = T extends [infer U] ? 1 : U` and
+/// `type C<T> = T extends [infer A, infer B extends A] ? B : 0` report
+/// TS2304 for `U` and for `A`; `I<2>` is the error type and `C<[1, 2]>` is
+/// `2`.
+pub(crate) const fn unresolved_type_name() -> CheckerDiagnostic {
+    CheckerDiagnostic {
+        code: CheckerDiagnosticCode::CannotFindName,
+        operation: CheckerDiagnosticOperation::TypeReference,
+    }
+}
+
 /// The checker's error type after its TS2456 for the type alias `alias`
 /// (its `DeclRef`): the typed recovery carrier, a complete answer, whose
 /// origin names the alias its message is about.
-pub(crate) fn circular_type_alias_recovery(
-    graph: &SemanticGraphStore,
+pub(crate) fn circular_type_alias_recovery<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     alias: SemanticNodeId,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
@@ -212,8 +255,8 @@ pub(crate) fn circular_type_alias_recovery(
 /// The checker's error type after `diagnostic`, a diagnostic the types
 /// themselves decide (never a resource limit): the typed recovery carrier,
 /// a complete answer.
-pub(crate) fn checker_recovery(
-    graph: &SemanticGraphStore,
+pub(crate) fn checker_recovery<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     diagnostic: CheckerDiagnostic,
 ) -> SemanticNodeId {
     verter_debug_assert::verter_debug_assert!(
@@ -369,6 +412,32 @@ impl RelationComplexity {
     }
 }
 
+/// The checking site a refused tuple splice is reported at: the node the
+/// checker is checking when it builds the tuple (`isPartOfTypeNode` of its
+/// current node), never the place the tuple is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum TupleSplicePosition {
+    /// A type node: TS2799.
+    #[default]
+    Type,
+    /// An expression: TS2800.
+    Expression,
+}
+
+/// The refusal of a tuple splice the tuple-product constructor's size gate
+/// (`project_semantic_dispatch::build::tuple_product`) refused, reported at
+/// `position`. That gate owns the checker's tuple-size rule and is this
+/// bridge's one caller; it mints only the tuple-spread refusal.
+pub(crate) const fn tuple_splice_refusal(position: TupleSplicePosition) -> OperationRefusal {
+    OperationRefusal::of(
+        match position {
+            TupleSplicePosition::Type => CheckerDiagnosticCode::TupleTooLarge,
+            TupleSplicePosition::Expression => CheckerDiagnosticCode::ExpressionTupleTooLarge,
+        },
+        CheckerDiagnosticOperation::TupleSpread,
+    )
+}
+
 /// One factor of a cross product, as `getCrossProductUnionSize` counts it: a
 /// union contributes its constituents, `never` makes the product empty, and
 /// any other type contributes one.
@@ -519,6 +588,8 @@ mod tests {
                 .step(5, CheckerDiagnosticOperation::ConditionalTail)
                 .unwrap_err(),
             cross_product_union([ProductFactor::Union(usize::MAX)], OP).unwrap_err(),
+            tuple_splice_refusal(TupleSplicePosition::Type),
+            tuple_splice_refusal(TupleSplicePosition::Expression),
             with_relation_comparisons_for_tests(0, || RelationComplexity::default().record())
                 .unwrap_err(),
         ];

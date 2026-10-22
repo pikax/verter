@@ -192,9 +192,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let Some(data) = self.graph().node_data(node) else {
                     continue;
                 };
-                if matches!(&*data, SemanticNodeData::InstantiationRef { base, .. } if base.decl_name.as_ref() == "ThisType")
-                {
-                    if let Some(receiver) = self.contextual_object_this_type(node, canonical) {
+                if let SemanticNodeData::InstantiationRef { base, args } = &*data {
+                    if args.len() == 1
+                        && self.names_contextual_this_marker(
+                            canonical,
+                            &base.canonical_id,
+                            base.owner,
+                            &base.decl_name,
+                        )
+                    {
+                        let receiver = args[0];
                         consumers[index].extend(
                             parameters
                                 .iter()
@@ -309,7 +316,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     member.value,
                     &mut budget,
                     &declared,
-                    false,
+                    None,
                 ) {
                     Ok(true) => {}
                     Ok(false) | Err(ContextualCandidateFailure::Mismatch) => {
@@ -637,7 +644,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             state.completed = None;
             state.diagnostic = None;
             let setup = InferenceSessionSetup::new(
-                self.graph(),
+                self.graph().store(),
                 self.call_inference_infos(&type_parameters),
                 VariancePhase::Covariant,
                 InferencePassKind::CallApplicability,
@@ -649,7 +656,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let id = self
                 .dispatch_txn
                 .borrow_mut()
-                .push_collecting_session(setup, None);
+                .push_collecting_session(setup);
             let session = self.take_collecting_session(id);
             (
                 ContextualCandidate {
@@ -781,6 +788,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         original.len(),
                         argument.clone(),
                         graph,
+                        self.construction_meter(),
                         &mut evidence,
                     )
                     .ok_or(ContextualCandidateFailure::Degraded(
@@ -798,9 +806,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 literal_mode: ArgumentLiteralMode::Literal,
                                 ..argument.clone()
                             };
-                            match self
-                                .collect_contextual_argument(&view, target, budget, &declared, true)
-                            {
+                            match self.collect_contextual_argument(
+                                &view,
+                                target,
+                                budget,
+                                &declared,
+                                Some(argument.node),
+                            ) {
                                 Ok(true) => {}
                                 Ok(false)
                                 | Err(ContextualCandidateFailure::Degraded(
@@ -825,17 +837,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         };
                     }
                     if let Some(signature) = self.generic_function_against(argument.node, target) {
-                        generic_arguments.push((argument, signature, target));
+                        generic_arguments.push((argument, signature, target, position));
                         continue;
                     }
                     if !self
-                        .collect_contextual_argument(&argument, target, budget, &declared, false)?
+                        .collect_contextual_argument(&argument, target, budget, &declared, None)?
                     {
                         if !self.hold_eager_failure(
                             &mut state.diagnostic,
                             &mut progress,
                             argument.authored,
                             argument.node,
+                            self.declared_report_target(ordinary, position, target),
                             target,
                             last_visible,
                         ) {
@@ -845,7 +858,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                 }
                 if !progress.eager_mismatch {
-                    for (mut argument, signature, target) in generic_arguments {
+                    for (mut argument, signature, target, position) in generic_arguments {
                         argument.node = self
                             .generic_function_in_context(
                                 session_id,
@@ -858,13 +871,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             .map_err(ContextualCandidateFailure::Degraded)?
                             .unwrap_or(argument.node);
                         if !self.collect_contextual_argument(
-                            &argument, target, budget, &declared, false,
+                            &argument, target, budget, &declared, None,
                         )? {
                             if !self.hold_eager_failure(
                                 &mut state.diagnostic,
                                 &mut progress,
                                 argument.authored,
                                 argument.node,
+                                self.declared_report_target(ordinary, position, target),
                                 target,
                                 last_visible,
                             ) {
@@ -889,7 +903,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         inference_target,
                         budget,
                         &declared,
-                        false,
+                        None,
                     )? {
                         progress.arguments[position] = assigned;
                         progress.cursor += 1;
@@ -913,7 +927,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 inference_target,
                                 budget,
                                 &declared,
-                                false,
+                                None,
                             )?;
                         if reportable {
                             state.diagnostic = Some(super::argument_not_assignable(
@@ -989,6 +1003,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         progress: &mut ContextualCandidate,
         authored: u32,
         node: SemanticNodeId,
+        report_target: SemanticNodeId,
         target: SemanticNodeId,
         last_visible: bool,
     ) -> bool {
@@ -1003,7 +1018,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if deferred_before && (inference_order || !last_visible) {
             return false;
         }
-        *diagnostic = Some(super::argument_not_assignable(authored, node, target));
+        *diagnostic = Some(super::argument_not_assignable(
+            authored,
+            node,
+            report_target,
+        ));
         if !deferred_before {
             return false;
         }
@@ -1012,15 +1031,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// Relate one argument to `target` collecting its candidates;
-    /// `first_pass` when the argument is a context-sensitive literal's
-    /// first-pass reading.
+    /// `first_pass_of` the argument's own type when the argument is a
+    /// context-sensitive literal's first-pass reading.
     fn collect_contextual_argument(
         &self,
         argument: &CallArgument,
         target: SemanticNodeId,
         budget: &mut CallResolutionBudget<'_>,
         declared: &[TypeParamDecl],
-        first_pass: bool,
+        first_pass_of: Option<SemanticNodeId>,
     ) -> Result<bool, ContextualCandidateFailure> {
         let before = self.accepted_inference_deposits();
         let step = self.call_argument_relation(
@@ -1031,7 +1050,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             argument.literal_mode,
             argument.literal_provenance.as_deref(),
             declared,
-            first_pass,
+            first_pass_of,
         );
         if !budget.charge_accepted_deposits(self.accepted_inference_deposits() - before) {
             return Err(ContextualCandidateFailure::Degraded(
@@ -1044,6 +1063,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             RelationStep::BudgetExceeded(_) => Err(ContextualCandidateFailure::Degraded(
                 ResolveCallFailure::Budget,
             )),
+            // A parameter whose type reads the candidate's own type
+            // parameters where this relation cannot decide it (a mapped type
+            // over one of them) infers nothing more from the argument: the
+            // checker infers first and checks applicability on the
+            // instantiated signature, which decides the argument.
+            RelationStep::Unknown
+                if declared
+                    .iter()
+                    .any(|decl| self.mentions_node(target, decl.param)) =>
+            {
+                let mut txn = self.dispatch_txn.borrow_mut();
+                txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(1);
+                Ok(true)
+            }
             RelationStep::Unknown | RelationStep::Assumed(_) => Err(
                 ContextualCandidateFailure::Degraded(ResolveCallFailure::Undecidable),
             ),
@@ -1131,7 +1164,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         positions.sort_unstable();
-        let retained_substitution = CanonicalTypeSubstitution::new(self.graph(), retained.clone());
+        let retained_substitution =
+            CanonicalTypeSubstitution::new(self.graph().store(), retained.clone());
         let declarations: Vec<_> = positions
             .iter()
             .map(|&position| {
@@ -1168,13 +1202,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 inferred.push((*param, *bound));
             }
         }
-        let fixed = CanonicalTypeSubstitution::new(self.graph(), fixed);
+        let fixed = CanonicalTypeSubstitution::new(self.graph().store(), fixed);
         let fixed = self
             .fresh_widened_substitution_outside_top_level(id, &fixed, None)?
             .unwrap_or(fixed);
         let inferred_params: FxHashSet<_> = inferred.iter().map(|(param, _)| *param).collect();
         let inference_mapper = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             fixed
                 .bindings()
                 .iter()
@@ -1183,7 +1217,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .collect(),
         );
         let contextual_mapper = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             fixed
                 .bindings()
                 .iter()
@@ -1197,7 +1231,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             .and_then(|&position| progress.parameters[position].constraint);
                         (
                             param,
-                            self.contextual_uninferred_parameter(param, constraint),
+                            self.contextual_uninferred_parameter(
+                                param,
+                                constraint,
+                                &inference_mapper,
+                            ),
                         )
                     }
                 })

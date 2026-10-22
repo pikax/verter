@@ -107,6 +107,7 @@ fn program(
     effects: impl IntoIterator<Item = ObjectConstructionEffect>,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+        is_literal: true,
         effects: verter_type_engine::semantic_query::PayloadArray::from(
             effects.into_iter().collect::<Vec<_>>(),
         ),
@@ -132,7 +133,7 @@ fn project(
     program: SemanticNodeId,
     selector: ObjectProjectionSelector,
     policy: ExactOptionalPropertyPolicy,
-) -> verter_type_engine::semantic_query::ObjectProjectionFormula {
+) -> Projected {
     match dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
         program,
         selector,
@@ -141,8 +142,69 @@ fn project(
         QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::ObjectProjection(formula),
             ..
-        }) => formula,
+        }) => Projected::read(dispatch, formula),
         other => panic!("expected object projection, got {other:?}"),
+    }
+}
+
+/// A projected formula with every alternative read through the dispatch
+/// cursor, side by side.
+struct Projected {
+    formula: verter_type_engine::semantic_query::ObjectProjectionFormula,
+    alternatives: Vec<verter_type_engine::semantic_query::ObjectProjectionAlternative>,
+    keyof: Option<Vec<PropertyKey>>,
+}
+
+impl Projected {
+    fn read(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        formula: verter_type_engine::semantic_query::ObjectProjectionFormula,
+    ) -> Self {
+        let alternatives = dispatch
+            .object_spread_alternatives(&formula)
+            .expect("an alternative read outside a demand is never refused");
+        assert_eq!(
+            alternatives.len() as u64,
+            formula.width(),
+            "the cursor reads exactly the formula's width"
+        );
+        let keyof = dispatch
+            .object_spread_exact_keyof(&formula)
+            .expect("an alternative read outside a demand is never refused");
+        Self {
+            formula,
+            alternatives,
+            keyof,
+        }
+    }
+
+    fn alternatives(&self) -> &[verter_type_engine::semantic_query::ObjectProjectionAlternative] {
+        &self.alternatives
+    }
+
+    /// Every alternative's closed witness, when every alternative closes.
+    fn closed(&self) -> Option<ClosedAlternatives<'_>> {
+        self.formula
+            .all_alternatives_closed()
+            .then_some(ClosedAlternatives(self))
+    }
+}
+
+struct ClosedAlternatives<'p>(&'p Projected);
+
+impl<'p> ClosedAlternatives<'p> {
+    fn alternatives(
+        &self,
+    ) -> impl Iterator<Item = verter_type_engine::semantic_query::ClosedObjectProjectionAlternative<'p>>
+    {
+        self.0
+            .alternatives
+            .iter()
+            .map(|alternative| alternative.closed().expect("every alternative closes"))
+    }
+
+    fn keyof(&self) -> Option<&'p [PropertyKey]> {
+        self.0.keyof.as_deref()
     }
 }
 
@@ -341,16 +403,12 @@ fn optional_spread_write_fold_distinguishes_policy_and_live_open_state() {
         ObjectProjectionSelector::Key(key("a")),
         ExactOptionalPropertyPolicy::Enabled,
     );
-    let value =
-        |formula: &verter_type_engine::semantic_query::ObjectProjectionFormula| match formula
-            .alternatives()[0]
-            .selected_key(&key("a"))
-        {
-            verter_type_engine::semantic_query::OpenSafeKeyEvidence::Positive(fact) => {
-                fact.value().clone()
-            }
-            other => panic!("expected exact a, got {other:?}"),
-        };
+    let value = |formula: &Projected| match formula.alternatives()[0].selected_key(&key("a")) {
+        verter_type_engine::semantic_query::OpenSafeKeyEvidence::Positive(fact) => {
+            fact.value().clone()
+        }
+        other => panic!("expected exact a, got {other:?}"),
+    };
     assert_ne!(value(&disabled), value(&enabled));
     assert!(matches!(
         value(&disabled),
@@ -446,7 +504,7 @@ fn selector_liveness_prunes_only_shadowed_recursive_key_effects() {
                 value: SemanticQueryValue::ObjectProjection(ref formula),
                 ..
             }) if matches!(
-                formula.alternatives()[0].selected_key(&key("x")),
+                dispatch.object_spread_alternatives(formula).unwrap()[0].selected_key(&key("x")),
                 verter_type_engine::semantic_query::OpenSafeKeyEvidence::Positive(fact)
                     if fact.value() == &ProjectionEvidence::Proven(number)
             )
@@ -683,6 +741,7 @@ fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
     let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let expr = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![
             verter_type_expr::ObjectMember::Spread(verter_type_expr::SpreadMember::new(
                 verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Object),
@@ -825,6 +884,81 @@ fn keyof_and_substitution_consume_the_canonical_program() {
     );
 }
 
+/// A refused spread-key read inside an intersection must not leave the
+/// other arm's keys as an exact `keyof` domain: a demand refusal says the
+/// arm's keys were not paid for, not that the arm has none. The same
+/// intersection under an adequate demand mints both arms' keys, proving
+/// the non-exact verdict comes from the refusal, not an empty arm.
+#[test]
+fn a_refused_spread_key_read_cannot_leave_the_intersection_keyof_exact() {
+    {
+        // A demand too small to pay for the spread arm's keys: `keyof
+        // (A & S)` must stay non-exact — `A`'s keys alone are not the
+        // intersection's domain.
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let left = object(graph, [surface_member("a", number, false)]);
+        let spread = program(
+            graph,
+            [
+                ObjectConstructionEffect::Spread(keyed_union(graph, "k", 64)),
+                property("shared", number, false),
+            ],
+        );
+        let intersection = graph.intern_node(SemanticNodeData::Intersection(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [left, spread],
+            )),
+        ));
+        dispatch.connected_demand().set_limits_for_tests(1, 8);
+        let (_guard, _) = dispatch.enter_connected_demand(false);
+        let _frame = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+            &dispatch.build_local_taint,
+        );
+        assert_eq!(
+            dispatch.key_names_from_base_node(intersection),
+            None,
+            "a refused spread arm must poison the intersection key domain"
+        );
+    }
+
+    {
+        // The same intersection under an adequate demand mints the union
+        // of both arms' keys: the non-exact verdict above comes from the
+        // refusal, not an empty or unenumerable arm.
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let left = object(graph, [surface_member("a", number, false)]);
+        let spread = program(
+            graph,
+            [
+                ObjectConstructionEffect::Spread(keyed_union(graph, "k", 64)),
+                property("shared", number, false),
+            ],
+        );
+        let intersection = graph.intern_node(SemanticNodeData::Intersection(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [left, spread],
+            )),
+        ));
+        let (_guard, _) = dispatch.enter_connected_demand(false);
+        let names = dispatch
+            .key_names_from_base_node(intersection)
+            .expect("an adequate demand enumerates both arms");
+        assert_eq!(
+            names,
+            vec![key("a"), key("shared")],
+            "the paid read unions the spread's exact keys with the plain arm"
+        );
+    }
+}
+
 #[test]
 fn relation_quantifies_correlated_alternatives_and_never_shortcuts_open_identity() {
     let host = host();
@@ -879,66 +1013,147 @@ fn relation_quantifies_correlated_alternatives_and_never_shortcuts_open_identity
     );
 }
 
+/// A union of `width` single-member objects whose keys start with `prefix`.
+fn keyed_union(
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    prefix: &str,
+    width: usize,
+) -> SemanticNodeId {
+    let arms = (0..width)
+        .map(|index| {
+            let value = graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(index as f64),
+            ));
+            object(
+                graph,
+                [surface_member(&format!("{prefix}{index}"), value, false)],
+            )
+        })
+        .collect::<Vec<_>>();
+    graph.intern_node(SemanticNodeData::Union(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(arms)),
+    ))
+}
+
+fn assert_object_spread_ts2590(
+    result: &QueryResult<SemanticQueryOutput<SemanticQueryValue>>,
+    context: &str,
+) {
+    use verter_type_engine::semantic_query::{
+        CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError, RecoveryBasis,
+    };
+    match result {
+        QueryResult::Error(QueryError::CheckerRecovery {
+            diagnostic,
+            basis: RecoveryBasis::Budget,
+            origin: Some(_),
+        }) => {
+            assert_eq!(
+                diagnostic.code,
+                CheckerDiagnosticCode::UnionTooComplex,
+                "{context}"
+            );
+            assert_eq!(
+                diagnostic.operation,
+                CheckerDiagnosticOperation::ObjectSpread,
+                "{context}"
+            );
+        }
+        other => panic!("{context}: expected the TS2590 recovery, got {other:?}"),
+    }
+}
+
+/// The checker refuses an object spread whose cross product reaches its
+/// limit (TS2590) before building a constituent; one below it builds. The
+/// limit is a property of the construction, so a selector that prunes the
+/// spreads (a later direct write of the selected key) is refused alike, and
+/// a refusal is never a miss, an empty product or a smaller one.
 #[test]
-fn distribution_cap_is_a_typed_budget_partial_and_never_a_miss() {
+fn cross_product_at_the_checker_limit_is_its_ts2590_recovery_for_every_selector() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
-    // One arm past the alternative-product distribution cap.
-    // Each arm carries its own member: arms that spread into an empty object
-    // merge without distributing (the checker's
-    // `tryMergeUnionOfObjectTypeAndEmptyObject`), so only non-empty arms
-    // reach the cap.
-    let arms = (0..1025)
-        .map(|index| {
-            let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-            object(graph, [surface_member(&format!("k{index}"), value, false)])
-        })
-        .collect::<Vec<_>>();
-    let union = graph.intern_node(SemanticNodeData::Union(
-        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(arms)),
-    ));
-    let capped = program(graph, [ObjectConstructionEffect::Spread(union)]);
-    let key = SemanticQueryKey::ProjectObjectSpread {
-        program: capped,
-        selector: ObjectProjectionSelector::Surface,
-        context: context(ExactOptionalPropertyPolicy::Disabled),
-    };
-    for attempt in 0..2 {
-        match dispatch.execute(key.clone()) {
-            QueryResult::Error(verter_type_engine::semantic_query::QueryError::BudgetExceeded(
-                failure,
-            )) => {
-                assert_eq!(
-                    failure.domain,
-                    verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation
-                );
-            }
-            other => panic!("attempt {attempt}: expected typed budget partial, got {other:?}"),
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let left = keyed_union(graph, "a", 400);
+    let right = keyed_union(graph, "b", 250);
+    let refused = program(
+        graph,
+        [
+            ObjectConstructionEffect::Spread(left),
+            ObjectConstructionEffect::Spread(right),
+            property("a0", number, false),
+        ],
+    );
+    for selector in [
+        ObjectProjectionSelector::Surface,
+        ObjectProjectionSelector::Key(key("a0")),
+        ObjectProjectionSelector::IndexDomain(IndexDomain::String),
+    ] {
+        for attempt in 0..2 {
+            let result = dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                program: refused,
+                selector: selector.clone(),
+                context: context(ExactOptionalPropertyPolicy::Disabled),
+            });
+            assert_object_spread_ts2590(&result, &format!("{selector:?} attempt {attempt}"));
         }
     }
 
-    // A nested program propagates the typed partial instead of collapsing to a
+    // A nested program propagates the refusal instead of collapsing to a
     // genuine miss.
     let outer = program(
         graph,
         [
-            property(
-                "x",
-                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number)),
-                false,
-            ),
-            ObjectConstructionEffect::Spread(capped),
+            property("x", number, false),
+            ObjectConstructionEffect::Spread(refused),
         ],
     );
-    match dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+    let nested = dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
         program: outer,
         selector: ObjectProjectionSelector::Surface,
         context: context(ExactOptionalPropertyPolicy::Disabled),
+    });
+    assert_object_spread_ts2590(&nested, "nested refusal");
+
+    // A refused nested construction is not shadowed by a later write of the
+    // selected key.
+    let shadowed = program(
+        graph,
+        [
+            ObjectConstructionEffect::Spread(refused),
+            property("x", number, false),
+        ],
+    );
+    let selected = dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+        program: shadowed,
+        selector: ObjectProjectionSelector::Key(key("x")),
+        context: context(ExactOptionalPropertyPolicy::Disabled),
+    });
+    assert_object_spread_ts2590(&selected, "shadowed nested refusal");
+
+    // 99,999 constituents: below the limit, the factored product builds
+    // completely, without building one of them.
+    let below = program(
+        graph,
+        [
+            ObjectConstructionEffect::Spread(keyed_union(graph, "c", 369)),
+            ObjectConstructionEffect::Spread(keyed_union(graph, "d", 271)),
+        ],
+    );
+    match dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+        program: below,
+        selector: ObjectProjectionSelector::Surface,
+        context: context(ExactOptionalPropertyPolicy::Disabled),
     }) {
-        QueryResult::Error(verter_type_engine::semantic_query::QueryError::BudgetExceeded(_)) => {}
-        other => panic!("nested cap must propagate as a budget partial, got {other:?}"),
+        QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::ObjectProjection(formula),
+            ..
+        }) => {
+            assert_eq!(formula.width(), 369 * 271);
+            assert!(formula.all_alternatives_closed());
+        }
+        other => panic!("a product below the limit builds, got {other:?}"),
     }
 }
 
@@ -1074,6 +1289,46 @@ fn relate(
     target: SemanticNodeId,
 ) -> verter_type_engine::semantic_query::RelationResult {
     dispatch.execute_relate_pair_as_result_for_tests(source, target)
+}
+
+#[test]
+fn strict_subtype_empty_literal_keeps_its_inferable_index() {
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep;
+    use verter_type_engine::semantic_query::RelationKind;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let fresh = program(graph, []);
+    let regular = object(graph, []);
+    let regular_program =
+        graph.intern_node(SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+            is_literal: false,
+            effects: verter_type_engine::semantic_query::PayloadArray::from(Vec::new()),
+        }));
+    let index = index_object(graph, string, number);
+    assert!(matches!(
+        dispatch.execute_relate_pair_kind(fresh, index, RelationKind::StrictSubtype),
+        RelationStep::Assignable { .. }
+    ));
+    for source in [regular, regular_program] {
+        assert!(matches!(
+            dispatch.execute_relate_pair_kind(source, index, RelationKind::StrictSubtype),
+            RelationStep::NotAssignable
+        ));
+    }
+    let required = object(graph, [surface_member("value", number, false)]);
+    assert!(matches!(
+        dispatch.execute_relate_pair_kind(fresh, required, RelationKind::StrictSubtype),
+        RelationStep::NotAssignable
+    ));
+    assert!(matches!(
+        dispatch.execute_relate_pair_kind(fresh, number, RelationKind::StrictSubtype),
+        RelationStep::NotAssignable
+    ));
 }
 
 #[test]
@@ -1833,46 +2088,35 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
     );
 }
 
+/// A refused construction and a live recursive operand are ReturnOnly
+/// operational partials: admitted nowhere, and a later adequate query
+/// heals and publishes.
 #[test]
-fn cap_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
+fn refusal_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
-    // The alternative-product cap is a ReturnOnly operational partial.
-    // Each arm carries its own member: arms that spread into an empty object
-    // merge without distributing (the checker's
-    // `tryMergeUnionOfObjectTypeAndEmptyObject`), so only non-empty arms
-    // reach the cap.
-    let arms = (0..1025)
-        .map(|index| {
-            let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-            object(graph, [surface_member(&format!("k{index}"), value, false)])
-        })
-        .collect::<Vec<_>>();
-    let union = graph.intern_node(SemanticNodeData::Union(
-        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(arms)),
-    ));
-    let capped = program(graph, [ObjectConstructionEffect::Spread(union)]);
+    let refused = program(
+        graph,
+        [
+            ObjectConstructionEffect::Spread(keyed_union(graph, "a", 400)),
+            ObjectConstructionEffect::Spread(keyed_union(graph, "b", 250)),
+        ],
+    );
     let before = graph.memo_entry_count();
-    let capped_result = dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
-        program: capped,
+    let refused_result = dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+        program: refused,
         selector: ObjectProjectionSelector::Surface,
         context: context(ExactOptionalPropertyPolicy::Disabled),
     });
-    assert!(
-        matches!(
-            capped_result,
-            QueryResult::Error(verter_type_engine::semantic_query::QueryError::BudgetExceeded(_))
-        ),
-        "cap must trip a typed budget partial, got {capped_result:?}"
-    );
+    assert_object_spread_ts2590(&refused_result, "the refused construction");
     assert_eq!(
         graph.memo_entry_count(),
         before,
-        "the cap partial is admitted nowhere"
+        "the refusal is admitted nowhere"
     );
 
     // A live recursive operand is likewise ReturnOnly.
@@ -4817,4 +5061,573 @@ fn a_spread_union_keyof_intersects_keys_nominally() {
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The literal a [`keyed_union`] arm writes, or panic.
+fn literal_value(
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    fact: &verter_type_engine::semantic_query::PositiveKeyFact,
+) -> f64 {
+    let ProjectionEvidence::Proven(node) = fact.value() else {
+        panic!("a closed arm's value is proven: {fact:?}");
+    };
+    match graph.node_data(*node).as_deref() {
+        Some(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::Number(value),
+        )) => *value,
+        other => panic!("a keyed arm writes its literal, got {other:?}"),
+    }
+}
+
+/// The stress-size products — 369 × 271 and 50 × 50 × 39 constituents —
+/// build factored and complete. Any alternative read by index pairs exactly
+/// its own arms (correlation) and carries the later direct write over the
+/// arm that wrote the same key (overwrite); a selected-key read multiplies
+/// by no unrelated arm.
+#[test]
+fn stress_products_keep_each_alternative_correlated_and_overwritten() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    for widths in [vec![369usize, 271], vec![50, 50, 39]] {
+        let prefixes = ["a", "b", "c"];
+        let mut effects = widths
+            .iter()
+            .zip(prefixes)
+            .map(|(width, prefix)| {
+                ObjectConstructionEffect::Spread(keyed_union(graph, prefix, *width))
+            })
+            .collect::<Vec<_>>();
+        effects.push(property("a0", string, false));
+        let root = program(graph, effects);
+        let formula = match dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+            program: root,
+            selector: ObjectProjectionSelector::Surface,
+            context: context(ExactOptionalPropertyPolicy::Disabled),
+        }) {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => formula,
+            other => panic!("{widths:?}: the product builds, got {other:?}"),
+        };
+        let width = widths.iter().product::<usize>();
+        assert_eq!(formula.width(), width as u64, "{widths:?}");
+        assert!(formula.all_alternatives_closed());
+
+        let samples = [
+            vec![0, 0, 0],
+            vec![5, 7, 3],
+            widths.iter().map(|width| width - 1).collect::<Vec<_>>(),
+        ];
+        for sample in samples {
+            let digits = &sample[..widths.len()];
+            let index = digits
+                .iter()
+                .zip(&widths)
+                .fold(0usize, |index, (digit, width)| index * width + digit);
+            let alternative = dispatch
+                .object_spread_cursor(&formula)
+                .nth(index)
+                .expect("the index is inside the product")
+                .expect("a read outside a demand is never refused");
+            let closed = alternative.closed().expect("closed alternative");
+            let mut expected = digits
+                .iter()
+                .zip(prefixes)
+                .map(|(digit, prefix)| format!("{prefix}{digit}"))
+                .collect::<Vec<_>>();
+            if !expected.contains(&"a0".to_owned()) {
+                expected.push("a0".to_owned());
+            }
+            expected.sort();
+            let mut keys = closed
+                .keyof()
+                .expect("a Surface alternative is whole-domain")
+                .iter()
+                .map(|key| key.as_string().expect("an authored name").to_owned())
+                .collect::<Vec<_>>();
+            keys.sort();
+            assert_eq!(keys, expected, "{widths:?} alternative {sample:?}");
+            for (digit, prefix) in digits.iter().zip(prefixes) {
+                let name = format!("{prefix}{digit}");
+                let Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(fact)) =
+                    closed.lookup(&key(&name))
+                else {
+                    panic!("{name} is present");
+                };
+                if name == "a0" {
+                    assert_eq!(
+                        fact.value(),
+                        &ProjectionEvidence::Proven(string),
+                        "the later direct write overwrites the arm's a0"
+                    );
+                } else {
+                    assert_eq!(literal_value(graph, fact), *digit as f64, "{name}");
+                }
+            }
+        }
+
+        let selected = project(
+            &dispatch,
+            root,
+            ObjectProjectionSelector::Key(key("b7")),
+            ExactOptionalPropertyPolicy::Disabled,
+        );
+        assert_eq!(
+            selected.formula.width(),
+            2,
+            "a selected-key read sees only whether its arm was chosen"
+        );
+        let present = selected
+            .alternatives()
+            .iter()
+            .filter(|alternative| {
+                matches!(
+                    alternative.closed().and_then(|closed| closed.lookup(&key("b7"))),
+                    Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(fact))
+                        if literal_value(graph, fact) == 7.0
+                )
+            })
+            .count();
+        assert_eq!(present, 1, "exactly one alternative reads the b7 arm");
+    }
+}
+
+/// A selected-key read of an `n × n` spread costs work linear in `n`:
+/// doubling both unions at most about doubles it, where building the
+/// Cartesian product would quadruple it.
+#[test]
+fn a_selected_key_read_grows_with_the_arms_not_their_product() {
+    let work = |arms: usize| {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let root = program(
+            graph,
+            [
+                ObjectConstructionEffect::Spread(keyed_union(graph, "a", arms)),
+                ObjectConstructionEffect::Spread(keyed_union(graph, "b", arms)),
+            ],
+        );
+        let (result, usage) =
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || {
+                    dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                        program: root,
+                        selector: ObjectProjectionSelector::Key(key("a1")),
+                        context: context(ExactOptionalPropertyPolicy::Disabled),
+                    })
+                },
+            );
+        match result {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => assert_eq!(formula.width(), 2),
+            other => panic!("the selected read builds, got {other:?}"),
+        }
+        assert!(usage.work > 0, "the read is charged");
+        usage.work
+    };
+    let (small, large) = (work(60), work(120));
+    assert!(
+        large * 10 <= small * 25,
+        "doubling the arms must keep the read linear: {small} -> {large}"
+    );
+}
+
+/// Selecting a key that every arm of the union still carries: no arm
+/// collapses, so the narrowing deduplication must decide `arms` distinct
+/// contributions while its charged work stays linear in the arms — a
+/// pairwise scan of every kept arm would charge quadratically.
+#[test]
+fn a_selected_key_read_over_distinct_arms_stays_linear() {
+    let work_and_width = |arms: usize| {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let keyed = |index: usize| {
+            object(
+                graph,
+                [surface_member(
+                    "k",
+                    graph.intern_node(SemanticNodeData::Literal(
+                        verter_type_engine::semantic_query::LiteralValue::Number(index as f64),
+                    )),
+                    false,
+                )],
+            )
+        };
+        let union = graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                (0..arms).map(keyed).collect::<Vec<_>>(),
+            )),
+        ));
+        let root = program(graph, [ObjectConstructionEffect::Spread(union)]);
+        let (result, usage) =
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || {
+                    dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                        program: root,
+                        selector: ObjectProjectionSelector::Key(key("k")),
+                        context: context(ExactOptionalPropertyPolicy::Disabled),
+                    })
+                },
+            );
+        match result {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => assert_eq!(
+                formula.width(),
+                arms as u64,
+                "every arm carries the selected key, so every arm stays distinct"
+            ),
+            other => panic!("the selected read builds, got {other:?}"),
+        }
+        assert!(usage.work > 0, "the read is charged");
+        usage.work
+    };
+    let (small, large) = (work_and_width(60), work_and_width(120));
+    assert!(
+        large * 10 <= small * 25,
+        "doubling the distinct arms must keep the read linear: {small} -> {large}"
+    );
+}
+
+/// A `RelationShape` read over arms that share a long member prefix: the
+/// fingerprint hashing walks each arm's whole kept structure, so the work
+/// must stay linear in the arms — and arms distinct in a read fact never
+/// collapse.
+#[test]
+fn a_relation_shape_read_over_long_common_prefixes_stays_linear() {
+    let prefix = 40;
+    let work_and_width = |arms: usize| {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let arm = |index: usize| {
+            let mut members: Vec<SurfaceMember> = (0..prefix)
+                .map(|shared| surface_member(&format!("p{shared}"), number, false))
+                .collect();
+            members.push(surface_member(
+                "t",
+                graph.intern_node(SemanticNodeData::Literal(
+                    verter_type_engine::semantic_query::LiteralValue::Number(index as f64),
+                )),
+                false,
+            ));
+            object(graph, members)
+        };
+        let union = graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                (0..arms).map(arm).collect::<Vec<_>>(),
+            )),
+        ));
+        let root = program(graph, [ObjectConstructionEffect::Spread(union)]);
+        let mut keys: Vec<PropertyKey> = (0..prefix)
+            .map(|shared| key(&format!("p{shared}")))
+            .collect();
+        keys.push(key("t"));
+        let (result, usage) =
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || {
+                    dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                        program: root,
+                        selector: ObjectProjectionSelector::RelationShape(
+                            verter_type_expr::OwnedSlice::from(keys.clone()),
+                        ),
+                        context: context(ExactOptionalPropertyPolicy::Disabled),
+                    })
+                },
+            );
+        match result {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => assert_eq!(
+                formula.width(),
+                arms as u64,
+                "arms distinct in the read tail never collapse"
+            ),
+            other => panic!("the relation-shape read builds, got {other:?}"),
+        }
+        assert!(usage.work > 0, "the read is charged");
+        usage.work
+    };
+    let (small, large) = (work_and_width(60), work_and_width(120));
+    assert!(
+        large * 10 <= small * 25,
+        "doubling the arms must keep the read linear over long common prefixes: {small} -> {large}"
+    );
+}
+
+/// Fingerprint-collision correctness: arms that narrow to equal
+/// contributions still collapse through the index (the structural
+/// comparison runs and settles the collision), while arms distinct in a
+/// read fact stay distinct.
+#[test]
+fn narrowing_dedup_resolves_fingerprint_collisions_with_structural_equality() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let one = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
+    ));
+    let two = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_engine::semantic_query::LiteralValue::Number(2.0),
+    ));
+    // `{k:1, pad0}` and `{k:1, pad1}` are distinct union operands whose
+    // selected-key narrowings are equal; `{k:2, pad0}` narrows apart.
+    let arm = |value: SemanticNodeId, pad: usize| {
+        object(
+            graph,
+            [
+                surface_member("k", value, false),
+                surface_member(&format!("pad{pad}"), number, false),
+            ],
+        )
+    };
+    let union =
+        graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [arm(one, 0), arm(one, 1), arm(two, 0)],
+            )),
+        ));
+    let root = program(graph, [ObjectConstructionEffect::Spread(union)]);
+    let comparisons_before = test_support::narrowing_dedup_comparisons();
+    let result = dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+        program: root,
+        selector: ObjectProjectionSelector::Key(key("k")),
+        context: context(ExactOptionalPropertyPolicy::Disabled),
+    });
+    match result {
+        QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::ObjectProjection(formula),
+            ..
+        }) => assert_eq!(
+            formula.width(),
+            2,
+            "the equal narrowings collapse; the distinct one stays"
+        ),
+        other => panic!("the selected read builds, got {other:?}"),
+    }
+    assert!(
+        test_support::narrowing_dedup_comparisons() > comparisons_before,
+        "the duplicate arm reaches the structural comparison through its fingerprint"
+    );
+}
+
+/// A tight allowance stops a distinct-arm selected read before its
+/// narrowing work runs: half the read's full charged cost refuses the
+/// query with the typed projection partial, having charged no more than
+/// the allowance — the hashing, probing and storage of the dedup are
+/// paid before they happen, never after.
+#[test]
+fn a_tight_allowance_stops_a_distinct_arm_read_before_its_narrowing_work() {
+    let arms = 400usize;
+    fn make(
+        host: &VerterHost,
+        arms: usize,
+    ) -> (
+        verter_type_engine::project_semantic_dispatch::ThreadDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
+        SemanticNodeId,
+    ) {
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let graph = host.project_type_store().semantic_graph();
+        let keyed = |index: usize| {
+            object(
+                graph,
+                [surface_member(
+                    "k",
+                    graph.intern_node(SemanticNodeData::Literal(
+                        verter_type_engine::semantic_query::LiteralValue::Number(index as f64),
+                    )),
+                    false,
+                )],
+            )
+        };
+        let union = graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                (0..arms).map(keyed).collect::<Vec<_>>(),
+            )),
+        ));
+        let root = program(graph, [ObjectConstructionEffect::Spread(union)]);
+        (dispatch, root)
+    }
+
+    let full_host = host();
+    let _full_scope = full_host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
+    let (dispatch, root) = make(&full_host, arms);
+    let (result, full) =
+        verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+            || {
+                dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                    program: root,
+                    selector: ObjectProjectionSelector::Key(key("k")),
+                    context: context(ExactOptionalPropertyPolicy::Disabled),
+                })
+            },
+        );
+    assert!(
+        matches!(
+            result,
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(_),
+                ..
+            })
+        ),
+        "the unconstrained read builds, got {result:?}"
+    );
+    assert!(full.work > 0);
+
+    let tight_host = host();
+    let _tight_scope = tight_host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
+    let (dispatch, root) = make(&tight_host, arms);
+    let allowance = full.work / 2;
+    dispatch
+        .connected_demand()
+        .set_limits_for_tests(allowance, 24);
+    let (result, used) =
+        verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+            || {
+                dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                    program: root,
+                    selector: ObjectProjectionSelector::Key(key("k")),
+                    context: context(ExactOptionalPropertyPolicy::Disabled),
+                })
+            },
+        );
+    assert!(
+        matches!(
+            result,
+            QueryResult::Error(verter_type_engine::semantic_query::QueryError::BudgetExceeded(_))
+        ),
+        "half the full cost refuses the read with the typed partial, got {result:?}"
+    );
+    assert!(
+        used.work <= allowance,
+        "the refusal charged no more than the allowance: {} > {allowance}",
+        used.work
+    );
+}
+
+/// The retained allocation a spread formula owns — measured by the
+/// owned-heap account, which walks the factored product the formula
+/// actually retains and is independent of the connected-work ledger
+/// construction charges — grows with the arms folded, not with their
+/// Cartesian product: doubling both unions at most about doubles the
+/// retained bytes, where a materialised product would quadruple them
+/// (its width does).
+#[test]
+fn a_retained_formula_grows_with_its_arms_not_their_product() {
+    let owned = |widths: &[usize]| -> (u64, usize) {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let effects = widths
+            .iter()
+            .zip(["a", "b", "c"])
+            .map(|(width, prefix)| {
+                ObjectConstructionEffect::Spread(keyed_union(graph, prefix, *width))
+            })
+            .collect::<Vec<_>>();
+        let root = program(graph, effects);
+        match dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+            program: root,
+            selector: ObjectProjectionSelector::Surface,
+            context: context(ExactOptionalPropertyPolicy::Disabled),
+        }) {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => (formula.width(), test_support::retained_heap_bytes(&formula)),
+            other => panic!("{widths:?}: the product builds, got {other:?}"),
+        }
+    };
+    let ((small_width, small), (large_width, large)) = (owned(&[60, 60]), owned(&[120, 120]));
+    assert_eq!(small_width, 3_600);
+    assert_eq!(large_width, 14_400, "the product width quadruples");
+    assert!(small > 0, "the retained formula owns allocation");
+    assert!(
+        large * 10 <= small * 25,
+        "the retained formula grows with its arms, not their product: {small} -> {large}"
+    );
+}
+
+/// A chain of nested property-only spreads (`p(i) = { ...p(i-1), a(i): 0 }`)
+/// is paid for link by link before its id lists grow: the charged work grows with the chain, so a small connected allowance
+/// stops a long chain before it is traversed.
+#[test]
+fn a_nested_property_spread_chain_is_charged_before_it_is_built() {
+    let chain = |host: &VerterHost, links: usize| {
+        let graph = host.project_type_store().semantic_graph();
+        let zero = graph.intern_node(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::Number(0.0),
+        ));
+        let mut inner = program(graph, [property("a0", zero, false)]);
+        for link in 1..links {
+            inner = program(
+                graph,
+                [
+                    ObjectConstructionEffect::Spread(inner),
+                    property(&format!("a{link}"), zero, false),
+                ],
+            );
+        }
+        program(
+            graph,
+            [
+                ObjectConstructionEffect::Spread(inner),
+                property("x", zero, false),
+            ],
+        )
+    };
+    let query = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+                 root| {
+        dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+            program: root,
+            selector: ObjectProjectionSelector::Key(key("x")),
+            context: context(ExactOptionalPropertyPolicy::Disabled),
+        })
+    };
+    let work = |links: usize| {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
+        let root = chain(&host, links);
+        let (result, usage) =
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || query(&dispatch, root),
+            );
+        assert!(
+            matches!(result, QueryResult::Value(_)),
+            "the chain builds within the production allowance: {result:?}"
+        );
+        usage.work
+    };
+    let (short, long) = (work(40), work(400));
+    assert!(
+        long >= short + 300,
+        "the chain's links are charged: {short} -> {long}"
+    );
 }

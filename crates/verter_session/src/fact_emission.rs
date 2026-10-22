@@ -53,6 +53,7 @@ use verter_semantic_source::decl_body_memo::{DeclBodyMemo, LoweredValueDecl};
 use verter_semantic_source::source_lens::{RouteLens, ShallowLens};
 use verter_session_query::inputs::shallow::ExportTarget;
 use verter_session_query::source::augmentation::ModuleAugmentationFact;
+use verter_session_query::source::demand::SourceRead;
 
 /// The contribution-set / order-sensitive fact family: augmentation
 /// contribution set+order, declaration contribution order, and the
@@ -101,11 +102,12 @@ pub struct ParseFactsEmission {
 /// `tests/cases/g_fact/fact_emission_work_class.rs`.
 ///
 /// Production cost: the counters are always live, and the POINT-LOOKUP
-/// counter bumps once per probe, so the total is `2N + 9` non-atomic
-/// `Cell` updates per file publish — 20_009 at N = 10_000 declarations,
+/// counter bumps once per probe, so the total is `2N + 10` non-atomic
+/// `Cell` updates per file publish — 20_010 at N = 10_000 declarations,
 /// not a handful. (`2N` because the walk probes twice per declaration:
-/// once for the member headers, once for the export target; `9` is the
-/// fixed number of section-level inventory traversals.) That is still
+/// once for the member headers, once for the export target; `10` is the
+/// fixed number of section-level inventory traversals plus the one
+/// module-kind probe the augmentation facts record.) That is still
 /// negligible against the same call's thousands of heap allocations and
 /// its per-member hashing, but it is a per-declaration cost and is
 /// recorded as one rather than rounded to nothing.
@@ -203,6 +205,15 @@ mod inventory_view {
         /// Flattened `(scope, key, header)` triples. Flattened INSIDE the
         /// view on purpose: handing out the per-scope `DeclMap` would let a
         /// caller re-iterate it without the tally noticing.
+        /// Whether the file is a module or a script, read from its
+        /// retained import/export inventory.
+        pub(crate) fn module_kind(
+            &self,
+        ) -> verter_session_query::inputs::contributors::FileModuleKind {
+            self.note_point_lookup();
+            verter_session_query::inputs::contributors::classify_shallow_module_kind(self.shallow)
+        }
+
         pub(crate) fn augmentation_type_headers(
             &self,
         ) -> impl Iterator<
@@ -406,9 +417,19 @@ pub(crate) struct LazyBodyFactSource {
 }
 
 impl LazyBodyFactSource {
+    /// The fact for `key`, applying the refusal evidence of the
+    /// declaration-body reads it rested on to the running tracers.
     pub(crate) fn compute(&self, key: &FactKey) -> Option<Fact> {
+        verter_type_engine::fact_tracing::consume_source_read(self.compute_read(key))
+    }
+
+    /// The fact for `key` together with the refusal its declaration-body
+    /// reads carry. A refused read (a lease miss) answers `None` for a fact
+    /// a retry under a live lease can compute, so a consumer that must tell
+    /// that apart from a consistent absence reads it here.
+    pub(crate) fn compute_read(&self, key: &FactKey) -> SourceRead<Option<Fact>> {
         if let Some(hit) = self.computed.get(key) {
-            return Some(hit.clone());
+            return SourceRead::clean(Some(hit.clone()));
         }
         // A class `Member` fact — the member-read fingerprint a class member
         // read roots on — computes from the class's lease-only selection of
@@ -419,17 +440,24 @@ impl LazyBodyFactSource {
             space: SymbolSpace::Type,
         } = key
         {
-            let outcome = verter_type_engine::fact_tracing::consume_source_read(
-                self.memo.class_member_read_hash_in(
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    exporter.as_ref(),
-                    member,
-                ),
-            )?;
+            let read = self.memo.class_member_read_hash_in(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                exporter.as_ref(),
+                member,
+            );
+            let Some(outcome) = read.value else {
+                return SourceRead {
+                    value: None,
+                    refusal: read.refusal,
+                };
+            };
             // A truncated fingerprint cannot certify the elements it did not
             // fully walk: decline, so the read keeps conservative evidence.
             if outcome.budget_exceeded {
-                return None;
+                return SourceRead {
+                    value: None,
+                    refusal: read.refusal,
+                };
             }
             let fact = Fact {
                 key: key.clone(),
@@ -437,7 +465,10 @@ impl LazyBodyFactSource {
                 display_hash: compute_display_hash(&outcome.hash),
             };
             self.computed.insert(key.clone(), fact.clone());
-            return Some(fact);
+            return SourceRead {
+                value: Some(fact),
+                refusal: read.refusal,
+            };
         }
         // `name` is the backing LOCAL declaration name probed against the
         // body memo; the emitted `Fact.key` stays the original requested
@@ -452,7 +483,9 @@ impl LazyBodyFactSource {
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     name.as_ref(),
                 );
-                let backing = self.lens.local_export_target(&key)?;
+                let Some(backing) = self.lens.local_export_target(&key) else {
+                    return SourceRead::clean(None);
+                };
                 (backing.clone(), *space)
             }
             // `LocalDecl` answers only for non-exported names — mirroring
@@ -464,7 +497,7 @@ impl LazyBodyFactSource {
                     name.as_ref(),
                 );
                 if self.lens.is_exported(&key) {
-                    return None;
+                    return SourceRead::clean(None);
                 }
                 (
                     verter_type_expr::DeclBindingKey::new(
@@ -474,49 +507,55 @@ impl LazyBodyFactSource {
                     *space,
                 )
             }
-            _ => return None,
+            _ => return SourceRead::clean(None),
         };
-        let outcome = match space {
+        let (outcome, refusal) = match space {
             // Body-fact fingerprint for a TYPE symbol — the stored memo-owned
             // fact, computed once at lazy lowering time from the transient
             // lowered bodies through the same shared lens (the fenced
             // output-side body-fact site), never a direct typed-body access
             // and never a re-lowering.
             SymbolSpace::Type => {
-                if decl_key.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
-                    verter_type_engine::fact_tracing::consume_source_read(
-                        self.memo
-                            .compat_type_body_hash_input(decl_key.name.as_ref()),
-                    )?
+                let read = if decl_key.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
+                    self.memo
+                        .compat_type_body_hash_input(decl_key.name.as_ref())
                 } else {
-                    verter_type_engine::fact_tracing::consume_source_read(
-                        self.memo
-                            .compat_type_body_hash_input_in(decl_key.owner, decl_key.name.as_ref()),
-                    )?
-                }
+                    self.memo
+                        .compat_type_body_hash_input_in(decl_key.owner, decl_key.name.as_ref())
+                };
+                let Some(outcome) = read.value else {
+                    return SourceRead {
+                        value: None,
+                        refusal: read.refusal,
+                    };
+                };
+                (outcome, read.refusal)
             }
             // No namespace-space declarations are inventoried by the
             // shallow walk — consistent absence.
-            SymbolSpace::Namespace => return None,
+            SymbolSpace::Namespace => return SourceRead::clean(None),
             SymbolSpace::Value => {
                 // Keep the synthesised-value-body vs lazy-memo selection HERE,
                 // then read the stored fingerprint through the named compat
                 // producer (the fenced output-side value-body-fact site).
-                let lowered = match self.synthesised_value_bodies.get(&decl_key) {
-                    Some(body) => Arc::clone(body),
+                let read = match self.synthesised_value_bodies.get(&decl_key) {
+                    Some(body) => SourceRead::clean(Some(Arc::clone(body))),
                     None if decl_key.owner
                         == verter_type_expr::TopLevelOwnerId::ordinary_file() =>
                     {
-                        verter_type_engine::fact_tracing::consume_source_read(
-                            self.memo.value_decl(decl_key.name.as_ref()),
-                        )?
+                        self.memo.value_decl(decl_key.name.as_ref())
                     }
-                    None => verter_type_engine::fact_tracing::consume_source_read(
-                        self.memo
-                            .value_decl_in(decl_key.owner, decl_key.name.as_ref()),
-                    )?,
+                    None => self
+                        .memo
+                        .value_decl_in(decl_key.owner, decl_key.name.as_ref()),
                 };
-                compat_value_body_hash_input(&lowered)
+                let Some(lowered) = read.value else {
+                    return SourceRead {
+                        value: None,
+                        refusal: read.refusal,
+                    };
+                };
+                (compat_value_body_hash_input(&lowered), read.refusal)
             }
         };
         let semantic_hash = outcome.hash;
@@ -527,7 +566,10 @@ impl LazyBodyFactSource {
             display_hash,
         };
         self.computed.insert(key.clone(), fact.clone());
-        Some(fact)
+        SourceRead {
+            value: Some(fact),
+            refusal,
+        }
     }
 }
 
@@ -950,6 +992,7 @@ fn compute_display_hash(semantic: &Hash16) -> Hash16 {
 /// augmentation-sensitive query.
 fn collect_augmentations(view: &FactEmissionView<'_>) -> Vec<ModuleAugmentationFact> {
     let mut out: Vec<ModuleAugmentationFact> = Vec::new();
+    let declaring_file = view.module_kind();
 
     // Type-space augmentations (interfaces, type aliases).
     for (scope, key, header) in view.augmentation_type_headers() {
@@ -967,6 +1010,7 @@ fn collect_augmentations(view: &FactEmissionView<'_>) -> Vec<ModuleAugmentationF
                 header.member_headers.as_slice(),
                 header.contributors.len(),
             ),
+            declaring_file,
         });
     }
 
@@ -986,6 +1030,7 @@ fn collect_augmentations(view: &FactEmissionView<'_>) -> Vec<ModuleAugmentationF
                 header.object_member_headers.as_slice(),
                 header.contributors.len(),
             ),
+            declaring_file,
         });
     }
 
@@ -1075,6 +1120,34 @@ mod tests {
             facts[0].owner,
             verter_type_expr::TopLevelOwnerId::ordinary_file()
         );
+    }
+
+    #[test]
+    fn augmentation_fact_records_whether_its_file_is_a_module() {
+        use verter_session_query::inputs::contributors::FileModuleKind;
+        let block = "declare module \"vue\" { interface ComponentCustomProperties { $t: string } }
+";
+        for (source, expected) in [
+            (block.to_string(), FileModuleKind::Script),
+            (
+                format!(
+                    "export {{}}
+{block}"
+                ),
+                FileModuleKind::Module,
+            ),
+            (
+                format!(
+                    "import type {{ Ref }} from \"vue\"
+{block}"
+                ),
+                FileModuleKind::Module,
+            ),
+        ] {
+            let facts = augmentations_for(&source);
+            assert_eq!(facts.len(), 1, "{source}");
+            assert_eq!(facts[0].declaring_file, expected, "{source}");
+        }
     }
 
     #[test]

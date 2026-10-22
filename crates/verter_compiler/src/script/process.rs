@@ -1126,8 +1126,9 @@ fn is_identifier_used_in_text(ident: &str, text: &str) -> bool {
 /// `ref` / similar, which then get elided as "type-only" and leave the setup
 /// body with unstripped TypeScript).
 fn compute_runtime_text(program: &Program, content_str: &str, items: &[ScriptItem]) -> String {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let alloc = Allocator::new();
-    let mut ct = CodeTransform::new(content_str, &alloc);
+    let mut ct = CodeTransform::<M>::new_in(content_str, &alloc);
     // Blank import statement regions first (original spans, pre-length-shift)
     // so specifier names on the import line itself don't false-positive.
     for item in items {
@@ -1142,6 +1143,45 @@ fn compute_runtime_text(program: &Program, content_str: &str, items: &[ScriptIte
     // Then strip TypeScript using the original program spans.
     crate::strip_types::typescript::strip_typescript_types(program, &mut ct, 0, content_str);
     ct.build_string()
+
+    })
+}
+
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(all(test, feature = "semantic-observe"))]
+mod capture_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn captured_runtime_text_stripping_keeps_helper_transform_operations() {
+        struct Observer(AtomicUsize);
+        impl verter_audit::AuditObserver for Observer {
+            fn record_event(&self, event: verter_audit::AuditEvent) {
+                if event == verter_audit::AuditEvent::CompileCodeTransformOp {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        let observer = Arc::new(Observer(AtomicUsize::new(0)));
+        let _capture = verter_audit::observer::install_observer(observer.clone());
+        let allocator = Allocator::default();
+        let source = "const value: number = 1;";
+        let parsed =
+            verter_parser::oxc_parse::Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(parsed.diagnostics.is_empty());
+        assert_eq!(
+            compute_runtime_text(&parsed.program, source, &[]),
+            "const value = 1;"
+        );
+        assert!(
+            observer.0.load(Ordering::Relaxed) > 0,
+            "captured helper transforms contribute to compile operation counts"
+        );
+    }
 }
 
 /// Filter import specifiers, keeping only those with runtime usage.
@@ -1364,12 +1404,15 @@ fn strip_expression_to_string<'a>(
     content_str: &'a str,
     alloc: &'a Allocator,
 ) -> String {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let span = expr.span();
-    let mut ct = CodeTransform::new(content_str, alloc);
+    let mut ct = CodeTransform::<M>::new_in(content_str, alloc);
     crate::strip_types::typescript::strip_typescript_from_expression(expr, &mut ct, 0, content_str);
     let output = ct.build_string();
     let tail = content_str.len() - span.end as usize;
     output[span.start as usize..output.len() - tail].to_string()
+
+    })
 }
 
 #[cfg(test)]

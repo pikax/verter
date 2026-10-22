@@ -15,6 +15,11 @@ publish = false
 # need it for their own tests add `features = ["test-support"]` only in
 # `[dev-dependencies]` or forward it from their own `test-support` feature.
 test-support = []
+# The coordinated, default-off observation opt-in
+# (docs/arch/semantic-observe.md). Compiles the request-context capture
+# hooks (capture/timing flags, dedup-joiner and cache-event callbacks);
+# a default build carries none of them.
+semantic-observe = []
 
 # Dependency closure is a layering contract: this crate sits below the
 # concrete scheduler, the workspace, the semantic engine and the session, and

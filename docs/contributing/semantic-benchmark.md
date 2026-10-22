@@ -26,6 +26,21 @@ export {};
 The demand is **the declared type of `__Probe`**. Both arms answer it from the
 same files on disk, byte for byte.
 
+The `vue-setup-store-remap` series uses synthetic setup closures with 5, 10,
+20 and 80 groups of two ref-valued state members and one captured action.
+The key remap excludes actions and unwraps state into
+`readonly [number] | readonly [string]`. The Rust growth guard checks connected
+work, cold builds, substitutions, key-remap evaluations and flow-obligation
+expansions, since dispatch counts alone can hide repeated domain scans and
+per-member flow planning.
+
+The `mapped-expand-remap` series renames 100, 1,000 and 3,000 keys of an
+imported interface through a recursive template conditional (`Kebab<K>`).
+The Rust guard in the session crate's allocator canaries checks that each further
+key costs one flat, small constant in allocations, live bytes at the peak, cold
+semantic builds and substitution walks, and that keys the template does not
+match, or splits more than once, keep the checker's names.
+
 | Arm | What runs | Enters the head-to-head |
 |---|---|---|
 | `verter` | `semantic_perf_probe`: a release executable linking the production `verter_session` library, host built with the shipped `HostConfig::default()` (no audit, trace, footprint or metrics capture) | yes |
@@ -793,6 +808,20 @@ node scripts/benchmark/semantic-perf/measure-expected.mjs --only <ids> --allow-s
 
 The run fails validation until the reference matches the scenario sources,
 the library and the method.
+
+The committed `expected.json` contains the catalog's measured golden answers.
+For an experiment, the measurer's `--out <file>` writes a separate reference;
+the benchmark's `--expected <file>` reads it with the same source, compiler and
+method validation. The standalone validator uses the committed reference unless
+`--expected <file>` explicitly selects an alternate; a run's recorded reference
+path does not select its validation oracle.
+For the fresh object literal union reproduction:
+
+```bash
+node scripts/benchmark/semantic-perf/measure-expected.mjs --only edge-array-literal-normalization --out .feedback/literal-union-reference.json --work .feedback/literal-union-reference
+node scripts/benchmark/semantic-perf.mjs --only edge-array-literal-normalization --arms verter,tsc-api --settings all --expected .feedback/literal-union-reference.json
+node scripts/benchmark/semantic-perf/validate.mjs <results.json> --require-all-matched --expected .feedback/literal-union-reference.json
+```
 
 ## Evidence runs
 

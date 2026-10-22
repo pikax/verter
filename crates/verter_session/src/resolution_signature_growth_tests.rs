@@ -34,6 +34,7 @@
 //! | second direct prepared-bundle lookup | cache hit, zero new cold flights |
 //! | warm `get_component_meta` pass | zero new cold flights, exactly one result-cache hit |
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -41,12 +42,14 @@ use crate::{HostConfig, UpsertRequest, VerterHost};
 
 /// The pre-compaction refusal-fixture size. The post-DAG calibration is two
 /// decision facts per authored specifier, so this remains comfortably bounded.
+#[cfg(feature = "semantic-observe")]
 const LARGE_SPECIFIERS: usize = 180;
 
 /// Specifier count for the anti-vacuity control. Far enough below the
 /// cap that the same shape roots and warms.
 const SMALL_SPECIFIERS: usize = 8;
 
+#[cfg(feature = "semantic-observe")]
 fn decision_fact_count(facts: &[verter_session_query::facts::fact_cache::FactVersionRef]) -> usize {
     facts
         .iter()
@@ -105,6 +108,7 @@ fn ts_owner(root: &str, count: usize) -> (VerterHost, String) {
     (host, owner)
 }
 
+#[cfg(feature = "semantic-observe")]
 fn vue_owner(root: &str, count: usize) -> (VerterHost, String) {
     let host = VerterHost::new_standalone(HostConfig::default());
     let mut source = String::from("<script setup lang=\"ts\">\n");
@@ -148,6 +152,8 @@ fn assert_every_chunk_resolves_positively(
 /// The former over-cap positive fixture now carries two bounded Decisions per
 /// declaration-companion specifier, stays rootable, and warm-hits the
 /// prepared-bundle rail.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn large_positive_chunk_owner_is_compacted_and_warms() {
     const ROOT: &str = "/rc_growth_over";
@@ -294,6 +300,8 @@ fn below_cap_positive_chunk_owner_roots_and_admits() {
 
 /// End-to-end consequence at the public boundary: the former over-cap
 /// positive-chunk component takes one cold pass and then warm-hits.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn large_positive_chunk_owner_reuses_component_meta_after_first_pass() {
     const ROOT: &str = "/rc_growth_cm_over";
@@ -368,6 +376,8 @@ fn large_positive_chunk_owner_reuses_component_meta_after_first_pass() {
 /// behaviour required of the over-cap case, proven reachable on this
 /// tree, so the test above cannot be satisfied by a tree that never
 /// warms component meta at all.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn below_cap_positive_chunk_owner_warms_with_no_additional_cold_flight() {
     const ROOT: &str = "/rc_growth_cm_under";

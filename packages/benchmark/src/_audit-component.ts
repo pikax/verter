@@ -81,6 +81,18 @@ const { createRequire } = await import("node:module");
 const requireFromHere = createRequire(import.meta.url);
 const native = requireFromHere("@verter/native");
 
+// The audit record this worker emits exists only in the instrumented
+// binding: a default build compiles capture out and its audit methods
+// report unavailable capture. Fail before any work with the fix named.
+if (native.captureAvailability() !== "Available") {
+  console.error(
+    "ERROR: @verter/native was built without semantic-observe, so " +
+      "getComponentMetaWithAudit has no record to return. Build the " +
+      "instrumented binding: pnpm --filter @verter/native run build:observe",
+  );
+  process.exit(4);
+}
+
 /**
  * Read a tsconfig file and return its parsed compilerOptions
  * (best-effort; tolerates JSONC comments). Returns `null` when the

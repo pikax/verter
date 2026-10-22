@@ -11,10 +11,12 @@ use verter_type_engine::semantic_query::SemanticNodeId;
 /// root-shape predicate: an object arm still counts when an intersection fold
 /// would drop it. The interned graph is acyclic, while the visited set dedupes
 /// shared subgraphs and permits arbitrarily deep alias chains.
-pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
+pub(crate) fn component_meta_registry_node_has_explicit_object_surface<
+    M: verter_audit::observe::ObserveExec,
+>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
 ) -> bool {

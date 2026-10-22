@@ -560,6 +560,23 @@ fn display_resolved_type_node(
                         child_depth,
                         visited,
                     ));
+                } else if member.optional
+                    && needs.contains(DisplayFacet::CheckerSpelling)
+                    && !visited.omit_nullish
+                    && !holds_undefined(store, member.value)
+                {
+                    // Under `strictNullChecks` the checker prints an
+                    // optional property's type with `undefined` added.
+                    s.push_str(": ");
+                    s.push_str(&render_operand(
+                        store,
+                        member.value,
+                        needs,
+                        child_depth,
+                        visited,
+                        Prec::Union,
+                    ));
+                    s.push_str(" | undefined");
                 } else {
                     s.push_str(": ");
                     s.push_str(
@@ -662,7 +679,11 @@ fn display_resolved_type_node(
                 };
                 parts.push(part);
             }
-            format!("{{ {} }}", parts.join("; "))
+            if parts.is_empty() {
+                "{}".to_string()
+            } else {
+                format!("{{ {} }}", parts.join("; "))
+            }
         }
         SemanticNodeData::Union(arms) => {
             // A union arm only parenthesises a LOOSER binder (Conditional /
@@ -880,6 +901,11 @@ fn display_resolved_type_node(
                 s.push('>');
             }
             s
+        }
+        SemanticNodeData::TypeOfNominal(_) if needs.contains(DisplayFacet::CheckerSpelling) => {
+            // The checker prints a unique symbol's type as such, not as the
+            // query that names it.
+            "unique symbol".to_owned()
         }
         SemanticNodeData::TypeOfNominal(_) => {
             // Renders the AUTHORED head (`typeof TOKEN` / `typeof Ns.TOKEN`)
@@ -1721,6 +1747,23 @@ fn element_renders_leading_readonly(
 /// than `min_prec` requires in the enclosing position. Parenthesisation is
 /// structural: the decision is taken from the node kind, so a `Conditional`
 /// operand wraps and a string literal whose TEXT contains `" | "` does not.
+/// Whether `node` already holds `undefined` (or absorbs it), so adding it
+/// as an optional property's type changes nothing.
+fn holds_undefined(store: &SemanticGraphStore, node: SemanticNodeId) -> bool {
+    let absorbs = |node: SemanticNodeId| {
+        matches!(
+            store.node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Undefined | PrimitiveKind::Any | PrimitiveKind::Unknown
+            ))
+        )
+    };
+    match store.node_data(node).as_deref() {
+        Some(SemanticNodeData::Union(arms)) => arms.iter().any(|&arm| absorbs(arm)),
+        _ => absorbs(node),
+    }
+}
+
 fn render_operand(
     store: &SemanticGraphStore,
     id: SemanticNodeId,

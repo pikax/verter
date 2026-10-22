@@ -31,6 +31,10 @@ pub(super) struct KeyDomainKey {
     /// no primitive literal representation; consumers must resolve its nominal
     /// value identity or explicitly defer.
     pub(super) literal: Option<LiteralValue>,
+    /// The type substituted for the mapper binder when it is not the
+    /// literal itself: an enum member's literal type (`E.A`) keys the
+    /// property its value names (`0`) while the binder stays the member.
+    pub(super) binder: Option<SemanticNodeId>,
 }
 
 impl KeyDomainKey {
@@ -46,6 +50,7 @@ impl KeyDomainKey {
                     PropertyKey::UniqueSymbol(_) => None,
                 },
                 key,
+                binder: None,
             })
             .collect()
     }
@@ -78,6 +83,9 @@ impl KeySpaceDomain {
     }
     pub(super) fn is_finite(&self) -> bool {
         self.broad.is_empty()
+    }
+    pub(super) fn literal_keys(&self) -> &[KeyDomainKey] {
+        &self.keys
     }
     pub(super) fn membership(&self, key: &PropertyKey) -> Option<bool> {
         if self.members.contains(key) {
@@ -190,6 +198,14 @@ enum KeyNamesArm {
     /// keyof — the arm poisons the intersection combine (and propagates
     /// upward as the poisoned verdict).
     OpenConstruction,
+    /// A typed refusal while reading a spread program's key domain — the
+    /// construction or the per-alternative reads could not pay the active
+    /// connected demand. The arm's keys are computable but unknown, so a
+    /// refusal is not evidence the arm adds no keys: it poisons an
+    /// intersection combine and propagates through a union combine
+    /// (collapsing it to [`KeyNamesArm::Unresolvable`] would let an
+    /// enclosing intersection drop it and publish a false-exact domain).
+    Refused,
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -233,6 +249,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let mut seen: FxHashSet<PropertyKey> = FxHashSet::default();
                     let mut any_enumerable = false;
                     let mut open_construction = false;
+                    let mut refused = false;
                     for arm in arm_results {
                         match arm {
                             KeyNamesArm::Names(arm_names) => {
@@ -245,10 +262,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                             KeyNamesArm::Unresolvable => {}
                             KeyNamesArm::OpenConstruction => open_construction = true,
+                            KeyNamesArm::Refused => refused = true,
                         }
                     }
                     results.push(if open_construction {
                         KeyNamesArm::OpenConstruction
+                    } else if refused {
+                        KeyNamesArm::Refused
                     } else if any_enumerable {
                         KeyNamesArm::Names(names)
                     } else {
@@ -258,15 +278,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 KeyNamesFrame::CombineUnion { arm_count } => {
                     // Keyof (A | B) = common keys across ALL arms (intersection
                     // of enumerated sets). Unresolvable arm → whole union None.
-                    // An OPEN CONSTRUCTION arm propagates its poison verdict:
-                    // collapsing it to a plain unresolvable arm would let an
-                    // enclosing intersection combine drop it and publish a
-                    // false-exact key domain.
+                    // An OPEN CONSTRUCTION or REFUSED arm propagates its poison
+                    // verdict: collapsing it to a plain unresolvable arm would
+                    // let an enclosing intersection combine drop it and publish
+                    // a false-exact key domain.
                     let start = results.len().saturating_sub(arm_count);
                     let arm_results: Vec<_> = results.drain(start..).collect();
                     let mut common: Option<FxHashSet<PropertyKey>> = None;
                     let mut unresolvable = false;
                     let mut open_construction = false;
+                    let mut refused = false;
                     for arm in arm_results {
                         match arm {
                             KeyNamesArm::Names(arm_names) => {
@@ -289,10 +310,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             KeyNamesArm::OpenConstruction => {
                                 open_construction = true;
                             }
+                            KeyNamesArm::Refused => {
+                                refused = true;
+                            }
                         }
                     }
                     let combined = if open_construction {
                         KeyNamesArm::OpenConstruction
+                    } else if refused {
+                        KeyNamesArm::Refused
                     } else if unresolvable {
                         KeyNamesArm::Unresolvable
                     } else {
@@ -340,16 +366,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                 ) {
                     crate::semantic_query::QueryResult::Value(formula) => {
-                        match formula.closed().and_then(|closed| closed.keyof()) {
-                            Some(keyof) => KeyNamesArm::Names(keyof.to_vec()),
+                        match self.object_spread_exact_keyof(&formula) {
+                            Ok(Some(keyof)) => KeyNamesArm::Names(keyof),
                             // An open / multi-alternative construction
                             // program has no exact key domain — poison
                             // the enclosing intersection combine.
-                            None => KeyNamesArm::OpenConstruction,
+                            Ok(None) => KeyNamesArm::OpenConstruction,
+                            // A demand refusal says the arm's keys were
+                            // not paid for, not that it has none — a
+                            // dropped arm would leave the remaining
+                            // arms' keys a false-exact domain.
+                            Err(_) => KeyNamesArm::Refused,
                         }
                     }
+                    // A typed query failure (refused construction,
+                    // cancellation) is likewise not a no-keys verdict.
                     crate::semantic_query::QueryResult::Recursive(_)
-                    | crate::semantic_query::QueryResult::Error(_) => KeyNamesArm::Unresolvable,
+                    | crate::semantic_query::QueryResult::Error(_) => KeyNamesArm::Refused,
                 };
                 results.push(keys);
             }
@@ -724,7 +757,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
             let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
             let equal = super::canonical_algebra::compare_structural(
-                self.graph(),
+                self.graph().store(),
                 pattern_index,
                 pattern_constraint,
                 &mut evidence,
@@ -830,20 +863,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(KeySpaceDomain::finite(vec![KeyDomainKey {
                         key: PropertyKey::string_literal(name.as_str()),
                         literal: Some(LiteralValue::String(name.clone())),
+                        binder: None,
                     }]))
                 }
                 SemanticNodeData::Literal(LiteralValue::Number(number)) => {
                     Some(KeySpaceDomain::finite(vec![KeyDomainKey {
                         key: PropertyKey::from_js_number(*number),
                         literal: Some(LiteralValue::Number(*number)),
+                        binder: None,
                     }]))
                 }
                 SemanticNodeData::TypeOfNominal(_) => {
                     Some(KeySpaceDomain::finite(vec![KeyDomainKey {
                         key: PropertyKey::UniqueSymbol(data.typeof_nominal_identity()?.clone()),
                         literal: None,
+                        binder: None,
                     }]))
                 }
+                SemanticNodeData::EnumLiteral(member) => self
+                    .enum_member_key(node, member)
+                    .map(|key| KeySpaceDomain::finite(vec![key])),
                 SemanticNodeData::Primitive(PrimitiveKind::Never) => {
                     Some(KeySpaceDomain::default())
                 }
@@ -1067,6 +1106,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         values.pop().map(Arc::new)
     }
 
+    /// The key an enum member's literal type `node` stands for: the
+    /// property its value names (`E.A = 0` keys `0`), the binder the
+    /// member itself (`{ [K in E]: K }` is `{ 0: E.A; … }`). `None` for a
+    /// member whose value is no string or number literal.
+    pub(super) fn enum_member_key(
+        &self,
+        node: SemanticNodeId,
+        member: &crate::semantic_query::EnumLiteralType,
+    ) -> Option<KeyDomainKey> {
+        let key = match self.graph().node_data(member.base).as_deref()? {
+            SemanticNodeData::Literal(LiteralValue::String(name)) => KeyDomainKey {
+                key: PropertyKey::string_literal(name.as_str()),
+                literal: Some(LiteralValue::String(name.clone())),
+                binder: Some(node),
+            },
+            SemanticNodeData::Literal(LiteralValue::Number(number)) => KeyDomainKey {
+                key: PropertyKey::from_js_number(*number),
+                literal: Some(LiteralValue::Number(*number)),
+                binder: Some(node),
+            },
+            _ => return None,
+        };
+        Some(key)
+    }
+
     fn key_space_leaf(&self, resolved: SemanticNodeId) -> Option<KeySpaceLeaf> {
         // Resolve only the key-set leaf. Further heads and composites return
         // to the worklist; member values are never a key-domain demand.
@@ -1076,6 +1140,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(KeySpaceLeaf::Finite(vec![KeyDomainKey {
                     key: PropertyKey::string_literal(name.as_str()),
                     literal: Some(LiteralValue::String(name.clone())),
+                    binder: None,
                 }]))
             }
             // Numeric-literal keys are legal keyspace members; they publish
@@ -1090,14 +1155,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(KeySpaceLeaf::Finite(vec![KeyDomainKey {
                     key: PropertyKey::from_js_number(*number),
                     literal: Some(LiteralValue::Number(*number)),
+                    binder: None,
                 }]))
             }
             SemanticNodeData::Primitive(PrimitiveKind::Never) => {
                 Some(KeySpaceLeaf::Finite(Vec::new()))
             }
+            SemanticNodeData::EnumLiteral(member) => self
+                .enum_member_key(resolved, member)
+                .map(|key| KeySpaceLeaf::Finite(vec![key])),
             SemanticNodeData::TypeOfNominal(_) => Some(KeySpaceLeaf::Finite(vec![KeyDomainKey {
                 key: PropertyKey::UniqueSymbol(data.typeof_nominal_identity()?.clone()),
                 literal: None,
+                binder: None,
             }])),
             SemanticNodeData::TypeOf(_) => {
                 let nominal = self.evaluate_deferred_semantic_node(resolved);
@@ -1427,7 +1497,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     | crate::semantic_query::QueryResult::Error(_) => return None,
                 };
                 let mut present = true;
-                for alternative in formula.alternatives() {
+                for alternative in self.object_spread_cursor(&formula) {
+                    let alternative = alternative.ok()?;
                     let closed = alternative.closed()?;
                     // The formula was projected under `Key(needle)`, so
                     // the lookup is inside the selector's declared set —
@@ -1509,6 +1580,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // `build_mapped_type`'s publication loop.
             SemanticNodeData::DeclRef { identity } => self.member_presence_fact_admission(
                 identity.canonical_id.as_ref(),
+                identity.owner,
                 identity.whole_hash,
                 identity.decl_name.as_ref(),
                 needle,
@@ -1522,6 +1594,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // `MemberPresence` lookup is sound.
                 self.member_presence_fact_admission(
                     base.canonical_id.as_ref(),
+                    base.owner,
                     base.whole_hash,
                     base.decl_name.as_ref(),
                     needle,
@@ -1709,9 +1782,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///   admitted on the strength of a presence fact.
     /// - `Some(false)` (ABSENT) — the artifact exists for the observed
     ///   content version, but the fact registry has no
-    ///   `MemberPresence(type_name, needle, Type)` entry. The member
-    ///   is provably absent regardless of visibility. Refute
-    ///   structurally.
+    ///   `MemberPresence(type_name, needle, Type)` entry, and the
+    ///   declaration WRITES its member set (an interface, a class, or an
+    ///   alias of an object literal). The member is provably absent
+    ///   regardless of visibility. Refute structurally.
+    /// - `None` (COMPUTED) — no presence fact, but the declaration is an
+    ///   alias whose body computes its members (a mapped type over its
+    ///   parameter, `type RO<T> = { readonly [K in keyof T]: T[K] }`, a
+    ///   reference, a conditional): no presence fact records those, so
+    ///   absence proves nothing and the caller resolves.
     /// - `None` (UNRECOVERABLE) — the file artifact for `(canonical,
     ///   observed_hash)` is not recoverable (evicted, schema
     ///   mismatch, content-hash drift). Fall through to the caller's
@@ -1730,6 +1809,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn member_presence_fact_admission(
         &self,
         canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         observed_hash: HashValue,
         type_name: &str,
         needle: &PropertyKey,
@@ -1768,9 +1848,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .ctx
             .member_presence_for_observed_content(canonical, observed_hash, presence_key)?
         {
-            None
-        } else {
-            Some(false)
+            return None;
         }
+        let writes_its_members = self
+            .ctx
+            .prepared_type_decl_return_only(canonical, owner, type_name)
+            .is_none_or(|prepared| {
+                prepared.kind != verter_session_query::declarations::TypeDeclKind::Alias
+                    || prepared
+                        .key_domain_closedness
+                        .as_ref()
+                        .is_some_and(|fact| fact.closed_object_shape)
+            });
+        writes_its_members.then_some(false)
     }
 }

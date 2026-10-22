@@ -94,7 +94,7 @@ fn exit_node<T: Clone>(
     result
 }
 
-impl ComponentMetaQueryEngine<'_> {
+impl<M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'_, M> {
     /// Evaluate an indexed fallthrough value expression to its resolved value NODE,
     /// entirely in node domain.
     ///
@@ -541,10 +541,10 @@ impl ComponentMetaQueryEngine<'_> {
 /// node's object / alias / intersection / union shape into the statically-known
 /// attr + listener key sets. `None` for any node that exposes no static key
 /// surface (the caller records an unknown spread).
-pub(crate) fn known_spread_keys_from_node(
+pub(crate) fn known_spread_keys_from_node<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
 ) -> Option<KnownSpreadKeys> {
@@ -556,10 +556,10 @@ pub(crate) fn known_spread_keys_from_node(
     )
 }
 
-fn known_spread_keys_from_node_inner(
+fn known_spread_keys_from_node_inner<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
@@ -719,10 +719,10 @@ fn insert_dynamic_root_candidate_charged(
 /// Emits a sorted `Vec` using the shared [`DynamicRootCandidate::ordering`]
 /// (the SAME ordering the syntactic-combine site re-applies), so observable
 /// output order is unchanged — only the exponential duplication is removed.
-pub(crate) fn collect_dynamic_root_candidates_from_node(
+pub(crate) fn collect_dynamic_root_candidates_from_node<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
     imports: &[AnalyzedImport],
@@ -739,10 +739,10 @@ pub(crate) fn collect_dynamic_root_candidates_from_node(
     out
 }
 
-fn collect_dynamic_root_candidates_from_node_inner(
+fn collect_dynamic_root_candidates_from_node_inner<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
     imports: &[AnalyzedImport],

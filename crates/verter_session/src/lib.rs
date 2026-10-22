@@ -56,15 +56,17 @@ extern crate verter_debug_assert;
 pub mod app_config_proof_db;
 #[cfg(test)]
 mod audit_caps_truncation_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 mod audit_warm_cache_tests;
+#[cfg(feature = "semantic-observe")]
 pub mod audited_request;
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 mod audited_request_tests;
 mod authored_evidence_producer;
 pub mod binder_identity_facts;
 mod block_content;
 mod cache;
+pub mod capture;
 pub mod carrier_artifact_cohort;
 #[cfg(test)]
 mod carrier_fixture_tests;
@@ -78,6 +80,8 @@ mod component_meta_delivery;
 mod heap_size_foreign;
 #[cfg(test)]
 mod request_view_reuse_tests;
+#[cfg(test)]
+mod request_view_verdict_tests;
 pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
@@ -97,6 +101,7 @@ pub mod component_meta_audit;
 mod component_meta_cache_discipline_tests;
 #[cfg(test)]
 mod fallthrough_admission_tests;
+#[cfg(feature = "semantic-observe")]
 pub mod host_audit_runtime;
 #[cfg(test)]
 mod host_freshness_evidence_tests;
@@ -256,6 +261,8 @@ mod overlay_artifact_key_isolation_tests;
 // Current-content-pinned `shallow_file_state` observed-read
 // discriminators.
 #[cfg(test)]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod shallow_file_state_pinned_tests;
 // Shared substrate for query-identity self-version rooting —
 // current-content fact path, self-root signature helpers, and strict
@@ -377,6 +384,7 @@ mod semantic_query_tests;
 #[cfg(test)]
 mod semantic_retention_account_tests;
 pub(crate) mod session_attachment;
+#[cfg(feature = "semantic-observe")]
 pub(crate) mod session_vfs_sink;
 pub mod session_view;
 mod shared;
@@ -436,6 +444,7 @@ pub mod for_tests;
 pub use for_tests::projection_bench_support;
 
 pub use block_content::hash_block_content;
+#[cfg(feature = "semantic-observe")]
 pub use host_audit_runtime::{
     ActiveRegistration, AuditRequestRegistration, AuditRuntimeSnapshot, HostAuditRuntime,
 };
@@ -602,6 +611,8 @@ pub struct VerterHost {
     /// registry that [`crate::host_audit_runtime::AuditRequestRegistration`]
     /// populates. Records are keyed by ids from `request_id_counter`;
     /// consumers drain them via `host_audit_runtime().take_record(id)`.
+    /// Optional capture: exists only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
     pub(crate) host_audit_runtime: Arc<crate::host_audit_runtime::HostAuditRuntime>,
     /// Test-only host-CPU-pool identity token observed by
     /// `compile_one_in_batch`. `usize::MAX` means unobserved/not on a

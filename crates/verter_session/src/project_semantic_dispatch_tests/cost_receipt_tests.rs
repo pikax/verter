@@ -401,6 +401,59 @@ fn an_abandoned_computation_is_its_consumers_cost() {
     );
 }
 
+/// A chain of computations that each fail — every level consuming one
+/// result, then abandoned into the level below — folds what each level
+/// consumed into its consumer as one failed-prefix receipt per level, not
+/// as every prerequisite the levels above already folded: the surviving
+/// consumer's receipt names a bounded list. It still owes everything the
+/// failed levels spent and consumed, and its footprint is what the levels
+/// needed: a result consumed by a frame below any of them keeps its frame.
+#[test]
+fn failed_computations_fold_one_prefix_per_level() {
+    const LEVELS: usize = 64;
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let ledger = &dispatch.connected_demand();
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    ledger.open_cost_scope(identity("root"));
+    for level in 0..LEVELS {
+        ledger.open_cost_scope(identity(&format!("L{level}")));
+    }
+    for level in (0..LEVELS).rev() {
+        let consumed =
+            DemandCostReceipt::new(identity(&format!("R{level}")), usage(1, 0), Vec::new());
+        let nesting = if level == LEVELS / 2 {
+            Nesting::Frame { depth: 1 }
+        } else {
+            Nesting::InPlace
+        };
+        ledger.record_prerequisite(&consumed, nesting);
+        ledger.charge().expect("the level's own unit");
+        ledger.abandon_cost_scope();
+    }
+    let root = ledger.seal_cost_scope(None).expect("the root seals");
+    assert!(
+        root.prerequisites().len() <= 2,
+        "{} prerequisites folded into the surviving consumer",
+        root.prerequisites().len()
+    );
+    assert_eq!(
+        root.exclusive(),
+        usage(LEVELS as u64, 0),
+        "the failed levels' own units"
+    );
+    assert_eq!(
+        root.closure_usage(),
+        usage(2 * LEVELS as u64, 0),
+        "the failed levels' units and every result they consumed"
+    );
+    assert_eq!(
+        root.footprint().instantiation_height,
+        1,
+        "the frame a failed level consumed a result through is the consumer's"
+    );
+}
+
 /// A computation run again in the same demand — its result could not be
 /// served — is charged again: the demand pays for the work it does, so a
 /// demand that recomputes a result is bounded by its allowance however
@@ -596,6 +649,7 @@ fn a_budget_profile_is_one_interned_identity() {
     let spec = BudgetProfileSpec {
         work: 100,
         bytes: 1_000,
+        construction_byte_refusal: false,
         query_depth: 24,
         instantiation_depth: 10,
         tail_steps: 10,
@@ -1186,12 +1240,30 @@ fn root_read_with_context(
     depth: u16,
     preceding: usize,
 ) -> RootAnswer {
+    root_read_configured(host, key, preceding, |dispatch| {
+        dispatch.set_connected_limits_for_tests(work, depth);
+    })
+}
+
+/// [`root_read_with_context`] with the dispatcher's allowances set by
+/// `configure` before the demand enters.
+fn root_read_configured(
+    host: &Arc<VerterHost>,
+    key: &verter_type_engine::semantic_query::SemanticQueryKey,
+    preceding: usize,
+    configure: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>),
+) -> RootAnswer {
     use verter_type_engine::semantic_query::{QueryResult, SemanticQueryValue};
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&ctx);
-    dispatch.set_connected_limits_for_tests(work, depth);
+    configure(&dispatch);
     let _connected = (preceding != 0).then(|| dispatch.enter_connected_demand(false).0);
     if preceding != 0 {
         dispatch.connected_demand().charge_units(preceding).unwrap();
@@ -2145,6 +2217,7 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
     let profile = BudgetProfile::intern(BudgetProfileSpec {
         work: 64,
         bytes: 1_024,
+        construction_byte_refusal: false,
         query_depth: 24,
         instantiation_depth: 10,
         tail_steps: 10,
@@ -2303,4 +2376,703 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
         refusal(),
         carrier(),
     ));
+}
+
+/// `[{ a: 0 } | … | { a: n - 1 }, { b: 0 } | … | { b: n - 1 }]`: two object
+/// unions whose intersection's cross product the checker builds whole.
+fn object_union_pair(n: usize) -> String {
+    let union = |key: &str| {
+        (0..n)
+            .map(|i| format!("{{ {key}: {i} }}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    format!("[{}, {}]", union("a"), union("b"))
+}
+
+/// The intersection of the two unions `probe` reads, as a root query key
+/// on `host` over `source`.
+fn intersection_root_key(
+    host: &Arc<VerterHost>,
+    source: &str,
+    probe: &str,
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        source,
+        probe,
+        |dispatch, node| {
+            let arms: Vec<_> = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) => elements.iter().map(|element| element.value).collect(),
+                other => panic!("the probe reads a pair of unions, got {other:?}"),
+            };
+            verter_type_engine::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                dispatch.graph().store(),
+                Arc::from(arms),
+            )
+        },
+    )
+}
+
+/// An intersection's distribution is paid for whole before its first
+/// constituent is built, so a root whose allowance cannot pay refuses as a
+/// function of the root and its allowance alone, and seals that refusal:
+/// an exact repeat answers it without evaluating; the same root entered
+/// inside another demand, or under another allowance, never inherits it
+/// and evaluates for itself; the production allowance distributes all 900
+/// constituents; and an edit to the file the arms are written in misses
+/// the refusal.
+#[test]
+fn an_unpaid_distribution_seals_its_refusal_under_its_own_allowance() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    // The key names the probe's nodes; the scope keeps them for every read.
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
+    let source = "export type Marker = 1;\n";
+    let key = intersection_root_key(&host, source, &object_union_pair(30));
+    let allowance = 500;
+    let limited = || root_read(&host, &key, allowance);
+
+    let refused = limited();
+    assert!(
+        refused.partial
+            && refused
+                .reasons
+                .contains(PartialReasonSet::PROJECTION_WORK_LIMIT),
+        "500 units cannot pay for a 900-constituent product: {refused:?}"
+    );
+    assert!(
+        refused.work <= allowance,
+        "the unpaid product charged nothing past the allowance: {refused:?}"
+    );
+    assert!(
+        host.project_type_store()
+            .semantic_graph()
+            .refusal_summary_count_for_tests()
+            >= 1,
+        "the refused root sealed its refusal"
+    );
+    let misses = semantic_misses(&host);
+    assert_eq!(limited(), refused, "the repeat answers the sealed refusal");
+    assert_eq!(semantic_misses(&host), misses, "and evaluates nothing");
+
+    let nested = root_read_with_context(&host, &key, allowance + 10, 24, 10);
+    assert!(nested.partial, "{nested:?}");
+    let after_nested = semantic_misses(&host);
+    assert!(
+        after_nested > misses,
+        "a root inside another demand evaluates for itself"
+    );
+    let other = root_read(&host, &key, allowance + 1);
+    assert!(other.partial, "{other:?}");
+    assert!(
+        semantic_misses(&host) > after_nested,
+        "another allowance is another profile, evaluated afresh"
+    );
+
+    let complete = root_read(
+        &host,
+        &key,
+        super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+    );
+    assert!(
+        !complete.partial,
+        "the production allowance distributes: {complete:?}"
+    );
+    assert!(
+        complete.work > 900,
+        "every constituent was paid for: {complete:?}"
+    );
+
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        super::checker_probe_lane_tests::PROBE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script("export type Marker = 2;\n"),
+        crate::FileLanguage::script_ts(),
+    );
+    let before_edit = semantic_misses(&host);
+    let _ = limited();
+    assert!(
+        semantic_misses(&host) > before_edit,
+        "an edit to what the refusal read evaluates afresh"
+    );
+}
+
+/// An intersection's distribution charges its construction footprint to
+/// the demand whatever the byte allowance; the advisory construction-byte
+/// rail is off unless enabled, so an allowance half that footprint still
+/// distributes all 900 constituents, complete. Enabled, the same allowance
+/// refuses the construction before it builds, a partial of the memory
+/// rail. Each read is cold, on a host of its own.
+#[test]
+fn construction_byte_refusal_is_opt_in() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let work = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let cold_read = |bytes: u64, refusal: bool| {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
+        let key = intersection_root_key(&host, "export type Marker = 1;\n", &object_union_pair(30));
+        root_read_configured(&host, &key, 0, |dispatch| {
+            dispatch.set_connected_limits_for_tests(work, 24);
+            dispatch.set_construction_byte_limit_for_tests(bytes);
+            dispatch
+                .connected_demand()
+                .set_construction_byte_refusal_for_tests(refusal);
+        })
+    };
+    let unlimited = cold_read(u64::MAX, false);
+    assert!(!unlimited.partial, "{unlimited:?}");
+    let allowance = unlimited.bytes / 2;
+    let default_off = cold_read(allowance, false);
+    assert!(
+        !default_off.partial && default_off.answer == unlimited.answer,
+        "the rail is off by default: the distribution completes: {default_off:?}"
+    );
+    assert!(
+        default_off.bytes > allowance,
+        "its footprint is still charged: {default_off:?}"
+    );
+    let enabled = cold_read(allowance, true);
+    assert!(
+        enabled.partial
+            && enabled
+                .reasons
+                .contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT),
+        "the enabled rail refuses the construction: {enabled:?}"
+    );
+}
+
+/// An explicit invalidation of a canonical drops every sealed refusal whose
+/// failed prefix consumed a result reading it — through receipts no cache
+/// holds — together with the memo candidates those receipts reach, and
+/// leaves refusals and candidates that never read it. The last release
+/// drains both reverse indexes.
+#[test]
+fn invalidating_a_canonical_drops_the_refusals_its_failed_prefix_reached() {
+    use verter_session_query::facts::fact_cache::{
+        FactVersionRef, ReadSetSignature, ResultReceipt,
+    };
+    use verter_type_engine::semantic_query::{
+        CacheRead, LiteralValue, PartialReasonSet, QueryResult, RelateMemoKey, RelationContext,
+        RelationOutcome, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
+        SemanticQueryValue,
+    };
+    use verter_type_engine::semantic_query_memo::ReverseIndexOccupancy;
+
+    let host = host();
+    let store = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
+    let profile = BudgetProfile::intern(BudgetProfileSpec {
+        work: 64,
+        bytes: 1_024,
+        construction_byte_refusal: false,
+        query_depth: 24,
+        instantiation_depth: 10,
+        tail_steps: 10,
+        request_operations: 0,
+        relation_comparisons: 600,
+        cost_model_revision: COST_MODEL_REVISION,
+    });
+    let key = |name: &str| {
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: verter_type_expr::OwnedStr::from("/refusals.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                local_scope: None,
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+            },
+            name: verter_type_expr::OwnedStr::from(name),
+        })
+    };
+    let refusal = || {
+        CacheRead::unleased_for_tests(
+            QueryResult::<SemanticQueryValue>::Error(
+                verter_type_engine::semantic_query::QueryError::Miss,
+            ),
+            verter_type_engine::semantic_query_memo::empty_signature(),
+            verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
+            true,
+            verter_type_engine::semantic_query::FactStatus::unavailable(
+                PartialReasonSet::PROJECTION_WORK_LIMIT,
+            ),
+            verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+        )
+    };
+    let file = |canonical: &str| FactVersionRef::FileWholeHash {
+        canonical_id: canonical.to_owned(),
+        hash: [9; 16],
+    };
+    // The failed prefix consumed `mid`, which consumed `base`; neither is
+    // cached.
+    let base = ResultReceipt::new(vec![file("/w/base.ts")]);
+    let mid = ResultReceipt::new(vec![file("/w/mid.ts"), FactVersionRef::Receipt(base)]);
+    let through_prefix =
+        || ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(mid.clone())]));
+    let elsewhere = ReadSetSignature::new(Arc::from(vec![file("/w/other.ts")]));
+
+    let entry = store.refusal_entry_for_tests(&host);
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Prefixed"),
+        profile.clone(),
+        entry,
+        refusal(),
+        through_prefix(),
+    ));
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Elsewhere"),
+        profile.clone(),
+        entry,
+        refusal(),
+        elsewhere,
+    ));
+    let source = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "source".into(),
+    )));
+    let target = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "target".into(),
+    )));
+    store.insert_relation_payload_for_tests(
+        RelateMemoKey::assignable(source, target, RelationContext::default()),
+        through_prefix(),
+        Arc::from(Vec::new()),
+        store.relation_payload_for_tests(RelationOutcome::Assignable),
+        0,
+    );
+    assert_eq!(store.refusal_summary_count_for_tests(), 2);
+    assert_eq!(store.canonical_to_entries_count("/w/base.ts"), 1);
+
+    assert_eq!(store.invalidate_canonical("/w/base.ts"), 1);
+    let kept = store.refusal_carriers_for_tests();
+    assert_eq!(kept.len(), 1, "only the refusal that read the edit leaves");
+    assert!(kept[0]
+        .facts
+        .iter()
+        .any(|fact| fact.canonical_id() == Some("/w/other.ts")));
+    assert_eq!(
+        store.reverse_index_occupancy(),
+        ReverseIndexOccupancy::default()
+    );
+    assert_eq!(store.refusal_index_occupancy_for_tests().canonicals, 1);
+
+    assert_eq!(store.invalidate_canonical("/w/other.ts"), 0);
+    assert_eq!(store.refusal_summary_count_for_tests(), 0);
+    assert_eq!(
+        store.refusal_index_occupancy_for_tests(),
+        ReverseIndexOccupancy::default()
+    );
+
+    // An evaluation in flight across an explicit invalidation read what the
+    // invalidation dropped, before the index could hold its summary: its
+    // refusal is never sealed. One entering after the invalidation is.
+    let before_invalidation = store.refusal_entry_for_tests(&host);
+    assert_eq!(store.invalidate_canonical("/w/base.ts"), 0);
+    assert!(
+        !store.seal_refusal_for_tests(
+            &host,
+            key("Prefixed"),
+            profile.clone(),
+            before_invalidation,
+            refusal(),
+            through_prefix(),
+        ),
+        "a refusal entered before an invalidation is never sealed after it"
+    );
+    assert_eq!(store.refusal_summary_count_for_tests(), 0);
+    assert_eq!(
+        store.refusal_index_occupancy_for_tests(),
+        ReverseIndexOccupancy::default()
+    );
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Prefixed"),
+        profile.clone(),
+        store.refusal_entry_for_tests(&host),
+        refusal(),
+        through_prefix(),
+    ));
+}
+
+/// `{ ...a, ...b }` over two `arms`-member object unions, and an index
+/// target every alternative relates to.
+fn spread_unions(arms: usize) -> String {
+    let union = |prefix: &str| {
+        (0..arms)
+            .map(|i| format!("{{ {prefix}{i}: {i} }}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    format!(
+        "type A = {};\ntype B = {};\ndeclare const a: A;\ndeclare const b: B;\n\
+         const s = {{ ...a, ...b }};\ntype T = {{ [key: string]: number }};\n",
+        union("a"),
+        union("b")
+    )
+}
+
+/// The relation of the spread `s` of [`spread_unions`] to `T`, as a root key.
+fn spread_relation_key(
+    host: &Arc<VerterHost>,
+    source: &str,
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        source,
+        "[typeof s, T]",
+        |dispatch, node| {
+            let elements = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) => elements
+                    .iter()
+                    .map(|element| element.value)
+                    .collect::<Vec<_>>(),
+                other => panic!("the probe reads the pair [typeof s, T], got {other:?}"),
+            };
+            assert!(
+                matches!(
+                    dispatch.graph().node_data(elements[0]).as_deref(),
+                    Some(
+                        verter_type_engine::semantic_query::SemanticNodeData::ObjectSpreadProgram(
+                            _
+                        )
+                    )
+                ),
+                "the source is the factored construction program"
+            );
+            dispatch
+                .relate_key_for(elements[0], elements[1])
+                .to_query_key()
+        },
+    )
+}
+
+/// A demand that cannot pay to read a spread's correlated alternatives
+/// stops as a typed work refusal, never as a smaller or empty product. The
+/// refusal is sealed for its isolated root and allowances only: an exact
+/// repeat answers it without reconstructing anything, a demand inside a
+/// different enclosing ledger evaluates for itself, a higher allowance
+/// completes, and an edit to the construction evaluates afresh.
+#[test]
+fn a_spread_work_refusal_is_sealed_per_isolated_root_and_heals() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let source = spread_unions(20);
+    let measured = {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let key = spread_relation_key(&host, &source);
+        root_read(&host, &key, full)
+    };
+    assert!(
+        !measured.partial,
+        "the full allowance relates every alternative: {measured:?}"
+    );
+
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = spread_relation_key(&host, &source);
+    let limited = measured.work / 2;
+    let refused = root_read(&host, &key, limited);
+    assert!(
+        refused.partial
+            && refused
+                .reasons
+                .contains(PartialReasonSet::PROJECTION_WORK_LIMIT),
+        "half the work cannot read every alternative: {refused:?}"
+    );
+    assert_ne!(
+        refused.answer, measured.answer,
+        "a refusal never answers as the complete product"
+    );
+
+    let before = semantic_misses(&host);
+    assert_eq!(root_read(&host, &key, limited), refused);
+    assert_eq!(
+        semantic_misses(&host),
+        before,
+        "the exact repeat answers its sealed refusal without reconstruction"
+    );
+
+    let before = semantic_misses(&host);
+    let enclosed = root_read_with_context(&host, &key, limited, 24, 1);
+    assert!(enclosed.partial);
+    assert!(
+        semantic_misses(&host) > before,
+        "a demand inside another ledger never inherits the refusal"
+    );
+
+    let healed = root_read(&host, &key, full);
+    assert_eq!(
+        (healed.answer.as_str(), healed.partial),
+        (measured.answer.as_str(), false),
+        "a higher allowance recomputes and completes"
+    );
+
+    let _ = spread_relation_key(&host, &source.replace("a0: 0", "a0: 10"));
+    let before = semantic_misses(&host);
+    let _ = root_read(&host, &key, limited);
+    assert!(
+        semantic_misses(&host) > before,
+        "an edit to the construction evaluates afresh"
+    );
+}
+
+/// Unions `A` of 100 and `B` of 80 string literals.
+fn template_unions() -> String {
+    let union = |name: &str, prefix: &str, count: usize| {
+        let arms: Vec<String> = (0..count).map(|i| format!("\"{prefix}{i}\"")).collect();
+        format!("type {name} = {};\n", arms.join(" | "))
+    };
+    format!("{}{}", union("A", "a", 100), union("B", "b", 80))
+}
+
+/// The reduction of `${A}-${B}` over [`template_unions`] as a root key.
+fn template_reduction_key(
+    host: &Arc<VerterHost>,
+    source: &str,
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        source,
+        "[A, B]",
+        |dispatch, node| {
+            let args = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) => elements
+                    .iter()
+                    .map(|element| element.value)
+                    .collect::<Vec<_>>(),
+                other => panic!("the probe reads the pair [A, B], got {other:?}"),
+            };
+            verter_type_engine::semantic_query::SemanticQueryKey::TemplateLiteralReduce {
+                pattern: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                    verter_type_expr::OwnedStr::from(""),
+                    verter_type_expr::OwnedStr::from("-"),
+                    verter_type_expr::OwnedStr::from(""),
+                ]),
+                args: Arc::from(args),
+                context: dispatch.template_literal_reduce_context(),
+            }
+        },
+    )
+}
+
+/// A template whose product the work allowance cannot pay for stops as a
+/// typed work refusal, never as a smaller or empty union. The refusal is
+/// sealed for its isolated root and allowances only: an exact repeat
+/// answers it without reconstructing anything, a demand inside a different
+/// enclosing ledger evaluates for itself, a higher allowance completes the
+/// 8,000-arm union, and an edit to a span evaluates afresh.
+#[test]
+fn a_template_work_refusal_is_sealed_per_isolated_root_and_heals() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let source = template_unions();
+    let measured = {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let key = template_reduction_key(&host, &source);
+        root_read(&host, &key, full)
+    };
+    assert!(
+        !measured.partial && measured.work >= 8_000,
+        "the full allowance builds all 8,000 concatenations: {measured:?}"
+    );
+
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = template_reduction_key(&host, &source);
+    let limited = measured.work / 2;
+    let refused = root_read(&host, &key, limited);
+    assert!(
+        refused.partial
+            && refused
+                .reasons
+                .contains(PartialReasonSet::PROJECTION_WORK_LIMIT),
+        "half the work cannot build every concatenation: {refused:?}"
+    );
+
+    let before = semantic_misses(&host);
+    assert_eq!(root_read(&host, &key, limited), refused);
+    assert_eq!(
+        semantic_misses(&host),
+        before,
+        "the exact repeat answers its sealed refusal without reconstruction"
+    );
+
+    let before = semantic_misses(&host);
+    let enclosed = root_read_with_context(&host, &key, limited, 24, 1);
+    assert!(enclosed.partial);
+    assert!(
+        semantic_misses(&host) > before,
+        "a demand inside another ledger never inherits the refusal"
+    );
+
+    let healed = root_read(&host, &key, full);
+    assert!(
+        !healed.partial && healed.work >= 8_000,
+        "a higher allowance recomputes and completes: {healed:?}"
+    );
+
+    let edited = template_reduction_key(&host, &source.replace("\"a0\"", "\"z0\""));
+    let before = semantic_misses(&host);
+    let _ = root_read(&host, &edited, limited);
+    assert!(
+        semantic_misses(&host) > before,
+        "an edit to a span evaluates afresh"
+    );
+}
+
+/// `{ ...a, ...b }` over 33- and 33-member object unions has 1,089
+/// correlated constituents — each pairs one `a` arm with one `b` arm, never
+/// an `a` key with another arm's value — and inference over the spread
+/// reads every constituent.
+#[test]
+fn a_33_by_33_spread_publishes_every_correlated_constituent_and_infers_from_each() {
+    let union = |prefix: &str| {
+        (0..33)
+            .map(|i| format!("{{ {prefix}{i}: {i} }}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let declarations = format!(
+        "type A = {};\ntype B = {};\ndeclare const a: A;\ndeclare const b: B;\n\
+         const s = {{ ...a, ...b }};\n",
+        union("a"),
+        union("b")
+    );
+    let render = |probe: &str| {
+        let host = bench_host(
+            0,
+            &format!(
+                "{declarations}type Values<T> = [T] extends [{{ [key: string]: infer V }}] ? V : never;\n\
+                 type __Probe = {probe};\nexport {{}};\n"
+            ),
+        );
+        let bytes = probe_answer(&host).expect("the probe answers");
+        let expr: verter_type_expr::TypeExpr =
+            serde_json::from_slice(&bytes).expect("the answer decodes");
+        verter_type_expr::render_type_expr_display(&expr)
+            .expect("the answer renders")
+            .text
+    };
+
+    let whole = render("typeof s");
+    let mut pairs = std::collections::BTreeSet::new();
+    for arm in whole.split(" | ") {
+        let members: Vec<(String, String)> = arm
+            .trim_matches(|c: char| c == '{' || c == '}' || c.is_whitespace())
+            .split(';')
+            .map(str::trim)
+            .filter(|member| !member.is_empty())
+            .map(|member| {
+                let (name, value) = member.split_once(':').expect("a property");
+                (name.trim().to_owned(), value.trim().to_owned())
+            })
+            .collect();
+        let [(a_name, a_value), (b_name, b_value)] = members.as_slice() else {
+            panic!("each constituent copies one arm of each union: {arm}");
+        };
+        assert_eq!(a_name, &format!("a{a_value}"), "correlated a in {arm}");
+        assert_eq!(b_name, &format!("b{b_value}"), "correlated b in {arm}");
+        pairs.insert((a_value.clone(), b_value.clone()));
+    }
+    assert_eq!(
+        pairs.len(),
+        33 * 33,
+        "every pair of arms is one constituent"
+    );
+
+    let inferred = render("Values<typeof s>");
+    let values: std::collections::BTreeSet<String> =
+        inferred.split(" | ").map(str::to_owned).collect();
+    assert_eq!(
+        values,
+        (0..33).map(|i: usize| i.to_string()).collect(),
+        "inference reads every value of every constituent: {inferred}"
+    );
+}
+
+/// A stress-size spread also reads through an inference (one test per
+/// size, so each stays inside the 20-second speed gate). `Values<typeof
+/// s>` unions the values of every constituent, and a later direct write
+/// over one arm's key replaces that arm's value in every constituent:
+/// the inferred set is exactly the surviving arm values plus the write's
+/// literal, so a lost constituent, a missed write or a write that
+/// appended instead of replacing all show up here.
+fn assert_stress_size_spread_infers_every_constituent_and_the_later_write(widths: &[usize]) {
+    let declarations = widths
+        .iter()
+        .zip(["A", "B", "C"].iter().zip(["a", "b", "c"]))
+        .map(|(width, (type_name, name))| {
+            let union = (0..*width)
+                .map(|i| format!("{{ {name}{i}: {i} }}"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("type {type_name} = {union};\ndeclare const {name}: {type_name};\n")
+        })
+        .collect::<String>();
+    let spreads = ["a", "b", "c"]
+        .iter()
+        .take(widths.len())
+        .map(|name| format!("...{name}"))
+        .chain([format!("a{}: 4242 as const", widths[0] - 1)])
+        .collect::<Vec<_>>()
+        .join(", ");
+    let host = bench_host(
+        0,
+        &format!(
+            "{declarations}const s = {{ {spreads} }};\n\
+             type Values<T> = [T] extends [{{ [key: string]: infer V }}] ? V : never;\n\
+             type __Probe = Values<typeof s>;\nexport {{}};\n"
+        ),
+    );
+    let bytes = probe_answer(&host).expect("the stress probe answers");
+    let expr: verter_type_expr::TypeExpr =
+        serde_json::from_slice(&bytes).expect("the answer decodes");
+    let inferred = verter_type_expr::render_type_expr_display(&expr)
+        .expect("the answer renders")
+        .text;
+
+    let values: std::collections::BTreeSet<String> =
+        inferred.split(" | ").map(str::to_owned).collect();
+    let overwritten = widths[0] - 1;
+    let mut expected: std::collections::BTreeSet<String> = widths
+        .iter()
+        .flat_map(|width| (0..*width).map(|i| i.to_string()).collect::<Vec<_>>())
+        .collect();
+    // The write replaces the arm's own value everywhere; it leaves the
+    // inferred set only when no other union writes the same value.
+    if !widths[1..].iter().any(|width| overwritten < *width) {
+        expected.remove(&overwritten.to_string());
+    }
+    expected.insert("4242".to_owned());
+    assert_eq!(
+        values, expected,
+        "{widths:?}: inference reads every surviving value and the later write: {inferred}"
+    );
+}
+
+#[test]
+fn a_369_by_271_spread_infers_every_constituent_and_the_later_write() {
+    assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[369, 271]);
+}
+
+#[test]
+fn a_50_by_50_by_39_spread_infers_every_constituent_and_the_later_write() {
+    assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[50, 50, 39]);
 }

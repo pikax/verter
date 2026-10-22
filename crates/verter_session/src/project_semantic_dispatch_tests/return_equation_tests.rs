@@ -98,7 +98,7 @@ fn flow_domain() -> ReturnDomainMetadata {
 fn mixed_seeded_call_flow_cycle_converges_for_both_members() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let callee = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let flow = ReturnObligationIdentity::FlowReturn(
@@ -140,7 +140,7 @@ fn mixed_seeded_call_flow_cycle_converges_for_both_members() {
 fn mixed_seeded_component_close_stages_both_domains() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let callee = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let flow_key = dispatch.flow_return_key_for(&flow_identity("seededClose"));
@@ -168,7 +168,7 @@ fn mixed_seeded_component_close_stages_both_domains() {
         dispatch.flow_frame_close_for_tests(
             idx,
             FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
-                dispatch.graph(),
+                dispatch.graph().store(),
                 number,
                 verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
                 None,
@@ -333,7 +333,7 @@ fn mixed_empty_component_close_admits_nothing() {
 fn self_recursion_two_edge_scc_preserves_empty_and_base_seed_verdicts() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let callee = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let flow = ReturnObligationIdentity::FlowReturn(
@@ -377,7 +377,7 @@ fn self_recursion_two_edge_scc_preserves_empty_and_base_seed_verdicts() {
 fn unresolved_outside_hold_fails_closed() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let callee = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let member = ReturnEquationMember {
         fresh_literal_returns: Vec::new(),
@@ -405,7 +405,7 @@ fn unresolved_outside_hold_fails_closed() {
 fn call_budget_trip_poisons_the_whole_mixed_component() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let callee = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let flow_key = dispatch.flow_return_key_for(&flow_identity("budgetOwner"));
@@ -439,7 +439,7 @@ fn call_budget_trip_poisons_the_whole_mixed_component() {
     let step = dispatch.flow_frame_close_for_tests(
         idx,
         FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
-            dispatch.graph(),
+            dispatch.graph().store(),
             number,
             verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
             None,
@@ -465,7 +465,7 @@ fn call_budget_trip_poisons_the_whole_mixed_component() {
 fn refused_call_commit_leaves_the_relation_ledger_undrained() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let callee = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
@@ -478,14 +478,14 @@ fn refused_call_commit_leaves_the_relation_ledger_undrained() {
         // A relation member whose session already committed and whose
         // deferred admission entry is intact: draining it is the last step
         // of the publication tail.
-        let relation_session = txn.push_collecting_session(empty_session_setup(), None);
+        let relation_session = txn.push_collecting_session(empty_session_setup());
         commit_session(&mut txn, relation_session);
         txn.relation
             .session_admission
             .defer(relation_session, relate_key.clone());
         // A call member staged on a session that never reached
         // `StagedDeterministic`: the commit gate refuses it.
-        let call_session = txn.push_collecting_session(empty_session_setup(), None);
+        let call_session = txn.push_collecting_session(empty_session_setup());
         let idx = txn.reentry_mut().push_flow_return(flow_key.clone(), 0);
         txn.obligations.pending_mut().deposit(PendingObligation {
             identity: ObligationIdentity::Relate {
@@ -522,7 +522,7 @@ fn refused_call_commit_leaves_the_relation_ledger_undrained() {
         dispatch.flow_frame_close_for_tests(
             idx,
             FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
-                dispatch.graph(),
+                dispatch.graph().store(),
                 number,
                 verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
                 None,
@@ -550,7 +550,7 @@ fn refused_call_commit_leaves_the_relation_ledger_undrained() {
 fn mixed_component_relation_member_flip_publishes_nothing() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let callee = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
@@ -598,7 +598,7 @@ fn mixed_component_relation_member_flip_publishes_nothing() {
         dispatch.flow_frame_close_for_tests(
             idx,
             FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
-                dispatch.graph(),
+                dispatch.graph().store(),
                 number,
                 verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
                 None,

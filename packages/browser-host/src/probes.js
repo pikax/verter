@@ -1,4 +1,5 @@
 import {
+  CAPTURE_STATES,
   CANONICAL_TS,
   CANONICAL_VUE,
   TYPEINFO_SYMBOL,
@@ -53,8 +54,15 @@ function mappingFromCompile(response) {
 /**
  * Drive the existing VerterHost (WASM binding or native-equivalent shape).
  * Does not implement semantics; it only calls the session authority.
+ *
+ * `capture` is the module's `captureAvailability()`: `"Available"` when it
+ * was built with `semantic-observe` (the query must return its stored audit
+ * record), `"Unavailable"` otherwise (the query must return no record).
  */
-export function runProbes(host, { tsSource, vueSource }) {
+export function runProbes(host, { tsSource, vueSource, capture }) {
+  if (!CAPTURE_STATES.includes(capture)) {
+    throw new Error(`capture availability is not reported (got ${String(capture)})`);
+  }
   host.upsert({
     canonicalId: CANONICAL_TS,
     inputId: CANONICAL_TS,
@@ -80,17 +88,22 @@ export function runProbes(host, { tsSource, vueSource }) {
   const mapping = mappingFromCompile(compile);
   // `resolveTypeWithAudit` hands back the stored `RequestAuditRecord` (JSON)
   // only when the audit capture state is `ActiveStored`, and `null` when the
-  // record was filtered or audit is disabled. `hasRecord` is derived from
-  // that state exactly like the native probe derives it; anything else (null,
-  // an error-shaped object, an array) is not a successful query operation.
+  // record was filtered, audit is disabled, or capture is unavailable.
+  // `hasRecord` is derived from that state exactly like the native probe
+  // derives it. With capture available anything else (null, an error-shaped
+  // object, an array) is not a successful query operation; with capture
+  // unavailable any returned record contradicts the reported availability.
   const record = parseMaybeJson(host.resolveTypeWithAudit(CANONICAL_TS, TYPEINFO_SYMBOL));
   const hasRecord =
     record != null &&
     typeof record === "object" &&
     !Array.isArray(record) &&
     record.capture_state === "ActiveStored";
-  if (!hasRecord) {
+  if (capture === "Available" && !hasRecord) {
     throw new Error("query audit record is absent from resolveTypeWithAudit");
+  }
+  if (capture === "Unavailable" && record != null) {
+    throw new Error("resolveTypeWithAudit returned a record although capture is unavailable");
   }
 
   return {
@@ -99,7 +112,7 @@ export function runProbes(host, { tsSource, vueSource }) {
       typeinfo: symbols,
       style: Array.isArray(style) ? style : [],
       mapping,
-      query: [{ decl: TYPEINFO_SYMBOL, kind: record.kind, hasRecord }],
+      query: [{ decl: TYPEINFO_SYMBOL, capture, kind: hasRecord ? record.kind : null, hasRecord }],
     },
     identities: {
       symbols: normalizeSymbolIdentities(symbols),

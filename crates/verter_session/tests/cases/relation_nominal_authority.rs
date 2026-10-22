@@ -127,13 +127,12 @@ fn relation_unique_symbol_identity_and_comparability_are_tristate() {
             RelateVerdictForTests::DoesNotHold,
         ),
         // A nominal subject against a NON-unique `symbol`: they overlap (a
-        // unique symbol IS a symbol), so comparability holds — while
-        // IDENTITY is a structural question this bounded reduction does not
-        // answer.
+        // unique symbol IS a symbol), so comparability holds, while exact
+        // identity distinguishes the nominal type from the broad symbol.
         (
             "KindA",
             "PlainKind",
-            RelateVerdictForTests::Undecided,
+            RelateVerdictForTests::DoesNotHold,
             RelateVerdictForTests::Holds,
         ),
         // A subject the oracle never read decides nothing in either
@@ -1362,6 +1361,7 @@ fn qualified_typeof_key_does_not_truncate_trailing_segments() {
     );
 
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 verter_type_expr::AuthoredPropertyKey::Computed(TypeExpr::TypeOf(ValueRef {

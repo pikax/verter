@@ -33,10 +33,14 @@ mod member_presence_vs_member;
 #[path = "g_misc1/memo_traced_parse_fact_survives_warm_hit.rs"]
 mod memo_traced_parse_fact_survives_warm_hit;
 #[path = "g_misc1/memory_peak_rss_per_host.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod memory_peak_rss_per_host;
 #[path = "g_misc1/memory_peak_rss_zero_on_wasm.rs"]
 mod memory_peak_rss_zero_on_wasm;
 #[path = "g_misc1/memory_peak_rss_zero_when_flag_off.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod memory_peak_rss_zero_when_flag_off;
 #[path = "g_misc1/merged_symbol_identity.rs"]
 mod merged_symbol_identity;
@@ -63,6 +67,8 @@ mod slot_binding_graph_matrix_import_ref;
 #[path = "g_misc1/test_support_feature_off_in_default_build.rs"]
 mod test_support_feature_off_in_default_build;
 #[path = "g_misc1/ts_bindings.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod ts_bindings;
 #[path = "g_misc1/whole_hash_migration_audit.rs"]
 mod whole_hash_migration_audit;

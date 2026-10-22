@@ -8,6 +8,8 @@
 //! to copy-paste; routing them through one named module makes the
 //! test-only entry points easy to grep and audit.
 
+// Probes the audit observer slot, which exists only with optional capture.
+#[cfg(feature = "semantic-observe")]
 pub mod audit_tls_harness;
 pub mod dispatch_bridges;
 pub mod overlay_pollution_probe;

@@ -54,17 +54,17 @@ fn peel_alias_root(
 /// `is_generic_instantiation` / `type_expr_contains_reducible_operator(raise(node))`
 /// triad. Parity-checked field-for-field against the `TypeExpr` predicates on
 /// `raise(node)`.
-pub(crate) fn classify_node_reduction_gates(
+pub(crate) fn classify_node_reduction_gates<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
 ) -> NodeReductionGateFacts {
     let graph = dispatch.graph();
     // Peel a single `Alias` chain so the root classification reads the underlying
     // carrier kind (the reverse boundary unwraps an `Alias` before raising).
-    let root = peel_alias_root(graph, node, 0);
+    let root = peel_alias_root(graph.store(), node, 0);
     let generic_instantiation_ref = match graph.read_in_scope(root).as_deref() {
         // `raise(InstantiationRef)` is `Ref` with NON-EMPTY type arguments.
         Some(SemanticNodeData::InstantiationRef { .. }) => true,
@@ -75,7 +75,7 @@ pub(crate) fn classify_node_reduction_gates(
     };
     NodeReductionGateFacts {
         generic_instantiation_ref,
-        contains_reducible_operator: node_contains_reducible_operator(graph, node, 0),
+        contains_reducible_operator: node_contains_reducible_operator(graph.store(), node, 0),
     }
 }
 

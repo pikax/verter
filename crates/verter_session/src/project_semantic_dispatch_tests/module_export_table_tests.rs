@@ -275,8 +275,10 @@ fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize)
     // consumers do, so completed proofs validate once in that view.
     let table_view = host.resolver_store_view_read().into_owned_view();
     let table_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let table_ctx =
-        crate::resolver_core::HostResolverContext::new(&host, &table_view, table_overlay);
+    let table_ctx = crate::resolver_core::HostResolverContext::<
+        '_,
+        verter_audit::observe::Uncaptured,
+    >::new(&host, &table_view, table_overlay);
     let signature_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
     let root = table_ctx
         .module_export_table("/wb/m0.ts")
@@ -307,7 +309,10 @@ fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize)
     );
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host, &view, overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let (_guard, _) = dispatch.enter_connected_demand(false);
     let result = dispatch.execute_read(SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
@@ -552,7 +557,10 @@ fn check_export_table_and_namespace_work(count: usize) -> [(&'static str, usize)
     );
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host, &view, overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let root = ValueRootKey {
@@ -845,7 +853,10 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
         );
         let view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let started = std::time::Instant::now();
         let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
@@ -976,4 +987,71 @@ fn overlapping_cold_namespaces_build_shared_modules_once() {
         concurrent, serial,
         "overlapping demands share every module build"
     );
+}
+
+/// A member-path `typeof` is one root-and-path `TypeOf` read wherever it is
+/// read: lowered where it is written, or projected through an alias whose
+/// body keeps it as a carrier. A member a named namespace import does not
+/// export is that read's miss on both paths, never a second read under the
+/// joined name `N.hidden`, which would bypass the namespace's export domain.
+#[test]
+fn a_member_path_typeof_reads_one_root_and_path_query_wherever_it_is_read() {
+    let files = [(
+        "m.ts",
+        "export namespace N { export const w = 2 as const; const hidden = 3 as const; }",
+    )];
+    let project = ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    };
+    let host = probe_host(project);
+    for (source, probe, answer) in [
+        ("import { N } from './m';", "typeof N.hidden", None),
+        (
+            "import { N } from './m'; type Hidden = typeof N.hidden;",
+            "Hidden",
+            None,
+        ),
+        ("import { N } from './m';", "typeof N.w", Some(2.0)),
+        (
+            "import { N } from './m'; type Shown = typeof N.w;",
+            "Shown",
+            Some(2.0),
+        ),
+    ] {
+        let expected = match answer {
+            Some(value) => SemanticNodeData::Literal(LiteralValue::Number(value)),
+            None => SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::Miss),
+        };
+        let _trace = super::raise::enable_dispatch_trace_for_test();
+        super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &host,
+            project,
+            source,
+            probe,
+            |dispatch, outcome| {
+                let node = match outcome {
+                    super::evaluate::StructuralFactDemandOutcome::Complete(node)
+                    | super::evaluate::StructuralFactDemandOutcome::Recovered { node, .. } => node,
+                    other => panic!("`{probe}` answers a node, got {other:?}"),
+                };
+                assert_eq!(
+                    dispatch.graph().node_data(node).as_deref(),
+                    Some(&expected),
+                    "`{probe}` over `{source}`"
+                );
+            },
+        );
+        let typeof_reads = super::raise::DISPATCH_TRACE.with(|trace| {
+            trace
+                .borrow()
+                .iter()
+                .filter(|kind| **kind == "TypeOf")
+                .count()
+        });
+        assert_eq!(
+            typeof_reads, 1,
+            "`{probe}` over `{source}` reads its root and path once"
+        );
+    }
 }

@@ -197,76 +197,197 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         /// mints a peer for an already-regular surface.
         #[allow(dead_code)] // exercised by the call-resolution tests
         fn regularized_source_node(&self, node: SemanticNodeId) -> SemanticNodeId {
-            let mut memo: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> =
-                rustc_hash::FxHashMap::default();
-            self.regularize_node(node, &mut memo)
+            self.regularized_source_node_with_policy(
+                node,
+                verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            )
         }
     }
 
-    /// `memo` is both the shared-subgraph memo and the cycle guard: a node
-    /// is pre-mapped to ITSELF on entry, so a cycle terminates on the
-    /// original node while a second visit through a different member
-    /// reuses the SAME regularized peer instead of the unregularized one.
-    #[allow(dead_code)] // exercised through `regularized_source_node` by tests
-    fn regularize_node(
+    /// An effect-free construction has the ordinary empty object surface
+    /// once its expression-site freshness is no longer needed.
+    pub(super) fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        if matches!(
+            graph.node_data(node).as_deref(),
+            Some(SemanticNodeData::ObjectSpreadProgram(program)) if program.effects.is_empty()
+        ) {
+            graph.intern_preserving_scope(
+                node,
+                SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                    Vec::new(),
+                    None,
+                    false,
+                )),
+            )
+        } else {
+            node
+        }
+    }
+
+    /// Consume expression-site freshness without expanding declaration or
+    /// spread operands. The postorder work list visits a shared child once
+    /// and does not spend a native stack level on nested literal types.
+    pub(super) fn regularized_source_node_with_policy(
         &self,
         node: SemanticNodeId,
-        memo: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
-        if let Some(regular) = memo.get(&node) {
-            return *regular;
-        }
         let graph = self.graph();
-        let Some(data) = graph.node_data(node) else {
-            return node;
-        };
-        memo.insert(node, node);
-        let regular = match &*data {
-            SemanticNodeData::Alias(target) => {
-                let regular = self.regularize_node(*target, memo);
-                if regular == *target {
-                    node
-                } else {
-                    graph.intern_node(SemanticNodeData::Alias(regular))
+        let mut memo = rustc_hash::FxHashMap::default();
+        let mut pending = vec![(node, false)];
+        while let Some((current, finish)) = pending.pop() {
+            let Some(data) = graph.node_data(current) else {
+                continue;
+            };
+            if !finish {
+                if memo.contains_key(&current) {
+                    continue;
                 }
-            }
-            SemanticNodeData::Object(view) => {
-                let mut changed = false;
-                let members = view
-                    .positive_members()
-                    .iter()
-                    .map(|member| {
-                        let value = self.regularize_node(member.value, memo);
-                        if member.excess_origin == ExcessPropertyOrigin::FreshOwn
-                            || value != member.value
-                        {
-                            changed = true;
-                        }
-                        let mut member = member.clone();
-                        member.excess_origin = ExcessPropertyOrigin::NonLiteral;
-                        member.value = value;
-                        member
-                    })
-                    .collect::<Vec<_>>();
-                if changed {
-                    graph.intern_node(SemanticNodeData::Object(
-                        crate::semantic_query::surface_view! {
-                            members: Arc::from(members.into_boxed_slice()),
-                            call_signatures: Arc::clone(&view.call_signatures),
-                            construct_signatures: Arc::clone(&view.construct_signatures),
-                            index_signatures: Arc::clone(&view.index_signatures),
-                            keyspace: view.keyspace,
-                            has_index_signature: view.closed().has_index_signature(),
-                        },
-                    ))
-                } else {
-                    node
+                memo.insert(current, current);
+                pending.push((current, true));
+                match data.as_ref() {
+                    SemanticNodeData::Alias(target) => pending.push((*target, false)),
+                    SemanticNodeData::Object(view) => pending.extend(
+                        view.positive_members()
+                            .iter()
+                            .map(|member| (member.value, false)),
+                    ),
+                    SemanticNodeData::Union(members) => {
+                        pending.extend(members.iter().map(|member| (*member, false)))
+                    }
+                    SemanticNodeData::Array { element, .. } => pending.push((*element, false)),
+                    SemanticNodeData::Tuple { elements, .. } => {
+                        pending.extend(elements.iter().map(|element| (element.value, false)))
+                    }
+                    SemanticNodeData::ObjectSpreadProgram(program) => {
+                        program.for_each_child_node(|child| pending.push((child, false)));
+                    }
+                    _ => {
+                        pending.pop();
+                    }
                 }
+                continue;
             }
-            _ => node,
-        };
-        memo.insert(node, regular);
-        regular
+            let mapped = |child: SemanticNodeId| memo.get(&child).copied().unwrap_or(child);
+            let regular = match data.as_ref() {
+                SemanticNodeData::Alias(target) => {
+                    let regular = mapped(*target);
+                    if regular == *target {
+                        current
+                    } else {
+                        graph.intern_node(SemanticNodeData::Alias(regular))
+                    }
+                }
+                SemanticNodeData::Object(view) => {
+                    let mut changed = false;
+                    let members = view
+                        .positive_members()
+                        .iter()
+                        .map(|member| {
+                            let value = mapped(member.value);
+                            changed |= member.excess_origin != ExcessPropertyOrigin::NonLiteral
+                                || value != member.value;
+                            SurfaceMember {
+                                value,
+                                excess_origin: ExcessPropertyOrigin::NonLiteral,
+                                ..member.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    if changed {
+                        graph.intern_node(SemanticNodeData::Object(
+                            crate::semantic_query::surface_view! {
+                                members: Arc::from(members.into_boxed_slice()),
+                                call_signatures: Arc::clone(&view.call_signatures),
+                                construct_signatures: Arc::clone(&view.construct_signatures),
+                                index_signatures: Arc::clone(&view.index_signatures),
+                                keyspace: view.keyspace,
+                                has_index_signature: view.closed().has_index_signature(),
+                            },
+                        ))
+                    } else {
+                        current
+                    }
+                }
+                SemanticNodeData::Union(members) => {
+                    let regular: Vec<_> = members.iter().map(|member| mapped(*member)).collect();
+                    if members.iter().copied().eq(regular.iter().copied()) {
+                        current
+                    } else {
+                        self.intern_normalized_union(&regular, nullability)
+                    }
+                }
+                SemanticNodeData::Array { element, readonly } => {
+                    let regular = mapped(*element);
+                    if regular == *element {
+                        current
+                    } else {
+                        graph.intern_node(SemanticNodeData::Array {
+                            element: regular,
+                            readonly: *readonly,
+                        })
+                    }
+                }
+                SemanticNodeData::Tuple { elements, readonly } => {
+                    let regular: Vec<_> = elements
+                        .iter()
+                        .map(|element| {
+                            let mut regular = element.copy();
+                            regular.value = mapped(element.value);
+                            regular
+                        })
+                        .collect();
+                    if elements.iter().eq(regular.iter()) {
+                        current
+                    } else {
+                        graph.intern_node(SemanticNodeData::Tuple {
+                            elements: regular.into(),
+                            readonly: *readonly,
+                        })
+                    }
+                }
+                SemanticNodeData::ObjectSpreadProgram(program) if program.effects.is_empty() => {
+                    self.regularized_empty_object_program(current)
+                }
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    let mut regular = program.map_child_nodes(mapped);
+                    regular.is_literal = false;
+                    let effects: Vec<_> = regular
+                        .effects
+                        .iter()
+                        .map(|effect| {
+                            let mut regular = effect.copy();
+                            match &mut regular {
+                                crate::semantic_query::ObjectConstructionEffect::DirectProperty(
+                                    effect,
+                                ) => effect.excess_origin = ExcessPropertyOrigin::NonLiteral,
+                                crate::semantic_query::ObjectConstructionEffect::DirectMethod(
+                                    effect,
+                                ) => effect.excess_origin = ExcessPropertyOrigin::NonLiteral,
+                                crate::semantic_query::ObjectConstructionEffect::DirectGet(
+                                    effect,
+                                )
+                                | crate::semantic_query::ObjectConstructionEffect::DirectSet(
+                                    effect,
+                                ) => effect.excess_origin = ExcessPropertyOrigin::NonLiteral,
+                                _ => {}
+                            }
+                            regular
+                        })
+                        .collect();
+                    regular.effects = effects.into();
+                    if &regular == program {
+                        current
+                    } else {
+                        graph.intern_node(SemanticNodeData::ObjectSpreadProgram(regular))
+                    }
+                }
+                _ => current,
+            };
+            memo.insert(current, regular);
+        }
+        memo.get(&node).copied().unwrap_or(node)
     }
 
     /// Run the fresh excess-property prepass for `key`'s frame. The caller
@@ -306,7 +427,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             return ExcessPrepassOutcome::Undecided;
                         }
                     };
-                    if formula.alternatives().iter().any(|alternative| {
+                    let Ok(alternatives) = self.object_spread_alternatives(&formula) else {
+                        return ExcessPrepassOutcome::Undecided;
+                    };
+                    if alternatives.iter().any(|alternative| {
                         matches!(
                             alternative.excess(),
                             crate::semantic_query::ExcessEligibility::SuppressedByGenericSpread
@@ -316,7 +440,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     let mut source_members = Vec::new();
                     let mut candidates = Vec::new();
-                    for alternative in formula.alternatives() {
+                    for alternative in &alternatives {
                         if alternative.closed().is_none() {
                             return ExcessPrepassOutcome::Undecided;
                         }
@@ -531,7 +655,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Resolve one target/arm position: follow `Alias`, resolve
     /// `DeclRef` / `InstantiationRef` through the shared dispatch
     /// ([`Self::unwrap_identity_carrier_for_relation`] — the same
-    /// `execute(Instantiate)` path the ordinary relation uses), and
+    /// `execute(Instantiate)` path the ordinary relation uses), reduce a
+    /// closed `Mapped` type to its object through the relation's own
+    /// [`Self::mapped_object_for_relation`], and
     /// recognize the global `Object` interface on the reference's
     /// declaration identity (a userland `Object` declaration is a merge
     /// partner of the global in TS, so the skip applies to it too). A bare
@@ -581,6 +707,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                     }
                 }
+                // A mapped type over a closed key domain is the object its
+                // keys map to — the object the ordinary relation decides
+                // against, and so the object the check classifies (TS
+                // resolves a non-generic mapped type's members before
+                // `isExcessPropertyCheckTarget`). One that stays open stays
+                // the carrier it is.
+                Some(SemanticNodeData::Mapped { source, mapper }) => {
+                    let (source, mapper) = (*source, mapper.clone());
+                    carrier_hops += 1;
+                    if carrier_hops > 8 {
+                        return ResolvedExcessNode::Exhausted;
+                    }
+                    match self.mapped_object_for_relation(
+                        source,
+                        &mapper,
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    ) {
+                        Some(object) if object != current => current = object,
+                        _ => return ResolvedExcessNode::Node(current),
+                    }
+                }
                 Some(_) => return ResolvedExcessNode::Node(current),
                 None => return ResolvedExcessNode::Unresolvable,
             }
@@ -603,7 +750,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Object(_)) => Some(true),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Object)) => Some(true),
             Some(SemanticNodeData::Alias(inner)) => self.is_excess_check_target(*inner, depth + 1),
-            Some(SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }) => {
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::Mapped { .. },
+            ) => {
                 match self.resolve_excess_node(node) {
                     ResolvedExcessNode::Node(resolved) if resolved != node => {
                         self.is_excess_check_target(resolved, depth + 1)
@@ -929,7 +1080,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return ArmKnows::Yes;
                 }
                 for info in view.index_signatures.iter() {
-                    if index_signature_applies_to_property(graph, info.key_type, key) {
+                    if index_signature_applies_to_property(graph.store(), info.key_type, key) {
                         return ArmKnows::Yes;
                     }
                 }
@@ -976,7 +1127,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 };
                 let mut any_undecidable = false;
-                for alternative in formula.alternatives() {
+                for alternative in self.object_spread_cursor(&formula) {
+                    let Ok(alternative) = alternative else {
+                        return ArmKnows::Undecidable;
+                    };
                     match alternative.selected_key(key) {
                         crate::semantic_query::OpenSafeKeyEvidence::Positive(_) => {
                             return ArmKnows::Yes;
@@ -1033,7 +1187,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return Some(member.value);
                 }
                 for info in view.index_signatures.iter() {
-                    if index_signature_applies_to_property(graph, info.key_type, key) {
+                    if index_signature_applies_to_property(graph.store(), info.key_type, key) {
                         return Some(info.value_type);
                     }
                 }

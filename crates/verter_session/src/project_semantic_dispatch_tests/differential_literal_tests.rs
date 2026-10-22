@@ -501,3 +501,127 @@ fn an_optional_spread_property_over_an_existing_one_is_their_union() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Module values whose object or array literal initializers hold calls,
+/// beside a bare call and a call-free literal.
+const CALLS_IN_LITERALS: &str = r##"
+type __BenchInit = 0;
+declare function g(): 1;
+declare function f(): number;
+declare const n: number;
+export const r = [g()];
+export let rLet = [g()];
+export const o = { a: f() };
+export const oLit = { a: g() };
+export const nested = { a: [f()] };
+export const deep = [{ a: f(), b: [g(), 2] }];
+export const mixed = { a: f(), b: "s", c: n };
+export const fresh = [g(), 2];
+export let lo = { a: g(), b: 1 };
+export const rc = [g(), 2] as const;
+export const os = { a: f(), b: 1 } satisfies { a: number; b: number };
+export const S = f();
+export const plain = { a: n };
+"##;
+
+/// A call that is an array-literal element or an object-literal property
+/// value types as its return: a call's result is no fresh literal, so a
+/// literal return type stays as it is where an authored literal beside it
+/// widens.
+#[test]
+fn a_call_inside_a_literal_types_as_its_return() {
+    let matrix = Matrix::new(CALLS_IN_LITERALS);
+    let failures = matrix.types(&[
+        ("typeof r", "1[]"),
+        ("typeof rLet", "1[]"),
+        ("typeof o", "{ a: number; }"),
+        ("typeof oLit", "{ a: 1; }"),
+        ("typeof nested", "{ a: number[]; }"),
+        ("typeof deep", "{ a: number; b: number[]; }[]"),
+        ("typeof mixed", "{ a: number; b: string; c: number; }"),
+        ("typeof fresh", "number[]"),
+        ("typeof lo", "{ a: 1; b: number; }"),
+        ("typeof rc", "readonly [1, 2]"),
+        ("typeof os", "{ a: number; b: number; }"),
+        ("typeof S", "number"),
+        ("typeof plain", "{ a: number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Object and array literals holding block-bodied function values, as
+/// module values and as call arguments, beside an expression-bodied one.
+/// Explicit method `this` parameters keep contextual inference from masking
+/// missing body-return routing; computed returns avoid literal-widening rules.
+const BLOCK_BODIES_IN_LITERALS: &str = r##"
+declare function keep<T>(value: T): T;
+type Returned<T> = T extends (...args: any[]) => infer R ? R : never;
+export const property = { run: () => {} };
+export const returned = keep({ run: () => { return; } });
+export const beside = keep({ run: () => {}, size: 2 });
+export const element = keep([() => {}]);
+export const nested = { a: 1, b: [function () { return "s"; }] };
+export const expression = keep({ run: () => 1 });
+export function inBody() { return keep({ run: () => {} }); }
+export function methodInBody() { return keep({ run(this: void) { return 1 + 1; } }); }
+export function nestedMethodInBody() { return keep({ o: { run(this: void) { return 1 + 1; } } }); }
+export function methodInArrayInBody() { return keep([{ run(this: void) { return 1 + 1; } }]); }
+export function annotatedMethodInBody() { return keep({ run(): "s" { return "s"; } }); }
+export const nestedConst = { nested: ({ run: () => { return 1; } } as const) };
+export const nestedSatisfies = { nested: ({ run: () => { return 1; } } satisfies { run: () => number }) };
+export const nestedNonNull = { nested: ({ run: () => { return 1; } }!) };
+export const nestedAssertion = { nested: ({ run: () => { return 1; } } as { run: () => 1 }) };
+"##;
+
+/// A block-bodied function value inside an object or array literal types
+/// its return from its body, where the literal is a module value and where
+/// it is a call argument; an expression body keeps the literal return its
+/// call infers.
+#[test]
+fn a_block_bodied_function_inside_a_literal_types_its_body_return() {
+    let failures = Matrix::new(BLOCK_BODIES_IN_LITERALS).same(&[
+        (Read::Type("typeof property"), "{ run: () => void; }"),
+        (Read::Type("typeof returned"), "{ run: () => void; }"),
+        (
+            Read::Type("typeof beside"),
+            "{ run: () => void; size: number; }",
+        ),
+        (Read::Type("typeof element"), "(() => void)[]"),
+        (
+            Read::Type("typeof nested"),
+            "{ a: number; b: (() => string)[]; }",
+        ),
+        (Read::Type("typeof expression"), "{ run: () => 1; }"),
+        (Read::Return("inBody"), "{ run: () => void; }"),
+        (
+            Read::Type("Returned<Returned<typeof methodInBody>['run']>"),
+            "number",
+        ),
+        (
+            Read::Type("Returned<Returned<typeof nestedMethodInBody>['o']['run']>"),
+            "number",
+        ),
+        (
+            Read::Type("Returned<Returned<typeof methodInArrayInBody>[number]['run']>"),
+            "number",
+        ),
+        (Read::Return("annotatedMethodInBody"), "{ run(): \"s\"; }"),
+        (
+            Read::Type("typeof nestedConst"),
+            "{ nested: { readonly run: () => number; }; }",
+        ),
+        (
+            Read::Type("typeof nestedSatisfies"),
+            "{ nested: { run: () => number; }; }",
+        ),
+        (
+            Read::Type("typeof nestedNonNull"),
+            "{ nested: { run: () => number; }; }",
+        ),
+        (
+            Read::Type("typeof nestedAssertion"),
+            "{ nested: { run: () => 1; }; }",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

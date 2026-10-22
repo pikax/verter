@@ -22,7 +22,6 @@ semantic-observe = [
   "verter_session/semantic-observe",
   "verter_diagnostics/semantic-observe",
   "dep:hotpath",
-  "hotpath/hotpath",
 ]
 # Allocation profiling through hotpath's own allocator, on top of the
 # coordinated opt-in.
@@ -222,8 +221,11 @@ path = "examples/audit_real_component_meta.rs"
 required-features = ["semantic-observe"]
 
 [[example]]
+# Prints the host's provenance counters, which exist only under
+# `semantic-observe`.
 name = "currency_phase_probe"
 path = "examples/currency_phase_probe.rs"
+required-features = ["semantic-observe"]
 
 [[example]]
 # Per-request resolver-context port call counts; the counters exist only
@@ -248,3 +250,15 @@ path = "examples/route_overhead_baseline.rs"
 name = "compiler_route_overhead"
 path = "examples/compiler_route_overhead.rs"
 required-features = ["semantic-observe"]
+
+[[example]]
+# Reads the decl-lowering handoff rendezvous profile, which exists only
+# under `semantic-observe`.
+name = "profile_real_component_meta"
+path = "examples/profile_real_component_meta.rs"
+required-features = ["semantic-observe"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }

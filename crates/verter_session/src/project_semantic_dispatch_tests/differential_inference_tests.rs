@@ -339,6 +339,84 @@ fn no_infer() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The fixture of [`a_local_intrinsic_no_infer_alias_is_no_infer`]: the
+/// module declares `NoInfer` itself, as the lib does.
+const LOCAL_NO_INFER: &str = r##"
+type __BenchInit = 0;
+type NoInfer<T> = intrinsic;
+declare function f<T extends string>(vals: T[], def: NoInfer<T>): T;
+declare function g<T extends string>(vals: T[], def: T): T;
+const r = f(["a", "b"], "a");
+const s = g(["a", "b"], "c");
+"##;
+
+/// A type alias whose body is the `intrinsic` keyword is the intrinsic its
+/// name selects wherever it is declared: a module's own `type NoInfer<T> =
+/// intrinsic` blocks inference through the parameter it wraps, and over an
+/// operand that is not generic it is the operand.
+#[test]
+fn a_local_intrinsic_no_infer_alias_is_no_infer() {
+    let matrix = Matrix::new(LOCAL_NO_INFER);
+    let failures = matrix.types(&[("typeof r", r#""a" | "b""#), ("NoInfer<string>", "string")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An imported `intrinsic` alias answers from the declaring file's current
+/// version: once the file respells it as an ordinary alias, the importer's
+/// next read is that alias, never the earlier intrinsic answer.
+///
+/// Oracle: TypeScript 7.0.2 answers `"ok"` while `base.ts` declares
+/// `type NoInfer<T> = intrinsic`, then `"ok"[]` after it declares
+/// `type NoInfer<T> = T[]`.
+#[test]
+fn editing_an_imported_intrinsic_alias_misses_the_warm_answer() {
+    use super::checker_probe_lane_tests::{default_probe_host, evaluated_render_on_host};
+    let host = default_probe_host();
+    let source = "import type { NoInfer } from \"./base\";\nexport {};\n";
+    let answer = |declaration: &str| {
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            "/wb/base.ts",
+            declaration,
+            crate::FileLanguage::script_ts(),
+        );
+        evaluated_render_on_host(&host, source, "NoInfer<\"ok\">")
+    };
+    assert_eq!(answer("export type NoInfer<T> = intrinsic;\n"), "\"ok\"");
+    assert_eq!(answer("export type NoInfer<T> = T[];\n"), "Array(\"ok\")");
+}
+
+/// An `intrinsic` alias whose name selects no implemented intrinsic is that
+/// unsupported intrinsic, a typed partial answer, never the body it spells:
+/// the `intrinsic` keyword is not a reference, so a module's own
+/// `type intrinsic` never answers it.
+#[test]
+fn a_local_intrinsic_alias_without_an_implementation_is_unsupported() {
+    use super::checker_probe_lane_tests::{
+        default_probe_host, with_probe_outcome_on_host, ProbeProject,
+    };
+    use super::StructuralFactDemandOutcome;
+    let host = default_probe_host();
+    let source = "type intrinsic = string;\n\
+                  type BuiltinIteratorReturn = intrinsic;\n\
+                  type NotAnIntrinsic<T> = intrinsic;\n\
+                  export {};\n";
+    for probe in ["BuiltinIteratorReturn", "NotAnIntrinsic<1>"] {
+        with_probe_outcome_on_host(
+            &host,
+            ProbeProject::default(),
+            source,
+            probe,
+            |_, outcome| {
+                assert!(
+                    matches!(outcome, StructuralFactDemandOutcome::Partial(_)),
+                    "{probe}: {outcome:?}"
+                );
+            },
+        );
+    }
+}
+
 /// The fixture of [`const_type_parameters`].
 const CONST_TYPE_PARAMETERS: &str = r##"
 declare function c1<const T>(x: T): T;
@@ -348,6 +426,9 @@ declare function c4<const T extends { a: unknown }>(x: T): T;
 declare function c5<const T>(...xs: T[]): T;
 declare function c6<const T extends readonly string[]>(x: [...T]): T;
 declare function c7<const T extends Record<string, unknown>>(x: T): T;
+declare function c8<const T extends readonly unknown[]>(x: [...T]): T;
+declare function c9<const T extends unknown[]>(x: readonly [...T]): T;
+declare function c10<const T extends unknown[]>(...xs: T): T;
 export function k1() { return c1([1, "a"]); }
 export function k2() { return c1({ a: 1, b: [true] }); }
 export function k3() { return c2([1, 2]); }
@@ -360,6 +441,9 @@ export function k9() { return c1(1); }
 export function k10() { return c1(null); }
 export function k11() { return c7({ n: { m: [1] } }); }
 export function k12() { return c2([]); }
+export function k13() { return c8([1, "b"]); }
+export function k14() { return c9([1, "b"]); }
+export function k15() { return c10(1, "b"); }
 "##;
 
 /// `const` type parameters infer literal, readonly arrays, tuples and objects.
@@ -448,11 +532,36 @@ declare function concat<A extends unknown[], B extends unknown[]>(a: [...A], b: 
 declare function pushF<T extends unknown[], U>(t: [...T], u: U): [...T, U];
 declare function args<A extends unknown[]>(f: (...a: A) => void): A;
 declare function fn2(a: string, b?: number): void;
+declare function suffix<T extends unknown[], U>(x: [...T, U]): [T, U];
+declare function mid<T extends unknown[]>(x: [string, ...T, number]): T;
+declare function optSuffix<T extends unknown[]>(x: [...T, number?]): T;
+declare function curry<A extends unknown[], B extends unknown[], R>(f: (...args: [...A, ...B]) => R, ...a: A): (...b: B) => R;
+declare function leading<T extends [unknown, unknown]>(x: [...T, ...string[]]): T;
+declare function trailing<T extends [unknown]>(x: [...string[], ...T]): T;
+declare const fx: (x: number, y: string, z: boolean) => 0;
+declare function framed<A extends unknown[], B extends unknown[], R>(f: (...args: [string, ...A, ...B, boolean]) => R, ...a: A): (...b: B) => R;
+declare const fy: (tag: string, x: number, y: string, done: boolean) => 0;
+declare function after0<T extends unknown[]>(x: [0, ...T]): T;
+declare function pairAfter0<T extends [unknown, unknown]>(x: [0, ...T]): T;
 export function v1() { return tail([1, "a", true]); }
 export function v2() { return concat([1], ["a"]); }
 export function v3() { return pushF([1, 2], "x"); }
 export function v4() { return args(fn2); }
 export function v5() { return args((a: 1, ...r: string[]) => {}); }
+export function v6() { return suffix([1, "a", 2]); }
+export function v7() { return mid(["s", 1, true, 2]); }
+export function v8() { return optSuffix([1, "a", 2]); }
+export function v9() { return curry(fx, 1); }
+export function v10() { return leading([1, true, "a", "b"]); }
+export function v11() { return trailing(["a", "b", 1]); }
+export function v12() { return framed(fy); }
+export function v13<U extends unknown[]>(x: [0, ...U]) { return after0(x); }
+export function v14<U extends [number, string]>(x: [0, ...U]) { return pairAfter0(x); }
+export function v15<A extends [number, string], U extends A>(x: [0, ...U]) { return pairAfter0(x); }
+declare function pair<T extends [unknown, unknown]>(x: T): T;
+export function v16<A extends [number, string], U extends A>(x: U) { return pair(x); }
+export function v17<A extends [number], U extends A>(x: U) { return pair(x); }
+export function v18<A extends [number, string], B extends A, C extends B, D extends C, E extends D, F extends E, G extends F, H extends G, I extends H, J extends I>(x: [0, ...J]) { return pairAfter0(x); }
 "##;
 
 /// Variadic tuple types spread, infer and instantiate as the checker's do.
@@ -908,6 +1017,88 @@ fn homomorphic_arrays_and_tuples() {
             r#"readonly [{ v: 1; }, { v: "a"; }]"#,
             r#"readonly [{ v: 1; }, { v: "a"; }]"#,
             r#"readonly [{ v: 1; }, { v: "a"; }]"#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`reverse_mapped_and_alias_inference`].
+const REVERSE_MAPPED_INFERENCE: &str = r##"
+type Box<T> = { v: T };
+type Boxed<T> = { [K in keyof T]: Box<T[K]> };
+type Getters<T> = { [K in keyof T as `get${Capitalize<K & string>}`]: () => T[K] };
+type Pre<T> = { [K in keyof T as `p_${K & string}`]: T[K] };
+type Mut<T> = { -readonly [K in keyof T]: T[K] };
+type Opt<T> = { [K in keyof T]?: T[K] };
+type Wrap<T> = { [K in keyof T]: [T[K]] };
+declare function ungetter<T>(x: Getters<T>): T;
+declare function unpre<T>(x: Pre<T>): T;
+declare function unbox<T>(x: Boxed<T>): T;
+declare function unmut<T>(x: Mut<T>): T;
+declare function unopt<T>(x: Opt<T>): T;
+declare function unwrapAll<T extends unknown[]>(x: Wrap<T>): T;
+declare const g: Getters<{ name: string }>;
+declare const bx: Boxed<{ n: number }>;
+export function m1() { return ungetter({ getName: () => "x" }); }
+export function m2() { return ungetter(g); }
+export function m3() { return unbox(bx); }
+export function m4() { return unmut({ a: 1 }); }
+export function m5() { return unopt({ a: 1 }); }
+export function m6() { return unwrapAll([[1], ["s"]]); }
+export function m7() { return unpre({ p_a: 1 }); }
+type Sink<T> = (x: T) => void;
+interface Reader<T> { get(): T }
+declare function pick<T>(a: T, s: Sink<T>): T;
+declare function both<T>(r: Reader<T>, s: Sink<T>): T;
+declare const sn: Sink<string | number>;
+declare const n: number;
+declare const ra: Reader<"a">;
+declare const ss: Sink<string>;
+export function m8() { return pick(n, sn); }
+export function m9() { return both(ra, ss); }
+"##;
+
+/// A homomorphic mapped type over a parameter the inference infers
+/// reverse-maps, in a call as in a conditional's `infer` pattern and nested
+/// inside one; two applications of one alias infer from the alias
+/// arguments, a contravariant argument contravariantly (`m8`, `m9`); and a
+/// key-remapped mapped type infers nothing, its parameter fixing to
+/// `unknown`.
+#[test]
+fn reverse_mapped_and_alias_inference() {
+    let failures = Matrix::new(REVERSE_MAPPED_INFERENCE).same(&[
+        (Read::Return(r#"m1"#), r#"unknown"#),
+        (Read::Return(r#"m2"#), r#"{ name: string; }"#),
+        (Read::Return(r#"m3"#), r#"{ n: number; }"#),
+        (Read::Return(r#"m4"#), r#"{ a: number; }"#),
+        (Read::Return(r#"m5"#), r#"{ a: number; }"#),
+        (Read::Return(r#"m6"#), r#"[number, string]"#),
+        (Read::Return(r#"m7"#), r#"unknown"#),
+        (Read::Return(r#"m8"#), r#"number"#),
+        (Read::Return(r#"m9"#), r#""a""#),
+        (
+            Read::Type(r#"{ a: Box<1> } extends Boxed<infer T> ? T : never"#),
+            r#"{ a: 1; }"#,
+        ),
+        (
+            Read::Type(r#"[{ a: Box<1> }] extends [Boxed<infer T>] ? T : never"#),
+            r#"{ a: 1; }"#,
+        ),
+        (
+            Read::Type(r#"{ a: [1]; b: ["s"] } extends Wrap<infer T> ? T : never"#),
+            r#"{ a: 1; b: "s"; }"#,
+        ),
+        (
+            Read::Type(r#"{ getName: () => string } extends Getters<infer T> ? T : never"#),
+            r#"unknown"#,
+        ),
+        (
+            Read::Type(r#"Getters<{ name: string }> extends Getters<infer T> ? T : never"#),
+            r#"{ name: string; }"#,
+        ),
+        (
+            Read::Type(r#"{ p_a: 1 } extends Pre<infer T> ? T : never"#),
+            r#"unknown"#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -2104,6 +2295,39 @@ export function n34() { return pa([sl, "b"]); }
 export function n35() { return pu({ v: c ? <const>"a" : "a" }); }
 export function n36() { return pu({ v: <const>["a"] }); }
 export function n37() { return id({ v: <const>"a", w: "b" }); }
+declare const c2: boolean;
+export function n38() { return pu(c ? { v: "a" as "a" } : { v: "a" as "a" }); }
+export function n39() { return pu(c ? { v: "a" as "a" } : { v: "b" }); }
+export function n40() { return pu(c ? { v: "a" as "a" } : { v: "a" }); }
+export function n41() { return pu(c ? { v: sl } : { w: 1, v: "b" as "b" }); }
+export function n42() { return pa(c ? ["a" as "a"] : ["b" as "b"]); }
+export function n43() { return pu(c ? { v: { w: "a" as "a" } } : { v: { w: "b" as "b" } }); }
+export function n44() { return pu(c ? { v: s } : { v: sl }); }
+export function n45() { return pu(c ? (c2 ? { v: "a" as "a" } : { v: sl }) : { v: "b" as "b" }); }
+export function n46() { return id({ v: "a" as "a", w: "a" }); }
+export function n47() { return id({ v: sl, w: "a" }); }
+export function n48() { return id({ v: sl, w: s }); }
+export function n49() { return id({ v: "a" as "a", v2: s, 0: sl }); }
+export function n50() { return pa(["a" as "a", ...([] as [])]); }
+export function n51() { return pa([, "a" as "a"]); }
+export function n52(p: "a") { return pu({ v: p }); }
+export function n53(s: "a") { return pu({ v: s }); }
+export function n54(p: "a") { return id({ v: p, w: "b" }); }
+export function n55(o: { v: "a" }) { return pu({ v: o.v }); }
+export function n56() { return kc({ v: [sl, "b"] }); }
+export function n57(p: number) { return kc({ v: [p, "b"] }); }
+export function n58() { return kc({ v: "a" }); }
+export function n59() { return kcn("a"); }
+export function n60() { return kc({ v: c ? "a" : "b" }); }
+export function n61() { return kc({ v: s }); }
+export function n62() { return kcn(c ? "a" : "b"); }
+export function n63() { return kcn(s); }
+declare function kt<const T>(x: [T]): T;
+export function n64() { return kt(["a"]); }
+export function n65() { return kt([s]); }
+export function n66() { return kc({ v: c ? s : "b" }); }
+declare function kx<const T>(x: { v: (T & {}) | undefined }): T;
+export function n67() { return kx({ v: "a" }); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -2292,7 +2516,7 @@ fn authored_literal_occurrences() {
 /// and a stored arm of different literals widens (`c ? "a" : sb`).
 #[test]
 fn nested_regular_literals_keep_their_type() {
-    let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
+    let mut failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
         (
             Read::Return(r#"n1"#),
             r#""a""#,
@@ -2392,6 +2616,69 @@ fn nested_regular_literals_keep_their_type() {
             r#"{ v: "a"; w: string; }"#,
         ),
     ]);
+    // Each object or array arm of a conditional argument is its own
+    // expression: its asserted or stored literals stay regular, and an
+    // equal literal another arm writes fresh widens.
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n38"#), r#""a""#),
+        (Read::Return(r#"n39"#), r#"string"#),
+        (Read::Return(r#"n40"#), r#"string"#),
+        (Read::Return(r#"n41"#), r#""a" | "b""#),
+        (Read::Return(r#"n42"#), r#""a" | "b""#),
+        (Read::Return(r#"n43"#), r#"{ w: "a"; } | { w: "b"; }"#),
+        (Read::Return(r#"n44"#), r#"string"#),
+        (Read::Return(r#"n45"#), r#""a" | "b""#),
+    ]));
+    // A regular literal at one member is no reason to keep an equal fresh
+    // literal at a sibling member, and an array literal's elements before
+    // a spread, or past an elision, are still addressed by their index.
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n46"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n47"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n48"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n49"#), r#"{ v: "a"; v2: string; 0: "a"; }"#),
+        (Read::Return(r#"n50"#), r#""a""#),
+    ]));
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[(
+        Read::Return(r#"n51"#),
+        r#""a" | undefined"#,
+        r#""a""#,
+        r#""a" | undefined"#,
+        r#""a""#,
+    )]));
+    // A read of a parameter of the call's own function is as fresh as
+    // that parameter, classified in the function's scope: a parameter
+    // that shadows a top-level binding is read as itself, never as the
+    // binding it shadows (`s: "a"` is regular where the top-level
+    // `const s = "a"` is fresh).
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n52"#), r#""a""#),
+        (Read::Return(r#"n53"#), r#""a""#),
+        (Read::Return(r#"n54"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n55"#), r#""a""#),
+    ]));
+    // A fresh literal beside a regular read keeps its type in a const
+    // context: the array literal's contextual type is a `const` type
+    // parameter, whatever the parameters the argument reaches. So does a
+    // fresh literal whose own contextual type is a `const` type parameter,
+    // alone, as a tuple element or under a union or intersection naming
+    // the parameter. A read or a conditional in a member or element
+    // position is no literal of its own and widens there, while a naked
+    // `const T` argument infers its literals as written.
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n56"#), r#"readonly ["a", "b"]"#),
+        (Read::Return(r#"n57"#), r#"readonly [number, "b"]"#),
+        (Read::Return(r#"n58"#), r#""a""#),
+        (Read::Return(r#"n59"#), r#""a""#),
+        (Read::Return(r#"n60"#), r#"string"#),
+        (Read::Return(r#"n61"#), r#"string"#),
+        (Read::Return(r#"n62"#), r#""a" | "b""#),
+        (Read::Return(r#"n63"#), r#""a""#),
+        (Read::Return(r#"n64"#), r#""a""#),
+        (Read::Return(r#"n65"#), r#"string"#),
+        (Read::Return(r#"n66"#), r#"string"#),
+        (Read::Return(r#"n67"#), r#""a""#),
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -2430,6 +2717,30 @@ let d27 = c ? (c2 ? "a" : "b") : "c";
 let d28 = { v: c ? (c2 ? "a" : sl) : "b" };
 let d29 = [s, "x" as "x"];
 let d30 = { v: s, w: { u: c ? s : sl } };
+declare const o: { w: number };
+const so = { v: "a" as "a" };
+let d31 = c ? { v: s } : { v: 1 };
+let d32 = { ...o, v: s };
+let d33 = c ? { v: s } : { v: sl };
+let d34 = c ? [s] : [1];
+let d35 = { a: { ...o, v: s } };
+let d36 = { ...o, v: c ? "a" : sl };
+let d37 = { ...so, v: s };
+let d38 = { v: s, ...o };
+declare const ov: { v: "a" };
+let d39 = { v: s, ...ov };
+let d40 = c ? { v: s, k: 1 } : { v: sl, k: "z" };
+let d41 = c ? { v: sl, k: 1 } : { v: s, k: "z" };
+let d42 = { ...{ v: s } };
+let d43 = { ...{ v: sl } };
+let d44 = [...[s]];
+let d46 = { ["v"]: s };
+declare const u: unique symbol;
+let d48 = { [u]: s };
+let d49 = { [u]: c ? "a" : sl };
+let d50 = c ? { [u]: s } : { [u]: 1 };
+let d51 = c ? [s, 1] : [sl, true];
+let d52 = c ? [s, [1, "x"]] : [true];
 "##;
 
 /// A declaration's initializer keeps each literal's freshness per authored
@@ -2478,7 +2789,10 @@ fn declared_literal_occurrences() {
 /// member, an element or a mutable declaration of it widens, and a
 /// conditional of a fresh literal and a stored read of the same literal is
 /// the regular one — through a nested conditional, beside an asserted
-/// element, and through a member read of the declaration.
+/// element, and through a member read of the declaration. A member read
+/// widens in each object or array arm of a conditional and beside a
+/// spread, while a later spread's own member of that key keeps its type,
+/// and under a computed key as under a written one.
 #[test]
 fn declared_reads_follow_their_binding_freshness() {
     let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
@@ -2497,6 +2811,44 @@ fn declared_reads_follow_their_binding_freshness() {
         ),
         (Read::Type("typeof d30.w"), r#"{ u: "a"; }"#),
         (Read::Type("typeof d30.v"), r#"string"#),
+        (
+            Read::Type("typeof d31"),
+            r#"{ v: string; } | { v: number; }"#,
+        ),
+        (Read::Type("typeof d32"), r#"{ w: number; v: string; }"#),
+        (Read::Type("typeof d33"), r#"{ v: string; }"#),
+        (Read::Type("typeof d34"), r#"string[] | number[]"#),
+        (
+            Read::Type("typeof d35"),
+            r#"{ a: { w: number; v: string; }; }"#,
+        ),
+        (Read::Type("typeof d36"), r#"{ w: number; v: "a"; }"#),
+        (Read::Type("typeof d37"), r#"{ v: string; }"#),
+        (Read::Type("typeof d38"), r#"{ w: number; v: string; }"#),
+        (Read::Type("typeof d39"), r#"{ v: "a"; }"#),
+        (
+            Read::Type("typeof d40"),
+            r#"{ v: string; k: number; } | { v: "a"; k: string; }"#,
+        ),
+        (
+            Read::Type("typeof d41"),
+            r#"{ v: "a"; k: number; } | { v: string; k: string; }"#,
+        ),
+        (Read::Type("typeof d42"), r#"{ v: string; }"#),
+        (Read::Type("typeof d43"), r#"{ v: "a"; }"#),
+        (Read::Type("typeof d44"), r#"string[]"#),
+        (Read::Type("typeof d46"), r#"{ v: string; }"#),
+        (Read::Type("(typeof d48)[typeof u]"), r#"string"#),
+        (Read::Type("(typeof d49)[typeof u]"), r#""a""#),
+        (Read::Type("(typeof d50)[typeof u]"), r#"string | number"#),
+        (
+            Read::Type("typeof d51"),
+            r#"(string | number)[] | ("a" | boolean)[]"#,
+        ),
+        (
+            Read::Type("typeof d52"),
+            r#"(string | (string | number)[])[] | boolean[]"#,
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -2519,6 +2871,8 @@ let e8 = c ? ("b" as "b") : s;
 let e9 = { v: [s, sl] };
 let e10 = c ? { v: s } : null;
 let e11 = [c ? "a" : sl, "x" as "x"];
+let e12 = { ...{ v: s } };
+let e13 = { ...{ v: sl } };
 export function m1() { return pu({ v: e1 }); }
 export function m2() { return id(e2); }
 export function m3() { return pu({ v: e3 }); }
@@ -2532,6 +2886,8 @@ export function m10() { return id(e9); }
 export function m11() { return id(e10); }
 export function m12() { return id(e7.o.v); }
 export function m13() { return id(e11); }
+export function m14() { return pu(e12); }
+export function m15() { return pu(e13); }
 "##;
 
 /// A declaration's type, widened by the freshness of the bindings its
@@ -2554,6 +2910,8 @@ fn declared_reads_reach_their_stored_uses() {
         (Read::Return(r#"m10"#), r#"{ v: string[]; }"#),
         (Read::Return(r#"m12"#), r#"string"#),
         (Read::Return(r#"m13"#), r#"("a" | "x")[]"#),
+        (Read::Return(r#"m14"#), r#"string"#),
+        (Read::Return(r#"m15"#), r#""a""#),
     ]);
     failures.extend(Matrix::new(DECLARED_READ_USES).four(&[(
         Read::Return(r#"m11"#),
@@ -2565,54 +2923,179 @@ fn declared_reads_reach_their_stored_uses() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A `const` type parameter inferred through a rest parameter keeps the argument tuple's literals.
+/// An array literal in a `const` type parameter's context is a readonly
+/// tuple only when that context is not mutable array-like: a parameter
+/// constrained to a mutable array, a mutable variadic tuple parameter and a
+/// rest parameter over a mutable array keep a mutable tuple, and a slice a
+/// variadic element infers is mutable whatever the tuple it came from.
 #[test]
-#[ignore = "typed gap in the lane: a rest parameter over a const type parameter is an UnrepresentableCallee"]
-fn pinned_const_type_parameters_through_rest_parameters() {
-    let failures = Matrix::new(CONST_TYPE_PARAMETERS).four(&[
-        (
-            Read::Return(r#"k4"#),
-            r#"[1, 2]"#,
-            r#"[1, 2]"#,
-            r#"[1, 2]"#,
-            r#"[1, 2]"#,
-        ),
-        (
-            Read::Return(r#"k7"#),
-            r#"["a", "b"]"#,
-            r#"["a", "b"]"#,
-            r#"["a", "b"]"#,
-            r#"["a", "b"]"#,
-        ),
+fn const_type_parameters_in_mutable_array_contexts() {
+    let failures = Matrix::new(CONST_TYPE_PARAMETERS).same(&[
+        (Read::Return(r#"k4"#), r#"[1, 2]"#),
+        (Read::Return(r#"k7"#), r#"["a", "b"]"#),
+        (Read::Return(r#"k13"#), r#"[1, "b"]"#),
+        (Read::Return(r#"k14"#), r#"[1, "b"]"#),
+        (Read::Return(r#"k15"#), r#"[1, "b"]"#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A call infers a variadic tuple type parameter from the arguments it spreads over.
+/// A call infers a variadic tuple type parameter from the slice of the
+/// argument tuple between the parameter's fixed prefix and suffix; two
+/// variadics split at the arity the call's arguments imply for the first,
+/// and a variadic beside a rest splits at its fixed constraint arity. A
+/// split whose implied arity overruns the fixed ends clamps the first slice
+/// and still infers the second (`v12`); a generic tuple of the same shape
+/// infers elementwise, its variadic to the caller's parameter (`v13`) —
+/// also under a fixed tuple constraint, which the caller's parameter
+/// satisfies by the positions its own constraint fixes, not by its one
+/// spread element (`v14`), however many sibling parameters that constraint
+/// passes through (`v15`, `v18`). A parameter bounded through a sibling
+/// satisfies a fixed tuple constraint by that sibling's bound (`v16`) and
+/// fails one it does not fit (`v17`).
 #[test]
-#[ignore = "typed gap in the lane: a variadic tuple parameter is an UnrepresentableCallee"]
-fn pinned_variadic_tuple_inference_in_calls() {
+fn variadic_tuple_inference_in_calls() {
+    let failures = Matrix::new(VARIADIC_TUPLES).same(&[
+        (Read::Return(r#"v1"#), r#"[string, boolean]"#),
+        (Read::Return(r#"v2"#), r#"[number, string]"#),
+        (Read::Return(r#"v3"#), r#"[number, number, string]"#),
+        (Read::Return(r#"v6"#), r#"[[number, string], number]"#),
+        (Read::Return(r#"v7"#), r#"[number, boolean]"#),
+        (Read::Return(r#"v8"#), r#"[number, string]"#),
+        (Read::Return(r#"v9"#), r#"(y: string, z: boolean) => 0"#),
+        (Read::Return(r#"v10"#), r#"[number, boolean]"#),
+        (Read::Return(r#"v11"#), r#"[number]"#),
+        (Read::Return(r#"v12"#), r#"(x: number, y: string) => 0"#),
+        (Read::Return(r#"v13"#), r#"U"#),
+        (Read::Return(r#"v14"#), r#"U"#),
+        (Read::Return(r#"v15"#), r#"U"#),
+        (Read::Return(r#"v16"#), r#"U"#),
+        (Read::Return(r#"v17"#), r#"[unknown, unknown]"#),
+        (Read::Return(r#"v18"#), r#"J"#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A conditional's `infer` declarations in a tuple pattern take the same
+/// positional plan as a call: the fixed ends pair, a lone variadic takes
+/// the slice (a lone source rest the array of its element), two variadics
+/// infer nothing without an implied arity and fall back to their
+/// constraints, and a variadic beside a rest splits at its constraint arity.
+#[test]
+fn variadic_tuple_infer_patterns() {
     let failures = Matrix::new(VARIADIC_TUPLES).four(&[
         (
-            Read::Return(r#"v1"#),
-            r#"[string, boolean]"#,
-            r#"[string, boolean]"#,
-            r#"[string, boolean]"#,
-            r#"[string, boolean]"#,
+            Read::Type(r#"[1, 2] extends [...infer A, ...infer B] ? [A, B] : 0"#),
+            r#"[unknown[], unknown[]]"#,
+            r#"[unknown[], unknown[]]"#,
+            r#"[unknown[], unknown[]]"#,
+            r#"[unknown[], unknown[]]"#,
         ),
         (
-            Read::Return(r#"v2"#),
-            r#"[number, string]"#,
-            r#"[number, string]"#,
-            r#"[number, string]"#,
-            r#"[number, string]"#,
+            Read::Type(r#"[1, ...string[]] extends [infer H, ...infer R] ? R : 0"#),
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
         ),
         (
-            Read::Return(r#"v3"#),
-            r#"[number, number, string]"#,
-            r#"[number, number, string]"#,
-            r#"[number, number, string]"#,
-            r#"[number, number, string]"#,
+            Read::Type(r#"string[] extends [...infer R] ? R : 0"#),
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+        ),
+        (
+            Read::Type(r#"number[] extends [infer H, ...infer R] ? R : 0"#),
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+        ),
+        (
+            Read::Type(r#"[1, ...string[], 2] extends [...infer A, infer L] ? [A, L] : 0"#),
+            r#"[[1, ...string[]], 2]"#,
+            r#"[[1, ...string[]], 2]"#,
+            r#"[[1, ...string[]], 2]"#,
+            r#"[[1, ...string[]], 2]"#,
+        ),
+        (
+            Read::Type(r#"[1, 2?] extends [infer A, ...infer R] ? R : 0"#),
+            r#"[(2 | undefined)?]"#,
+            r#"[2?]"#,
+            r#"[(2 | undefined)?]"#,
+            r#"[2?]"#,
+        ),
+        (
+            Read::Type(r#"[a: 1, b: 2] extends [infer A, ...infer R] ? R : 0"#),
+            r#"[b: 2]"#,
+            r#"[b: 2]"#,
+            r#"[b: 2]"#,
+            r#"[b: 2]"#,
+        ),
+        (
+            Read::Type(
+                r#"[1, 2, 3] extends [...infer A extends [unknown], ...infer B] ? [A, B] : 0"#,
+            ),
+            r#"[[unknown], unknown[]]"#,
+            r#"[[unknown], unknown[]]"#,
+            r#"[[unknown], unknown[]]"#,
+            r#"[[unknown], unknown[]]"#,
+        ),
+        (
+            Read::Type(
+                r#"[1, 2, 3] extends [...infer A extends [unknown, unknown], ...string[]] ? A : 0"#,
+            ),
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+        ),
+        (
+            Read::Type(
+                r#"[1, 2, 3] extends [...infer A extends [unknown, unknown], ...number[]] ? A : 0"#,
+            ),
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+        ),
+        (
+            Read::Type(
+                r#"["a", "b", 1] extends [...string[], ...infer A extends [unknown]] ? A : 0"#,
+            ),
+            r#"[1]"#,
+            r#"[1]"#,
+            r#"[1]"#,
+            r#"[1]"#,
+        ),
+        (
+            Read::Type(r#"[1, 2, 3] extends [...infer A, number?] ? A : 0"#),
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+        ),
+        (
+            Read::Type(r#"[1, ...string[]] extends [...infer R] ? R : 0"#),
+            r#"[1, ...string[]]"#,
+            r#"[1, ...string[]]"#,
+            r#"[1, ...string[]]"#,
+            r#"[1, ...string[]]"#,
+        ),
+        (
+            Read::Type(r#"[1, ...string[]] extends [infer A, ...(infer R)[]] ? R : 0"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Type(r#"[1, 2, 3] extends [1, ...(infer R)[]] ? R : 0"#),
+            r#"2 | 3"#,
+            r#"2 | 3"#,
+            r#"2 | 3"#,
+            r#"2 | 3"#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -2909,5 +3392,177 @@ fn pinned_recursive_template_length() {
         (Read::Type(r#"L<"p\nq">"#), r#"3"#, r#"3"#, r#"3"#, r#"3"#),
         (Read::Type(r#"L<"p\\nq">"#), r#"4"#, r#"4"#, r#"4"#, r#"4"#),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`intersection_with_a_mapped_type_over_the_inferred_parameter`].
+const VALIDATED_INTERSECTION: &str = r##"
+declare function validated<C>(reducers: C & { [K in keyof C]: C[K] extends { prepare: any } ? { reducer: unknown } : {} }): C;
+export const plain = validated({ a: 1 });
+export const annotated = validated({ a: (s: number) => {} });
+export const method = validated({ a(s: number) { return s; } });
+"##;
+
+/// A parameter typed as the inferred parameter intersected with a mapped
+/// type over its keys infers from the naked arm, eager and context
+/// sensitive arguments alike, and the argument relates to the mapped arm
+/// once the mapped type is instantiated over the inferred object.
+#[test]
+fn intersection_with_a_mapped_type_over_the_inferred_parameter() {
+    let failures = Matrix::new(VALIDATED_INTERSECTION).types(&[
+        ("typeof plain", "{ a: number; }"),
+        ("typeof annotated", "{ a: (s: number) => void; }"),
+        ("typeof method", "{ a(s: number): number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`a_mapped_parameter_over_closed_keys_relates_as_its_members`].
+const MAPPED_PARAMETER_MEMBERS: &str = r##"
+declare function dup<K extends PropertyKey>(x: { [P in K]: P }, k: K): "first";
+declare function dup<K>(x: unknown, k: K): "second";
+export const sameSpelling = dup<1 | "1">({ 1: "1" }, 1);
+declare function req<T>(x: { [K in keyof T]-?: T[K] | null }, t: T): "first";
+declare function req<T>(x: unknown, t: T): "second";
+export const required = req<{ a?: number }>({ a: undefined }, {});
+type Spelled = { [P in 1 | "1"]: P };
+declare function spelled(x: Spelled): "first";
+declare function spelled(x: unknown): "second";
+export const spelledAlias = spelled({ 1: "1" });
+type Optional = { a?: number };
+type NotOptional = { [K in keyof Optional]-?: Optional[K] | null };
+declare function notOptional(x: NotOptional): "first";
+declare function notOptional(x: unknown): "second";
+export const requiredAlias = notOptional({ a: undefined });
+"##;
+
+/// A mapped type over a closed key domain, as an alias or as a parameter
+/// once its type arguments are given, relates the argument to the members
+/// the mapped type has: `-?` drops the `undefined` an optional source
+/// member adds under `strictNullChecks`, and keys of one spelling (`1` and
+/// `"1"`) are one member holding both productions. The explicitly
+/// instantiated same-spelling call is not answered yet, but never with the
+/// overload the checker rejects.
+#[test]
+fn a_mapped_parameter_over_closed_keys_relates_as_its_members() {
+    let failures = Matrix::new(MAPPED_PARAMETER_MEMBERS).four(&[
+        (
+            Read::Type("typeof spelledAlias"),
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof requiredAlias"),
+            "\"second\"",
+            "\"first\"",
+            "\"second\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof required"),
+            "\"second\"",
+            "\"first\"",
+            "\"second\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof sameSpelling"),
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+        ),
+    ]);
+    let wrong: Vec<&String> = failures
+        .iter()
+        .filter(|failure| {
+            !failure.contains("`typeof sameSpelling`") || !failure.starts_with("GAP ")
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{}",
+        wrong
+            .iter()
+            .map(|failure| failure.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// [`a_mapped_parameter_over_closed_keys_relates_as_its_members`]'s
+/// same-spelling call, answered.
+#[test]
+#[ignore = "typed gap in the lane: an argument to an explicitly instantiated mapped parameter degrades by UnresolvedValue"]
+fn pinned_same_spelling_mapped_parameter_call() {
+    let failures =
+        Matrix::new(MAPPED_PARAMETER_MEMBERS).types(&[("typeof sameSpelling", "\"first\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`a_fresh_literal_against_a_closed_mapped_type_is_excess_checked`].
+const MAPPED_EXCESS: &str = r##"
+type Enumerated = { [K in "a" | "b"]: K };
+declare function enumerated(x: Enumerated): "first";
+declare function enumerated(x: unknown): "second";
+export const enumeratedExcess = enumerated({ a: "a", b: "b", c: 1 });
+export const enumeratedExact = enumerated({ a: "a", b: "b" });
+type Valued = { [K in "a"]: number };
+declare function valued(x: Valued): "first";
+declare function valued(x: unknown): "second";
+export const valuedExcess = valued({ a: 1, z: 2 });
+type Face = { a: number };
+declare function partial(x: Partial<Face>): "first";
+declare function partial(x: unknown): "second";
+export const partialExcess = partial({ a: 1, z: 2 });
+declare function plain(x: { a: "a"; b: "b" }): "first";
+declare function plain(x: unknown): "second";
+export const plainExcess = plain({ a: "a", b: "b", c: 1 });
+declare function one(x: Enumerated): void;
+export function single() { return one({ a: "a", b: "b", c: 1 }); }
+declare function onePartial(x: Partial<Face>): void;
+export function singlePartial() { return onePartial({ a: 1, z: 2 }); }
+"##;
+
+/// A mapped type over a closed key domain is an object target of the fresh
+/// excess-property check, as the object its keys map to: a fresh literal
+/// with a property the mapped type has no key for selects the next
+/// overload, as it does against the object written out, while the literal
+/// with exactly its keys selects the mapped overload. A single signature
+/// reports the excess property (TS2353) at it.
+#[test]
+fn a_fresh_literal_against_a_closed_mapped_type_is_excess_checked() {
+    let mut failures = Matrix::new(MAPPED_EXCESS).types(&[
+        ("typeof enumeratedExcess", "\"second\""),
+        ("typeof enumeratedExact", "\"first\""),
+        ("typeof valuedExcess", "\"second\""),
+        ("typeof partialExcess", "\"second\""),
+        ("typeof plainExcess", "\"second\""),
+    ]);
+    let host = super::signature_predicate_inference_tests::host_with(MAPPED_EXCESS);
+    let rows: &[(&str, &str)] = &[
+        ("single", "(19,57): error TS2353: Object literal may only specify known properties, and 'c' does not exist in type 'Enumerated'."),
+        ("singlePartial", "(21,61): error TS2353: Object literal may only specify known properties, and 'z' does not exist in type 'Partial<Face>'."),
+    ];
+    for root in [
+        super::signature_predicate_inference_tests::STRICT_ROOT,
+        super::signature_predicate_inference_tests::LOOSE_ROOT,
+    ] {
+        for (function, expected) in rows {
+            let reported = super::signature_predicate_inference_tests::checker_report(
+                &host,
+                root,
+                function,
+                MAPPED_EXCESS,
+            );
+            if reported != [*expected] {
+                failures.push(format!(
+                    "`{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                ));
+            }
+        }
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

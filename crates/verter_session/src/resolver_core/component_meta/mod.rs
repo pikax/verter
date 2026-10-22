@@ -352,11 +352,11 @@ pub enum ComponentMetaResolutionPurpose {
 /// the DTO's cross-file carrier facts on a warm DTO hit), keeping the outer
 /// component-meta cache entry correctly keyed — all inside the single
 /// resolution engine.
-pub(crate) fn component_meta_resolved_macros(
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],

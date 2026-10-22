@@ -127,8 +127,8 @@ enum RequestedSubject {
 /// [`RequestBoundResolverContext`] — the sealed marker implemented for
 /// `HostResolverContext` and `SessionResolverContext` — makes a non-request
 /// binding a compile error.
-pub(crate) fn build_template_class_semantic_facts(
-    ctx: &dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
+pub(crate) fn build_template_class_semantic_facts<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities<M>>,
     canonical: &str,
     whole_hash: verter_session_query::analysis::types::Hash16,
     script: TemplateClassScriptInputs<'_>,
@@ -351,8 +351,8 @@ fn select_requested_subjects(
     result
 }
 
-fn join_subject(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn join_subject<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     _canonical: &str,
     script: TemplateClassScriptInputs<'_>,
     requested: &RequestedSubject,
@@ -429,8 +429,8 @@ fn join_prop_field(
     }
 }
 
-fn classify_binding(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn classify_binding<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical: &str,
     declaration: DeclBindingKey,
     subject: TemplateClassSubject,
@@ -483,8 +483,8 @@ fn classify_binding(
 }
 
 /// Classify every requested `:class` subject of `raw` through `dispatch`.
-fn classify_requested_subjects(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn classify_requested_subjects<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical: &str,
     script: TemplateClassScriptInputs<'_>,
     raw: &RawTemplateData,
@@ -523,8 +523,8 @@ fn classify_requested_subjects(
     (subjects, rows, completeness)
 }
 
-fn classify_prop(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn classify_prop<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical: &str,
     script: TemplateClassScriptInputs<'_>,
     payload: &verter_type_expr::locators::MacroPayloadLocator,
@@ -615,8 +615,8 @@ fn classify_prop(
 /// so the subject joins as `Unresolved` and `classify_prop` is not called. That
 /// boundary is a ruled fail-closed negative, pinned by
 /// `template_class_imported_props_type_argument_fails_closed_with_local_control`.
-fn named_type_argument_member_head(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn named_type_argument_member_head<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical: &str,
     script: TemplateClassScriptInputs<'_>,
     payload: &verter_type_expr::locators::MacroPayloadLocator,
@@ -637,8 +637,8 @@ fn named_type_argument_member_head(
     Some(head)
 }
 
-fn classify_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn classify_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
     subject: TemplateClassSubject,
     candidate: Option<&WrapperCandidate>,
@@ -707,8 +707,8 @@ fn classify_node(
     }
 }
 
-fn carrier_instantiation_args(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn carrier_instantiation_args<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
     visited: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<Arc<[SemanticNodeId]>> {
@@ -722,8 +722,8 @@ fn carrier_instantiation_args(
     }
 }
 
-fn classify_closed_domain(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn classify_closed_domain<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
 ) -> ClosedLiteralDomain {
     let context =
@@ -744,8 +744,8 @@ fn classify_closed_domain(
     classify_normalized_domain(dispatch, normalized, &mut FxHashSet::default(), &mut 4_096)
 }
 
-fn classify_normalized_domain(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn classify_normalized_domain<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
     visited: &mut FxHashSet<SemanticNodeId>,
     remaining: &mut usize,
@@ -1085,8 +1085,10 @@ mod tests {
         // request-bound context, never the raw owned-view escape hatch.
         let base_view = host.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let request_ctx =
-            crate::resolver_core::HostResolverContext::from_cold_seed(&host, &base_view, overlay);
+        let request_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::from_cold_seed(&host, &base_view, overlay);
 
         let publishable = build_template_class_semantic_facts(
             &request_ctx,

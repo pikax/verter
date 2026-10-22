@@ -75,9 +75,15 @@ fn assert_one_typeresolution_record(
         matches!(record.kind_payload, RequestKindPayload::TypeResolution(_)),
         "kind_payload must be TypeResolution"
     );
+    // A build without `semantic-observe` answers the same request but
+    // reports unavailable capture instead of a stored record.
+    let expected = if cfg!(feature = "semantic-observe") {
+        verter_audit::AuditCaptureState::ActiveStored
+    } else {
+        verter_audit::AuditCaptureState::Unavailable
+    };
     assert_eq!(
-        record.capture_state,
-        verter_audit::AuditCaptureState::ActiveStored,
+        record.capture_state, expected,
         "active TypeResolution request must produce a stored record"
     );
     record
@@ -213,11 +219,13 @@ fn list_file_symbols_returns_empty_for_unloaded_file() {
 /// Number of top-level `export type T{i}` declarations emitted by the
 /// 5 KLOC fixture below. Every other line is a `// filler` comment, so
 /// this is the EXACT count of listed symbols.
+#[cfg(feature = "semantic-observe")]
 const BIG_TS_SYMBOL_COUNT: usize = 250;
 
 /// Build the ~5 KLOC fixture: `BIG_TS_SYMBOL_COUNT` top-level type
 /// aliases, each padded with 19 comment lines (≈ 5_000 lines total).
 /// Only the `export type` lines declare symbols; the filler is comments.
+#[cfg(feature = "semantic-observe")]
 fn big_ts_fixture() -> String {
     let mut source = String::with_capacity(5_000);
     for i in 0..BIG_TS_SYMBOL_COUNT {
@@ -241,6 +249,8 @@ fn big_ts_fixture() -> String {
 /// provenance counters rather than a wall-clock ceiling, which flakes
 /// under nextest process-per-test CPU oversubscription. The wall-clock
 /// budget for the 5 KLOC path lives in a `verter_bench` criterion bench.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn list_file_symbols_5kloc_is_complete_and_warm() {
     let host = make_host_with_audit();
@@ -437,6 +447,8 @@ export type Outer = Inner;
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_named_symbol_non_generic_default_expands() {
     let host = make_host_with_audit();
@@ -477,6 +489,8 @@ export type Outer = Inner;
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_named_symbol_generic_default_navigates() {
     let host = make_host_with_audit();
@@ -507,6 +521,8 @@ export type Wrap<T> = { wrapped: T };
     let _ = def_node;
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_named_symbol_with_audit_emits_one_record() {
     let host = make_host_with_audit();
@@ -533,6 +549,8 @@ fn resolve_named_symbol_with_audit_emits_one_record() {
     );
 }
 
+// Correlation trace ids are optional capture.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_named_symbol_with_audit_carries_trace_id() {
     let host = make_host_with_audit();
@@ -729,6 +747,61 @@ fn evaluate_caches_when_cacheable_true() {
 }
 
 #[test]
+fn evaluate_never_caches_an_answer_whose_access_read_stopped() {
+    let host = make_host_with_audit();
+    upsert_ts(
+        &host,
+        "/scope.ts",
+        "export type Y = { c: 1 };\nexport type X = { a: { b: Y['c'] } };\n",
+    );
+    let req = || EvaluateTypeExpressionRequest {
+        scope: "/scope.ts".to_string(),
+        expression: "X['a']".to_string(),
+        extra_imports: Vec::new(),
+        mode: ProjectionMode::Expanded,
+        cacheable: true,
+    };
+
+    let (_stopped, stopped_record) = {
+        let _partial = verter_type_engine::project_semantic_dispatch::evaluate::force_partial_closed_operator_evaluation_for_tests();
+        parts(host.evaluate_type_expression_with_audit(req()))
+    };
+    assert!(!stopped_record.from_cache);
+
+    let (complete, record) = parts(host.evaluate_type_expression_with_audit(req()));
+    assert!(
+        !record.from_cache,
+        "an answer whose read stopped must not serve a later request from the scratch cache"
+    );
+    let store = host.project_type_store().semantic_graph();
+    let data = store.node_data(complete.expect("the complete read resolves").id());
+    let Some(SemanticNodeData::Object(view)) = data.as_deref() else {
+        panic!("the access reads its member object, got {data:?}");
+    };
+    let member = view
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            verter_type_engine::semantic_query::SurfaceEntry::Member(member) => Some(member.value),
+            _ => None,
+        })
+        .expect("the member `b`");
+    assert!(
+        !matches!(
+            store.node_data(member).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ),
+        "the complete read reduces the nested access"
+    );
+
+    let (_, warm) = parts(host.evaluate_type_expression_with_audit(req()));
+    assert!(
+        warm.from_cache,
+        "the complete answer warms the scratch cache"
+    );
+}
+
+#[test]
 fn evaluate_skips_cache_when_cacheable_false() {
     let host = make_host_with_audit();
     upsert_ts(&host, "/scope.ts", "export type Anchor = number;\n");
@@ -792,6 +865,8 @@ fn evaluate_evicts_oldest_at_cache_limit() {
     assert!(cache.get("verter://typeinfo/k0.ts").is_none());
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn evaluate_with_audit_emits_one_record() {
     let host = make_host_with_audit();
@@ -818,6 +893,8 @@ fn evaluate_with_audit_emits_one_record() {
     );
 }
 
+// Correlation trace ids are optional capture.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn evaluate_with_audit_carries_trace_id() {
     let host = make_host_with_audit();
@@ -882,6 +959,8 @@ export type Wrap<T> = { wrapped: T };
     let _ = type_arg_ref;
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn wire_lowering_miss_reports_computed_default_effective_mode() {
     // FIX D regression: an early miss with `mode = None` must record the
@@ -1378,6 +1457,25 @@ fn operator_reduction_step_propagates_fault_opaque_not_masked_as_carrier() {
         recursive,
         Ok(MaterializationStep::Stop(carrier)),
         "a recursive back-edge preserves the operator carrier"
+    );
+
+    // (f) The checker's recovered error type (a TS2590 cross product) is the
+    //     operator's own answer: delivered as the stop node, neither the
+    //     carrier nor a propagated fault.
+    let recovery = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+        diagnostic: verter_type_engine::semantic_query::CheckerDiagnostic {
+            code: verter_type_engine::semantic_query::CheckerDiagnosticCode::UnionTooComplex,
+            operation:
+                verter_type_engine::semantic_query::CheckerDiagnosticOperation::TemplateLiteral,
+        },
+        basis: verter_type_engine::semantic_query::RecoveryBasis::Budget,
+        origin: None,
+    }));
+    let delivered = classify_operator_reduction_step(graph, QueryResult::Value(recovery), carrier);
+    assert_eq!(
+        delivered,
+        Ok(MaterializationStep::Stop(recovery)),
+        "a checker recovery is the operator's answer, not the carrier"
     );
 }
 

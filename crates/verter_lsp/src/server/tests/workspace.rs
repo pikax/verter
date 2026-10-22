@@ -186,6 +186,103 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
         );
 }
 
+/// A resolution the retention account declined to keep still drives provider
+/// sync and dependency traversal, but never becomes a route the host holds.
+///
+/// Mutation recipe: mark every delivered resolution retained in the
+/// collector. The refused resolutions then reach the host's route snapshot.
+#[test]
+fn unretained_provider_dependencies_sync_but_stay_out_of_the_route_snapshot() {
+    struct RefusingAccount;
+    impl verter_session_query::retention::resolution_charge::ResolutionRetentionAccount
+        for RefusingAccount
+    {
+        fn reserve_retained(
+            &self,
+            _bytes: usize,
+        ) -> Option<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>
+        {
+            None
+        }
+    }
+
+    let source = "import { MAGIC } from './tempUtil';\nimport Child from './Child.vue';\n";
+    let references = ["'./tempUtil'", "'./Child.vue'"].map(|expr| {
+        let start = source.find(expr).unwrap();
+        test_analyzed_module_reference(
+            expr,
+            Some(&expr[1..expr.len() - 1]),
+            &[],
+            verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
+            start,
+            start + expr.len(),
+        )
+    });
+    let collect = |refuse: bool| {
+        let resolver =
+            verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.app.json".to_string()),
+            )]);
+        let reader = TestResolverReader::with_files(&[
+            "/workspace/src/tempUtil.ts",
+            "/workspace/src/Child.vue",
+        ]);
+        if refuse {
+            verter_workspace::WorkspaceAccess::install_resolution_retention(
+                &reader.workspace,
+                Arc::new(RefusingAccount),
+            );
+        }
+        collect_resolved_provider_dependencies_from_analyzed_refs(
+            &resolver,
+            None,
+            &reader,
+            "/workspace/src/Importer.vue",
+            &references,
+        )
+        .expect("an unretained resolution is delivered, not refused")
+    };
+    let sources = |resolved: &ResolvedProviderDependencies| {
+        resolved
+            .iter()
+            .map(|entry| entry.source_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let routes = |resolved: &ResolvedProviderDependencies| {
+        resolved
+            .route_snapshot()
+            .into_iter()
+            .map(|route| route.resolved_canonical_id)
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        "/workspace/src/tempUtil.ts".to_string(),
+        "/workspace/src/Child.vue".to_string(),
+    ];
+
+    let retained = collect(false);
+    assert_eq!(sources(&retained), expected);
+    assert_eq!(
+        routes(&retained),
+        expected.iter().cloned().map(Some).collect::<Vec<_>>(),
+        "a retained resolution is the host's route"
+    );
+
+    let unretained = collect(true);
+    assert_eq!(
+        sources(&unretained),
+        expected,
+        "an unretained resolution still drives provider sync and traversal"
+    );
+    assert_eq!(
+        routes(&unretained),
+        Vec::<Option<String>>::new(),
+        "an unretained resolution must not enter the host's route snapshot"
+    );
+}
+
 #[test]
 fn vue_tsx_collision_with_real_file() {
     // A real .vue.tsx file exists but there's no matching .vue source in any project.
@@ -1611,6 +1708,8 @@ async fn swapping_the_vfs_workspace_evicts_the_import_set_memo() {
 /// there whether it compiled once per notification or never. The companion test
 /// `a_burst_of_did_change_notifications_does_not_compile_once_per_notification`
 /// covers the established-projection burst.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notification() {
     const BURST: usize = 24;

@@ -295,17 +295,16 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq,
-            reverse_indexed: false,
             cost_receipt: super::scc_publish::fixture_receipt(&family),
         };
         // A seed is charged like every published candidate; one the account
         // refuses is not seeded.
         let populated_slots =
             family::publication_slot_bound(slot, &entry.satisfied_projection, &requested_path);
-        let registered_canonicals =
-            reverse_index::registered_canonical_count(&read_set_signature, &dispatch_dep_signature);
+        let direct_edges =
+            reverse_index::direct_edge_count(&read_set_signature, &dispatch_dep_signature);
         let Ok(retention) =
-            self.reserve_memo_candidate(&entry, &family, populated_slots, registered_canonicals)
+            self.reserve_memo_candidate(&entry, &family, populated_slots, direct_edges)
         else {
             return 0;
         };
@@ -323,6 +322,16 @@ impl SemanticGraphStore {
         };
         let outcome = slots.publish(slot, entry, &requested_path, cap, eviction);
         let populated_slots = outcome.populated;
+        reverse_index::register_published(
+            verter_audit::observe::Uncaptured,
+            &crate::request_observers::CaptureTargets::EMPTY,
+            &self.canonical_to_entries,
+            &family,
+            &populated_slots,
+            admission_seq,
+            &read_set_signature,
+            &dispatch_dep_signature,
+        );
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
@@ -332,9 +341,6 @@ impl SemanticGraphStore {
         }
         if family_was_new && !populated_slots.is_empty() {
             self.record_family_admission_locked(&mut entries, &family);
-        }
-        if !populated_slots.is_empty() {
-            self.defer_reverse_index_registration(&family, admission_seq, entries.len());
         }
         drop(entries);
         populated_slots.len()

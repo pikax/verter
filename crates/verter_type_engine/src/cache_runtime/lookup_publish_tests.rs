@@ -16,7 +16,7 @@ use crate::cache_runtime::admission::{Candidate, FactCandidateDiscriminant};
 use crate::cache_runtime::candidate_store::ReverseIndexedCandidateStore;
 use crate::cache_runtime::singleflight::{ComputeAdmission, InflightTable};
 use crate::cache_runtime::NonAdmissionReason;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
@@ -368,7 +368,7 @@ fn budgeted_split_publish_eviction_does_not_self_deadlock() {
     // the same publish lifecycle.
     let store = Arc::new(
         ReverseIndexedCandidateStore::<u32, String>::with_counter_and_budget(
-            Arc::new(AtomicU64::new(0)),
+            crate::cache_runtime::OccupancyCounter::new(),
             1,
         ),
     );
@@ -470,7 +470,7 @@ fn budgeted_split_publish_eviction_does_not_self_deadlock() {
 fn publish_fence_spans_publish_core_through_evict_deferred() {
     let store = Arc::new(
         ReverseIndexedCandidateStore::<u32, String>::with_counter_and_budget(
-            Arc::new(AtomicU64::new(0)),
+            crate::cache_runtime::OccupancyCounter::new(),
             16,
         ),
     );

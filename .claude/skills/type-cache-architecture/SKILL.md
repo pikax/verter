@@ -1167,25 +1167,42 @@ window lacks it; `semantic_graph_read_set_signature` keys self-roots in a sorted
 small list and leaves sorting to the one seal. A sealed traced set that
 already holds the build's fence and every observed self-root at its observed
 version is shared as the completed carrier rather than copied and sealed
-again. The reverse index is registered when it is READ, not at publish: a
-publish leaves its candidate unindexed (`MemoEntry::reverse_indexed`) and notes
-its family and admission sequence in `PendingRegistrations`; every read of
-`canonical_to_entries` — `invalidate_canonical` and the diagnostic counts —
-first registers exactly those pending candidates under the same `entries` hold
-(`index_unregistered_candidates_locked`), so a read sees every resident
-candidate, its registration work follows the publishes since the previous read
-rather than the memo's size, and a candidate displaced or FIFO-evicted before
-any read is dropped with nothing to prune. A pending list that reaches the
-resident family count is dropped for one walk of every resident family at the
-next read, so it never outgrows the memo it indexes. The work counter
-`test_reverse_index_registration_visits` guards that bound
-(`reverse_index_read_registers_only_candidates_published_since_the_last_read`). Registration and every drain go through ONE
-borrowed projection (`RegisteredCanonicals` over
-`ReadSetSignature::for_each_canonical_id` ∪ the dispatch-fence canonicals), so
-they stay symmetric without allocating a canonical per call; an existing shard
-is reached by a read guard (which excludes the outer `remove_if` like the
-write-locked `entry` path), and a prune attempts the outer drop only when it
-emptied the inner map. The
+again. The reverse index
+(`semantic_query_memo::ReceiptReverseIndex`, shared by the family memo, the
+refusal-summary table and `cache_runtime::ReverseIndexedCandidateStore`)
+registers DIRECT edges, each once: canonical → the evidence (carrier, receipt
+or page, cached or not) whose own facts read it, consumed receipt → the
+evidence that consumed it, carrier → its candidates, dispatch fence → the
+candidates sharing that fence allocation (one node per interned fence, so its
+canonicals register once), plus each candidate's strict self-roots. A chain or diamond costs
+`O(F + E + C)` physical registrations however many candidates share it —
+never a per-candidate canonical closure — and `invalidate_canonical` walks up
+from the canonical, each node once. Unregistering a candidate drops every
+evidence node and canonical only it reached, so the index drains to empty with
+its last candidate; edges naming a candidate are charged by that candidate's
+reservation, everything else by the index's own pin. Each charge follows the
+allocation it covers, under the declared heap-block convention
+(`retention::allocation::heap_block_bytes`): every table and holder set by the
+layout of its backing allocation (`hashbrown` `allocation_size`), which no
+removal — tombstoned or not — shrinks, from its allocation until it is rebuilt
+(at a quarter live) or freed; each candidate's extra-canonical list and each
+canonical's text by its own block. A full drain, a clear or a drop releases
+exactly what was charged. The allocator canaries
+(`allocator_canaries` `reverse_index_backing`) measure the blocks the index
+holds from the allocator's layouts and require the index's charge plus its
+owners' reservations to cover them at every stage, within the charge granule. There is no
+account-less index: `Default` charges the process-local account, and
+`ReceiptReverseIndex::charging_registrations` (the candidate store, whose
+candidates charge nothing) charges the candidates' share too. The index drives
+explicit-invalidation cleanup only, never validity; its one leaf lock is taken
+inside each store's existing consistency boundary. Every store registers a
+candidate in the step that makes it visible — the family memo's publishes
+(ordinary, prefix backfill, SCC member) under the `entries` hold that installs
+it, the candidate store under the slot guard — and only then unregisters the
+candidates that step displaced, so evidence they share stays indexed across a
+replacement and a read of the index owes no registration work
+(`a_publish_registers_its_candidate_and_a_read_links_nothing`,
+`replacing_a_registration_keeps_its_shared_evidence`). The
 allocation canary `recursive_paths_allocations_per_entity_stay_flat` guards the
 per-entity allocation ceiling and its flat growth across layouts.
 
@@ -1234,43 +1251,83 @@ deliveries skip it, so the outermost operation's owner releases them when the
 operation ends and a result outlives it only through the carrier it is
 delivered in (`SemanticQueryOutput`, `CacheRead`) or an explicit builder owner.
 
-Kept results: a dispatcher keeps the results its builds published
-(`keep_published`: admitted results, and request-local completions) under the
-workspace edit clocks they were computed at. The kept table is a cache the
-dispatcher owns past its operations, so every entry holds a `Retained` charge
-on the process retention account: a refused reservation keeps nothing, and
-the result's delivery stays its only owner. A later read first performs the
-family memo's validated lookup. After a miss, `own_published_read` can answer
-from a kept result before a producer claim is installed, provided its edit
-clocks are current and its nodes and kernel epochs remain live. The read
-replays the result's receipt into the active demand (`served_read`) and
-delivers its carrier. A result the demand cannot pay for is recomputed, never
-served. Results a lookup SERVED are not kept: a memo candidate is validated
-against the live view on every read, and the edit clocks alone miss a file the
-host reloads mid-request (`invalidation_imported_prop_type_file_edit`).
+Request completion tier: the results a REQUEST computed and may serve again
+live in one request-shared tier (`project_semantic_dispatch/request_completions.rs`),
+owned by the request context (`RequestContext::semantic_completions`), one
+tier per graph and store view (`RequestCompletions::tier_for(graph,
+compat_token)`). Every dispatcher of the request on that graph and view holds
+the same tier — one per host operation, and every semantic task a drive lends
+its state to (`task_dispatcher` shares the tier; `exchange_request_state` does
+not swap it) — so a result one dispatcher completed answers every other. A
+dispatcher made with no request context installed owns a tier its tasks share.
+The tier is reclaimed with its owner: dropping the request context releases
+every result it kept.
 
-Request-local completion: a NESTED read of a cheap intermediate family —
-`Conditional`, `TemplateLiteralReduce`, `ProjectPath` (`completes_request_locally`
-in `project_semantic_dispatch/mod.rs`) — outside every checker obligation
-(`ObligationRuntime::decides_root`), uncaptured, with no operand force active
-and no family-memo producer of the key open on this task, completes for the
-requesting dispatcher alone. It makes the family memo's validated lookup
-exactly as a claim does (`begin_query_claim`: a stored result answers, one the
-demand cannot pay for is recomputed, a result the dispatcher kept answers a
-miss), then runs the same traced build under the producer's cost identity
+The tier keeps (`keep_published`) the results the request's builds published
+— admitted results, kept for a claim the memo cannot serve back to the
+request's own view (the candidate records facts newer than the view) — and
+its request-local completions, each with its read (and the receipt its
+computation sealed), its carrier, and the workspace edit clocks it was
+computed at. Every entry holds a `Retained`
+charge on the process retention account: a refused reservation keeps nothing,
+and the result's delivery stays its only owner. A kept result serves
+(`own_published_read`, `kept_value_read`) only while its edit clocks are
+current and its kernel epochs remain live; the read replays its receipt into
+the active demand (`served_read`) and delivers its carrier. A result the
+demand cannot pay for is recomputed, never served. Results a lookup SERVED are
+not kept: a memo candidate is validated against the live view on every read,
+and the edit clocks alone miss a file the host reloads mid-request
+(`invalidation_imported_prop_type_file_edit`).
+
+Request-local completion: a NESTED read of an intermediate family —
+`Conditional`, `TemplateLiteralReduce`, `ProjectPath`, `SignaturesOfType` and
+`Relate` (`completes_request_locally` in `project_semantic_dispatch/mod.rs`) —
+uncaptured, with no operand force active, no family-memo producer of the key
+open on this task, and outside every checker obligation
+(`ObligationRuntime::decides_root`) unless the family completes inside one
+(`completes_request_locally_in_obligations`: a callable-shape read decides no
+obligation, so inside a relation, flow or call frame it is the result the memo
+would admit there), completes for the request. A relation does so only as the
+root of its checker transaction read by another computation (a decision's
+relation of each distributed member): its publication capture stays empty.
+The completion reads the request's kept result first, then makes the family
+memo's validated lookup exactly as a claim does (`begin_query_claim`: a stored
+result answers, one the demand cannot pay for is recomputed). A key another
+task is producing (`SemanticGraphStore::has_flight`) is joined through the
+family memo's claim instead, never computed beside it, so two computations
+that need each other across tasks meet the wait-cycle cut. Otherwise the
+completion runs the same traced build under the producer's cost identity
 (`ClaimAttempt::cost_identity`) and settles its output through the SAME
 `settle_output` the memo's `ProducerLease::settle` uses
 (`SemanticGraphStore::complete_request_local`): the carrier is bubbled, the
-read carries its receipt, and a complete priced result is kept on the
-dispatcher (`keep_published`) for repeated reads. It registers no flight and is
-never admitted: the evaluation or build that reads it is itself retained (the
-deferred-evaluation memo, the enclosing instantiation or root query), so an
-entry of its own would be claimed, admitted, reverse-indexed and FIFO-evicted
-without a later request reaching it. A re-entry of a key whose local
-completion is open answers the same-path recursion carrier on either path.
-Root reads, obligation-frame reads (relation, flow, call — whose decisions are
-shared through the memo) and captured reads keep the family memo. Guarded by
-`recursive_paths_admit_their_instantiations_not_their_nested_steps`.
+read carries its receipt, and a complete priced result is kept in the tier.
+It registers no flight and is never admitted: the evaluation or build that
+reads it is itself retained (the deferred-evaluation memo, the enclosing
+instantiation or root query), so an entry of its own would be claimed,
+admitted, reverse-indexed and FIFO-evicted without a later request reaching
+it — a conditional distributed over `n` members would leave `2n` relation and
+`2n` signature entries behind. A re-entry of a key whose local completion is
+open answers the same-path recursion carrier on either path. Root reads,
+other obligation-frame reads and captured reads keep the family memo.
+
+A relation root completed for the request keeps its component with it
+(`relation_keep_completed_component`): the root and every member the
+component completed that a published root's batched member publish would
+admit — decided binary relation members, proven flow members and call
+members, each with a flight — kept under the root's carrier, receipt and
+edit clocks (`completed_member_read`), under ONE charge for the
+whole component, all or nothing (`RequestCompletionTier::keep_component`). The
+members' flights end unpublished (a joiner computes again; a reader in the
+request finds the kept member), and the inline relation, flow-return and
+call-resolution warm reads consult the tier after the memo
+(`relation_warm_step`, `warm_flow_return_read`, `kept_call_result`). A root
+that is not kept (partial, unpriced, cancelled) releases its members unkept,
+as an unpublished root does. Guarded by
+`recursive_paths_admit_their_instantiations_not_their_nested_steps`,
+`repeated_infer_retains_its_declarations_not_its_per_member_work`,
+`dispatchers_of_one_request_share_its_completed_relations`,
+`mixed_component_member_entry_self_roots_cover_all_component_files` and the
+tier's own reclamation and pressure tests (`request_completions_tests.rs`).
 
 Instantiation serves: every instantiation reads its declaration file's
 `IndexedReady` record (`ProjectSemanticDispatch::transaction_indexed_record`), as do its global-interface, member-index and augmentation-candidate reads.
@@ -1289,8 +1346,9 @@ immutable evidence page — a `ResultReceipt` of `EvidenceKind::Page` — and pa
 the level of pages again until the top level fits one page. Pages are
 deterministic (cut points are positions in the canonical order), lossless,
 validated leaf by leaf through the same receipt walk as a consumed result's
-receipt, projected into reverse-index registration through their canonical
-summaries, and shared by `Arc` with every candidate, refusal summary and
+receipt, registered in the reverse index as evidence nodes like any consumed
+receipt (each page once, under the canonicals its own facts read and the
+evidence that consumed it), and shared by `Arc` with every candidate, refusal summary and
 enclosing signature that absorbs them. Each page holds ONE retention charge for
 its whole life, sized by what it stores (entry array, owned fact strings, the
 canonical-set storage it does not share), however many holders share it. A page
@@ -1416,10 +1474,12 @@ proof after the export table is evicted. Canonical summaries are persistent
 hash tries; their public iteration stays lexical through a byte radix walk.
 Radix ordering consumes common prefixes once per bucket (including small
 insertion buckets) and visits only the occupied bucket range when names
-diverge. Component publication projects its shared carrier's canonical union
-once, outside the memo lock, and reuses that temporary projection for every
-member and populated slot; each candidate still registers its own admission
-identity and the complete fact carrier. Export-table scale tests inspect all
+diverge. Component publication builds one set of registration inputs — the
+shared carrier and the dispatch-fence canonicals — and reuses it for every
+member and populated slot; the reverse index walks that carrier's direct facts
+and child receipts once, registering only the evidence not indexed yet, so the
+members share one carrier node and each registers only its own admission
+identity, its carrier edge and its fence edges. Export-table scale tests inspect all
 suffixes through one request context and count proof work
 across construction and those reads; the request's receipt validation memo
 remains responsible for sharing completed validation.
@@ -1475,8 +1535,21 @@ Workspace resolution carries the same distinction through
 `ResolutionOutcome`. A result-only compatibility query must consume
 `into_transient_result()` and must not retain the target. Any provider, route,
 exact-edge, parsed-edge, or artifact sink must instead consume
-`into_publication()`, whose `ResolutionPublication::{Admitted, Refused}` shape
-keeps an admitted miss distinct from a typed refusal. `AdmittedResolution`
+`into_publication()`, whose `ResolutionPublication::{Admitted, Unretained,
+Refused}` shape keeps an admitted miss distinct from a typed refusal.
+`Unretained` is a complete, current answer the retention account declined to
+keep (`RetentionPressure` at the Engine's workspace-lane reservation): it is
+DELIVERED to its consumer, never withheld like an untrustworthy non-admission
+(torn, partial, superseded, cancelled, budget-exceeded), and never admitted —
+there is no conversion to `AdmittedResolution`, so no persistent or shared
+sink can root on it. A consumer answers from it (`delivered()` /
+`into_delivered()`), import-graph bookkeeping (dependency edges, stage
+blockers, provider sync) follows it, and every session entry that converts an
+outcome into a publication marks the reading compute non-cacheable through
+`NonCacheableReadReason::UnretainedResolution` (transitive), so nothing derived
+from it is retained either; request-scoped normalization memos replay that
+mark. A composed answer that depends on an unretained lane is itself
+unretained (`or_else_publication`, `unretained_with`). `AdmittedResolution`
 has no external constructor: only the Engine transaction finalizer can mint
 one, and projections (`map_result`, `map_admitted`, `replace_result`) require an
 existing admitted carrier. The former `from_admitted_state` escape hatch is

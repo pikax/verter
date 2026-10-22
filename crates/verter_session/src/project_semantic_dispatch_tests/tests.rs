@@ -335,7 +335,7 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let (_, parameter) = reverse_test_binders(graph, "Value", 9005);
     let string = primitive(graph, PrimitiveKind::String);
     let number = primitive(graph, PrimitiveKind::Number);
@@ -375,22 +375,25 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
     assert_ne!(string_key, number_key, "only the pending argument differs");
     assert_eq!(key_for(string), string_key);
     let relation_key = dispatch.relate_key_for(string, string);
-    let mut selection_receipt = None;
+    let relation_query = relation_key.to_query_key();
+    let relation_builds =
+        || verter_type_engine::project_semantic_dispatch::raise::dispatch_cold_for(&relation_query);
+    let builds_before = relation_builds();
     for (key, expected) in [(&string_key, string), (&number_key, number)] {
         let cold = dispatch.execute_read(key.clone());
         assert!(matches!(cold.value().clone(), QueryResult::Value(node) if node == expected));
         assert!(!cold.result_is_partial() && !cold.cache_suppress());
-        let receipt = graph
-            .relation_published_carrier(&relation_key)
-            .expect("the decided relation is published")
-            .admission_seq;
-        if let Some(previous) = selection_receipt {
-            assert_eq!(
-                receipt, previous,
-                "branch-only frames reuse the original relation computation"
-            );
-        }
-        selection_receipt = Some(receipt);
+        // The decision reads its relation nested in its own evaluation: the
+        // relation completes for the request, never the family memo.
+        assert!(
+            graph.relation_published_carrier(&relation_key).is_none(),
+            "the decided relation completes outside the family memo"
+        );
+        assert_eq!(
+            relation_builds() - builds_before,
+            1,
+            "branch-only frames reuse the original relation computation"
+        );
         let count = graph.slot_candidate_count_for_tests(key);
         assert_eq!(count, 1);
         for _ in 0..3 {
@@ -399,6 +402,70 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
             assert_eq!(graph.slot_candidate_count_for_tests(key), count);
         }
     }
+}
+
+/// Every dispatcher of one request shares what the request completed: a
+/// relation one dispatcher's decision completed for the request answers a
+/// second dispatcher of the same request without being related again, and
+/// is held outside the family memo, so a dispatcher of another request
+/// relates it for itself. The completions are released with the request.
+#[test]
+fn dispatchers_of_one_request_share_its_completed_relations() {
+    let host = host();
+    let reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests;
+    let request = verter_type_engine::request_context::install_test_request_for("/w/shared.ts");
+    let first = ProjectSemanticDispatch::new(&host);
+    let _builder = first.enter_construction_scope();
+    let graph = first.graph_arc();
+    let string = primitive(graph, PrimitiveKind::String);
+    let number = primitive(graph, PrimitiveKind::Number);
+    let decision = SemanticQueryKey::Conditional {
+        check: string,
+        extends: string,
+        true_branch: string,
+        false_branch: number,
+        distributive: false,
+        pending: None,
+    };
+    let read = first.execute_read(decision);
+    assert!(matches!(read.value().clone(), QueryResult::Value(node) if node == string));
+    let relation_key = first.relate_key_for(string, string);
+    assert!(
+        graph.relation_published_carrier(&relation_key).is_none(),
+        "the decision's relation completes outside the family memo"
+    );
+    assert!(first.request_completions_for_tests() > 0);
+
+    let second = ProjectSemanticDispatch::new(&host);
+    let before = reductions();
+    assert!(matches!(
+        second.execute_relate(relation_key.clone()),
+        RelationStep::Assignable { .. }
+    ));
+    assert_eq!(
+        reductions() - before,
+        0,
+        "a dispatcher of the same request reads the relation the request completed"
+    );
+
+    drop(second);
+    drop(request);
+    let _other = verter_type_engine::request_context::install_test_request_for("/w/shared.ts");
+    let third = ProjectSemanticDispatch::new(&host);
+    assert_eq!(
+        third.request_completions_for_tests(),
+        0,
+        "another request starts with no completions"
+    );
+    let before = reductions();
+    assert!(matches!(
+        third.execute_relate(relation_key),
+        RelationStep::Assignable { .. }
+    ));
+    assert!(
+        reductions() - before > 0,
+        "a dispatcher of another request relates it for itself"
+    );
 }
 
 #[test]
@@ -423,7 +490,7 @@ fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
     };
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let (_, parameter) = reverse_test_binders(graph, "Value", 9008);
     let string = primitive(graph, PrimitiveKind::String);
     let argument = graph.intern_node_with_scope(
@@ -504,7 +571,7 @@ fn pending_arguments_remain_visible_to_clause_instantiation() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let (_, parameter) = reverse_test_binders(graph, "Branch", 9010);
     let argument = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("<clause>"),
@@ -553,7 +620,7 @@ fn pending_arguments_remain_visible_to_infer_routing() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let (infer, parameter) = reverse_test_binders(graph, "Captured", 9011);
     let string = primitive(graph, PrimitiveKind::String);
     let template = graph.intern_node(SemanticNodeData::Conditional {
@@ -652,7 +719,7 @@ fn pending_conditional_arguments_remain_visible_to_mapped_value_demand() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let (_, parameter) = reverse_test_binders(graph, "Value", 9006);
     let (_, key_parameter) = reverse_test_binders(graph, "Key", 9007);
     let string = primitive(graph, PrimitiveKind::String);
@@ -673,6 +740,7 @@ fn pending_conditional_arguments_remain_visible_to_mapped_value_demand() {
         source: keys,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: key_parameter,
             key_space: keys,
             value_expr: value,
@@ -2735,6 +2803,7 @@ fn finite_mapped_index_matches_single_key_publication_context() {
                 key_space,
                 value_expr: value,
                 over_type_variable: false,
+                modifiers_type: None,
                 name_remap: None,
                 optionality: OptionalityMod::Keep,
                 readonly: ReadonlyMod::Keep,
@@ -2872,6 +2941,7 @@ fn residual_template_application_does_not_force_unused_mapped_argument() {
         key_space,
         value_expr: parameter,
         over_type_variable: false,
+        modifiers_type: None,
         name_remap: None,
         optionality: OptionalityMod::Keep,
         readonly: ReadonlyMod::Keep,
@@ -3824,7 +3894,9 @@ fn canonical_algebra_collapses_only_proven_facts() {
 
     // Distinct literal arms stay a two-arm union.
     let union = canonical_algebra::intern_ordered_union(
-        &graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
         &[lit_a, lit_b],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -3835,7 +3907,12 @@ fn canonical_algebra_collapses_only_proven_facts() {
     assert!(!union.evidence.incomplete);
 
     // PROVEN disjoint scalar intersection collapses to `never`.
-    let disjoint = canonical_algebra::intern_ordered_intersection(&graph, &[string, number]);
+    let disjoint = canonical_algebra::intern_ordered_intersection(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
+        &[string, number],
+    );
     assert!(
         matches!(
             graph.node_data(disjoint.node).as_deref(),
@@ -3847,7 +3924,12 @@ fn canonical_algebra_collapses_only_proven_facts() {
     // UNDECIDED disjointness (two object surfaces) keeps the carrier.
     let obj_x = simple_object(&graph, &[("x", string)]);
     let obj_y = simple_object(&graph, &[("y", number)]);
-    let undecided = canonical_algebra::intern_ordered_intersection(&graph, &[obj_x, obj_y]);
+    let undecided = canonical_algebra::intern_ordered_intersection(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
+        &[obj_x, obj_y],
+    );
     assert!(
         matches!(
             graph.node_data(undecided.node).as_deref(),
@@ -3864,7 +3946,9 @@ fn canonical_algebra_collapses_only_proven_facts() {
         )),
     ));
     let flattened = canonical_algebra::intern_ordered_union(
-        &graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
         &[inner, number],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -3949,7 +4033,9 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     // of the two collapses to the first retained arm, complete and
     // warm-eligible.
     let union = canonical_algebra::intern_ordered_union(
-        &graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
         &[at_62, at_94],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -3964,7 +4050,12 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
         !union.evidence.incomplete,
         "a span-only collapse is a completed comparison, never Incomplete"
     );
-    let intersection = canonical_algebra::intern_ordered_intersection(&graph, &[at_62, at_94]);
+    let intersection = canonical_algebra::intern_ordered_intersection(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
+        &[at_62, at_94],
+    );
     assert_eq!(
         intersection.node, at_62,
         "the intersection twin collapses under T & T = T"
@@ -3976,7 +4067,9 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let number_at_62 = member_span_object(62, number);
     let distinct = canonical_algebra::intern_ordered_union(
-        &graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
         &[at_62, number_at_62],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -4019,7 +4112,9 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
         "index-signature spans stay arena identity"
     );
     let index_union = canonical_algebra::intern_ordered_union(
-        &graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
         &[index_a, index_b],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -4062,7 +4157,9 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     let sig_b = signature_node(300);
     assert_ne!(sig_a, sig_b, "signature spans stay arena identity");
     let sig_union = canonical_algebra::intern_ordered_union(
-        &graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
         &[sig_a, sig_b],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -4165,7 +4262,9 @@ fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exac
         "distinct argument ids keep the shells arena-distinct"
     );
     let collapsed = canonical_algebra::intern_ordered_union(
-        &graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
         &equal_arguments,
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -4178,7 +4277,7 @@ fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exac
     let distinct_parameters = [equal_arguments[0], conditional(type_param(1), argument_a)];
     assert!(
         matches!(
-            graph.node_data(canonical_algebra::intern_ordered_union(&graph, &distinct_parameters, verter_session_query::flow::policy::NullabilityPolicy::Strict).node)
+            graph.node_data(canonical_algebra::intern_ordered_union(verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph), &distinct_parameters, verter_session_query::flow::policy::NullabilityPolicy::Strict).node)
                 .as_deref(),
             Some(SemanticNodeData::Union(members)) if members.len() == 2
         ),
@@ -4250,7 +4349,9 @@ fn span_only_duplicates_collapse_above_prehash_narrowing_threshold() {
     arms.push(duplicate);
 
     let union = canonical_algebra::intern_ordered_union(
-        &graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
         &arms,
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -4304,7 +4405,7 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
     // `0 & -0` is the inhabited literal `0`, never `never`.
     let intersection =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[zero, neg_zero],
         );
     assert!(
@@ -4319,7 +4420,7 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
     // `0 | -0` folds to ONE arm.
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[zero, neg_zero],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -4396,7 +4497,7 @@ fn tier1_payload_equal_discard_roots_descendant_files() {
 
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[g, f],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -4440,7 +4541,7 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
     );
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[scoped_any],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -4455,7 +4556,7 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
     );
     let never_union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[scoped_never],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -4470,7 +4571,7 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
     );
     let intersection =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[scoped_unknown],
         );
     assert_eq!(
@@ -4579,7 +4680,7 @@ fn comparator_object_arm_discriminates_diverged_positive_members() {
 
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[base, diverged],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -4614,7 +4715,7 @@ fn over_deep_alias_peek_marks_evidence_incomplete() {
 
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[aliased, string],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -4657,7 +4758,7 @@ fn wide_distinct_object_union_canonicalizes_without_budget_exhaustion() {
 
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &arms,
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -4709,7 +4810,7 @@ fn wide_union_of_deep_distinct_arms_canonicalizes_completely() {
 
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &arms,
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -4752,7 +4853,7 @@ fn frameless_incomplete_canonical_evidence_marks_request_partial() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[aliased, string],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -4809,7 +4910,7 @@ fn framed_incomplete_canonical_evidence_taints_frame_partial_not_only_suppressed
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[aliased, string],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -7336,7 +7437,7 @@ fn distributed_conditional_dependencies_follow_member_selections() {
         };
         let dispatch = ProjectSemanticDispatch::new(&host);
         let _builder = dispatch.enter_construction_scope();
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let string = primitive(graph, PrimitiveKind::String);
         let number = primitive(graph, PrimitiveKind::Number);
         let boolean = primitive(graph, PrimitiveKind::Boolean);
@@ -9113,6 +9214,7 @@ fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
     });
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: binder,
         key_space,
         value_expr: value_placeholder,
@@ -9179,6 +9281,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     };
     let mapper_add = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: make_binder(),
         key_space,
         value_expr,
@@ -9189,6 +9292,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     };
     let mapper_remove = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: make_binder(),
         key_space,
         value_expr,
@@ -9199,6 +9303,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     };
     let mapper_ro_add = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: make_binder(),
         key_space,
         value_expr,
@@ -9284,6 +9389,7 @@ fn mapped_type_value_materialised_from_source_member_for_known_keys() {
 
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -9353,6 +9459,7 @@ fn mapped_type_resolves_key_space_via_key_of_subquery() {
 
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -9557,6 +9664,7 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 
     let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -10093,6 +10201,7 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     let opaque = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -10688,6 +10797,7 @@ fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
     let empty_source = simple_object(&graph, &[]);
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -10777,6 +10887,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
                        value_expr: SemanticNodeId,
                        name_remap: Option<SemanticNodeId>| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -11423,6 +11534,7 @@ fn mapped_narrowing_admits_exponent_range_numeric_keys() {
             source: empty_source,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: param,
                 key_space,
                 value_expr: param,
@@ -11494,6 +11606,7 @@ fn key_remap_publishes_numeric_literal_keys() {
             source: empty_source,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: param,
                 key_space,
                 value_expr: param,
@@ -12117,6 +12230,7 @@ fn object_record_relation_accepts_numeric_literal_keys() {
             source: empty_source,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
                     decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
                     param_index: 0,
@@ -14735,6 +14849,7 @@ fn reverse_test_target(
         source: infer,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: parameter,
             key_space,
             value_expr: template,
@@ -15400,6 +15515,7 @@ fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
         source: infer_t,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_parameter,
             key_space,
             value_expr: template,
@@ -17559,6 +17675,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         source: remap_infer,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: remap_parameter,
             key_space: remap_key_space,
             value_expr: boxed(remap_projection),
@@ -18343,6 +18460,7 @@ fn open_mapped_value_body_carrier_stops_in_expanded_and_macro_object_surface() {
 
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -18432,6 +18550,7 @@ fn closed_mapped_controls_still_enumerate_no_carrier_over_fire() {
     // (1) identity `{ [K in keyof T]: T[K] }` (Partial/Required/Readonly).
     let identity_mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr: num,
@@ -18444,6 +18563,7 @@ fn closed_mapped_controls_still_enumerate_no_carrier_over_fire() {
     // binder only; no outer generic ⇒ CLOSED.
     let k_only_mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr: k_param,
@@ -18526,6 +18646,7 @@ fn mapped_binder_bound_outer_generic_open_value_discrimination() {
 
     let make_mapper = |value_expr| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -18608,6 +18729,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
 
     let mapper_with = |key_space, value_expr, name_remap| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -18805,6 +18927,7 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
 
     let mapper_with_value = |value_expr| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space: keyof_foo_of_t,
         value_expr,
@@ -21248,6 +21371,7 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
     };
     let mapper_with = |name_remap| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space: string_ty,
         value_expr: string_ty,
@@ -22012,6 +22136,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     };
     let mapper = |key_space, value_expr| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -22379,6 +22504,7 @@ fn mapped_type_self_roots_and_origin_edges_include_name_remap() {
     );
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space: string_ty,
         value_expr: string_ty,
@@ -22892,6 +23018,8 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// The per-request `SemanticQueryKey` dispatch mask must record tags
 /// dispatched through the shared `execute_via_cold_build_helper` choke point
 /// — INCLUDING nested reducer sub-dispatches that enter ONLY via
@@ -22923,7 +23051,10 @@ fn dispatch_mask_records_execute_read_only_nested_normalize_intersection() {
     let ctx = RequestContext::new(1, Arc::from("/c.vue"), false, None);
     let _guard = RequestContextGuard::install(Arc::clone(&ctx));
 
-    let dispatch = ProjectSemanticDispatch::new(&host);
+    // Captured execution: only it records into the request counters read below.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch = ProjectSemanticDispatch::new(&captured);
     let owner = synthetic_macro_owner(&host, "/c.vue");
     let result = dispatch.execute_type_node(SemanticQueryKey::ResolveMacroPayload {
         owner,
@@ -23699,6 +23830,8 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// **Class A dispatch parity (invisibility proof).** Verifies that
 /// adding the `ResolveMacroPayload` variant + body to the dispatcher
 /// did NOT change existing `ComponentMetaAnalysis` outputs for any
@@ -24736,6 +24869,7 @@ fn shallow_mapped_type_enumerates_keyset() {
         source: str_id,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_param,
             key_space,
             value_expr: num_id,
@@ -26530,6 +26664,7 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
     let placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr: placeholder,
@@ -28517,6 +28652,7 @@ fn subtree_references_node_descends_object_spread_program_effects() {
     });
     let program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28569,7 +28705,7 @@ fn extends_pattern_declares_infer_descends_object_spread_program() {
     let (infer, _parameter) = reverse_test_binders(&graph, "U", 0);
     let program_with = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-            verter_type_engine::semantic_query::ObjectSpreadProgram {
+            verter_type_engine::semantic_query::ObjectSpreadProgram { is_literal: true,
                 effects: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![
                         verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28639,6 +28775,7 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28667,6 +28804,7 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
         source: str_id,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_param,
             key_space,
             value_expr,
@@ -28727,6 +28865,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28758,6 +28897,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
         source: empty_source,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_param,
             key_space: key_a,
             value_expr,
@@ -28839,6 +28979,7 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -28929,6 +29070,7 @@ fn mapped_type_over_open_program_source_defers() {
     });
     let open_source = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28970,6 +29112,7 @@ fn mapped_type_over_open_program_source_defers() {
         source: open_source,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_param,
             key_space: key_a,
             value_expr: mapper_param,
@@ -29070,6 +29213,7 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -29170,6 +29314,7 @@ fn keyof_intersection_poisons_through_union_nesting() {
     });
     let open_program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -29246,6 +29391,7 @@ fn excess_arm_knows_property_reads_program_targets() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -30914,8 +31060,8 @@ fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
 #[test]
 fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
     // GROWING-GENERIC discriminator. A conditional generic whose every
-    // tail step applies itself to a FRESH node id (`type Grow<T> = T extends
-    // never ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
+    // tail step applies itself to a FRESH node id (`type Grow<T> = [T]
+    // extends [never] ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
     // so `Grow<string>` → `Grow<[string]>` → `Grow<[[string]]>` → …, distinct
     // `InstantiationRef` ids the `visited` set can NEVER match) DEFEATS
     // visited-ID cycle detection. Under a ledger too small for its tail run
@@ -30927,11 +31073,34 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     // operational truncation ALSO refuses warm admission (`result_is_partial`
     // + `cache_suppress`). Under a ledger with room, the run reaches its tail
     // budget and `Grow<string>` is the checker's TS2589 recovery; a lower
-    // tail budget than production's stands in on the same path.
+    // tail budget than production's stands in on the same path. Its check
+    // wraps the parameter (`[T]`), so no uniform-growth certificate covers
+    // it; the bare-parameter form (`T extends never ? never : Grow<[T]>`) is
+    // a certified divergence instead — the same complete TS2589 under the
+    // starved ledger, kept.
     //
     // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
-    // is `any` under TS2589.
-    const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    // is `any` under TS2589, in both forms.
+    const CERTIFIED: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    let (outcome, partial, suppressed, instantiated, _) = grow_string_demand(CERTIFIED, Some(256));
+    assert!(
+        matches!(outcome, StructuralFactDemandOutcome::Complete(_)) && !partial && !suppressed,
+        "a certified divergence is complete under a starved ledger, got {outcome:?}"
+    );
+    assert!(
+        matches!(
+            &instantiated,
+            Some(SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                basis: verter_type_engine::semantic_query::RecoveryBasis::Certified,
+                ..
+            })) if diagnostic.code
+                == verter_type_engine::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+        ),
+        "the bare-parameter growth is the certified TS2589 recovery, got {instantiated:?}"
+    );
+
+    const GROW: &str = "export type Grow<T> = [T] extends [never] ? never : Grow<[T]>;\n";
     let (outcome, partial, suppressed, _, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
         StructuralFactDemandOutcome::Recovered { reasons, .. }
@@ -31012,6 +31181,7 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
     });
     let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space: key_union,
         value_expr: deep_value,
@@ -31042,9 +31212,9 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
 
     assert!(
         graph
-            .peek_selected_value_memo_for_tests(deep_value, context)
+            .peek_mapped_member_value_memo_for_tests(deep_value, context)
             .is_some(),
-        "a complete deep finite evaluation must be eligible for the shared deferred memo"
+        "a complete deep finite evaluation must be eligible for the shared mapped-member memo"
     );
 
     let stats_before_repeat = graph.stats_snapshot();
@@ -31220,6 +31390,7 @@ fn frameless_complete_with_cache_suppress_trips_build_frame_escape_assert() {
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -31309,6 +31480,7 @@ fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -32273,6 +32445,11 @@ use verter_type_engine::project_semantic_dispatch::walk::{
     ShallowSurfaceMember,
 };
 
+/// The surface merges run on a bare graph, outside any connected demand.
+const UNMETERED:
+    verter_type_engine::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'static> =
+    verter_type_engine::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED;
+
 fn shallow_member_full(
     name: &str,
     value: SemanticNodeId,
@@ -32363,7 +32540,7 @@ fn oracle_value_union(
         // delegates the intern while keeping its own dedup/singleton logic.
         _ => {
             verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-                graph,
+                verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
                 &ids,
                 verter_session_query::flow::policy::NullabilityPolicy::Strict,
             )
@@ -32590,15 +32767,20 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
             .map(|&i| arms[i].as_ref().map(ShallowSurface::copy_for_tests))
             .collect();
         // Plain permutation.
-        let actual = merge_union_surfaces(&graph, &permuted, &mut test_canonical_evidence())
-            .expect("non-empty arm vector yields a surface");
+        let actual =
+            merge_union_surfaces(verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph), &permuted, UNMETERED, &mut test_canonical_evidence())
+                .expect("non-empty arm vector yields a surface");
         let expected =
             oracle_merge_union_surfaces(&graph, &permuted).expect("oracle yields a surface");
         assert_shallow_surface_eq(&actual, &expected, &format!("common-member perm {perm:?}"));
 
-        let actual_macro =
-            merge_union_surfaces_for_macro(&graph, &permuted, &mut test_canonical_evidence())
-                .expect("non-empty arm vector yields a surface");
+        let actual_macro = merge_union_surfaces_for_macro(
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
+            &permuted,
+            UNMETERED,
+            &mut test_canonical_evidence(),
+        )
+        .expect("non-empty arm vector yields a surface");
         let expected_macro = oracle_merge_union_surfaces_for_macro(&graph, &permuted)
             .expect("oracle yields a surface");
         assert_shallow_surface_eq(
@@ -32613,8 +32795,13 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
             .map(|arm| arm.as_ref().map(ShallowSurface::copy_for_tests))
             .collect();
         with_none.push(None);
-        let actual_none = merge_union_surfaces(&graph, &with_none, &mut test_canonical_evidence())
-            .expect("non-empty arm vector yields a surface");
+        let actual_none = merge_union_surfaces(
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
+            &with_none,
+            UNMETERED,
+            &mut test_canonical_evidence(),
+        )
+        .expect("non-empty arm vector yields a surface");
         let expected_none =
             oracle_merge_union_surfaces(&graph, &with_none).expect("oracle yields a surface");
         assert_shallow_surface_eq(
@@ -32627,9 +32814,13 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
             "a non-Object arm collapses the common-member surface to empty"
         );
 
-        let actual_macro_none =
-            merge_union_surfaces_for_macro(&graph, &with_none, &mut test_canonical_evidence())
-                .expect("non-empty arm vector yields a surface");
+        let actual_macro_none = merge_union_surfaces_for_macro(
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
+            &with_none,
+            UNMETERED,
+            &mut test_canonical_evidence(),
+        )
+        .expect("non-empty arm vector yields a surface");
         let expected_macro_none = oracle_merge_union_surfaces_for_macro(&graph, &with_none)
             .expect("oracle yields a surface");
         assert_shallow_surface_eq(
@@ -32644,16 +32835,45 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
     }
 
     // Degenerate inputs stay pinned.
-    assert!(merge_union_surfaces(&graph, &[], &mut test_canonical_evidence()).is_none());
-    assert!(merge_union_surfaces_for_macro(&graph, &[], &mut test_canonical_evidence()).is_none());
+    assert!(merge_union_surfaces(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph
+        ),
+        &[],
+        UNMETERED,
+        &mut test_canonical_evidence()
+    )
+    .is_none());
+    assert!(merge_union_surfaces_for_macro(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph
+        ),
+        &[],
+        UNMETERED,
+        &mut test_canonical_evidence()
+    )
+    .is_none());
     let single = vec![arms[0].as_ref().map(ShallowSurface::copy_for_tests)];
-    let actual_single = merge_union_surfaces(&graph, &single, &mut test_canonical_evidence())
-        .expect("single arm yields");
+    let actual_single = merge_union_surfaces(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
+        &single,
+        UNMETERED,
+        &mut test_canonical_evidence(),
+    )
+    .expect("single arm yields");
     let expected_single = oracle_merge_union_surfaces(&graph, &single).expect("oracle yields");
     assert_shallow_surface_eq(&actual_single, &expected_single, "single-arm common");
-    let actual_single_macro =
-        merge_union_surfaces_for_macro(&graph, &single, &mut test_canonical_evidence())
-            .expect("single arm yields");
+    let actual_single_macro = merge_union_surfaces_for_macro(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
+        &single,
+        UNMETERED,
+        &mut test_canonical_evidence(),
+    )
+    .expect("single arm yields");
     let expected_single_macro =
         oracle_merge_union_surfaces_for_macro(&graph, &single).expect("oracle yields");
     assert_shallow_surface_eq(
@@ -32712,8 +32932,15 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
 
     // Common-member rule: order follows ARM 0 (zebra, alpha), not arm 1
     // and not name order.
-    let common =
-        merge_union_surfaces(&graph, &arms, &mut test_canonical_evidence()).expect("surface");
+    let common = merge_union_surfaces(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
+        &arms,
+        UNMETERED,
+        &mut test_canonical_evidence(),
+    )
+    .expect("surface");
     let common_names: Vec<&str> = common
         .members
         .iter()
@@ -32725,9 +32952,15 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
         "common-member rule must preserve arm-0 source order"
     );
     // Macro rule: first-seen order across arms in arm order.
-    let macro_merged =
-        merge_union_surfaces_for_macro(&graph, &arms, &mut test_canonical_evidence())
-            .expect("surface");
+    let macro_merged = merge_union_surfaces_for_macro(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &graph,
+        ),
+        &arms,
+        UNMETERED,
+        &mut test_canonical_evidence(),
+    )
+    .expect("surface");
     let macro_names: Vec<&str> = macro_merged
         .members
         .iter()
@@ -32952,6 +33185,7 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
         });
         MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: k_param,
             key_space,
             value_expr,
@@ -33093,6 +33327,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
     });
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -33583,7 +33818,7 @@ fn incomplete_canonicalization_refuses_the_canonical_stamp_and_pays_the_re_close
     let string_node = primitive(&graph, PrimitiveKind::String);
     let union =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            &graph,
+            verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[aliased, string_node],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -34109,7 +34344,7 @@ fn budget_recovery_root_reprojection_remains_approximate_and_unretained() {
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);
         let _builder = dispatch.enter_construction_scope();
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let recovery = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
             diagnostic: CheckerDiagnostic {
                 code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,

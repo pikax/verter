@@ -59,7 +59,74 @@ use crate::semantic_query::{
     SurfaceMember, SurfaceView, TypeParamDecl,
 };
 
+/// The identity of one substitution walk, `(node, parameter, arg)`: the
+/// memo entry its receipt prices. A public substitution and the walk at its
+/// root are one computation, so they share one receipt and one entry.
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct SubstitutionCost(SemanticNodeId, SemanticNodeId, SemanticNodeId);
+
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    fn priced_substitution_read(
+        &self,
+        node: SemanticNodeId,
+        parameter: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let (value, receipt) = self
+            .graph()
+            .substitute_memo_get_priced(node, parameter, arg)?;
+        matches!(
+            self.admit_served(&receipt, super::cost_receipt::Nesting::InPlace),
+            super::ServedAdmission::Admitted
+        )
+        .then_some(value)
+    }
+
+    /// Open the cost recording of one substitution walk, rooted at its
+    /// operands. `None` when an operand is not live in this graph (released
+    /// or foreign): the walk still runs on its `node_data` fallback, but it
+    /// seals no receipt and so publishes nothing to the memo.
+    fn substitution_cost(
+        &self,
+        node: SemanticNodeId,
+        parameter: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> Option<super::connected_demand::CostRecording<'_, '_>> {
+        let roots = self
+            .graph()
+            .root_nodes([node, parameter, arg].into_iter().filter(|node| {
+                // Signature-clause tokens are virtual semantic leaves, not
+                // graph allocations. Their identity stays in the cost key;
+                // only actual graph operands acquire counted root holds.
+                !crate::signature_kernel::SignatureStore::is_binder_token(*node)
+            }))
+            .ok()?;
+        Some(
+            self.connected_demand.record_cost(
+                super::cost_receipt::CostIdentity::of_key(SubstitutionCost(node, parameter, arg))
+                    .with_roots(roots),
+            ),
+        )
+    }
+
+    fn finish_substitution_cost(
+        &self,
+        recording: Option<super::connected_demand::CostRecording<'_, '_>>,
+        epoch: u64,
+    ) -> Option<Arc<super::cost_receipt::DemandCostReceipt>> {
+        let recording = recording?;
+        let request = crate::request_context::current_request_budget();
+        let complete = self.canonical_evidence_epoch.get() == epoch
+            && self.connected_demand_trip().is_none()
+            && !self.cancellation.is_cancelled();
+        let receipt = recording.finish(complete, request.as_deref());
+        if let Some(receipt) = &receipt {
+            self.connected_demand
+                .record_prerequisite(receipt, super::cost_receipt::Nesting::InPlace);
+        }
+        receipt
+    }
+
     construction_ordinal_seam! {
         fn substitute_semantic_type_param(
             &self,
@@ -67,6 +134,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             parameter_node: SemanticNodeId,
             arg: SemanticNodeId,
         ) -> SemanticNodeId {
+            let _demand = self.enter_connected_demand(false).0;
             // Top-level substitute-call telemetry. Bumped at the
             // entry of `substitute_semantic_type_param` (the public
             // surface), so the snapshot reflects the number of distinct
@@ -74,11 +142,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // recursive `substitute_with_change_tracking` walks. Paired
             // with `SubstituteMemoHit` (next line) to expose the
             // hit-rate of the hash-cons memo.
-            if let Some(observer) = verter_audit::current_observer() {
+            verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                 observer.record_event(verter_audit::AuditEvent::SubstituteTopLevelCall);
-            }
+            });
             self.enter_substitution_walk();
-            if node != parameter_node && self.binder_dependency_proves_absent(node, parameter_node) {
+            if node == parameter_node {
+                self.classify_recursive_substitution(node, parameter_node, arg);
+                return arg;
+            }
+            if self.binder_dependency_proves_absent(node, parameter_node) {
                 return node;
             }
             // Hash-cons memo. The store-owned `substitute_memo` collapses
@@ -90,38 +162,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // arena-scoped, and semantic-node ids inside one arena are
             // content-addressed integers — so a triple of ids is a
             // complete identity for the substitution result. Substitution
-            // is a pure function of its three inputs, so the cache needs
-            // no fact-signature validation.
-            if let Some(cached) = self.graph().substitute_memo_get(node, parameter_node, arg) {
-                if let Some(observer) = verter_audit::current_observer() {
+            // has an immutable complete result for its three inputs. The memo
+            // stores only complete, priced results; a budget- or site-dependent
+            // refusal never publishes. Fact-bearing canonical work advances the
+            // separate evidence fence below.
+            if let Some(cached) = self.priced_substitution_read(node, parameter_node, arg) {
+                verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMemoHit);
-                }
+                });
                 return cached;
             }
-            // Change-tracking through recursion. The internal helper
-            // returns (result, changed) so each branch can short-circuit
-            // the rebuild path when no descendant produced a different
-            // node id. The public signature is unchanged; callers see only
-            // the result id.
-            //
-            // Evidence-blind-replay fence: the store-owned memo is
-            // cross-request, so a walk whose canonical composite routing
-            // deposited NON-TRIVIAL evidence (file self-roots, or an
-            // incomplete comparison's warm suppression) must not be
-            // replayed to a later request that would then skip the deposit
-            // — a stale warm read served on an under-rooted entry. The
-            // epoch advancing across the walk suppresses the publish; the
-            // result itself still flows to the caller.
-            let epoch_before = self.canonical_evidence_epoch.get();
-            let result = self
-                .substitute_with_change_tracking(node, parameter_node, arg)
-                .0;
-            if self.canonical_evidence_epoch.get() == epoch_before && !self.cancellation.is_cancelled()
-            {
-                self.graph()
-                    .substitute_memo_publish(node, parameter_node, arg, result);
-            }
-            result
+            // Change-tracking through recursion. The walk at the root is
+            // this substitution itself: it records the one receipt and
+            // publishes the one memo entry the triple has, so the public
+            // entry wraps no second recording around it. The public
+            // signature is unchanged; callers see only the result id.
+            self.classify_recursive_substitution(node, parameter_node, arg);
+            self.substitute_node_recorded(node, parameter_node, arg).0
         }
     }
 
@@ -702,13 +759,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // structurally correct: visiting the binder twice in
         // `Foo<K, K>`-style fixtures IS the recursive memo's hit
         // case at the boundary.
-        crate::request_context::with_current_request_context(|ctx| {
-            ctx.classify_recursive_substitute(RecursiveSubstituteIdentity {
-                node: node.0,
-                parameter_node: parameter_node.0,
-                arg: arg.0,
-            })
-        });
+        self.classify_recursive_substitution(node, parameter_node, arg);
         // Trivial-identity short-circuit runs AFTER classification:
         // the per-request audit needs to see every entry, but the
         // identity branch returns `arg` without touching graph
@@ -716,10 +767,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if node == parameter_node {
             return (arg, true);
         }
-        if let Some(cached) = self.graph().substitute_memo_get(node, parameter_node, arg) {
-            if let Some(observer) = verter_audit::current_observer() {
+        if let Some(cached) = self.priced_substitution_read(node, parameter_node, arg) {
+            verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                 observer.record_event(verter_audit::AuditEvent::RecursiveSubstituteMemoHit);
-            }
+            });
             // The memo stores the substitution RESULT. `changed` is
             // recovered cheaply from `result != node` — this is
             // safe because substitution is a pure
@@ -731,17 +782,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let changed = cached != node;
             return (cached, changed);
         }
-        // Same evidence-blind-replay fence as the top-level entry: a
-        // sub-walk whose canonical routing deposited non-trivial
-        // evidence is not replayable, and neither is any enclosing
-        // sub-walk (ancestors observe the same epoch advance).
+        self.substitute_node_recorded(node, parameter_node, arg)
+    }
+
+    /// Count one arrival at `(node, parameter, arg)` in the request's
+    /// audit footprint: unique or repeated within the request.
+    fn classify_recursive_substitution(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
+            ctx.classify_recursive_substitute(RecursiveSubstituteIdentity {
+                node: node.0,
+                parameter_node: parameter_node.0,
+                arg: arg.0,
+            })
+        });
+    }
+
+    /// The cold walk of `(node, parameter, arg)` after its memo missed:
+    /// recorded as one computation and published, priced, when complete.
+    ///
+    /// Evidence-blind-replay fence: the store-owned memo is cross-request,
+    /// so a walk whose canonical composite routing deposited NON-TRIVIAL
+    /// evidence (file self-roots, or an incomplete comparison's warm
+    /// suppression) must not be replayed to a later request that would
+    /// then skip the deposit — a stale warm read served on an under-rooted
+    /// entry. The epoch advancing across the walk suppresses the publish,
+    /// for this walk and every enclosing one (ancestors observe the same
+    /// advance); the result itself still flows to the caller.
+    fn substitute_node_recorded(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> (SemanticNodeId, bool) {
         let epoch_before = self.canonical_evidence_epoch.get();
+        let recording = self.substitution_cost(node, parameter_node, arg);
         let (result, changed) =
             self.substitute_with_change_tracking_inner(node, parameter_node, arg);
-        if self.canonical_evidence_epoch.get() == epoch_before && !self.cancellation.is_cancelled()
-        {
+        if let Some(receipt) = self.finish_substitution_cost(recording, epoch_before) {
             self.graph()
-                .substitute_memo_publish(node, parameter_node, arg, result);
+                .substitute_memo_publish_priced(node, parameter_node, arg, result, receipt);
         }
         (result, changed)
     }
@@ -894,7 +978,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     == crate::semantic_query::composite::CompositeOriginCategory::Heritage
                     || new_members.iter().any(|member| {
                         crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
-                            self.graph(),
+                            self.graph().store(),
                             *member,
                         )
                     }) {
@@ -1214,11 +1298,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return (*built, true);
                     }
                 }
+                // A template with a hole still open keeps it; its literal
+                // holes fold into its text all the same.
+                let (quasis, new_expressions) =
+                    match self.folded_literal_holes(quasis, &new_expressions) {
+                        Some((folded, holes)) => {
+                            (verter_type_expr::OwnedSlice::from(folded.as_slice()), holes)
+                        }
+                        None => ((*quasis).clone(), new_expressions),
+                    };
                 (
                     self.graph().intern_preserving_scope(
                         node,
                         SemanticNodeData::TemplateLiteral {
-                            quasis: (*quasis).clone(),
+                            quasis,
                             expressions: crate::semantic_query::PayloadArray::from(
                                 new_expressions.into_boxed_slice(),
                             ),
@@ -1247,6 +1340,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !(oc || ic) {
                     return (node, false);
                 }
+                // An access of the permissive instantiation's wildcard, or by
+                // it, is the wildcard (`getIndexedAccessType` returns
+                // `wildcardType` for either operand).
+                let wildcard = |id: SemanticNodeId| {
+                    matches!(
+                        self.graph().node_data(id).as_deref(),
+                        Some(SemanticNodeData::Opaque(QueryError::PermissiveWildcard))
+                    )
+                };
+                if wildcard(sub_object) {
+                    return (sub_object, true);
+                }
+                if let crate::semantic_query::IndexKey::Computed(index) = &sub_index {
+                    if wildcard(*index) {
+                        return (*index, true);
+                    }
+                }
                 (
                     self.graph().intern_preserving_scope(
                         node,
@@ -1260,9 +1370,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             SemanticNodeData::Mapped { source, mapper } => {
                 // "mapped descents" counter.
-                if let Some(observer) = verter_audit::current_observer() {
+                verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMappedTypeDescend);
-                }
+                });
                 // Exact node identity is the sole shadowing axis. A mapped
                 // TypeParam that merely shares an infer display name is a
                 // distinct declaration and cannot match an exact InferRef.
@@ -1283,8 +1393,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     other => (other, false),
                 };
-                let any_changed =
-                    source_changed || key_space_changed || value_expr_changed || name_remap_changed;
+                let (sub_modifiers_type, modifiers_type_changed) = match mapper.modifiers_type {
+                    Some(m) => {
+                        let (sub, c) = self.substitute_with_change_tracking(m, parameter_node, arg);
+                        (Some(sub), c)
+                    }
+                    None => (None, false),
+                };
+                let any_changed = source_changed
+                    || key_space_changed
+                    || value_expr_changed
+                    || name_remap_changed
+                    || modifiers_type_changed;
                 if !any_changed {
                     return (node, false);
                 }
@@ -1292,9 +1412,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // Distinct from `SubstituteMappedTypeDescend` (every
                 // visit) — fires only on the rebuild branch after at
                 // least one descendant sub-tree changed.
-                if let Some(observer) = verter_audit::current_observer() {
+                verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMappedRebuild);
-                }
+                });
                 (
                     self.graph().intern_preserving_scope(
                         node,
@@ -1320,6 +1440,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 // variable; the mapping stays homomorphic
                                 // over its instantiation.
                                 over_type_variable: mapper.over_type_variable,
+                                modifiers_type: sub_modifiers_type,
                             },
                         },
                     ),
@@ -1350,9 +1471,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 if !any_changed {
                     // "opaque TypeOf returns" counter.
-                    if let Some(observer) = verter_audit::current_observer() {
+                    verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                         observer.record_event(verter_audit::AuditEvent::SubstituteTypeOfOpaque);
-                    }
+                    });
                     return (node, false);
                 }
                 let rebuilt = data
@@ -1372,9 +1493,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // substitution is deferred onto the sealed pending frame
                 // so an undemanded loser is never traversed. Selection
                 // does not run here.
-                if let Some(observer) = verter_audit::current_observer() {
+                verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteConditionalDescend);
-                }
+                });
                 // Capture-avoidance for an `Infer` binder — the same
                 // shadow rule the Mapped arm applies, here on the
                 // conditional-scope axis: a
@@ -1435,9 +1556,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !cc && !ec && next_pending == *pending {
                     return (node, false);
                 }
-                if let Some(observer) = verter_audit::current_observer() {
+                verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteConditionalRebuild);
-                }
+                });
                 (
                     self.graph().intern_preserving_scope(
                         node,
@@ -1884,6 +2005,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if let Some(remap) = mapper.name_remap {
                         stack.push(remap);
                     }
+                    stack.extend(mapper.modifiers_type);
                 }
                 // A construction program is not an infer-binding boundary:
                 // an `infer` inside a program effect declares for the
@@ -2020,7 +2142,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => None,
         };
 
-        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut stack: Vec<SemanticNodeId> = Vec::new();
         stack.push(root);
         while let Some(node) = stack.pop() {
@@ -2103,6 +2225,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let shadowed = mapper.parameter_node == target;
                     stack.push(*source);
                     stack.push(mapper.key_space);
+                    stack.extend(mapper.modifiers_type);
                     if !shadowed {
                         stack.push(mapper.value_expr);
                         if let Some(remap) = mapper.name_remap {

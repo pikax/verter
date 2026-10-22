@@ -47,6 +47,7 @@ impl VerterHost {
         self.host_view_env_hashes_for(canonical_id).parse_env_hash == indexed.parse_env_hash
     }
 
+    #[cfg(feature = "semantic-observe")]
     /// The owner's DIRECT import targets — every authored import
     /// specifier on the owner's shallow surface, resolved through the
     /// shared route-edge policy.
@@ -72,12 +73,9 @@ impl VerterHost {
             .import_targets
             .values()
             .filter_map(|target| {
-                match self.resolve_route_edge_canonical(canonical_id, &target.source_specifier) {
-                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                        admitted.into_result()
-                    }
-                    verter_workspace::ResolutionPublication::Refused(_) => None,
-                }
+                self.resolve_route_edge_canonical(canonical_id, &target.source_specifier)
+                    .into_delivered()
+                    .flatten()
             })
             .collect()
     }

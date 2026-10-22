@@ -1,5 +1,7 @@
 use super::*;
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_runtime_cache_remains_authoritative_after_legacy_slot_is_cleared() {
@@ -346,6 +348,8 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_only_budget_partial_does_not_warm_component_meta_result_db() {
@@ -468,6 +472,8 @@ fn direct_resolve_fallthrough_surface_installs_context_so_budget_gate_is_live() 
 /// result warms `ComponentMetaResultDb`. A regression that wrongly gated on the
 /// surface-shape `accepted_surface_completeness == LowerBound` would refuse this
 /// and the replay would be cold.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn lower_bound_complete_fallthrough_surface_still_warms_component_meta_result_db() {
@@ -656,6 +662,8 @@ fn lower_bound_complete_fallthrough_surface_still_warms_cached_meta_payload() {
 /// The partial is fallthrough-ONLY: the no-macro owner's Expanded resolve
 /// completes cleanly (`synthesis_should_suppress == false`), isolating the
 /// budget fuse from the synthesis gate (the exact shape D4 targets).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_only_budget_partial_not_warmed_through_session_view_surfaces() {
@@ -802,6 +810,8 @@ fn fallthrough_only_budget_partial_not_warmed_through_session_view_surfaces() {
 /// budget is set to `max(R, S)`: resolve alone (`R <= K`) and fallthrough
 /// alone (`S <= K`) each stay within it, but the combined cold work
 /// (`C = R + S > K`) trips a SHARED budget.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn combined_resolve_plus_fallthrough_budget_partial_not_warmed_through_session_view_surfaces() {
@@ -956,6 +966,8 @@ fn combined_resolve_plus_fallthrough_budget_partial_not_warmed_through_session_v
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_runtime_reuse_survives_host_cache_clear() {

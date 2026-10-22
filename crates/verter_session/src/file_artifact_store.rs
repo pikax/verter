@@ -144,6 +144,25 @@ impl FileFacts {
         self.lazy.as_ref()?.compute(key)
     }
 
+    /// [`Self::lookup_or_compute`], keeping the refusal evidence of the
+    /// declaration-body reads a lazy fact rested on instead of applying it:
+    /// a refused read answers `None` for a fact a retry under a live lease
+    /// can compute, which a validator must not take for a consistent
+    /// absence.
+    pub(crate) fn lookup_or_compute_read(
+        &self,
+        key: &fact_registry::FactKey,
+    ) -> verter_session_query::source::demand::SourceRead<Option<fact_registry::Fact>> {
+        use verter_session_query::source::demand::SourceRead;
+        if let Some(fact) = self.lookup(key) {
+            return SourceRead::clean(Some(fact.clone()));
+        }
+        match self.lazy.as_ref() {
+            Some(lazy) => lazy.compute_read(key),
+            None => SourceRead::clean(None),
+        }
+    }
+
     /// Borrow the underlying registry. O(1) per-key lookup via
     /// `registry().get(&key)`.
     #[must_use]
@@ -190,10 +209,11 @@ impl FileFacts {
 
 /// Kind of augmentation target.
 ///
-/// Distinguishes external specifiers (`declare module "vue" {}`),
-/// resolved relative paths (`declare module "./local" {}` resolved
-/// against the augmenter), wildcard ambients (`declare module "*.css" {}`),
-/// and the global block (`declare global {}`).
+/// Distinguishes external specifiers (`declare module "vue" {}`), the
+/// module file a relative or package specifier resolves to from the
+/// augmenter (`declare module "./local" {}`, or `declare module "pkg" {}`
+/// in a module), wildcard ambients (`declare module "*.css" {}`), and the
+/// global block (`declare global {}`).
 // Dependency-neutral augmentation key vocabulary shared with the semantic
 // observation boundary. `InternedSpecifier`/`InternedGlobPattern` are fact
 // registry values, and these key types contain no session/host behavior.
@@ -361,7 +381,7 @@ fn base_snapshot_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool 
 /// every call site (an augmenter artifact only ever replaces itself at its own
 /// canonical), so comparing `parse_stable_hash` here is exactly comparing the
 /// per-augmenter fingerprint contribution. The fact compare is order-
-/// INDEPENDENT (a multiset over the five fact dimensions) and CONSERVATIVE:
+/// INDEPENDENT (a multiset over the six fact dimensions) and CONSERVATIVE:
 /// any genuine membership change makes the multisets differ. The lockstep unit
 /// invariant
 /// `file_artifact_store_tests::augmentation_contribution_equivalence_tracks_fingerprint_inputs`
@@ -382,7 +402,7 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
     if prev_facts.len() != next_facts.len() {
         return false;
     }
-    // Multiset compare keyed by the five fact dimensions (all `Eq + Hash`).
+    // Multiset compare keyed by the six fact dimensions (all `Eq + Hash`).
     // `ModuleAugmentationFact` is not `Eq`, so fold a per-fact count map and
     // confirm `next` exactly drains it.
     type FactKey = (
@@ -391,6 +411,7 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
         InternedName,
         SymbolSpace,
         Hash16,
+        verter_session_query::inputs::contributors::FileModuleKind,
     );
     let key_of = |fact: &ModuleAugmentationFact| -> FactKey {
         (
@@ -399,6 +420,7 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
             fact.augmented_name.clone(),
             fact.space,
             fact.augmented_member_shape_fingerprint,
+            fact.declaring_file,
         )
     };
     let mut counts: rustc_hash::FxHashMap<FactKey, i64> = rustc_hash::FxHashMap::default();
@@ -959,9 +981,9 @@ pub struct FileArtifactStore {
     /// [`Self::evict_lru_promoted`] under explicit memory pressure.
     access_tick: AtomicU64,
     /// Live entry counter.
-    live_counter: Arc<AtomicU64>,
+    live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Stale-sweep counter.
-    stale_sweeps: Arc<AtomicU64>,
+    stale_sweeps: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Monotonic artifact-publication generation.
     ///
     /// Bumped on every mutation that changes the per-canonical
@@ -1060,7 +1082,10 @@ impl FileArtifactStore {
         Self::with_counters(Default::default(), Default::default())
     }
 
-    pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counters(
+        live: verter_type_engine::cache_runtime::OccupancyCounter,
+        stale: verter_type_engine::cache_runtime::OccupancyCounter,
+    ) -> Self {
         Self::with_counters_and_schema_version(
             live,
             stale,
@@ -1080,8 +1105,8 @@ impl FileArtifactStore {
     }
 
     fn with_counters_and_schema_version(
-        live: Arc<AtomicU64>,
-        stale: Arc<AtomicU64>,
+        live: verter_type_engine::cache_runtime::OccupancyCounter,
+        stale: verter_type_engine::cache_runtime::OccupancyCounter,
         schema_version: u32,
     ) -> Self {
         Self {
@@ -1638,6 +1663,8 @@ impl FileArtifactStore {
     /// Look up the indexed artifact for `canonical_id` if the cached
     /// entry matches `expected_whole_hash`. Stale entries are ignored.
     #[must_use]
+    /// [`Self::get_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get(
         &self,
         canonical_id: &str,
@@ -1645,7 +1672,25 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
-        self.get_base_artifacts(
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, expected_whole_hash, expected_parse_key, expected_file_language)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub fn get_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        expected_whole_hash: Hash16,
+        expected_parse_key: &verter_language::ParseKey,
+        expected_file_language: &FileLanguage,
+    ) -> Option<Arc<IndexedReady>> {
+        let _ = observation;
+        self.get_base_artifacts::<M>(
+            observation,
             canonical_id,
             expected_whole_hash,
             expected_parse_key,
@@ -1657,13 +1702,15 @@ impl FileArtifactStore {
     /// [`Self::get`] returning the whole base `FileArtifacts` entry, for a
     /// reader that also consumes the artifact's parse facts.
     #[must_use]
-    pub(crate) fn get_base_artifacts(
+    pub(crate) fn get_base_artifacts<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         expected_whole_hash: Hash16,
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<FileArtifacts>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1685,7 +1732,7 @@ impl FileArtifactStore {
                     Arc::clone(&stored.payload)
                 })
         });
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1697,7 +1744,7 @@ impl FileArtifactStore {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -1733,6 +1780,8 @@ impl FileArtifactStore {
     /// overlay-scoped read never reaches the base entry. Stale
     /// candidates for an older content hash yield `None`.
     #[must_use]
+    /// [`Self::get_overlay_scoped_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get_overlay_scoped(
         &self,
         canonical_id: &str,
@@ -1741,6 +1790,24 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_overlay_scoped_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, expected_whole_hash, discriminator, expected_parse_key, expected_file_language)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub fn get_overlay_scoped_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        expected_whole_hash: Hash16,
+        discriminator: Hash16,
+        expected_parse_key: &verter_language::ParseKey,
+        expected_file_language: &FileLanguage,
+    ) -> Option<Arc<IndexedReady>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1767,7 +1834,7 @@ impl FileArtifactStore {
                         Arc::clone(&stored.payload.indexed)
                     })
             });
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1779,7 +1846,7 @@ impl FileArtifactStore {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -1817,7 +1884,23 @@ impl FileArtifactStore {
     /// base reader. A session-view reader that wants its overlay
     /// artifact uses [`Self::get_overlay_scoped`] (exact key) instead.
     #[must_use]
+    /// [`Self::get_any_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_any_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub fn get_any_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) -> Option<Arc<IndexedReady>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1840,7 +1923,7 @@ impl FileArtifactStore {
                 }
             }
         }
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1852,7 +1935,7 @@ impl FileArtifactStore {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -1877,7 +1960,29 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
-        self.get(
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_for_current_content_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(),
+                canonical_id,
+                expected_content_hash,
+                expected_parse_key,
+                expected_file_language,
+            )
+
+        })
+    }
+
+    /// Content-pinned lookup using the calling execution's capture receivers.
+    #[must_use]
+    pub fn get_for_current_content_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        expected_content_hash: Hash16,
+        expected_parse_key: &verter_language::ParseKey,
+        expected_file_language: &FileLanguage,
+    ) -> Option<Arc<IndexedReady>> {
+        self.get_in::<M>(
+            observation,
             canonical_id,
             expected_content_hash,
             expected_parse_key,
@@ -2975,7 +3080,7 @@ impl FileArtifactStore {
         // R23 typed event: a `FileArtifactStore` entry was admitted.
         // Best-effort emission — silent no-op when no observer
         // accumulator is installed on the current thread.
-        verter_type_engine::request_observers::push_structured_event(
+        verter_type_engine::component_meta_trace_structured!(
             crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                 canonical_id: Arc::clone(&canonical),
                 action: verter_audit::FileArtifactCacheAction::Admit,
@@ -3024,7 +3129,7 @@ impl FileArtifactStore {
             self.bump_artifact_generation();
             // R23 typed event: a `FileArtifactStore` entry was
             // evicted. Best-effort emission.
-            verter_type_engine::request_observers::push_structured_event(
+            verter_type_engine::component_meta_trace_structured!(
                 crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                     canonical_id: canonical,
                     action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3064,7 +3169,7 @@ impl FileArtifactStore {
             // downstream telemetry can attribute drain footprint
             // per `FileArtifactKey` dimension.
             for (key, _payload) in &removed_pairs {
-                verter_type_engine::request_observers::push_structured_event(
+                verter_type_engine::component_meta_trace_structured!(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3101,7 +3206,7 @@ impl FileArtifactStore {
                 .fetch_add(removed as u64, Ordering::Relaxed);
             self.bump_artifact_generation();
             for (key, _payload) in &removed_pairs {
-                verter_type_engine::request_observers::push_structured_event(
+                verter_type_engine::component_meta_trace_structured!(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3207,6 +3312,20 @@ impl FileArtifactStore {
         key: AugmentationTargetKey,
         set: Arc<AugmenterSet>,
     ) -> Option<Arc<AugmenterSet>> {
+        self.install_augmenter_set_if(key, set, |_| true)
+            .expect("an unconditional install always installs")
+    }
+
+    /// [`Self::install_augmenter_set`], applied only when `admit` accepts
+    /// the set the index holds at `key` (`None` when vacant), decided under
+    /// the same entry guard as the install. `None` when nothing was
+    /// installed; otherwise the displaced set, if any.
+    fn install_augmenter_set_if(
+        &self,
+        key: AugmentationTargetKey,
+        set: Arc<AugmenterSet>,
+        admit: impl FnOnce(Option<&AugmenterSet>) -> bool,
+    ) -> Option<Option<Arc<AugmenterSet>>> {
         let reservation = self.reserve_membership_epoch();
         let epoch = reservation.epoch();
         let version = AugmenterVersion {
@@ -3227,7 +3346,20 @@ impl FileArtifactStore {
         //   version reaches the retired chain before the live slot stops
         //   holding it, so a root-relative reader can never find it in
         //   neither map.
-        let retired = match self.augmentation_index.entry(key.clone()) {
+        let entry = self.augmentation_index.entry(key.clone());
+        let admitted = match &entry {
+            AugmentationIndexEntry::Occupied(slot) => admit(Some(&slot.get().set)),
+            AugmentationIndexEntry::Vacant(_) => admit(None),
+        };
+        if !admitted {
+            drop(entry);
+            drop(reservation);
+            // A rejection still completes a reserved transition: a mutation
+            // that landed while this epoch was in flight skipped its publish.
+            self.publish_global_contributors();
+            return None;
+        }
+        let retired = match entry {
             AugmentationIndexEntry::Occupied(mut slot) => {
                 let previous = slot.get();
                 self.retired_augmenters
@@ -3252,7 +3384,7 @@ impl FileArtifactStore {
         if retired.is_some() {
             self.note_retirements(1);
         }
-        retired
+        Some(retired)
     }
 
     /// THE sole augmentation-index retirement combinator. Logical, like
@@ -3358,6 +3490,48 @@ impl FileArtifactStore {
         prev
     }
 
+    /// Re-key the entries of the set `key` holds: `observed`, with each
+    /// `(index, artifact_key)` of `refreshed` healed to its current exact
+    /// key, under the same fingerprint. Returns whether it was written.
+    ///
+    /// A refresh re-keys a set the index holds; it never installs one. A set
+    /// the index does not hold under `observed`'s fingerprint was served to
+    /// its request only (its scan consumed a resolution the process did not
+    /// keep) or has since been superseded, and healing its keys makes it
+    /// neither retainable nor current.
+    pub fn refresh_augmenter_set_keys(
+        &self,
+        key: &AugmentationTargetKey,
+        observed: &AugmenterSet,
+        refreshed: Vec<(usize, FileArtifactKey)>,
+    ) -> bool {
+        let holds_observed = |held: Option<&AugmenterSet>| {
+            held.is_some_and(|held| held.fingerprint == observed.fingerprint)
+        };
+        if refreshed.is_empty() || !holds_observed(self.get_augmenter_set(key).as_deref()) {
+            return false;
+        }
+        let mut entries = observed.entries.clone();
+        for (index, artifact_key) in refreshed {
+            entries[index].artifact_key = artifact_key;
+        }
+        let set = Arc::new(AugmenterSet {
+            entries,
+            fingerprint: observed.fingerprint,
+        });
+        // The held-set check repeats under the install's entry guard: an
+        // invalidation or a differently-fingerprinted publish that lands
+        // after the check above must not be overwritten by the observed set.
+        // A same-fingerprint re-key changes no recorded shape fact, so it
+        // moves neither the route-surface generation nor the artifact one.
+        self.route_surface_generation.mutate(|| {
+            let installed = self
+                .install_augmenter_set_if(key.clone(), set, holds_observed)
+                .is_some();
+            (installed, false)
+        })
+    }
+
     /// Snapshot the base-artifact augmenter rows into an owned `Vec`,
     /// then drop the `self.artifacts` shard guards.
     ///
@@ -3432,11 +3606,11 @@ impl FileArtifactStore {
     /// nothing (matches TypeScript's own augmentation-visibility
     /// rule).
     ///
-    /// `resolve_relative_canonical` is a caller-supplied hook that
-    /// resolves a `(augmenter_canonical, relative_specifier)` pair to
-    /// a canonical when the queried target is `ResolvedRelativeCanonical`.
-    /// `None` means the augmenter's specifier did not resolve to the
-    /// queried canonical and the augmenter is skipped.
+    /// `resolve` is a caller-supplied hook that resolves an
+    /// `(augmenter_canonical, specifier)` pair — a relative specifier, or a
+    /// package specifier declared in a module — to the module file it names
+    /// when the queried target is `ResolvedRelativeCanonical`. `None` means
+    /// the specifier resolved to no file and the augmenter is skipped.
     #[cfg(any(test, feature = "test-support"))]
     pub fn ensure_augmentation_index_populated<R>(
         &self,
@@ -3448,7 +3622,15 @@ impl FileArtifactStore {
         R: Fn(&str, &str) -> Option<Arc<str>>,
     {
         crate::host_manage::source_augmentation::AugmentationRequestDriver::new(self)
-            .ensure_populated(key, resolve, discriminator)
+            .ensure_populated(
+                key,
+                |canonical, specifier| {
+                    crate::host_manage::source_augmentation::AugmentationTarget::admitted(resolve(
+                        canonical, specifier,
+                    ))
+                },
+                discriminator,
+            )
     }
 
     /// Invalidate every `augmentation_index` entry that the augmenter
@@ -3684,10 +3866,11 @@ impl verter_type_engine::invalidation_domain::InvalidationByCanonical for FileAr
 ///
 /// Exact arms (`ExternalSpecifier` / `WildcardAmbient` / `GlobalAugmentation`)
 /// are decided from the fact's specifier alone — no resolver needed. The
-/// `ResolvedRelativeCanonical` arm cannot resolve the augmenter's relative
-/// specifier without a module resolver (the store layer has none), so it
-/// answers CONSERVATIVELY: any relative `declare module "./x"` fact is treated
-/// as a potential contributor to EVERY relative-target entry.
+/// `ResolvedRelativeCanonical` arm cannot resolve the augmenter's specifier
+/// without a module resolver (the store layer has none), so it answers
+/// CONSERVATIVELY: any `declare module` fact augmenting a module file (`"./x"`,
+/// or `"pkg"` declared in a module) is treated as a potential contributor to
+/// EVERY resolved-file entry.
 ///
 /// Over-matching here is correctness-safe: an invalidation only DROPS an index
 /// entry, and the next [`FileArtifactStore::ensure_augmentation_index_populated`]
@@ -3702,11 +3885,10 @@ fn augmenter_fact_could_contribute(
     target_key: &AugmentationTargetKey,
 ) -> bool {
     let specifier: &str = fact.specifier.as_ref();
-    // Same relative class as `augmenter_matches_target` — the exact
-    // matcher and this conservative invalidation variant must agree on
-    // which facts are relative, or a `declare module '..'` fact would
-    // be exact-matched as relative but never invalidate relative-target
-    // entries.
+    // Same relative class as `augmenter_matches_target`'s external arm —
+    // the exact matcher and this conservative invalidation variant must
+    // agree on which facts are relative, or a `declare module '..'` fact
+    // would be exact-matched as relative yet invalidate external entries.
     let is_relative = verter_session_query::resolution::is_relative_specifier(specifier);
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
@@ -3714,9 +3896,12 @@ fn augmenter_fact_could_contribute(
             let is_global = specifier == GLOBAL_AUGMENTATION_TAG;
             !is_relative && !is_wildcard && !is_global && specifier == target_spec.as_ref()
         }
-        // Conservative: cannot resolve the relative specifier without a
-        // module resolver, so any relative fact could target this entry.
-        AugmentationTargetKind::ResolvedRelativeCanonical(_) => is_relative,
+        // Conservative: cannot resolve the specifier without a module
+        // resolver, so any fact augmenting a module file could target this
+        // entry.
+        AugmentationTargetKind::ResolvedRelativeCanonical(_) => {
+            verter_session_query::source::augmentation::fact_augments_resolved_module(fact)
+        }
         AugmentationTargetKind::WildcardAmbient(target_pattern) => {
             specifier.contains('*') && specifier == target_pattern.as_ref()
         }
@@ -3796,7 +3981,7 @@ pub(crate) fn emit_module_augmentation_index_shape_event(
             None,
         ),
     };
-    verter_type_engine::request_observers::push_structured_event(
+    verter_type_engine::component_meta_trace_structured!(
         crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationIndexShape {
             target_kind_tag: tag,
             external_specifier,
@@ -3862,7 +4047,7 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
 /// dimension); the parallel `semantic_hash` and `display_hash`
 /// fields carry both lane hashes simultaneously.
 fn emit_fact_registry_writes(canonical_id: &Arc<str>, fact: &fact_registry::Fact) {
-    verter_type_engine::request_observers::push_structured_event(
+    verter_type_engine::component_meta_trace_structured!(
         crate::component_meta_audit::StructuredAuditEvent::FactRegistryWrite {
             canonical_id: Arc::clone(canonical_id),
             fact_key_kind: fact_key_kind_tag_for(&fact.key),

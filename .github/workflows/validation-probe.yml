@@ -109,7 +109,7 @@ jobs:
       - name: Run the workload probe
         env:
           VALIDATION_PROBE_LANE: main
-        run: cargo nextest run -p verter_validation_probe --features external-corpus -E 'not test(observation_lane_emits_one_artifact)'
+        run: cargo nextest run -p verter_validation_probe --features external-corpus
 
       - name: Upload the summary artifact
         if: always()
@@ -188,10 +188,10 @@ jobs:
         working-directory: .integration-tests/repos/svelte-benchmarks
         run: pnpm --ignore-workspace install && pnpm generate
 
+      # The capture drives every case cold and warm, so its duration follows
+      # the corpus: a lane binary bounded by this job's timeout, not a test.
       - name: Capture observations
-        env:
-          VALIDATION_PROBE_LANE: main
-        run: cargo nextest run -p verter_validation_probe --features external-corpus -E 'test(observation_lane_emits_one_artifact)'
+        run: cargo run -p verter_validation_probe --features external-corpus --bin validation-probe-observe -- --lane main
 
       - name: Upload the observation artifact
         if: always()

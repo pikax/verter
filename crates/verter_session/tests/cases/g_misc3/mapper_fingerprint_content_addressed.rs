@@ -492,6 +492,7 @@ fn make_indexed_access_foo_k() -> Arc<TypeExpr> {
 #[allow(dead_code)]
 fn make_object_with_two_props() -> Arc<TypeExpr> {
     Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "a".into(),

@@ -44,7 +44,7 @@ pub enum SourceMapChainError {
 /// nameIdx)` unchanged.
 type Payload = Option<(u32, u32, u32, Option<u32>)>;
 
-impl<'a> CodeTransform<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// Re-express `input` — a map of this transform's INPUT text — as a map of
     /// this transform's OUTPUT text, carrying every authored payload unchanged.
     ///

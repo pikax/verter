@@ -369,7 +369,7 @@ impl RequestAuditRecord {
 /// Every audited entry-point now returns a [`RequestAuditRecord`]
 /// unconditionally (the [`crate::AuditedResult`] carrier's `audit`
 /// field is mandatory in both arms). This discriminant lets a consumer
-/// tell apart the three capture regimes without inspecting the rest of
+/// tell apart the capture regimes without inspecting the rest of
 /// the envelope:
 ///
 /// - [`AuditCaptureState::ActiveStored`] — the consumer filter accepted
@@ -382,6 +382,10 @@ impl RequestAuditRecord {
 /// - [`AuditCaptureState::AuditDisabled`] — audit was disabled at the
 ///   host config (`audit_enabled = false`). No observer was installed;
 ///   the returned record is the cheap default-filled envelope.
+/// - [`AuditCaptureState::Unavailable`] — the binary was built without
+///   the `semantic-observe` capture feature. Nothing was measured; the
+///   record's metric fields carry no observation and must not be read
+///   as zero metrics.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash, Default)]
 #[ts(export_to = "audit.generated.ts")]
 pub enum AuditCaptureState {
@@ -394,6 +398,18 @@ pub enum AuditCaptureState {
     /// Audit disabled at host config; a cheap default-filled record is
     /// returned and nothing is stored.
     AuditDisabled,
+    /// Capture is compiled out of this binary (no `semantic-observe`).
+    /// Nothing was measured or stored; the metric fields are absent
+    /// observations, never zero metrics.
+    Unavailable,
+}
+
+impl AuditCaptureState {
+    /// `true` when the record carries measured observations.
+    #[must_use]
+    pub const fn is_captured(self) -> bool {
+        matches!(self, Self::ActiveStored)
+    }
 }
 
 /// Discriminant naming the producer surface that emitted the record.

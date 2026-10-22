@@ -65,8 +65,8 @@ use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::FactKey;
 use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 use verter_type_engine::semantic_query::{
-    IndexKey, PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
+    IndexKey, PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext, PropertyKey,
+    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
 use verter_type_expr::TypeExpr;
 
@@ -97,6 +97,7 @@ export type Remapped = {
 };
 "#;
 
+#[cfg(feature = "semantic-observe")]
 /// The same six-key shape with the remap written INLINE rather than
 /// through a userland helper. Deciding an inline conditional remap needs
 /// no nested query, so a cancelled request does not fail the first key
@@ -378,33 +379,25 @@ fn single_key_demand_through_remapping_mapper_forces_only_the_producing_key() {
     );
 
     // Independent of node identity: the `boxed` member's own value must
-    // address SOURCE KEY `b`, never `e`. The published value is the
-    // addressable `WideSource['b']` access, so the producing iteration key
-    // is readable directly off it — exactly the fact a wrong-producer
-    // regression changes while leaving every member NAME and every counter
-    // identical.
+    // be SOURCE KEY `b`'s, never `e`'s. The published value reads
+    // `WideSource['b']` through to the member's type, `number` (`e` holds
+    // `number[]`), so the producing iteration key shows in it — exactly
+    // the fact a wrong-producer regression changes while leaving every
+    // member NAME and every counter identical.
     let boxed_value = member_value(&host, narrowed, "boxed");
-    let indexed_key = match host
-        .project_type_store()
-        .semantic_graph()
-        .node_data(boxed_value)
-        .as_deref()
-    {
-        Some(SemanticNodeData::IndexedAccess {
-            index: IndexKey::String(name),
-            ..
-        }) => name.to_string(),
-        other => panic!(
-            "`Remapped['kept_b']`'s `boxed` member is `WideSource['b']`, an addressable \
-             indexed access; got {other:?}"
+    assert!(
+        matches!(
+            host.project_type_store()
+                .semantic_graph()
+                .node_data(boxed_value)
+                .as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
         ),
-    };
-    assert_eq!(
-        indexed_key, "b",
         "the demanded produced name `kept_b` is produced by iteration key `b`, so the value \
-         must address `WideSource['b']`. `e` here means the remap preimage selected the wrong \
-         producing key — a regression invisible to member names (`boxed` either way) and to \
-         the per-K counter (one materialisation either way)."
+         must be `WideSource['b']`, `number`. `number[]` here means the remap preimage selected \
+         the wrong producing key `e` — a regression invisible to member names (`boxed` either \
+         way) and to the per-K counter (one materialisation either way). got {}",
+        describe(&host, boxed_value)
     );
 }
 
@@ -1081,6 +1074,7 @@ fn single_key_demand_through_an_identity_remap_is_independent_of_source_width() 
     );
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Audit observer that cancels the ACTIVE request the first time a
 /// top-level type-parameter substitution is issued, and counts every
 /// substitution the run performs.
@@ -1091,11 +1085,13 @@ fn single_key_demand_through_an_identity_remap_is_independent_of_source_width() 
 /// that key is decided.
 const CANCEL_AT_SUBSTITUTION: u64 = 3;
 
+#[cfg(feature = "semantic-observe")]
 struct CancelOnFirstSubstitution {
     seen: std::sync::atomic::AtomicU64,
     ctx: Arc<verter_type_engine::request_context::RequestContext>,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl verter_audit::AuditObserver for CancelOnFirstSubstitution {
     fn record_event(&self, event: verter_audit::AuditEvent) {
         if matches!(event, verter_audit::AuditEvent::SubstituteTopLevelCall) {
@@ -1107,6 +1103,7 @@ impl verter_audit::AuditObserver for CancelOnFirstSubstitution {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Counts substitutions without cancelling — the control that says how
 /// much work an UNINTERRUPTED build performs, so the cancelled run's
 /// count is compared against a measured quantity rather than a guess.
@@ -1114,6 +1111,7 @@ struct CountSubstitutions {
     seen: std::sync::atomic::AtomicU64,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl verter_audit::AuditObserver for CountSubstitutions {
     fn record_event(&self, event: verter_audit::AuditEvent) {
         if matches!(event, verter_audit::AuditEvent::SubstituteTopLevelCall) {
@@ -1137,6 +1135,8 @@ fn project_result(
     )
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// REGRESSION BOUNDARY (cancelled mapped projection): once the request
 /// is cancelled, a mapped projection must stop substituting keys and
 /// must not hand back a published surface.
@@ -1592,6 +1592,8 @@ fn a_proven_absent_key_on_a_plain_mapper_misses_without_forcing_any_value() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// REGRESSION BOUNDARY (cancelled mapped key loop, BOTH publication
 /// rails): once the request is cancelled, a mapped evaluation must stop
 /// forcing key values rather than run its key domain out.

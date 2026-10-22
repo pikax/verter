@@ -255,11 +255,13 @@ fn generic_arguments_bind_by_declared_order_and_defaults_follow_the_named_parame
 /// a constrained generic must substitute exactly, not collapse to the
 /// constraint or to a sibling instantiation.
 ///
-/// `Constrained<K extends keyof WideSource>` projects `WideSource[K]`.
-/// Three different literal arguments must produce three different
-/// bodies. Substituting the CONSTRAINT (`keyof WideSource`) instead of
-/// the argument, or memoising the instantiation on the declaration
-/// rather than on `(declaration, arguments)`, makes all three identical.
+/// `Constrained<K extends keyof WideSource>` projects `WideSource[K]`,
+/// which the published answer reads through to the member's type. Three
+/// different literal arguments must produce the three members' types.
+/// Substituting the CONSTRAINT (`keyof WideSource`) instead of the
+/// argument reads the union of every member, and memoising the
+/// instantiation on the declaration rather than on `(declaration,
+/// arguments)` makes all three identical.
 #[test]
 fn constrained_parameter_substitutes_the_exact_argument_not_its_constraint() {
     let host = new_host();
@@ -276,24 +278,24 @@ fn constrained_parameter_substitutes_the_exact_argument_not_its_constraint() {
         })
         .collect();
 
-    for (key, node) in &picked {
-        let graph = host.project_type_store().semantic_graph();
-        let data = graph.node_data(*node);
-        let indexed_key = match data.as_deref() {
-            Some(SemanticNodeData::IndexedAccess {
-                index: verter_type_engine::semantic_query::IndexKey::String(name),
-                ..
-            }) => name.to_string(),
-            other => panic!(
-                "`Constrained<'{key}'>['picked']` must carry the substituted index; got {other:?}"
-            ),
-        };
+    for ((key, node), member) in picked.iter().zip([
+        PrimitiveName::String,
+        PrimitiveName::Number,
+        PrimitiveName::Boolean,
+    ]) {
+        let expected = lower(
+            &host,
+            &TypeExpr::primitive(member),
+            ProjectionMode::Expanded,
+        );
         assert_eq!(
-            indexed_key,
-            key.to_string(),
-            "the constrained parameter must substitute the EXACT argument into the index \
-             position; substituting the constraint `keyof WideSource` or a sibling \
-             instantiation's argument gives a different key"
+            *node,
+            expected,
+            "`Constrained<'{key}'>['picked']` must read `WideSource['{key}']`, the member the \
+             EXACT argument names; substituting the constraint `keyof WideSource` reads every \
+             member and a sibling instantiation's argument reads another. got={} want={}",
+            describe(&host, *node),
+            describe(&host, expected)
         );
     }
 
@@ -501,6 +503,8 @@ fn mapper_kind_classification_materialises_no_value_body() {
 /// identity — pinned by
 /// `distinct_argument_environments_instantiate_once_each_and_repeats_join_the_memo`),
 /// otherwise a count of one would only mean the demands collapsed.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn one_generic_body_lowers_once_across_distinct_argument_environments() {
     let host = new_host();

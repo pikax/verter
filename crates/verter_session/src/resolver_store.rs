@@ -337,6 +337,7 @@ pub fn dump_from_host_call_sites() -> Vec<(String, u64)> {
     rows
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Per-request component-meta store counters captured by
 /// [`VerterHost::component_meta_audit_store_snapshot`]. The fields
 /// live on [`crate::component_meta_audit::ComponentMetaPayload`]
@@ -346,8 +347,6 @@ pub fn dump_from_host_call_sites() -> Vec<(String, u64)> {
 /// the audit-builder finalisation.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ComponentMetaStoreCounters {
-    pub materialize_structure_calls: u64,
-    pub materialize_structure_cache_hits: u64,
     pub node_arena_lock_acquisitions: u64,
     pub family_map_lock_acquisitions: u64,
     pub dep_signature_merges: u64,
@@ -1571,12 +1570,12 @@ impl HostStoreView {
             .fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(c.get().saturating_add(1)));
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             ctx.cache_counters
                 .bypass_diagnostics
                 .host_store_view_from_host_builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        });
         host.store_view_manager().base_view(host)
     }
 
@@ -2054,7 +2053,7 @@ impl HostStoreView {
     /// requires both. The memo is bypassed deliberately — a memoized
     /// answer is not a root read, and a control that could be satisfied by
     /// a cache hit would prove nothing about the instrumentation.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "semantic-observe"))]
     pub(crate) fn owner_read_through_roots_for_tests(
         &self,
         canonical_id: &str,
@@ -3212,36 +3211,7 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
         &self,
         fact: &verter_session_query::facts::fact_cache::ParseFactRef,
     ) -> bool {
-        const ZERO_HASH: Hash16 = [0u8; 16];
-        let resolved = self.canonical_view(fact.canonical_id.as_str());
-        let facts = match resolved.file_facts.as_ref() {
-            Some(f) => f,
-            // Untracked file — accept if the observed hash was the
-            // zero sentinel (producer saw the file as unavailable
-            // and recorded the sentinel; absence is consistent).
-            // Otherwise reject — the consumer observed a real fact
-            // hash but the file has dropped out of the index.
-            None => return fact.expected_hash == ZERO_HASH,
-        };
-        // `lookup_or_compute`: a recorded body-sensitive `Export` /
-        // `LocalDecl` observation revalidates through the SAME lazy
-        // body fact path that produced it (the side-store is Arc-shared
-        // with the snapshot's `FileFacts` clone).
-        match facts.lookup_or_compute(&fact.key) {
-            Some(stored) => {
-                let stored_hash = match fact.lane {
-                    verter_session_query::facts::registry::FactLane::Semantic => {
-                        stored.semantic_hash
-                    }
-                    verter_session_query::facts::registry::FactLane::Display => stored.display_hash,
-                };
-                stored_hash == fact.expected_hash
-            }
-            // Fact absent in registry — accept iff observed was the
-            // zero sentinel (consistent absence — see
-            // `fact_signature_helpers::parse_fact_ref`).
-            None => fact.expected_hash == ZERO_HASH,
-        }
+        self.check_parse_domain(fact).validates()
     }
 
     /// Resolve-imports-domain validator (R26).
@@ -3425,6 +3395,46 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
         &self,
         fact: &verter_session_query::facts::fact_cache::ProgramAnalysisFactRef,
     ) -> bool {
+        self.check_program_analysis_domain(fact).validates()
+    }
+}
+
+impl HostStoreView {
+    /// [`StoreView::validates_parse_domain`], telling a fact that fails
+    /// against what was read from one whose lazy body read was refused.
+    ///
+    /// [`StoreView::validates_parse_domain`]: verter_session_query::facts::store_view::StoreView::validates_parse_domain
+    pub(crate) fn check_parse_domain(
+        &self,
+        fact: &verter_session_query::facts::fact_cache::ParseFactRef,
+    ) -> LeafCheck {
+        const ZERO_HASH: Hash16 = [0u8; 16];
+        let resolved = self.canonical_view(fact.canonical_id.as_str());
+        let facts = match resolved.file_facts.as_ref() {
+            Some(f) => f,
+            // Untracked file — accept if the observed hash was the
+            // zero sentinel (producer saw the file as unavailable
+            // and recorded the sentinel; absence is consistent).
+            // Otherwise reject — the consumer observed a real fact
+            // hash but the file has dropped out of the index.
+            None => return LeafCheck::of(fact.expected_hash == ZERO_HASH),
+        };
+        // A recorded body-sensitive `Export` / `LocalDecl` observation
+        // revalidates through the SAME lazy body fact path that produced it
+        // (the side-store is Arc-shared with the snapshot's `FileFacts`
+        // clone).
+        check_parse_fact(facts.lookup_or_compute_read(&fact.key), fact)
+    }
+
+    /// [`StoreView::validates_program_analysis_domain`], telling a fact
+    /// that fails against the index from one whose index walk was refused
+    /// its walk-stack lease.
+    ///
+    /// [`StoreView::validates_program_analysis_domain`]: verter_session_query::facts::store_view::StoreView::validates_program_analysis_domain
+    pub(crate) fn check_program_analysis_domain(
+        &self,
+        fact: &verter_session_query::facts::fact_cache::ProgramAnalysisFactRef,
+    ) -> LeafCheck {
         match fact {
             verter_session_query::facts::fact_cache::ProgramAnalysisFactRef::FlowBody {
                 function,
@@ -3432,15 +3442,20 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
             } => {
                 let canonical = function.canonical_id.as_ref();
                 if self.is_tombstoned(canonical) {
-                    return false;
+                    return LeafCheck::Invalid;
                 }
                 let resolved = self.canonical_view(canonical);
                 let Some(indexed) = resolved.flow_body_indexed.as_ref() else {
-                    return false;
+                    return LeafCheck::Invalid;
                 };
-                let index = crate::host_source_demand::consume_walked_read(
-                    indexed.shallow_state.decl_bodies().function_program_index(),
-                );
+                let read = indexed.shallow_state.decl_bodies().function_program_index();
+                let refused = read.refusal.is_some();
+                let index = crate::host_source_demand::consume_walked_read(read);
+                // A refused walk serves an empty index no retry keeps: it
+                // proves nothing about the function's body.
+                if refused {
+                    return LeafCheck::Refused;
+                }
                 // The KEYED lookup: the fact names one function position,
                 // and validity is that position's own live body hash —
                 // never "some entry in this file matches closely enough".
@@ -3468,12 +3483,72 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                             },
                         )
                     };
-                matched.is_some_and(|matched| {
+                LeafCheck::of(matched.is_some_and(|matched| {
                     &matched.entry().flow_body_stable_hash() == flow_body_stable_hash
-                })
+                }))
             }
         }
     }
+}
+
+/// What validating one fact that is not a receipt proved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeafCheck {
+    /// The fact validates against what was read.
+    Valid,
+    /// The fact does not validate against what was read.
+    Invalid,
+    /// A read the answer rests on was refused (a declaration-body lease
+    /// miss, or a walk-stack lease the index walk could not have): the fact
+    /// fails closed, and a retry once the lease can be had may answer
+    /// otherwise.
+    Refused,
+}
+
+impl LeafCheck {
+    /// The check of a read that was not refused.
+    pub(crate) fn of(valid: bool) -> Self {
+        if valid {
+            Self::Valid
+        } else {
+            Self::Invalid
+        }
+    }
+
+    pub(crate) fn validates(self) -> bool {
+        self == Self::Valid
+    }
+}
+
+/// Check a parse-domain fact against the registered or lazily computed fact
+/// `read` answered. A refused read applies its evidence to the running
+/// tracers and is [`LeafCheck::Refused`] whatever it answered: its `None`
+/// is not the consistent absence the zero sentinel records.
+pub(crate) fn check_parse_fact(
+    read: verter_session_query::source::demand::SourceRead<
+        Option<verter_session_query::facts::Fact>,
+    >,
+    fact: &verter_session_query::facts::fact_cache::ParseFactRef,
+) -> LeafCheck {
+    const ZERO_HASH: Hash16 = [0u8; 16];
+    let refused = read.refusal.is_some();
+    let stored = verter_type_engine::fact_tracing::consume_source_read(read);
+    if refused {
+        return LeafCheck::Refused;
+    }
+    LeafCheck::of(match stored {
+        Some(stored) => {
+            let stored_hash = match fact.lane {
+                verter_session_query::facts::registry::FactLane::Semantic => stored.semantic_hash,
+                verter_session_query::facts::registry::FactLane::Display => stored.display_hash,
+            };
+            stored_hash == fact.expected_hash
+        }
+        // Fact absent in registry — accept iff observed was the zero
+        // sentinel (consistent absence — see
+        // `fact_signature_helpers::parse_fact_ref`).
+        None => fact.expected_hash == ZERO_HASH,
+    })
 }
 
 /// Caches one immutable `Arc<StoreViewSnapshot>`-backed base
@@ -4632,6 +4707,7 @@ impl VerterHost {
             .external_supersession_fingerprint()
     }
 
+    #[cfg(feature = "semantic-observe")]
     pub(crate) fn component_meta_audit_store_snapshot(
         &self,
         store_view: Option<&HostStoreView>,
@@ -4673,12 +4749,6 @@ impl VerterHost {
         let component_meta_counters =
             match verter_type_engine::request_context::current_request_context() {
                 Some(ctx) => ComponentMetaStoreCounters {
-                    materialize_structure_calls: ctx
-                        .materialize_structure_calls
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    materialize_structure_cache_hits: ctx
-                        .materialize_structure_cache_hits
-                        .load(std::sync::atomic::Ordering::Relaxed),
                     node_arena_lock_acquisitions: ctx
                         .node_arena_lock_acquisitions
                         .load(std::sync::atomic::Ordering::Relaxed),
@@ -4709,6 +4779,7 @@ impl VerterHost {
         (store_audit, component_meta_counters)
     }
 
+    #[cfg(feature = "semantic-observe")]
     pub(crate) fn component_meta_audit_memory_bytes(&self) -> (u64, u64) {
         let host_cache_bytes: u64 = self
             .project_type_store
@@ -5182,6 +5253,8 @@ mod store_view_o1_build_tests;
 /// declared here for the same reason.
 #[cfg(test)]
 #[path = "store_view_marginal_admit_tests.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod store_view_marginal_admit_tests;
 
 /// Terminal-aggregate validation contract — declared here for the same
@@ -5230,7 +5303,13 @@ impl crate::VerterHost {
     pub(crate) fn capture_request_snapshot(
         &self,
     ) -> verter_type_engine::resolver_core::RequestSnapshot<WorkspaceSlotClocks> {
-        verter_type_engine::resolver_core::RequestSnapshot::new(
+        self.capture_request_snapshot_in::<verter_audit::observe::Uncaptured>()
+    }
+
+    pub(crate) fn capture_request_snapshot_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+    ) -> verter_type_engine::resolver_core::RequestSnapshot<WorkspaceSlotClocks> {
+        verter_type_engine::resolver_core::RequestSnapshot::new_in::<M>(
             self.project_type_store().project_generation_clock(),
             self.aggregate_clock_reader(),
         )

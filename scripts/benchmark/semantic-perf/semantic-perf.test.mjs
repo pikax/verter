@@ -10,9 +10,10 @@
 //   node --test scripts/benchmark/semantic-perf/semantic-perf.test.mjs
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
@@ -31,6 +32,7 @@ import {
   ROOT,
   TIER_DEFAULTS,
   materialize,
+  parseArgs,
 } from "./run.mjs";
 import {
   allScenarios,
@@ -202,6 +204,18 @@ test("the canonical form fails closed on syntax it does not know", () => {
 });
 
 // ---------------------------------------------------------------- catalog and schedule
+
+test("a run can select a fresh measured reference without changing the committed table", () => {
+  const path = join("local-evidence", "reference.json");
+  assert.equal(parseArgs(["--expected", path]).expected, resolve(path));
+});
+
+test("the array literal normalization reproduction is selectable", () => {
+  const s = allScenarios().find((s) => s.id === "edge-array-literal-normalization");
+  assert.ok(s, "the captured reproduction belongs in the benchmark catalog");
+  assert.equal(s.probe, "typeof arr");
+  assert.match(s.source, /const arr = \[\{ a: 1 \}, \{ b: "x" \}\];/);
+});
 
 test("every scenario entry declares __BenchInit and __Probe once", () => {
   const ids = new Set();
@@ -492,6 +506,21 @@ test("a Verter answer is classified, and only an equal answer is matched", () =>
   assert.equal(classify(ANSWER("2"), { reference: REF("1") }), "mismatch");
   assert.equal(
     classify(ANSWER("any"), { reference: REF("any", { errorAny: true, codes: [2589] }) }),
+    "mismatch",
+  );
+  // tsc's error type at its limit matches Verter's recovery for the same
+  // diagnostic, and only that one.
+  const ts2590 = REF("any", { errorAny: true, codes: [2590] });
+  assert.equal(
+    classify(ANSWER("any", { checkerRecovery: 2590 }), { reference: ts2590 }),
+    "matched",
+  );
+  assert.equal(
+    classify(ANSWER("any", { checkerRecovery: 2589 }), { reference: ts2590 }),
+    "mismatch",
+  );
+  assert.equal(
+    classify(ANSWER("any", { checkerRecovery: null }), { reference: ts2590 }),
     "mismatch",
   );
   assert.equal(
@@ -982,6 +1011,33 @@ const resummarize = (run) => {
 };
 const firstOf = (run, arm, measured = true) =>
   run.invocations.find((i) => i.arm === arm && i.warmup !== measured);
+
+test("validation uses the committed reference unless an alternate is explicitly selected", () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-reference-"));
+  try {
+    const expectedPath = join(dir, "expected.json");
+    const runPath = join(dir, "results.json");
+    const expectedText = JSON.stringify(EXPECTED);
+    writeFileSync(expectedPath, expectedText);
+    const run = syntheticRun();
+    run.meta.expected = { file: expectedPath, sha256: sha256Text(expectedText) };
+    writeFileSync(runPath, JSON.stringify(run));
+    const invoke = (...args) => {
+      const result = spawnSync(process.execPath, [join(HERE, "validate.mjs"), ...args, runPath], {
+        encoding: "utf8",
+      });
+      assert.equal(result.error, undefined);
+      // Synthetic paths intentionally have no raw files on disk. The reference
+      // digest diagnostic distinguishes selection from those other failures.
+      assert.equal(result.status, 1, result.stderr);
+      return result.stdout;
+    };
+    assert.match(invoke(), /reference digest differs/);
+    assert.doesNotMatch(invoke("--expected", expectedPath), /reference digest differs/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("a well-formed synthetic run passes and compares the matched row", () => {
   const run = syntheticRun();

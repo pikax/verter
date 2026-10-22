@@ -649,6 +649,7 @@ fn mapper_heap_bytes(mapper: &crate::semantic_query::MapperKey) -> usize {
         name_remap,
         kind,
         over_type_variable,
+        modifiers_type,
     } = mapper;
     inline(parameter_node)
         + inline(key_space)
@@ -658,6 +659,7 @@ fn mapper_heap_bytes(mapper: &crate::semantic_query::MapperKey) -> usize {
         + inline(name_remap)
         + inline(kind)
         + inline(over_type_variable)
+        + inline(modifiers_type)
 }
 
 /// A conditional's shared pending-substitution record and its frames.
@@ -815,7 +817,8 @@ fn call_argument_heap_bytes(argument: &CallArgKey, aliases: &mut AliasSet) -> us
 }
 
 /// A call argument's literal provenance: its shared record, the record's
-/// position slice, and each position's path and literal slices.
+/// position slice, each position's path and literal slices, and the
+/// fresh-read path slices.
 fn literal_provenance_heap_bytes(
     provenance: Option<&Arc<crate::semantic_query::ArgumentLiteralProvenance>>,
     aliases: &mut AliasSet,
@@ -829,8 +832,18 @@ fn literal_provenance_heap_bytes(
     let record = verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
         crate::semantic_query::ArgumentLiteralProvenance,
     >());
-    let crate::semantic_query::ArgumentLiteralProvenance { positions } = &**provenance;
+    let crate::semantic_query::ArgumentLiteralProvenance {
+        positions,
+        fresh_reads,
+    } = &**provenance;
     record
+        + arc_slice_block_bytes(fresh_reads, aliases).map_or(0, |block| {
+            block
+                + fresh_reads
+                    .iter()
+                    .map(|path| copy_slice_bytes(path, aliases))
+                    .sum::<usize>()
+        })
         + arc_slice_block_bytes(positions, aliases).map_or(0, |block| {
             block
                 + positions

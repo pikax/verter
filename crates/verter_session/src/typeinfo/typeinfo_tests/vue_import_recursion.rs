@@ -100,7 +100,12 @@ fn public_member_names(host: &VerterHost, canonical_id: &str) -> Vec<String> {
 fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<String> {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     let _whole_hash = host
@@ -153,7 +158,12 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
 fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Option<Vec<String>> {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     let _whole_hash = host
@@ -204,7 +214,12 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
 fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]) -> TypeExpr {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     let _whole_hash = host
@@ -431,7 +446,12 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
     let host = make_host_with_files(&[(A, A_VUE)]);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
@@ -456,7 +476,7 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
 
     assert!(
         !matches!(
-            verter_type_engine::project_semantic_dispatch::node_data_for(verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx).graph(), node).as_deref(),
+            verter_type_engine::project_semantic_dispatch::node_data_for(verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx).graph().store(), node).as_deref(),
             Some(SemanticNodeData::Object(view))
                 if view.positive_members().iter().any(|member| member.string_name().expect("string-key fixture") == "$props")
         ),
@@ -966,7 +986,12 @@ fn typeof_construct_return_is_produced_by_instantiate_vue_default() {
 
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     // ONLY TypeOf is dispatched here — so an Instantiate provenance edge on the
@@ -1091,4 +1116,64 @@ fn instance_type_self_cycle_resolves_shallow_instance() {
         "the inner self-cyclic member must stay the shallow instance-identity \
          Ref(\"default\") carrier, got {inner_self:?}"
     );
+}
+
+/// The member named `name` of an object type.
+fn object_member<'a>(object: &'a TypeExpr, name: &str) -> &'a TypeExpr {
+    let TypeExpr::Object(object) = object else {
+        panic!("expected an object holding `{name}`, got {object:?}");
+    };
+    object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == name =>
+            {
+                Some(&prop.ty)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("member `{name}` must exist"))
+}
+
+// ---------------------------------------------------------------------------
+// A projected terminal presents an imported component member as the shallow
+// instance-identity carrier at EVERY level of its inline structure: a
+// component reference nested a dozen inline objects deep presents exactly as
+// one nested three deep.
+// ---------------------------------------------------------------------------
+#[test]
+fn a_component_member_nested_deep_in_the_terminal_presents_as_its_carrier() {
+    const LEAF: &str = "/w/NestLeaf.vue";
+    let leaf_vue = r#"<script setup lang="ts">
+defineProps<{ f: string }>();
+</script>
+"#;
+    for depth in [3usize, 12] {
+        let holder = format!("/w/NestHolder{depth}.vue");
+        let mut nested = String::from("{ peer: Leaf }");
+        // bounded-loop: authored finite fixture depth.
+        for level in (0..depth).rev() {
+            nested = format!("{{ l{level}: {nested} }}");
+        }
+        let holder_vue = format!(
+            "<script setup lang=\"ts\">\nimport Leaf from './NestLeaf.vue';\n\
+             defineProps<{{ wrap: {nested} }}>();\n</script>\n"
+        );
+        let host = make_host_with_files(&[(LEAF, leaf_vue), (holder.as_str(), &holder_vue)]);
+        let terminal = project_vue_default_path(&host, &holder, &["$props", "wrap"]);
+        let mut cursor = &terminal;
+        // bounded-loop: walks the same authored finite fixture depth.
+        for level in 0..depth {
+            cursor = object_member(cursor, &format!("l{level}"));
+        }
+        let peer = object_member(cursor, "peer");
+        assert!(
+            matches!(peer, TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "default" && type_arguments.is_empty()),
+            "a component member {depth} inline objects deep presents as the instance-identity \
+             Ref(\"default\") carrier, got {peer:?}"
+        );
+    }
 }

@@ -162,3 +162,24 @@ export function recordsToQuickPickItems(
 export function formatRecordAsJson(record: unknown): string {
   return JSON.stringify(record, null, 2);
 }
+
+/** JSON-RPC `MethodNotFound`, the code an LSP server answers audit methods with when capture is compiled out. */
+const METHOD_NOT_FOUND = -32601;
+
+/**
+ * Whether an LSP request error says the server cannot capture audit records:
+ * a server built without the `semantic-observe` feature answers the audit
+ * methods with `MethodNotFound` and an "audit capture is unavailable"
+ * message. That is a build property to report, not a request failure.
+ */
+export function isAuditCaptureUnavailable(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  return (
+    code === METHOD_NOT_FOUND &&
+    typeof message === "string" &&
+    message.startsWith("audit capture is unavailable")
+  );
+}

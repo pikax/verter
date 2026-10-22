@@ -18,6 +18,13 @@ use verter_session_query::analysis::types::Hash16;
 use verter_session_query::declarations::metadata::ValueDeclIdentity;
 use verter_session_query::facts::reuse::NonCacheableReadReason;
 
+/// The declaration namespace an ambient global read consumes.
+#[derive(Debug, Clone, Copy)]
+pub enum AmbientSymbolSpace {
+    Type,
+    Value,
+}
+
 /// Content-free marker for the published workspace root an epoch retains.
 /// It has no methods and no `Any` supertrait, so a retained root can be
 /// neither read nor downcast through an epoch.
@@ -405,6 +412,7 @@ pub trait RouteLookup {
         &self,
         consumer_project: ProjectStableKey,
         symbol: &str,
+        space: AmbientSymbolSpace,
     ) -> Option<AmbientSymbolHit>;
 
     fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str);
@@ -443,17 +451,34 @@ impl CancellationCheckpoint {
         // A job token that accepted a request owner decides; otherwise the
         // installed request's token, else the ownerless job token. Each is
         // read in place.
-        let cancelled =
-            verter_execution::cancellation::with_current_job_cancellation_token(|job| match job {
-                Some(token) if token.has_registered_owners() => token.is_cancelled(),
-                _ => crate::request_context::current_request_cancelled()
-                    .unwrap_or_else(|| job.is_some_and(|token| token.is_cancelled())),
-            });
+        let cancelled = verter_execution::cancellation::with_current_job_cancellation_token(
+            Self::selected_token_cancelled,
+        );
         #[cfg(feature = "test-support")]
         if cancelled {
             crate::cancel_trace::observed(std::panic::Location::caller());
         }
         cancelled
+    }
+
+    /// The selection [`Self::is_cancelled`] makes, given the job token
+    /// installed on this thread. Written as plain matches: every semantic
+    /// checkpoint runs it, and a debug build calls out for each combinator.
+    fn selected_token_cancelled(
+        job: Option<&verter_execution::cancellation::CancellationToken>,
+    ) -> bool {
+        if let Some(token) = job {
+            if token.has_registered_owners() {
+                return token.is_cancelled();
+            }
+        }
+        match crate::request_context::current_request_cancelled() {
+            Some(cancelled) => cancelled,
+            None => match job {
+                Some(token) => token.is_cancelled(),
+                None => false,
+            },
+        }
     }
 }
 

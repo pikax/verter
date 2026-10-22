@@ -285,7 +285,10 @@ impl SnapshotShard {
 /// sink readable through [`dump_decl_handoff_stats`]. Off (the default)
 /// the rendezvous paths are byte-identical to the unprofiled arms — no
 /// clock reads, no payload change, no counter traffic.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// The profile exists only under the `semantic-observe` feature; without
+/// it the gate is never consulted and the sink cannot exist.
+#[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
 pub(crate) const DECL_HANDOFF_PROFILE_ENV: &str = "VERTER_DECL_HANDOFF_PROFILE";
 
 /// Cumulative decl-lowering handoff rendezvous counters — one record per
@@ -306,7 +309,7 @@ pub(crate) const DECL_HANDOFF_PROFILE_ENV: &str = "VERTER_DECL_HANDOFF_PROFILE";
 /// acquire+first-run handoff would reclaim.
 ///
 /// Diagnostic accounting only — never a validity or scheduling signal.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
 #[derive(Default)]
 pub(crate) struct HandoffStats {
     acquire_ops: std::sync::atomic::AtomicU64,
@@ -323,14 +326,14 @@ pub(crate) struct HandoffStats {
 /// Cross-thread monotonic span in nanoseconds; a clock inversion (never
 /// observed in practice — `Instant` is process-wide monotonic on every
 /// supported platform) clamps to zero rather than panicking.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
 fn saturating_ns(from: std::time::Instant, to: std::time::Instant) -> u64 {
     to.checked_duration_since(from)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
 impl HandoffStats {
     fn record_acquire(
         &self,
@@ -404,7 +407,7 @@ impl HandoffStats {
 /// **Diagnostic accessor**, mirroring `dump_from_host_call_sites`:
 /// bench/profiling harnesses read it at pass boundaries; production
 /// code never consults it.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DeclHandoffSnapshot {
     pub acquire_ops: u64,
@@ -423,7 +426,7 @@ pub struct DeclHandoffSnapshot {
 /// than `0`) at first consultation. Resolved once — services capture the
 /// resolved sink at construction, so the per-op cost when off is one
 /// `Option` check on an already-loaded field.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
 fn global_handoff_stats() -> Option<&'static Arc<HandoffStats>> {
     static GLOBAL: std::sync::OnceLock<Option<Arc<HandoffStats>>> = std::sync::OnceLock::new();
     GLOBAL
@@ -438,7 +441,7 @@ fn global_handoff_stats() -> Option<&'static Arc<HandoffStats>> {
 /// Snapshot the global handoff rendezvous counters. `None` when the
 /// [`DECL_HANDOFF_PROFILE_ENV`] gate is off — the sink does not exist
 /// and nothing was recorded.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
 #[must_use]
 pub fn dump_decl_handoff_stats() -> Option<DeclHandoffSnapshot> {
     global_handoff_stats().map(|stats| stats.snapshot())
@@ -446,10 +449,40 @@ pub fn dump_decl_handoff_stats() -> Option<DeclHandoffSnapshot> {
 
 /// Zero the global handoff rendezvous counters — only useful for benches
 /// that want per-pass deltas. No-op when the gate is off.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
 pub fn reset_decl_handoff_stats() {
     if let Some(stats) = global_handoff_stats() {
         stats.reset();
+    }
+}
+
+/// Without `semantic-observe` the handoff profile sink cannot exist: the
+/// type is uninhabited, so [`DeclLoweringService::profile`] is always
+/// `None` and every profiled rendezvous arm is statically dead.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "semantic-observe")))]
+pub(crate) enum HandoffStats {}
+
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "semantic-observe")))]
+impl HandoffStats {
+    fn record_acquire(
+        &self,
+        _submitted: std::time::Instant,
+        _started: std::time::Instant,
+        _finished: std::time::Instant,
+        _received: std::time::Instant,
+        _parsed_now: bool,
+    ) {
+        match *self {}
+    }
+
+    fn record_run(
+        &self,
+        _submitted: std::time::Instant,
+        _started: std::time::Instant,
+        _finished: std::time::Instant,
+        _received: std::time::Instant,
+    ) {
+        match *self {}
     }
 }
 
@@ -491,6 +524,10 @@ struct DeclWorker {
     /// the sender, so a release boundary watches this to fail instead of
     /// waiting for a marker that will never run.
     alive: crossbeam_channel::Receiver<()>,
+    /// The worker thread, joined when the service drops: it owns the
+    /// shard, so its exit is when the shard's retained snapshots, and the
+    /// retention charges pinning them, are released.
+    thread: std::thread::JoinHandle<()>,
 }
 
 /// Spawn `worker_count` decl-lowering worker threads, each owning its own
@@ -513,7 +550,7 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
         let releases = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
         let pending = Arc::clone(&releases);
         let (alive_tx, alive) = crossbeam_channel::bounded::<()>(0);
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name(format!("verter-decl-lower-{index}"))
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
@@ -544,6 +581,7 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
             wake,
             releases,
             alive,
+            thread,
         });
     }
     workers
@@ -709,8 +747,8 @@ pub struct DeclLoweringService {
     /// Env-gated handoff rendezvous profile sink, resolved ONCE at
     /// construction from the global gate ([`global_handoff_stats`]).
     /// `None` (the default) keeps both rendezvous paths byte-identical
-    /// to the unprofiled arms.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// to the unprofiled arms. Exists only under `semantic-observe`.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
     profile: Option<Arc<HandoffStats>>,
     /// The aggregate retention account this service's retained parse
     /// snapshots pin against. Production uses the process-local account;
@@ -744,20 +782,45 @@ impl std::fmt::Debug for DeclLoweringService {
     }
 }
 
+/// Closing the job queues ends the workers; joining them means a dropped
+/// service has released every retained snapshot and the retention charge
+/// pinning it by the time its drop returns. Every lease holds the service,
+/// so none is left to release afterwards. A worker never joins itself: if
+/// the last handle drops on one, that worker exits once its job returns.
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DeclLoweringService {
+    fn drop(&mut self) {
+        let Some(workers) = self.workers.take() else {
+            return;
+        };
+        let current = std::thread::current().id();
+        let threads: Vec<std::thread::JoinHandle<()>> =
+            workers.into_iter().map(|worker| worker.thread).collect();
+        for thread in threads {
+            if thread.thread().id() != current {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
 /// The declaration-lowering work counters: the deterministic, wall-clock-free
 /// observability rail for parse-once / lower-on-demand. Owned by the lowering
 /// side and shared (one `Arc`) by every declaration-body memo a host builds;
 /// the host's provenance facade aggregates it. Relaxed increments, reset only
 /// by the facade.
+///
+/// The counters are optional measurement state: without `semantic-observe`
+/// they are zero-size, their writes compile to nothing and no reader exists.
 #[derive(Debug, Default)]
 pub struct DeclLoweringCounters {
     /// OXC eval-program parses performed through the single host parse
     /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
-    pub eval_program_parses: std::sync::atomic::AtomicU64,
+    pub eval_program_parses: verter_audit::observe::ObservedU64,
     /// `EvalEnv` builds initiated by the host (the program-taking
     /// builder plus any call site that forces an internal fallback
     /// build). Exactly 1 per cold canonical build.
-    pub eval_env_builds: std::sync::atomic::AtomicU64,
+    pub eval_env_builds: verter_audit::observe::ObservedU64,
     /// Declaration BODIES lowered to typed IR on behalf of this host —
     /// one increment per type/value/augmentation declaration contributor
     /// whose body (annotation, signature set, object shape, heritage,
@@ -766,12 +829,12 @@ pub struct DeclLoweringCounters {
     /// ZERO bodies; a semantic query lowers exactly the demanded
     /// declaration closure; a whole-file env demand (fallthrough /
     /// runtime values) lowers the file's full declaration set once.
-    pub decl_bodies_lowered: std::sync::atomic::AtomicU64,
+    pub decl_bodies_lowered: verter_audit::observe::ObservedU64,
     /// Declaration statements lowered from OXC syntax by the demanded
     /// body lowering and its transient body re-borrow — one per statement
     /// per lowering. A cold body demanded for its facts and then for its
     /// body lowers each contributing statement ONCE.
-    pub decl_statements_lowered: std::sync::atomic::AtomicU64,
+    pub decl_statements_lowered: verter_audit::observe::ObservedU64,
     /// Class elements lowered by selective class-body lowering: one per raw
     /// `ClassBody.body` element a member demand lowered. A demand for one
     /// class member lowers only the elements declaring it, never the
@@ -847,6 +910,7 @@ impl DeclLoweringService {
             worker_count,
             workers,
             queue_capacity: DECL_WORKER_QUEUE_CAPACITY,
+            #[cfg(feature = "semantic-observe")]
             profile: global_handoff_stats().cloned(),
             account,
             live_leases: std::sync::atomic::AtomicUsize::new(0),
@@ -892,11 +956,26 @@ impl DeclLoweringService {
         Self::new_with(/* lazy = */ false, 1)
     }
 
+    /// The handoff rendezvous profile sink, when one is installed. Always
+    /// `None` without `semantic-observe`, where no sink can exist.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    fn profile(&self) -> Option<&Arc<HandoffStats>> {
+        #[cfg(feature = "semantic-observe")]
+        {
+            self.profile.as_ref()
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            None
+        }
+    }
+
     /// Test-only single-worker constructor with an INJECTED handoff
     /// profile sink — exercises the profiled rendezvous arms without
     /// touching the process-global env gate (which would leak across
     /// tests sharing the process).
-    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[cfg(all(test, not(target_arch = "wasm32"), feature = "semantic-observe"))]
     fn new_single_worker_with_profile(sink: Arc<HandoffStats>) -> Self {
         let mut service = Self::new_with(/* lazy = */ false, 1);
         service.profile = Some(sink);
@@ -947,7 +1026,7 @@ impl DeclLoweringService {
             self.count_handoff();
             let key_for_job = key.clone();
             let source = Arc::clone(source);
-            match self.profile.as_ref() {
+            match self.profile() {
                 None => {
                     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
                     let account = Arc::clone(&self.account);
@@ -1048,7 +1127,7 @@ impl DeclLoweringService {
             let source = Arc::clone(source);
             let account = Arc::clone(&self.account);
             let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-            let submitted = self.profile.as_ref().map(|_| std::time::Instant::now());
+            let submitted = self.profile().map(|_| std::time::Instant::now());
             // The worker reads the clock only for a profiled acquisition.
             let profiled = submitted.is_some();
             let worker_job: WorkerJob = Box::new(move |shard| {
@@ -1072,7 +1151,7 @@ impl DeclLoweringService {
                 .recv()
                 .expect("decl-lowering worker must answer every acquire");
             if let (Some(stats), Some(submitted), Some((started, finished))) =
-                (self.profile.as_ref(), submitted, timing)
+                (self.profile(), submitted, timing)
             {
                 stats.record_acquire(
                     submitted,
@@ -1374,7 +1453,7 @@ impl DeclLoweringService {
             let shard_index = shard_index(key, workers.len());
             self.count_handoff();
             let key = key.clone();
-            let result = match self.profile.as_ref() {
+            let result = match self.profile() {
                 None => {
                     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
                     let worker_job: WorkerJob = Box::new(move |shard| {
@@ -2218,7 +2297,7 @@ mod tests {
     /// rendezvous timestamps: queue = submit→job-start, service =
     /// job-start→job-end, response = job-end→caller-wakeup. Synthetic
     /// instants make the expected nanosecond sums exact.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
     #[test]
     fn handoff_stats_record_exact_three_way_split() {
         use std::time::{Duration, Instant};
@@ -2256,7 +2335,7 @@ mod tests {
     /// `run_leased` rendezvous — hits, lease misses, and panicking jobs
     /// alike (a miss/panic still pays the full rendezvous). Panic
     /// re-raise semantics are unchanged on the profiled arm.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
     #[test]
     fn profiled_service_records_acquire_and_run_rendezvous() {
         let sink = Arc::new(HandoffStats::default());
@@ -2311,7 +2390,7 @@ mod tests {
     /// nothing anywhere: the global diagnostic dump stays `None`. A
     /// regression that recorded unconditionally into the global sink
     /// would surface a `Some` snapshot here.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
     #[test]
     fn unprofiled_service_records_nothing_and_global_dump_stays_none() {
         if std::env::var_os(DECL_HANDOFF_PROFILE_ENV).is_some() {

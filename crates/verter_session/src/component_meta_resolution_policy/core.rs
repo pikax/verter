@@ -99,9 +99,13 @@ impl<'a> PolicyRegistry<'a> {
     }
 }
 
-pub(super) struct PolicyCtx<'a, 'h> {
+pub(super) struct PolicyCtx<
+    'a,
+    'h,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
     pub(super) registry: &'a PolicyRegistry<'a>,
-    pub(super) engine: &'a mut ComponentMetaQueryEngine<'h>,
+    pub(super) engine: &'a mut ComponentMetaQueryEngine<'h, M>,
     pub(super) owner_canonical: &'a str,
     pub(super) owner: TopLevelOwnerId,
     pub(super) host: &'a VerterHost,
@@ -140,12 +144,12 @@ pub(super) struct PolicyCtx<'a, 'h> {
     pub(super) active_refs_max_depth: u64,
 }
 
-impl<'a, 'h> PolicyCtx<'a, 'h> {
+impl<'a, 'h, M: verter_audit::observe::ObserveExec> PolicyCtx<'a, 'h, M> {
     /// The request-bound resolver context every raise / node read routes
     /// through (overlay-aware under a session context).
     pub(super) fn resolver_ctx(
         &self,
-    ) -> &'h dyn ResolverContext<crate::resolver_core::HostCapabilities> {
+    ) -> &'h dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> {
         self.engine.ctx
     }
 
@@ -347,9 +351,9 @@ pub(super) struct DeclLookup {
 
 /// Return the rule-selected source position without mutating the input.
 /// Absent and Failed are absorbing.
-pub(super) fn rewrite_source_position(
+pub(super) fn rewrite_source_position<M: verter_audit::observe::ObserveExec>(
     slot: &verter_type_expr::facts::SourcePosition,
-    ctx: &mut PolicyCtx<'_, '_>,
+    ctx: &mut PolicyCtx<'_, '_, M>,
 ) -> verter_type_expr::facts::SourcePosition {
     let Some(current) = slot.present() else {
         return slot.clone();
@@ -364,9 +368,9 @@ pub(super) fn rewrite_source_position(
 /// ONCE through the shared bridge and run the rule walk off the raised
 /// node. `None` = keep the existing published source (unraisable sources
 /// stay shallow verbatim — never a fabricated stand-in).
-pub(super) fn rewrite_source(
+pub(super) fn rewrite_source<M: verter_audit::observe::ObserveExec>(
     source: &SemanticTypeSource,
-    ctx: &mut PolicyCtx<'_, '_>,
+    ctx: &mut PolicyCtx<'_, '_, M>,
 ) -> Option<SemanticTypeSource> {
     let hot = ctx.raise_source(source)?;
     rewrite_node(hot.node(), ctx)
@@ -375,9 +379,9 @@ pub(super) fn rewrite_source(
 /// The node-domain rule walk over a raised published-source node. Returns
 /// `Some(replacement source)` when a rule fired; `None` keeps the existing
 /// published source.
-pub(super) fn rewrite_node(
+pub(super) fn rewrite_node<M: verter_audit::observe::ObserveExec>(
     node: SemanticNodeId,
-    ctx: &mut PolicyCtx<'_, '_>,
+    ctx: &mut PolicyCtx<'_, '_, M>,
 ) -> Option<SemanticTypeSource> {
     if let Some((name, args)) = ctx.node_ref_head(node) {
         return rewrite_ref_node(name.as_str(), &args, ctx);
@@ -392,10 +396,10 @@ pub(super) fn rewrite_node(
 }
 
 /// Rewrite a reference-headed node per rules 1, 3, 4, 5.
-fn rewrite_ref_node(
+fn rewrite_ref_node<M: verter_audit::observe::ObserveExec>(
     name: &str,
     arg_nodes: &[SemanticNodeId],
-    ctx: &mut PolicyCtx<'_, '_>,
+    ctx: &mut PolicyCtx<'_, '_, M>,
 ) -> Option<SemanticTypeSource> {
     // Rule 4: macro-participating bare alias / generic stays symbolic.
     // Type-role classification is structural (the reference resolves to a
@@ -464,10 +468,10 @@ fn rewrite_ref_node(
 /// (Rule 5) — each hop re-enters [`rewrite_ref_node`] under the guard, so a
 /// self-referential alias (`type Self = Pick<Self>`, `type A = B; type B =
 /// A`) registers on the active set and terminates on the back-edge.
-fn rewrite_ref_body_with_guard(
+fn rewrite_ref_body_with_guard<M: verter_audit::observe::ObserveExec>(
     lookup: &DeclLookup,
     arg_nodes: &[SemanticNodeId],
-    ctx: &mut PolicyCtx<'_, '_>,
+    ctx: &mut PolicyCtx<'_, '_, M>,
 ) -> Option<SemanticTypeSource> {
     // Rule 3 applies only to BARE references: a generic instantiation's
     // published carrier keeps the substitution (publishing the uninstantiated
@@ -503,9 +507,9 @@ fn rewrite_ref_body_with_guard(
 /// type-role-bearing Vue SFC macros.
 ///
 /// Structural §3.4 classification — never a nominal name-suffix filter.
-pub(super) fn indexed_access_targets_macro_participating(
+pub(super) fn indexed_access_targets_macro_participating<M: verter_audit::observe::ObserveExec>(
     object: SemanticNodeId,
-    ctx: &PolicyCtx<'_, '_>,
+    ctx: &PolicyCtx<'_, '_, M>,
 ) -> bool {
     if let Some((name, _)) = ctx.node_ref_head(object) {
         return ctx.is_macro_participating(name.as_str());
@@ -535,7 +539,10 @@ pub(super) fn indexed_access_targets_macro_participating(
 /// Bodies that are themselves an IndexedAccess on a macro-participating
 /// alias should NOT resolve eagerly — they are kept symbolic because that
 /// is the registry authoritative form.
-pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> bool {
+pub(super) fn body_root_is_resolvable<M: verter_audit::observe::ObserveExec>(
+    body: SemanticNodeId,
+    ctx: &PolicyCtx<'_, '_, M>,
+) -> bool {
     if ctx.node_ref_head(body).is_some() {
         return false;
     }

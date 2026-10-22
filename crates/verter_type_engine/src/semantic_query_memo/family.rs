@@ -111,13 +111,6 @@ pub(super) struct MemoEntry {
     /// `warm_publish_one_if_absent` / the test publish helpers — the
     /// only paths that create a `MemoEntry`.
     pub(super) admission_seq: u64,
-    /// Whether this candidate's registrations are in the store's reverse
-    /// index. A published candidate is registered the first time the
-    /// reverse index is read
-    /// ([`SemanticGraphStore::index_unregistered_candidates_locked`]), so a
-    /// candidate displaced or evicted before then has no registration to
-    /// prune.
-    pub(super) reverse_indexed: bool,
     /// What computing this candidate cost: the receipt every read of it
     /// replays, so a warm read charges its consumer what the cold build
     /// charged. Shared by the backfills and SCC members the same build
@@ -129,7 +122,7 @@ impl MemoEntry {
     /// The bytes of this candidate's cache-only bookkeeping, held for exactly
     /// as long as the candidate: its entry in every slot its publication may
     /// populate (with each slot's container convention), its materialised
-    /// point record, and its reverse-index registrations. None of these is
+    /// point record, and its reverse-index registration. None of these is
     /// handed to a caller, so none outlives the candidate. Its delivery
     /// lease is caller metadata warm reads share, charged by the lease's own
     /// owner for as long as it lives; the carrier, the delivered rails and
@@ -142,15 +135,18 @@ impl MemoEntry {
         &self,
         family: &FamilyKey,
         populated_slots: usize,
-        registered_canonicals: usize,
+        direct_edges: usize,
     ) -> verter_session_query::retention::Footprint {
         use crate::semantic_query::allocation_footprint::OwnedHeap as _;
         let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
-        let registration = super::reverse_index::registration_footprint(
-            family,
-            registered_canonicals,
-            populated_slots,
-        );
+        let registration = if populated_slots == 0 {
+            verter_session_query::retention::Footprint {
+                bytes: 0,
+                handles: Default::default(),
+            }
+        } else {
+            super::reverse_index::registration_footprint(family, direct_edges)
+        };
         let bytes = populated_slots
             * (std::mem::size_of::<Self>() + verter_session_query::retention::ENTRY_OVERHEAD_BYTES)
             + self.satisfied_projection.owned_heap_bytes(&mut aliases)
@@ -963,7 +959,8 @@ impl FamilyKey {
                 visit(mapper.parameter_node);
                 visit(mapper.key_space);
                 visit(mapper.value_expr);
-                mapper.name_remap.into_iter().for_each(visit);
+                mapper.name_remap.into_iter().for_each(&mut visit);
+                mapper.modifiers_type.into_iter().for_each(visit);
             }
             FamilyKey::Conditional {
                 check,
@@ -1044,6 +1041,13 @@ impl FamilyKey {
                                 .flat_map(|l| l.iter())
                                 .copied()
                                 .for_each(&mut visit);
+                        }
+                        for read in literal_provenance.iter().flat_map(|p| p.fresh_reads.iter()) {
+                            for step in read.iter() {
+                                if let crate::semantic_query::ArgumentPathStep::Member(key) = step {
+                                    visit(*key);
+                                }
+                            }
                         }
                         if let Some(const_view) = const_view {
                             visit(*const_view);
@@ -1868,18 +1872,6 @@ impl FamilySlots {
     /// accounting). Used by `invalidate_canonical` to drop only those
     /// candidates whose fact rail genuinely references the touched
     /// canonical, leaving unrelated overlay candidates intact.
-    /// Visit every candidate in every slot, mutably, with its slot.
-    pub(super) fn for_each_candidate_mut(
-        &mut self,
-        mut visit: impl FnMut(ModeSlot, &mut MemoEntry),
-    ) {
-        for slot in ALL_MODE_SLOTS {
-            for entry in self.slot_list_mut(*slot).iter_mut() {
-                visit(*slot, entry);
-            }
-        }
-    }
-
     pub(super) fn retain_candidates_in_slot_mut<F>(&mut self, slot: ModeSlot, mut keep: F)
     where
         F: FnMut(&MemoEntry) -> bool,

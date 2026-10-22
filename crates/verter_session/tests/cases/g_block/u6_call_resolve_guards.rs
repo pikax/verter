@@ -339,6 +339,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                             }]
                             .into_boxed_slice(),
                         ),
+                        fresh_reads: Arc::from([]),
                     })),
                     context_sensitive: false,
                     const_view: None,

@@ -14,10 +14,14 @@
  * stub.
  */
 
+import { captureAvailability } from "@verter/native";
 import type { FunctionType, ObjectProperty, ObjectType, TypeDescriptor } from "@verter/type-ir";
 import { describe, expect, it } from "vitest";
 
 import { TypeInfoSession } from "../src/index.js";
+
+// Audit records exist only in a binding built with `semantic-observe`.
+const captured = captureAvailability() === "Available";
 
 const FIXTURE = `
 export type Foo = { msg: string };
@@ -54,36 +58,61 @@ describe("TypeInfoSession.resolveSymbol", () => {
     session.host.close();
   });
 
-  it("Identity and Expanded mode return distinct semantic node ids (verified via audit hop counters)", () => {
-    // Identity contract is at the SemanticNodeId level: Identity
-    // returns the alias-shell node, Navigate / Expanded return the
-    // unwrapped target. The raise pipeline (`raise_node_to_type_expr`)
-    // is a TypeExpr projection that follows aliases by design — so
-    // both modes appear identical at the descriptor level.
-    //
-    // The discriminating signal at this layer is the audit record's
-    // hop / expansion counters: Identity emits 0 expansions; Expanded
-    // emits >= 1 expansion. The two paths therefore drive distinct
-    // audit records even though the resulting descriptor is the same
-    // shape.
-    const session = new TypeInfoSession({ root: "/fixtures" });
-    session.host.upsert({
-      inputId: "/fixtures/types.ts",
-      source: FIXTURE,
-    });
-    const idResult = session.resolveSymbol("/fixtures/types.ts", "Foo", {
-      mode: "identity",
-    });
-    const expResult = session.resolveSymbol("/fixtures/types.ts", "Foo", {
-      mode: "expanded",
-    });
-    expect(idResult.auditRecord).toBeDefined();
-    expect(expResult.auditRecord).toBeDefined();
-    // Two distinct request_ids — these are independent audited
-    // requests, never folded together.
-    expect(idResult.auditRecord?.request_id).not.toBe(expResult.auditRecord?.request_id);
-    session.host.close();
-  });
+  it.runIf(captured)(
+    "Identity and Expanded mode return distinct semantic node ids (verified via audit hop counters)",
+    () => {
+      // Identity contract is at the SemanticNodeId level: Identity
+      // returns the alias-shell node, Navigate / Expanded return the
+      // unwrapped target. The raise pipeline (`raise_node_to_type_expr`)
+      // is a TypeExpr projection that follows aliases by design — so
+      // both modes appear identical at the descriptor level.
+      //
+      // The discriminating signal at this layer is the audit record's
+      // hop / expansion counters: Identity emits 0 expansions; Expanded
+      // emits >= 1 expansion. The two paths therefore drive distinct
+      // audit records even though the resulting descriptor is the same
+      // shape.
+      const session = new TypeInfoSession({ root: "/fixtures" });
+      session.host.upsert({
+        inputId: "/fixtures/types.ts",
+        source: FIXTURE,
+      });
+      const idResult = session.resolveSymbol("/fixtures/types.ts", "Foo", {
+        mode: "identity",
+      });
+      const expResult = session.resolveSymbol("/fixtures/types.ts", "Foo", {
+        mode: "expanded",
+      });
+      expect(idResult.auditRecord).toBeDefined();
+      expect(expResult.auditRecord).toBeDefined();
+      // Two distinct request_ids — these are independent audited
+      // requests, never folded together.
+      expect(idResult.auditRecord?.request_id).not.toBe(expResult.auditRecord?.request_id);
+      session.host.close();
+    },
+  );
+
+  it.runIf(!captured)(
+    "Identity and Expanded mode both resolve without an audit record when capture is unavailable",
+    () => {
+      const session = new TypeInfoSession({ root: "/fixtures" });
+      session.host.upsert({
+        inputId: "/fixtures/types.ts",
+        source: FIXTURE,
+      });
+      const idResult = session.resolveSymbol("/fixtures/types.ts", "Foo", {
+        mode: "identity",
+      });
+      const expResult = session.resolveSymbol("/fixtures/types.ts", "Foo", {
+        mode: "expanded",
+      });
+      expect(idResult.type).toBeDefined();
+      expect(expResult.type?.kind).toBe("object");
+      expect(idResult.auditRecord).toBeUndefined();
+      expect(expResult.auditRecord).toBeUndefined();
+      session.host.close();
+    },
+  );
 
   it("instantiates a generic carrier with an object typeArg, round-tripping the property through the reverse (descriptorToNative) direction", () => {
     // REGRESSION: `descriptorToNative`'s `lowerObjectMembers` is the
@@ -176,8 +205,9 @@ describe("TypeInfoSession.resolveSymbol", () => {
     if (result.type) {
       expect(result.type.kind).toBe("unknown");
     }
-    // Audit record always emits.
-    expect(result.auditRecord).toBeDefined();
+    // The audit record always emits when the binding captures, and
+    // never when capture is unavailable.
+    expect(result.auditRecord !== undefined).toBe(captured);
     session.host.close();
   });
 });

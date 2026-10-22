@@ -639,6 +639,9 @@ impl VerterLanguageServer {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
                             admitted.into_result()
                         }
+                        verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                            unretained.into_result()
+                        }
                         verter_workspace::ResolutionPublication::Refused(_) => return false,
                     },
                 };
@@ -678,15 +681,13 @@ impl VerterLanguageServer {
                 let Some(specifier) = module_reference.literal_specifier.as_deref() else {
                     continue;
                 };
-                let target = match self.resolve_import_specifier_for_publication(&barrel, specifier)
+                let target = match self
+                    .resolve_import_specifier_for_publication(&barrel, specifier)
+                    .into_delivered()
                 {
-                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                        let Some(target) = admitted.into_result() else {
-                            continue;
-                        };
-                        target
-                    }
-                    verter_workspace::ResolutionPublication::Refused(_) => return false,
+                    Some(Some(target)) => target,
+                    Some(None) => continue,
+                    None => return false,
                 };
                 if verter_session_query::resolution::path_is_carrier(&target) {
                     re_exports_carrier = true;
@@ -881,6 +882,18 @@ impl VerterLanguageServer {
     pub(super) fn cancel_legs_after_moved_revision(&self, canonical_id: &str) {
         tracing::debug!(
             "provider_sync: cancelling {canonical_id}'s remaining legs — its revision moved"
+        );
+        self.needs_ide_sync.insert(canonical_id.to_string());
+        self.needs_deferred_sync.insert(canonical_id.to_string());
+    }
+
+    /// The same owed legs as [`Self::cancel_legs_after_moved_revision`] for a
+    /// delivery the serving engine refused to certify while the revision
+    /// stayed current.
+    pub(super) fn defer_legs_until_certified(&self, canonical_id: &str) {
+        tracing::debug!(
+            "provider_sync: {canonical_id}'s IDE delivery is not certified by the serving \
+             engine; its remaining legs stay owed"
         );
         self.needs_ide_sync.insert(canonical_id.to_string());
         self.needs_deferred_sync.insert(canonical_id.to_string());

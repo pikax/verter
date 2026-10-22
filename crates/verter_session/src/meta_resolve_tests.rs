@@ -20,10 +20,13 @@ fn make_project() -> Arc<MetaProject> {
     MetaProject::new(host)
 }
 
+#[cfg(feature = "semantic-observe")]
 fn make_project_with_config(config: HostConfig) -> Arc<MetaProject> {
     MetaProject::new(VerterHost::new_standalone(config))
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn provenance(project: &MetaProject) -> crate::meta_provenance::MetaProvenanceSnapshot {
     project.host().provenance().snapshot()
 }
@@ -111,6 +114,7 @@ fn slot_names_from_resolved(
     .collect()
 }
 
+#[cfg(feature = "semantic-observe")]
 fn clear_legacy_cached_resolved_state(
     project: &MetaProject,
     canonical: &str,
@@ -810,6 +814,8 @@ defineProps<Props>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn repeated_same_mode_queries_reuse_resolved_meta_cache() {
     let project = make_project();
@@ -866,6 +872,8 @@ defineProps<Props>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn top_level_component_meta_lives_in_runtime_not_host_wrapper_cache() {
     let project = make_project();
@@ -925,6 +933,8 @@ defineProps<Props>()
 // Phase 1: Architecture — Shared traversal between modes
 // ===========================================================================
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn type_mode_skips_expansion_and_expanded_mode_uses_resolver_cache() {
     let project = make_project();
@@ -1040,6 +1050,8 @@ defineProps<Props>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn expanded_component_meta_imported_props_avoid_loaded_files_macro_path() {
     let project = make_project();
@@ -2116,6 +2128,8 @@ defineSlots<Slot>()
 // Phase 1: Architecture — Raw analysis boundary
 // ===========================================================================
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn get_analysis_returns_raw_snapshot_without_imported_enrichment() {
     // After the refactor, get_analysis() must NOT enrich imported types.
@@ -2744,6 +2758,8 @@ defineProps<Props>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn typed_jsdoc_resolution_uses_cached_import_lookup_without_external_source_traversal() {
     let project = make_project();
@@ -4817,6 +4833,8 @@ defineProps<Props>()
 // Edge case: `ProjectionMode::Identity` cache invalidation on dependency change
 // ===========================================================================
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn type_mode_cache_invalidates_when_dependency_file_changes() {
     let project = make_project();
@@ -5122,6 +5140,8 @@ defineProps<Props>()
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_component_meta_records_imported_root_proof_time_when_imports_are_followed() {
     let project = make_project_with_config(HostConfig {
@@ -5829,6 +5849,8 @@ defineEmits<Emits>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn compute_component_meta_state_for_fallthrough_keeps_imported_define_emits_on_eval_shape_path() {
     let project = make_project();
@@ -5934,6 +5956,8 @@ defineEmits<Emits>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn compute_component_meta_state_for_fallthrough_keeps_local_define_emits_wrapper_on_query_projection_path(
 ) {
@@ -6958,6 +6982,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![
             verter_type_expr::ObjectMember::Property(
                 verter_type_expr::ObjectProperty::synthetic_public_key(
@@ -7170,6 +7195,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     let _builder = dispatch.enter_construction_scope();
 
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![
             verter_type_expr::ObjectMember::Property(
                 verter_type_expr::ObjectProperty::synthetic_public_key(
@@ -8337,6 +8363,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     });
     let open_branch = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -8838,12 +8865,13 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        &host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     // The overlay session's own whole-hash hint (resolved through the session
     // ctx) keys the overlay DTO slot; the core re-derives + validates it.
@@ -8980,12 +9008,13 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        &host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     let overlay_hash =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::get_whole_hash(
@@ -9135,12 +9164,13 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        &host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     // The SFC's own whole-hash is UNCHANGED (only the carrier `/slots.ts` was
     // overlaid), so the overlay read keys on the same SFC hash — the binding

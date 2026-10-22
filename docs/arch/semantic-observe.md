@@ -94,20 +94,46 @@ audit crate declares it for the work-attribution table; the query boundary
 declares it for the currency-probe rail; the parser, diagnostics, semantic,
 compiler, scheduler, workspace, semantic source layer, type engine and
 session declare it for their own optional state and `hotpath` profiler
-instrumentation (it activates the optional `hotpath` dependency directly), and
-forward it through existing dependency edges without enabling it. The LSP
-root and the benchmark harness expose the combined opt-in. `hotpath-alloc`
+instrumentation (it activates the optional `hotpath` dependency directly;
+hotpath's profiler is enabled only on non-wasm32 targets, so an instrumented
+wasm32 build compiles hotpath's no-op form), and
+forward it through existing dependency edges without enabling it. The LSP,
+NAPI, WASM, MCP and tsc roots, the FFI conversion crate and the benchmark
+harness expose the combined opt-in;
+the execution crate declares it for the request-context capture hooks. `hotpath-alloc`
 layers hotpath's allocation profiling on top and implies `semantic-observe`.
 There are no other measurement features.
 
-`test-support` remains a separate capability. Only measurement harnesses and
-an owner's own test self-edge may request optional capture; the session's
-test self-edge requests the audit crate's own `semantic-observe`, so its
-CSS-domain chargeability tests can read work-attribution counters, and no
-other layer's. No production dependency edge or default feature may enable
-it, even through the production root's dev-dependency feature unification.
-Tests that need optional capture can run with an explicit
-`--features semantic-observe`.
+`test-support` remains a separate capability. Only measurement harnesses
+request optional capture; no production dependency edge, default feature or
+dev-dependency edge may enable it, even through a root's dev-dependency
+feature unification. The session crate's own test build is checked the same
+way, so the canonical gate and the core CI shards never switch
+`semantic-observe` on. They do build with the members' `test-support`
+features, and the observation gate
+`cfg(any(test, feature = "test-support", feature = "semantic-observe"))` also
+compiles the bookkeeping tests read under `test-support`: origin edges, the
+graph store's tallies, occupancy counters, VFS provenance and the
+declaration-lowering counters. The shipped configuration of that state — no
+`test`, no `test-support`, no `semantic-observe` — is exercised by the
+shipped-cfg lane (`verter_shipped_cfg_contract` under the
+`no-debug-assertions` profile), and the feature-closure guard keeps every
+member's `test-support`, like `soak-support`, out of every shipped closure.
+Suites that read a captured record, a footprint or
+a measurement carry `#[cfg(feature = "semantic-observe")]` and run in the
+instrumentation lane: `node scripts/observe-lane.mjs run` tests every
+workspace member that declares `semantic-observe` with it switched on, under
+the same provider-free core filter (CI job `rust-observe`). The member set is
+read from `cargo metadata`, so a crate that declares the feature joins the
+lane without a list edit. A default-build test is kept for each public audit
+surface to prove it reports unavailable capture.
+
+Guards whose only evidence is an optional counter run there too: the
+lazy-lowering guards that count lowered declaration bodies, the fallthrough
+reuse guard and the one-native-call compat guard read provenance counters that
+a default build does not compile, so the instrumentation lane, a required CI
+job, is their primary gate. Optional state read only by tests stays under a
+test gate instead, and keeps running in the canonical gate.
 
 When optional state is consolidated, default builds compile away optional
 fields, hooks, argument/payload construction, TLS lookups, atomics, timers,
@@ -126,13 +152,115 @@ Generators must preserve that boundary:
   that was compiled out. Required budgets, diagnostic data and ownership
   accounting remain accessible independently.
 
-An instrumented binary currently captures unconditionally. Per-request off
-selects concrete uncaptured/captured execution once at root entry, carrying
-that choice through resumptions; background work selects at job submission.
-That selection is not yet implemented: the audit envelope is still selected
-by runtime host configuration (see the sweep inventory's open items). Bound specialization to these two modes, not every
-host/counter combination. Do not use per-operation enabled checks,
-NoOpObserver virtual calls or observer TLS polling in hot loops.
+An instrumented binary captures per request. The audited entries (component
+meta, type resolution, named-symbol and expression evaluation, graph queries,
+framework surfaces, flow return, analyze, compile, workspace operations, LSP
+handlers and MCP tools) select captured or uncaptured execution once at root
+entry (`verter_session::capture::select_mode`, over
+`ObserveMode::select`) from the host's `audit_enabled` setting and request
+filter, and build their request context with
+`verter_session::capture::root_entry_context`. Both modes install the same
+REQUIRED context — canonical, the host's `projection_op_budget` and
+cancellation — so budget, cancellation and partiality behave identically and
+only the optional capture differs. The context carries the selected mode
+(`RequestContext::observe_mode`), and every scheduler resumption and task
+dispatcher reinstalls that same context, so background work runs in the mode
+its submitting request selected. A captured context plants the audit observer
+and the footprint accumulator; an uncaptured one clears the observer slot.
+An LSP handler is an async window that may resume on any runtime worker, so
+neither mode installs a governing request context there: the requests the
+handler issues install their own exactly as they do uncaptured, and a captured
+LSP session plants only the observer slot.
+
+### Concrete execution modes
+
+The selected mode becomes a type. `verter_audit::observe::ObserveExec` is a
+sealed trait with exactly two implementors, `Captured` and `Uncaptured`, and
+`verter_audit::specialise!(mode => M, { ... })` expands its body once per mode
+with `M` naming that mode's type (only the `Uncaptured` expansion in a default
+build). Code compiled for `M` emits through the typed forms
+`observe!(M => on observer => |obs| ...)`,
+`observe_request!(M => on request => |ctx| ...)`,
+`component_meta_trace_structured!(M => on accumulator => ...)` and
+`component_meta_trace_custom!(M => on accumulator => ...)`, each a branch on the constant
+`M::CAPTURED`: the uncaptured expansion reads no observer, request-context,
+accumulator or timing slot and builds no payload. Specialization is bounded
+to these two modes, not every host/counter combination. The typed forms
+require an explicit borrowed receiver; neither captured nor uncaptured
+emission recovers a receiver from TLS.
+
+`RequestSnapshot` retains `CaptureTargets` at lifecycle admission. The
+dispatcher clones those handles once and carries them into its sibling task
+dispatchers; `GraphIn` borrows them for interning and cache operations. Session
+helpers pass the same borrow through typed lookups. The mode-aware
+`resolver_context::capture_targets` accessor returns a static empty carrier
+for uncaptured execution without calling a request port. With the feature
+disabled the carrier is zero-size. Required request-context, budget,
+cancellation and fact-tracing access remains independent.
+
+The mode rides the structures an execution unit already carries:
+
+- The engine's capability family, `ResolverCapabilities::Observe`. A
+  `ProjectSemanticDispatch<C>` is compiled for `C::Observe`; its evaluators
+  (`ArenaOps`, `RelationCx`, `FlowCx`, `InferenceTxn`) carry the driver's mode.
+- The semantic graph store as a unit reaches it, `GraphIn<'_, M>`
+  (`ProjectSemanticDispatch::graph`). Interning (shard-lock timing), memo
+  reads and publishes (per-request cache counters and cache events),
+  dependency-signature interning and origin-edge recording are compiled for
+  the unit's mode. `record_origin_edge!` builds an edge's arguments only when
+  `GraphIn::records_origin_edges` is true: always in test and `test-support`
+  builds, otherwise only for captured execution.
+- The session's request contexts. `HostCapabilities<M>` is the host family
+  for mode `M`; `HostRequestLifecycle<'a, M>` and
+  `SessionRequestLifecycle<'a, M>` carry it (`RequestBoundLifecycle::Observe`),
+  so every request port the dispatcher calls is compiled for the unit's mode
+  and reaches the shared stores' typed lookups (`get_any_in`, `get_route_in`,
+  `ensure_indexed_ready_serve_in`, ...). Session code between a root entry and
+  a dispatcher is generic over `M`.
+
+A unit adopts the carried mode once, where it starts: an audited root entry
+from its own selection (`capture::entry_mode` when the body arrives as a
+closure), any other unit — a context or dispatcher built inside a request, a
+scheduler job, an upsert, an invalidation — from the installed request
+(`capture::installed_mode`, over
+`request_context::installed_observe_mode`). A shared store or host operation
+called from outside a unit keeps a plain entry (`get_any`, `get_route`, ...)
+that adopts the installed mode once and runs the typed `_in` form; units call
+the typed form directly. A surface that installs a context only to arm the
+projection budget, with no audit registration, selects its mode by the same
+rule: with no request installed, captured exactly when an observer is planted. Once-per-request and once-per-phase emission — a
+root entry's record, a compile phase's timing, a cold cache write, a
+workspace maintenance pass — may use the untyped forms, which read the slot
+once. A scheduler job carries its submitting request's context from
+submission, and its dispatch publishes only when that carried context
+reports `RequestContextLike::captured`; the worker never polls a slot to
+decide. `CodeTransform<'_, M>` carries that execution mode through script,
+template and source-map generation. Captured transforms count operations in
+a plain local tally and publish once on drop. Uncaptured operations compile
+out the tally update, and their drop performs no observer lookup.
+`CodeTransform::new` constructs an uncaptured transform; compiler execution
+uses `CodeTransform::<M>::new_in` with its selected mode.
+Standalone transform owners (script-fragment stripping, declaration rendering,
+style emission, assembly and Svelte projection) adopt the installed selection
+once before constructing their transform. Their inner operations carry that
+mode, so helper-created transforms still contribute to captured compile counts.
+
+In a debug instrumented build a dispatcher bound to a request context asserts
+its compiled mode equals the mode the installed root entry selected, so a
+misrouted unit fails in the instrumentation lane rather than dropping a
+request's observations. The process-wide work-attribution table
+(`verter_audit::attribute!`, `count_resolver_context_call!`) is selected by
+the instrumented build as a whole. Per-execution provenance in typed store
+and host paths follows the selected mode; test-support retains deterministic
+work accounting in both modes.
+
+A default build has no audit envelope at all. The observer slot, the
+per-request accumulator, the record store, the scheduler and VFS audit sinks
+and the request context's audit counters are compiled out;
+`verter_session::capture::normalize_host_config` clears `audit_enabled`,
+`footprint_capture` and `audit_timing_capture` at host construction; and every
+audited entry returns its real result with a record whose `capture_state` is
+`Unavailable`.
 
 ## Capture availability API
 
@@ -140,15 +268,36 @@ NoOpObserver virtual calls or observer TLS polling in hot loops.
 without `semantic-observe` and `Available` with it. Availability is a binary
 capability, independent of the profile and of whether a request asks for
 capture. `ObserveMode::{Uncaptured, Captured}` is the execution vocabulary;
-`ObserveMode::compiled()` gives the current unconditional build mode.
+`ObserveMode::select(requested)` picks the mode for a root entry and is always
+`Uncaptured` in a default build; its production caller is
+`verter_session::capture::select_mode`. `ObserveExec`, `Captured`,
+`Uncaptured` and `specialise!` turn the selection into a type (see "Concrete
+execution modes"). `verter_session::capture::availability()` re-exports the
+build's answer for the host layer.
 
 `observe::capture(|| payload)` returns `None` when the feature is off without
 calling the collector. With it on it calls the collector once and returns
-`Some(payload)`. Construct metrics inside the closure. This capture boundary
-does not install observers, alter REQUIRED state or perform runtime enabled
-checks. It does not migrate existing audit endpoints; their consolidation
-must report unavailable capture through this capability, never fabricated
-zero metrics.
+`Some(payload)`. Construct metrics inside the closure.
+
+Emission and storage use one shape across crates:
+
+- `verter_audit::observe!(|obs| body)` runs `body` against the installed
+  observer. Without the feature the body is type-checked inside a closure that
+  is never built, so no argument or payload is constructed.
+  `verter_type_engine::observe_request!(|ctx| body)` is the same form over the
+  current request context.
+- `ObservedU64`, `ObservedU32`, `ObservedU16` and `ObservedFlag` are atomics
+  with the feature and zero-size without it; their writes compile to nothing
+  and their readers exist only with the feature. `Stopwatch` reads the clock
+  only with the feature, and `Sample<T>` evaluates its closure only with it.
+
+Public surfaces report unavailability, never fabricated zero metrics:
+`AuditCaptureState::Unavailable` marks every record a default build returns;
+the NAPI and WASM bindings export `captureAvailability()` (`"Available"` or
+`"Unavailable"`), and their record readers (`getLastAuditRecord`,
+`getAuditRecords`, `getBundlerBatchSummary`, the why-loaded and
+why-instantiated walkers, `getComponentMetaWithAudit`) fail with an error that
+names the missing feature; the LSP audit methods answer with the same error.
 
 ## Verification boundaries
 
@@ -162,15 +311,24 @@ measurement mode is covered by declaring that dependency.
 Metadata's workspace-wide resolved feature union alone is not production
 build evidence: it includes other members' dev features. The guard checks each
 of `verter_napi`, `verter_lsp`, `verter_wasm`, and `verter_tsc` with normal/build
-edges and with the root's dev edges, on the host and WASM targets. Cargo feature
+edges and with the root's dev edges, plus `verter_session` with its dev edges,
+on the host and WASM targets. Cargo feature
 selection is profile-independent, so the same closure applies to default/dev,
 debug, release and `no-debug-assertions`; profile compile lanes supply the
 separate build evidence. Isolated fixture manifests demonstrate rejection of
 direct, implied and dev-dependency enablement and acceptance of independent
 test-support features.
 
+The capture on/off equivalence suite
+(`crates/verter_ffi/src/convert/capture_equivalence_tests.rs`) drives the same
+component-meta, compile and named-type requests cold through the plain and
+audited entries on hosts with capture off and on, and requires byte-identical
+wire answers; it runs in both the default build and the instrumentation lane,
+where it also requires the audited host to have stored every record.
+
 Run `cargo nextest run -p verter_audit` both without and with
-`--features semantic-observe` for availability proof, and
+`--features semantic-observe` for availability proof,
+`node scripts/observe-lane.mjs run` for the instrumentation lane, and
 `cargo nextest run -p verter_source_policy_gate -E 'test(observe_feature_closure)'`
 for closure proof. Formatting,
 Clippy, docs build, production builds, and the canonical/shipped-cfg and WASM

@@ -1,5 +1,60 @@
 ## Semantic Dispatch (current authority)
 
+Literal sources against literal-only union targets use an operation-local
+membership index inside the relation authority. Its keys reuse the canonical
+algebra's exact literal-value identity (including SameValueZero numbers),
+independent of file-scoped node ids. Index preparation charges work and logical
+construction bytes before insertion; its shared cost receipt is consumed by
+every dependent query, and each lookup deposits the inspected file self-roots.
+The outermost dispatch operation releases the index and its backing storage.
+If a warm consumer has already paid preparation in the connected demand,
+rebuilding the released index does not charge it again. The rebuilt index's
+receipt still records its full cold work and bytes, so a later independent
+demand consuming a newly cached sibling pays preparation in full.
+The checker's small-union recursion classification reuses the literal-only
+proof, so it does not flatten that target again for each source literal.
+Membership never changes the union's stored sequence or `VerterStableV1` order.
+Mixed, deferred, template and enum members, and active inference sessions,
+retain the ordinary ordered relation path. `Exclude` and subset relations use
+this index. Native `Omit` already enumerates canonical `PropertyKey` values into
+an `FxHashSet` and filters by membership; it retains that typed property-key
+owner, including its numeric/string key normalization, without relation scans.
+
+A pair question (`execute_relate_pair`) of a literal against a literal-only
+union takes no relation frame and publishes no memo entry, as a literal pair
+does: a distributive conditional asks one per member. It replays a memoized
+answer for the pair first (paying its receipt, which is never below the index
+price), then answers from the index, the lookup's roots and the index receipt
+going to the asking build. The path depends on the operands' shapes alone,
+never on what an earlier read prepared. A pair asked while a relation frame is
+on top joins that frame's chain, and a pair already open lower on the
+obligation stack is the relation's coinductive assumption: both take the
+ordinary path, which applies the chain's overflow, depth and comparison limits
+and the assumption. A preparation ahead of any relation
+frame starts only when the demand can pay for every arm and records no budget
+edge (a frame on top never asked for it); a refused one falls back to the
+relation authority, whose own frame records the refusal. Inside a relation, a
+literal-only union source against a union target reads its members through the
+index in member order and stops at the first one the target lacks
+(`eachTypeRelatedToSomeType` over `containsType`), depositing the same roots in
+the same first-inspection order as one arm per member, without a work item per
+member; a refused preparation falls back to one arm per member, and each arm
+reports it. One membership test (`literal_members_in_union`) serves all three
+paths.
+
+The structural-fact demand's composite reduction reduces a resolved union
+once per operation when every arm is a literal, a primitive or an enum member:
+such a union, proven left as written (the canonical union over the arms keeps
+every one), is recorded with the file roots that canonicalization inspected,
+and a later demand replays those roots instead of reducing it again. That
+canonicalization runs no metered construction (the meter pays only for
+distributions), so a replay prices a demand exactly as reducing again does
+(`a_reused_composite_proof_prices_a_demand_as_reducing_again`); a union with
+any other arm is reduced by every demand. A distributive conditional's members
+each read their named `extends` operand through that demand. The outermost
+dispatch operation releases the record with the membership indexes.
+Member-set comparisons in the reduction use a hashed index for wide unions.
+
 Closed single-property scalar object unions use a request-local property index
 inside the relation authority. Matching properties still enter the ordinary
 member relation in authored order, including the positional first attempt.
@@ -68,7 +123,7 @@ a distinct responsibility:
 - `walk.rs` — `PathWalker` + `walk_path` (iterative worklist per plan §2)
 - `guards.rs` — `SubstitutionGuard`, `EvaluationGuard`, `WalkGuard`, `KeyEnumerationGuard`, `RelationGuard` (per-call RAII cycle detection)
 - `enumerate.rs` — `KeyEnumeration`, `EnumeratedKey`, `key_names_*` helpers
-- `relation.rs` — the SOLE relation authority (`execute_relate` riding `execute(SemanticQueryKey::Relate)`): reentry/assumption frames, coinductive SCC discharge, inference sessions, the O(tag) prefilter, and the structural reducer; `relation_txn.rs` carries the transient `CheckerTransaction` substrate. THREE `RelationKind`s are live and reduce here, `Relate` staying the sole query tag: `Assignable` (the full structural lattice — what call applicability asks, unchanged), `Identity` (`reduce_identity`, BOUNDED to the nominal axis: two `unique symbol` declaring identities decide, every other subject is undecided — scope-insensitive STRUCTURAL constituent identity is the canonical type algebra's own comparator, not this relation), and `Comparable` (`reduce_comparable`, the overlap oracle: `NotAssignable` is a PROOF of empty overlap, `Assignable` means no such proof was found, `Unknown` means a subject the oracle could not read). `Subtype` / `StrictSubtype` are REFUSED (undecided, `ReturnOnly`) rather than answered through a neighbouring kind's lattice. `Identity` is live and warm-admittable but has NO production asker yet — `nodes_comparable` is the only new consumer and it asks `Comparable` — so its only current traffic is test-driven. Read its bound before reaching for it: `Identity(X, X)` is UNDECIDED for any non-nominal `X`, because scope-insensitive structural constituent identity is the canonical type algebra's own comparator and answering it here would be two engines for one question. `relation_nominal_identity` / `relation_nominal_leaf` are the nominal axis, asked before the deferred gate so a preserved `unique symbol` `typeof` carrier is not swallowed as an ordinary deferred shell. Mixed pairs are relation- and direction-aware: comparability widens either nominal side, while assignability widens only a nominal source; a broad `symbol` source never satisfies a nominal target.
+- `relation.rs` — the SOLE relation authority (`execute_relate` riding `execute(SemanticQueryKey::Relate)`): reentry/assumption frames, coinductive SCC discharge, inference sessions, the O(tag) prefilter, and the structural reducer; `relation_txn.rs` carries the transient `CheckerTransaction` substrate. THREE `RelationKind`s are live and reduce here, `Relate` staying the sole query tag: `Assignable` (the full structural lattice — what call applicability asks, unchanged), `Identity` (`reduce_identity`, semantic type identity: nominal declarations and resolved structural shapes, with exact member modifiers and types, order-independent composite membership, and signature-kernel callable identity; the canonical algebra separately owns conservative construction identity), and `Comparable` (`reduce_comparable`, the overlap oracle: `NotAssignable` is a PROOF of empty overlap, `Assignable` means no such proof was found, `Unknown` means a subject the oracle could not read). `Subtype` / `StrictSubtype` are REFUSED (undecided, `ReturnOnly`) rather than answered through a neighbouring kind's lattice. `Identity` is live and warm-admittable; deferred conditional relations ask it for operand identity. Unreadable operands and unsupported non-pair axes remain undecided. Structural identity sub-relations use the same full-key transaction, binding barrier, SCC discharge and work budget as other relation judgements. `relation_nominal_identity` / `relation_nominal_leaf` are the nominal axis, asked before the deferred gate so a preserved `unique symbol` `typeof` carrier is not swallowed as an ordinary deferred shell. Mixed pairs are relation- and direction-aware: comparability widens either nominal side, while assignability widens only a nominal source; a broad `symbol` source never satisfies a nominal target.
 
   **The `expand_pair` gate ORDER is an invariant.** The nominal leaf sits directly ABOVE the deferred-shell gate and NOTHING else moved: the opaque gate, the `Infer` deposit, the `InferRef` gate, and the union/intersection distribution keep their positions, so a pair the nominal axis has nothing to say about takes exactly the sequence it always did. Re-hoisting the deferred gate above the nominal leaf would swallow every preserved carrier; sinking it below the distribution arms would decide composites-with-deferred-children the engine deliberately defers, which is a general change to the lattice and not a nominal one. The leaf DECLINES (returns `None`) when the non-nominal side is a composite — in EITHER direction, so a symmetric question cannot answer differently by operand order — or, for assignability only, when it is an `Infer` position that must receive the carrier verbatim as its inference candidate; a declined pair carrying a nominal identity is the ONE pair allowed to step over the deferred gate, so it reaches the frame that owns it. For the same reason `relation_eval_requires_canonical_frame` opens a memoized frame for a `DeclRef` / `InstantiationRef` / declaration-or-recursive placeholder ONLY when the pair's other side is nominal (a `Conditional` always opens one): a carrier's declaring identity is revealed only by the canonical frame's identity unwrap, and widening that to every carrier pair would decide array elements, tuple elements, and object members the deferred gate answers `Unknown` today.
 
@@ -97,6 +152,72 @@ Guards: `many_distinct_relations_under_tiny_retention_keep_operand_only_residenc
 
 **Superseding notes for other owners' documents** (folded in by the documentation closure): `.claude/skills/host-session/SKILL.md` still lists relation proofs among what a close releases and names `semantic_query_memo/intern_table.rs` as the proof/relate-key table storage — both are gone; `docs/contributing/semantic-benchmark.md` still lists interned relation proofs among the retention/work counts — the counter no longer exists (the benchmark records, `session-analyze.mjs` required state and the dx-harness churn counters dropped it).
 
+### Library generic interfaces and generic-method relations
+
+A runtime nominal's `__builtin__` carrier (`Promise<T>`, `Map<K, V>`,
+`Set<T>`, `Date`, …; never `Function`, which relations decide by tag) is, to
+the relation, the project's global interface of that name
+(`relation_declaration_identity` → `runtime_nominal_global_declaration`,
+through `first_global_declaration`, read from the library
+`relation_wrapper_canonical` names). Two applications relate by their
+arguments under the interface's measured variance (`generic_reference`), and
+the identity unwrap expands an application to the interface's members, the
+members a walk's read already takes. A project that declares no such
+interface keeps the carrier unresolvable. Such a carrier is a reference, not a
+builtin utility: `infer_inventory` infers through `Promise<infer O>`'s
+arguments and the permissive test's wildcard check does not read it as an
+operation.
+
+`keyof T[]` is `keyof` the project's `Array<T>` (`ReadonlyArray<T>`):
+`scope_apparent_wrapper_subject` rewrites a reducing `KeyOf` of a scope-less
+array before memo admission, and `build_array_key_of` serves a file-scoped
+one. The wrapper is read under structural transit, so member values stay
+carriers: `Array`'s `[Symbol.unscopables]` maps over `keyof any[]`.
+
+Generic method relations follow `compareSignaturesRelated`:
+
+- A generic source is instantiated in the context of the target's canonical
+  signature (`canonical_signature`, the checker's `getCanonicalSignature`):
+  an unconstrained target parameter is its declaration's own binder whatever
+  default an instantiation gave it, so `then<R = T>` of `A<R>` against
+  `B<R>` meets its own pair one level down instead of recursing on fresh
+  binders.
+- A source parameter the target's clause declares too (a binder no
+  instantiation moved, `R2 = never`) binds to itself and asks the return for
+  nothing.
+- An instantiation whose inference does not settle while a conditional's
+  `infer` is collecting and the target names one of its declarations
+  (`Promise<number> extends PromiseLike<infer U>`: `then`'s callback reads
+  `U`) leaves the signature pair undecided
+  (`InContextInstantiation::Unsettled`): the instantiation's own session takes
+  only the source's parameters, so the uninstantiated pair would decide a
+  branch it never related. Inference through a lib thenable's `then` into an
+  enclosing inference (`thenOf(p1)`) is not done yet; such calls are typed
+  `UnrepresentableCallee` gaps.
+- Two callback parameters (one non-generic call signature each, nullable
+  alike, no predicate) relate target-to-source with strictly contravariant
+  parameters, never the method-bivariant fallback (`callback_parameter_pair`,
+  `SignatureCheckMode::Callback`). Where the enclosing relation is not strict
+  (a method target, or `strictFunctionTypes` off) the callback's RETURN
+  relates in either direction (the checker's `BivariantCallback`): `add(cb:
+  () => T)` is bivariant in `T`; otherwise it is covariant
+  (`StrictCallback`). The callback relation runs inside the enclosing frame,
+  so its parameters infer at `InferPosition::CallbackParam` (the two flips
+  cancel) and its return at `InferPosition::ContravariantParam`.
+- Inference into a union with one naked parameter matches a source member to
+  another member referencing the same generic declaration by its type
+  arguments (`members_unmatched_by_inference`, the checker's
+  `inferToMultipleTypes` + `inferFromTypeArguments`): `PromiseLike<R'>` into
+  `R | PromiseLike<R>` infers `R'`, a declaration's reference to itself in
+  its own body (a `RecursiveRef` carrier, `raw_generic_reference`) matching
+  like any other reference. Only the arguments relate, so two
+  recursive declarations never expand into each other. Matching a member
+  through another declaration's structure is not done (the checker's
+  `inferFromObjectTypes`); `thenables_of_different_declarations_infer_through_their_structure`
+  pins the rows that need it.
+
+Guards: the `lib_generic_relation_tests` suite (`verter_session`).
+
 ### Object-literal spreads: canonical construction programs
 
 Every spread-bearing object is a `SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram)` — one immutable, source-ordered effect list (`DirectProperty` / `DirectMethod` / `DirectGet` / `DirectSet` / `DirectIndex` / `DirectCall` / `DirectConstruct` / `Spread`). It is the sole stored description of the object: no folded member surface, completeness mirror, replay cursor, or side log coexists. A non-spread object stays a closed `SemanticNodeData::Object` surface (every `SurfaceView` is closed by construction; the open-operand representation is gone). Direct effects carry lossless typed facts: typed key or computed-key child, value/signature children, optional/readonly, method/get/set kind, implementation-body fact, visibility, spans/declaration origin, and excess origin.
@@ -109,13 +230,13 @@ The fresh excess-property prepass is a dormant engine capability. No production 
 
 **One correlated projection family.** `SemanticQueryKey::ProjectObjectSpread { program, selector, context }` evaluates programs. Selectors: `Key`, `RelationShape`, `Surface`, `IndexDomain`, `Signature`, `EnumerableValueEnvelope`, `ExcessEligibility`. The sealed dispatch-constructed context carries the projection-reduction axes, the R/T/L/J environment hashes, the substitution identity, and the exact-optional-property policy; prepared and family identity include all of them, so distinct selectors/environments/views never cross-serve.
 
-Finite enumerable union operands fork whole alternatives at their exact spread position, and later effects apply per branch, so correlation survives overwrites. Selector liveness prunes only shadowed recursive effects before recursion (`Key(x)` on `{...Self, x}` never enters `Self`; `{x, ...Self}` must). An alternative's public surface is positive evidence only: omission never proves absence, emptiness, exact `keyof`, exhaustive domain, or closed materialization. Those operations exist only on the sealed witnesses `ClosedObjectProjectionAlternative` / `ClosedObjectProjectionFormula`; an open or mixed formula cannot mint one.
+Finite enumerable union operands fork whole alternatives at their exact spread position, and later effects apply per branch, so correlation survives overwrites. The formula is FACTORED (`project_semantic_dispatch/object_spread_product.rs`): a Leaf/Choice/Overlay DAG (plus a `Nested` choice over a spread program's own formula) holds the sum of the spread layers, never their Cartesian product. Consumers read alternatives one at a time through `ProjectSemanticDispatch::object_spread_cursor` (a fallible `ProductCursor`; `nth` skips without folding, `object_spread_alternatives` collects, `object_spread_exact_keyof` intersects whole-domain keyofs); each read charges its bounded work and construction bytes to the connected demand before folding, and a refused read is `Err(trip)` — never a smaller or empty product. A one-alternative product is folded once at build (`ProductNode::Finished`) so warm reads reuse it. Construction is two-staged: every effect's layer is built over the WHOLE program and the product size is checked against the checker's `CROSS_PRODUCT_UNION_SIZE` (TS2590, `CheckerDiagnosticOperation::ObjectSpread`, a resource-partial `CheckerRecovery` error) BEFORE selector pruning; then the selector's live suffix is kept and every fragment narrowed to the facts the selector reads, collapsing arms that differ only in unread facts (a `Key` read of an `M × N` spread has width 2). Narrowed selectors report `ExcessEligibility::Indeterminate`. There is no distribution or depth cap. Selector liveness prunes only shadowed recursive effects (`Key(x)` on `{...Self, x}` never enters `Self`; `{x, ...Self}` must) — a shadowed operand that cannot be classified contributes no factor. An alternative's public surface is positive evidence only: omission never proves absence, emptiness, exact `keyof`, exhaustive domain, or closed materialization. Those operations exist only on the sealed witness `ClosedObjectProjectionAlternative`; an open alternative cannot mint one.
 
 Optional spread writes fold per branch: absent + optional → optional right-present value; required/optional left + optional → required/optional union of presents; a live open residual keeps presence but makes value/facets indeterminate; a later required direct write restores exactness. The exact-optional policy controls authored `undefined` (`1|2` vs `1|2|undefined`), and environments never cross-hit. Spread-copied index facts lose readonly; authored direct indices keep it. An index constrains values when a key exists but never manufactures named presence. Direct call/construct effects survive in distinct buckets; a callable/constructable operand contributes neither.
 
 **Excess eligibility is a whole-program selector**: `Eligible { direct_candidates }`, `SuppressedByGenericSpread`, or `Indeterminate`. Any semantically generic spread suppresses all direct candidates before or after it (even under a finite-looking constraint); closed/enumerable spreads do not suppress and spread-provided keys are never candidates; operational inability to classify a residual is `Indeterminate`, which falls back safely (no rejection). Generic-to-concrete substitution re-evaluates eligibility. The prepass consumes programs through this selector and requires closed alternatives for absence.
 
-**Relation consumes correlated alternatives with exact quantifiers**: every source alternative must assign to some target alternative; reject only with complete negative proof; open/indeterminate evidence falls back to `Unknown`. Program roots are recognized before self-equality, shortcuts, inference deposits, excess, `Record`, index, and signature loops. `{...T} <= {...T}` stays non-publishing `Unknown` while `T` is unresolved, despite identical node ids. Required named target keys need named required presence — a source index never satisfies it. Broad `Record`/index obligations relate every known contribution and require an exact envelope per live residual; open targets reject on exact known mismatches before closure but stay `Unknown` on a passing known subset. Inference deposits only from exact whole-branch positions inside the existing transaction checkpoints — indeterminate positions deposit nothing. Alternative-product caps, depth caps, and recursive breaks are typed operational partials (`BudgetExceeded` / recursive), ReturnOnly and admitted nowhere; a later adequate run heals. Cross-thread owner wait-cycles break with a typed recursive partial under the store's owner wait-for graph.
+**Relation consumes correlated alternatives with exact quantifiers**: every source alternative must assign to some target alternative; reject only with complete negative proof; open/indeterminate evidence falls back to `Unknown`. Program roots are recognized before self-equality, shortcuts, inference deposits, excess, `Record`, index, and signature loops. `{...T} <= {...T}` stays non-publishing `Unknown` while `T` is unresolved, despite identical node ids. Required named target keys need named required presence — a source index never satisfies it. Broad `Record`/index obligations relate every known contribution and require an exact envelope per live residual; open targets reject on exact known mismatches before closure but stay `Unknown` on a passing known subset. Inference deposits only from exact whole-branch positions inside the existing transaction checkpoints — indeterminate positions deposit nothing. The checker's cross-product refusal (TS2590 `CheckerRecovery`, a resource partial), a connected-demand trip on a cursor read (`Err(trip)`), and recursive breaks are typed operational partials, ReturnOnly and admitted nowhere; a later adequate run heals. Cross-thread owner wait-cycles break with a typed recursive partial under the store's owner wait-for graph.
 
 Raising/display preserves exact effect order when no closed formula exists (never spreads-first); the shallow typeinfo surface joins positive members with `members_complete = false` unless a single closed alternative proves the domain. On the wire, `GraphObjectSpreadProgram` (tag 33) carries the ordered lossless effect list under graph schema 7.
 
@@ -165,3 +286,5 @@ resolved type surfaces.
 - A second `fn shallow_lower_type_expr` — FORBIDDEN (besides `project_semantic_dispatch::lower`).
 - A second struct owning a `RelationMemo` field — FORBIDDEN (besides `SemanticGraphStore`).
 - A second struct owning the semantic node map — FORBIDDEN (besides `SemanticGraphStore`).
+
+**Closed mapped operands reduce relation-locally.** The identity-carrier unwrap reduces a `Mapped` operand whose source, key domain and template are closed, such as a signature's mapped parameter after substitution. It handles identity templates, index-key domains and enumerable keys alike: each key reads the template with the binder bound to it, and `Keep` modifiers come from the modifiers type (the source of a homomorphic mapping). The object is interned for the relation alone, without member edges, matching the identity and index-key reducers. Open sources, name remaps, distributing homomorphic sources (unions, arrays, tuples), unique-symbol keys and templates that read as `Opaque` keep the carrier, so the relation stays undecided. The mapped build still carrier-stops under structural transit.

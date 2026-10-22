@@ -1074,6 +1074,7 @@ mod tests {
         use std::sync::Arc;
         use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty};
         let obj = ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::Property(
                 ObjectProperty::synthetic_public_key(
                     "inner".into(),
@@ -1435,6 +1436,7 @@ mod tests {
         // (4) the empty object surface.
         legacy_vs_sealed(
             Some(&TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: vec![],
             }))),
             Some(&NamedTypeMemberOutput::EmptyObject),

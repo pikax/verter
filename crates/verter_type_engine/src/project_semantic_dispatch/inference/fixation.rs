@@ -361,7 +361,10 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
     /// tuple (the checker first unions object and array LITERAL candidates,
     /// a provenance an array node does not carry) or a subtype relation is
     /// undecided. A declared object type is an ordinary candidate: `two(x,
-    /// y)` over `A` and `B` infers `A`.
+    /// y)` over `A` and `B` infers `A`. A union of literals counts as a
+    /// literal of its members' base primitives, so `g(["a", "b"], "c")`
+    /// over `g<T extends string>(vals: T[], def: T)` infers `"a" | "b" |
+    /// "c"`.
     fn call_common_supertype(&self, candidates: &[SemanticNodeId]) -> Option<SemanticNodeId> {
         let graph = self.graph();
         let mut ordered: Vec<SemanticNodeId> = Vec::with_capacity(candidates.len());
@@ -425,9 +428,38 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
                 primary.push(*candidate);
             }
         }
-        let literal_base = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Literal(value)) => Some(std::mem::discriminant(value)),
-            _ => None,
+        // The base primitives of a literal or a union of literals
+        // (`getBaseTypeOfLiteralType`, one bit per primitive), `None` for a
+        // type that is its own base — any other type, and `true | false`,
+        // which is `boolean`.
+        let literal_base = |node: SemanticNodeId| {
+            let bit = |value: &crate::semantic_query::LiteralValue| -> u8 {
+                match value {
+                    crate::semantic_query::LiteralValue::String(_) => 1,
+                    crate::semantic_query::LiteralValue::Number(_) => 2,
+                    crate::semantic_query::LiteralValue::BigInt(_) => 4,
+                    crate::semantic_query::LiteralValue::Boolean(_) => 8,
+                }
+            };
+            match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Literal(value)) => Some(bit(value)),
+                Some(SemanticNodeData::Union(arms)) => {
+                    let mut base = 0;
+                    let mut booleans = [false; 2];
+                    for arm in arms.iter() {
+                        let data = graph.node_data(*arm)?;
+                        let SemanticNodeData::Literal(value) = data.as_ref() else {
+                            return None;
+                        };
+                        if let crate::semantic_query::LiteralValue::Boolean(flag) = value {
+                            booleans[usize::from(*flag)] = true;
+                        }
+                        base |= bit(value);
+                    }
+                    (base != 8 || booleans != [true, true]).then_some(base)
+                }
+                _ => None,
+            }
         };
         let supertype = match primary.as_slice() {
             [] => None,

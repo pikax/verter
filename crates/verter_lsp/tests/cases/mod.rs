@@ -11,13 +11,19 @@ mod decl_overlay_close_ownership;
 mod generated_only_spans_suppressed;
 mod handler_activity;
 mod kebab_tag_mapping_full_columns;
+#[cfg(feature = "semantic-observe")]
 mod lsp_audit_cancellation_finalizes_with_marker;
+#[cfg(feature = "semantic-observe")]
 mod lsp_audit_diagnostics_completion;
+#[cfg(feature = "semantic-observe")]
 mod lsp_audit_hover_record;
+#[cfg(feature = "semantic-observe")]
 mod lsp_audit_query_methods;
+#[cfg(feature = "semantic-observe")]
 mod lsp_audit_tls_propagation;
 mod lsp_component_meta_output_error;
 mod lsp_component_meta_wire_equivalence;
+mod managed_fallback_headless_live;
 mod one_parse_per_style_block;
 mod outbound_slow_client;
 mod owned_binding_gate;

@@ -38,7 +38,12 @@ and serves through `LiveFactValidation::request_snapshot` /
 handles into every producer, memo and cache-runtime entry point below
 (`&RequestFlags` beside the context), and reads plain fields throughout. The snapshot holds handles only, so
 every read is live: a mid-request cancellation, project reset or workspace edit
-is observed by the next read. Per-method call counts of these ports, per lane,
+is observed by the next read. In a capture build the same snapshot retains
+`CaptureTargets` for the root-selected request. Dispatchers and resumed tasks
+keep these receivers, and typed store operations borrow them rather than
+recovering an observer or accumulator from worker TLS. The carrier is
+zero-size without `semantic-observe`; uncaptured access evaluates no optional
+request-port call. Per-method call counts of these ports, per lane,
 come from the default-off `semantic-observe` counter
 (`count_resolver_context_call!`, read by the `resolver_dispatch_profile`
 example in `verter_bench`). Production contexts
@@ -284,6 +289,16 @@ between first query and first delivered surface. ProjectSync then certifies the
 matching bytes without rewriting its captured snapshot; concurrent edits remain
 protected. A lazy managed fallback staying `Held` cannot mask an applied shared
 receipt.
+Without a shared route (no editor rendezvous: headless clients, Neovim, Helix,
+Zed, Lapce) the managed engine is the only one. The composite then treats a
+`Held` managed write as that engine's demand: `ProviderHub::synchronize_pending_file`
+establishes an on-demand hub (singleflight, retry cooldown), the install replays
+the recorded state, and the write returns certified. Holding instead would
+deadlock: an uncommitted IDE surface never issues the query that would start the
+engine. A hub that establishes only explicitly treats the call as a no-op while
+no engine serves. The coordinator logs an uncertified refusal while the revision
+is still current as `TSX_SYNC_UNCERTIFIED`; `TSX_SYNC_SKIPPED` means the
+revision moved.
 Overlay close removes desired content immediately but retains an epoch-bound
 withdrawal from a committed injection receipt until transport close succeeds.
 A never-injected or shadow-vetoed carrier owns no transport document and creates
@@ -1218,7 +1233,7 @@ Concrete contract:
 - **Warm validators require `&CurrentHostStoreView`.** The top-level warm-validation entry points with no outer publish fence (`try_get_cached_meta_payload`, `ComponentMetaResultDb::get_with_view`, the imported-root / owner-import-surface warm reads) accept ONLY a proven-current view. A `ReturnOnly` read is a cache MISS, not a validation — the caller falls to the cold path whose own `is_stable` / publish fence gates promotion.
 - **typeinfo query-returners do bounded-retry-then-supersede.** `resolve_named_symbol`, `evaluate_type_expression`, `project_node_to_type_expr_json_bytes` (the session-owned bytes FFI facade that mints the `OutputProjector` capability + materializes + serializes internally), `resolve_shallow_surface`, `resolve_vue_macro_surface`, `resolve_vue_public_type`, and `resolve_type_with_audit` build a request-bound dispatch context and RETURN the resolved node with NO outer fence. They acquire a `CurrentHostStoreView` via `typeinfo::current_store_view_for_query` (bounded retry, default 3); on sustained churn they surface a typed non-current MISS (`None`, or `QueryError::UnstableState`) rather than resolving against a superseded snapshot and returning a stale node. `None` is the established FFI miss signal (`typeExpr: null`). The retry is bounded — it terminates, never spins. A non-current evaluation must NOT warm the `scratch_cache`.
 - **Every branch of a cache-presence-selected lane binds a REQUEST-BOUND context.** `VerterHost::build_template_class_semantic_facts` (`host_manage/analysis_io.rs`) picks its resolver context from artifact presence: the base-publishable + `IndexedReady`-present branch builds a `HostResolverContext::from_cold_seed`, the other composes a `SessionResolverContext::from_cold_seed`. The resolver-tier builder takes `&dyn RequestBoundResolverContext` — the sealed marker implemented for those two contexts and NEVER for `VerterHost` — so a bare-host binding is a COMPILE error, not a cache-presence-dependent runtime abort. The rail matters because `classify_binding` demands `prepared_value_decl` for every template `:class` script binding, and only a request-bound context can serve a prepared declaration. Regression: `template_class_lane_context_tests.rs` (indexed-present assertion + cold-seed control).
-- **Cold contexts carry `Current` vs `ColdSeed`.** `HostResolverContext::from_current(&CurrentHostStoreView)` vs `HostResolverContext::from_cold_seed(&ColdSeedHostStoreView)` — and the session-bound counterpart `SessionResolverContext::from_cold_seed(&ColdSeedHostStoreView)`. The cold-seed constructor marks the request-bound `RequestStoreView` non-current iff the seed was `ReturnOnly`; its `validates*` family then fails CLOSED, so every nested warm-cache probe inside the dispatch MISSES rather than validating against the stale seed. This is the single-chokepoint enforcement — no individual nested validator knows about currentness.
+- **Cold contexts carry `Current` vs `ColdSeed`.** `HostResolverContext::<M>::from_current_in(&CurrentHostStoreView)` vs `HostResolverContext::<M>::from_cold_seed(&ColdSeedHostStoreView)` — and the session-bound counterpart `SessionResolverContext::<M>::from_cold_seed(&ColdSeedHostStoreView)`. These constructors carry the root-selected execution mode `M`; the unit-test `from_current` convenience chooses `Uncaptured`. The cold-seed constructor marks the request-bound `RequestStoreView` non-current iff the seed was `ReturnOnly`; its `validates*` family then fails CLOSED, so every nested warm-cache probe inside the dispatch MISSES rather than validating against the stale seed. This is the single-chokepoint enforcement — no individual nested validator knows about currentness.
 - **Cold-seed currentness is INTRINSIC to its read — never a separately-sourced flag.** A cold-seed view's `is_current` comes from the SAME read that produced its raw view: `StoreViewRead::into_cold_seed_view()` derives it from the read's arm (`Current` vs `ReturnOnly`). There is no constructor that pairs a raw view with a caller-supplied bool — the retired `ColdSeedHostStoreView::from_raw_for_compute(view, separate_flag)` was exactly such a footgun, letting a view from one read be re-bound with a currentness flag from ANOTHER read (a stale second read marked current). Two valid sources of a cold-seed in a validating cold compute:
   - **A helper that does its OWN fresh read** takes the cold-seed straight from that read: `self.resolver_store_view_read().into_cold_seed_view()` (then `.with_session_overlay(..)` for the session path). The view-bound component-meta cold compute (`VerterHost::view_bound_cold_seed` → `compute_component_meta_state_with_view` / `_from_captured_with_view`) and the bare-host overlay entries (`compute_component_meta_state_with_overlay` / `_from_captured_with_overlay`) use this — currentness and view come from one read, no flag to mismatch.
   - **A helper that holds the EXECUTOR's single-read `(view, is_current)` pair** re-binds it via the SOLE pairing constructor `StoreViewRead::from_executor_snapshot(view, is_current)` (returns the intrinsic-currentness enum, consumed via `.into_cold_seed_view()`), confined to the executor boundary where the pair provably came from one read. The fallthrough cold compute (`compute_fallthrough_surface_uncached`) and the component-meta `*_with_view_arg` entries use this — the executor's `snapshot_view` destructured one `StoreViewRead` and threaded both into `compute`. The executors (`ComponentMetaRequestExecutor`, `FallthroughRequestExecutor`) track `snapshot_view_current` and thread it into `compute(.., base_is_current)`.
@@ -1313,3 +1328,13 @@ expose `semanticNodeRoots`, `semanticNodeInternalEdges` and
 `semanticNodePermanentNodes`. These required current counts add no observation
 history. See the [ownership reference](../type-resolution/references/counted-node-ownership.md)
 for the ownership contract, the close and the sidecar cleanup.
+
+## Workspace source capture
+
+A scheduler file stage binds source capture once from its submitted request,
+falling back to the DAG waiter group's winner context. Synchronous jobs use
+the same owner even when caller TLS is empty. The bound loader forwards request identity and timing to
+`WorkspaceRead::read_file_captured`; ordinary reads use the uncaptured
+specialization and never consult optional context state or the sink registry.
+Session dependency-source reads use their existing typed capture receivers.
+Both entries execute the same overlay/snapshot/disk read algorithm.

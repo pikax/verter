@@ -179,18 +179,6 @@ pub trait ArtifactNode {
     }
 }
 
-/// The reverse-index registrations a candidate with `signature` and
-/// `self_roots` takes: one per distinct canonical among its facts and its
-/// self-roots, the set its store indexes it under.
-fn reverse_index_registrations(
-    signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
-    self_roots: &[Arc<str>],
-) -> usize {
-    let mut seen: rustc_hash::FxHashSet<Arc<str>> = signature.canonical_ids().into_iter().collect();
-    seen.extend(self_roots.iter().cloned());
-    seen.len()
-}
-
 /// The post-compute fence applies equally to retained and unretained entries.
 fn computed_signature_is_current(
     signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
@@ -543,15 +531,12 @@ pub mod query {
                         let discriminant =
                             node.discriminant(&key, &value, &signature, validated_at_generation);
                         let footprint = node.candidate_footprint(&key, &value);
-                        let registrations =
-                            reverse_index_registrations(&signature, &self_root_canonicals);
                         match Candidate::admit::<N::Key>(
                             discriminant,
                             value,
                             signature,
                             self_root_canonicals,
                             validated_at_generation,
-                            registrations,
                             footprint,
                             &node.retention_account(),
                         ) {

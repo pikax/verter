@@ -45,24 +45,16 @@ fn snapshot_path_for(fixture: &fixtures::CorrectnessFixture) -> PathBuf {
 }
 
 /// Build a hermetic [`VerterHost`] using the same `MemoryWorkspace`
-/// pattern that the `component_meta_audit::harness` already uses.
-/// `audit_enabled` is on because [`AuditedRequest::resolve`] requires
-/// a published `RequestAuditRecord` — the gate ignores the record and
-/// only consumes the [`ComponentMetaAnalysis`] payload.
+/// pattern that the `component_meta_audit::harness` already uses. The
+/// gate consumes only the [`ComponentMetaAnalysis`] payload, so the host
+/// captures no audit records.
 fn build_host(files: &[(&str, &str)]) -> std::sync::Arc<VerterHost> {
     let workspace = std::sync::Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
     for (canonical, content) in files {
         workspace.inject_file((*canonical).into(), std::sync::Arc::from(*content));
     }
     let ws_access: std::sync::Arc<dyn WorkspaceAccess> = workspace;
-    std::sync::Arc::new(VerterHost::new(
-        HostConfig {
-            audit_enabled: true,
-            footprint_capture: false,
-            ..HostConfig::default()
-        },
-        ws_access,
-    ))
+    std::sync::Arc::new(VerterHost::new(HostConfig::default(), ws_access))
 }
 
 /// Resolve a fixture's target SFC and return the host plus its
@@ -75,13 +67,10 @@ fn compute_for_fixture(
     fixture: &fixtures::CorrectnessFixture,
 ) -> (std::sync::Arc<VerterHost>, ComponentMetaAnalysis) {
     let host = build_host(fixture.files);
-    let req = verter_session::audited_request::AuditedRequest::builder()
-        .attach_to(std::sync::Arc::clone(&host))
-        .resolve_component_meta(fixture.target);
-    match req {
-        Ok((analysis, _resolution, _record)) => (host, analysis),
-        Err(e) => panic!(
-            "correctness fixture `{}` (`{}`) must resolve, got {e}",
+    match host.get_component_meta_with_resolution(fixture.target) {
+        Some((analysis, _resolution)) => (host, analysis),
+        None => panic!(
+            "correctness fixture `{}` (`{}`) must resolve",
             fixture.id, fixture.target,
         ),
     }
@@ -124,11 +113,9 @@ defineEmits<{
         ),
     ];
     let host = build_host(files);
-    let (analysis, _resolution, _record) =
-        verter_session::audited_request::AuditedRequest::builder()
-            .attach_to(host)
-            .resolve_component_meta("/row_click.vue")
-            .expect("/row_click.vue must resolve");
+    let (analysis, _resolution) = host
+        .get_component_meta_with_resolution("/row_click.vue")
+        .expect("/row_click.vue must resolve");
 
     let event_names: Vec<&str> = analysis.events.iter().map(|e| e.name.as_str()).collect();
 

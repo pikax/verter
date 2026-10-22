@@ -20,7 +20,6 @@ semantic-observe = [
   "verter_semantic/semantic-observe",
   "verter_parser/semantic-observe",
   "dep:hotpath",
-  "hotpath/hotpath",
 ]
 # Exposes `template` (and `script`) as `pub` instead of `pub(crate)` — see
 # `src/lib.rs`. Primarily for the benchmark harness, but it also provides the
@@ -152,3 +151,8 @@ verter_parser = { path = "../verter_parser", features = ["stack-fault-injection"
 name = "parse_corpus_probe"
 path = "src/bin/parse_corpus_probe.rs"
 required-features = ["external-corpus"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }

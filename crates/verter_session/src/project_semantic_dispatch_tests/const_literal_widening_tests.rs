@@ -211,7 +211,12 @@ fn eval(
 ) -> (TypeExpr, Option<FlowReturnDegradation>) {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = FlowReturnKey {
         function: dispatch.flow_function_slot_for(
@@ -431,7 +436,12 @@ fn a_copy_cycle_reads_no_widening_literal() {
     );
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     assert!(!dispatch.value_read_widens(
         "/w/cycle.ts",
@@ -646,6 +656,7 @@ export function c3(c: C3) { return c.p; }
 class B { p = 1 }
 class Dd extends B { q; }
 export function ddq(d: Dd) { return d.q; }
+class AN { accessor n; static accessor s; constructor() { } }
 ";
 
 /// The four `strictNullChecks` × `noImplicitAny` settings.
@@ -664,7 +675,8 @@ const FOUR_SETTINGS: [Option<&str>; 4] = [
 ///
 /// Measured on TypeScript 7.0.2 (all four `strictNullChecks` ×
 /// `noImplicitAny` settings alike): `np`, `nq`, `ns`, `dp`, `cp`, `c3` and
-/// `ddq` are `any`.
+/// `ddq` are `any`, and so are the `accessor` fields `AN['n']` and
+/// `(typeof AN)['s']`.
 #[test]
 fn a_property_without_type_or_initializer_is_the_implicit_any() {
     for compiler_options in FOUR_SETTINGS {
@@ -683,6 +695,8 @@ fn a_property_without_type_or_initializer_is_the_implicit_any() {
                 ("ReturnType<typeof cp>", "any"),
                 ("ReturnType<typeof c3>", "any"),
                 ("ReturnType<typeof ddq>", "any"),
+                ("AN['n']", "any"),
+                ("(typeof AN)['s']", "any"),
             ],
         );
         assert!(
@@ -700,7 +714,10 @@ fn a_property_without_type_or_initializer_is_the_implicit_any() {
 /// ([`a_constructor_assigned_property_takes_the_assigned_type`] holds the
 /// measured answers). So is a static property of a class with a static
 /// block (TypeScript 7.0.2: `S1.s` with `static { this.s = 1; }` is
-/// `number` under `noImplicitAny`, `any` without it).
+/// `number` under `noImplicitAny`, `any` without it). An `accessor` field
+/// is typed as a property is (TypeScript 7.0.2: `A['x']` with `this.x = 1`
+/// in the constructor and `SA.s` with `static { this.s = 1; }`
+/// are `number` under `noImplicitAny`, `any` without it).
 #[test]
 fn a_flow_typed_property_is_the_missing_member_marker() {
     let source = "\
@@ -708,9 +725,14 @@ class K { readonly rCtor; constructor() { this.rCtor = 3; } }
 export function krCtor(k: K) { return k.rCtor; }
 class S1 { static s; static { this.s = 1; } }
 export function s1() { return S1.s; }
+class A { accessor x; constructor() { this.x = 1; } }
+class SA { static accessor s; static { this.s = 1; } }
+export function sa() { return SA.s; }
 ";
     for compiler_options in FOUR_SETTINGS {
         for probe in [
+            "A['x']",
+            "ReturnType<typeof sa>",
             "ReturnType<typeof krCtor>",
             "K['rCtor']",
             "ReturnType<typeof s1>",
@@ -829,4 +851,194 @@ fn a_readonly_literal_member_read_widens_through_every_receiver() {
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const DECLARED_WIDENING: &str = "\
+declare const flag: boolean;
+const c1 = \"a\";
+const cAnn: \"a\" = \"a\";
+const cAs = \"a\" as const;
+const cu = flag ? \"a\" : \"b\";
+let x = c1;
+var vx = c1;
+const cx = c1;
+let lAnn = cAnn;
+let lAs = cAs;
+let lu = cu;
+const sat = { a: 1, b: \"x\", c: [true] } satisfies { a: number; b: string; c: boolean[] };
+const satU = { a: 1, b: \"x\", c: [true] } satisfies { [k: string]: unknown };
+const satLit = { a: 1, b: \"x\" } satisfies { a: 1; b: string };
+const satConst = { a: 1 } as const satisfies { a: number };
+const o = { f: () => true, g: (n: number) => n > 0, h: () => \"s\", i: (): 1 => 1, j: () => 1 as const, k: () => flag ? 1 : 2 };
+const oc = { f: () => true } as const;
+const ocn = { a: { f: () => \"s\" } } as const;
+const ocm = { a: { f: () => \"s\" } as const };
+declare function obj<T>(o: T): T;
+const oca = obj({ f: () => \"s\" } as const);
+const ocat = obj([{ f: () => \"s\" }] as const);
+const ocan = obj({ a: { f: () => \"s\" } } as const);
+const ocam = obj({ a: { f: () => \"s\" } as const });
+const ocs = { f: () => \"s\" } as const satisfies { f: () => \"s\" };
+const om = { m() { return true; } };
+declare function keep<T extends string>(f: () => T): T;
+const kept = keep(() => \"s\");
+";
+
+/// A module declaration widens the literals TypeScript widens: a `let` or
+/// `var` copying a value whose read widens, the members of a `satisfies`
+/// object its contextual type does not keep literal, and the lone literal
+/// an object member arrow's body returns. Every other literal is kept.
+///
+/// Measured on TypeScript 7.0.2, alike with `strictNullChecks` and
+/// `noImplicitAny` each on and off: `x` and `vx` are `string`, `cx` and
+/// `c1` `"a"`, `lAnn` and `lAs` `"a"`, `lu` `string`; `sat` is `{ a:
+/// number; b: string; c: true[]; }` (a `boolean` context keeps `true`),
+/// `satU` `{ a: number; b: string; c: boolean[]; }`, `satLit` `{ a: 1;
+/// b: string; }`, `satConst` `{ readonly a: 1; }`; `o` is `{ f: () =>
+/// boolean; g: (n: number) => boolean; h: () => string; i: () => 1; j: () =>
+/// 1; k: () => 1 | 2; }`, `oc` `{ readonly f: () => boolean; }`, `ocn` `{
+/// readonly a: { readonly f: () => string; }; }`, `ocm` `{ a: { readonly f:
+/// () => string; }; }`; an `as const` with a
+/// contextual type keeps the arrow's literal: `oca` and `ocs` `{ readonly
+/// f: () => "s"; }`, `ocat` `readonly [{ readonly f: () => "s"; }]`, `ocan`
+/// `{ readonly a: { readonly f: () => "s"; }; }`, `ocam` `{ a: { readonly f:
+/// () => "s"; }; }`; `om` `{ m(): boolean; }`; `kept` (an argument's arrow under a `string`
+/// constraint) `"s"`.
+///
+/// Mutation: lowering a mutable copy as the read it names answers `x` `"a"`;
+/// typing a `satisfies` object without its contextual type answers `satU`
+/// `{ a: 1; b: "x"; c: true[]; }`; keeping a member arrow's fresh return
+/// answers `o.f` `() => true`; widening every arrow's return answers `o.k`
+/// `() => number` and `kept` `string`; widening it under every `as const`
+/// answers `oca` `{ readonly f: () => string; }`.
+#[test]
+fn a_declaration_widens_the_literals_the_checker_widens() {
+    for compiler_options in [
+        None,
+        Some(LOOSE),
+        Some(r#"{ "strict": true, "noImplicitAny": false }"#),
+        Some(r#"{ "strict": false }"#),
+    ] {
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &[],
+                compiler_options,
+                ambient_lib: None,
+            },
+            DECLARED_WIDENING,
+            &[
+                ("typeof x", "string"),
+                ("typeof vx", "string"),
+                ("typeof cx", "\"a\""),
+                ("typeof c1", "\"a\""),
+                ("typeof lAnn", "\"a\""),
+                ("typeof lAs", "\"a\""),
+                ("typeof lu", "string"),
+                ("typeof sat", "{ a: number; b: string; c: true[]; }"),
+                ("typeof satU", "{ a: number; b: string; c: boolean[]; }"),
+                ("typeof satLit", "{ a: 1; b: string; }"),
+                ("typeof satConst", "{ readonly a: 1; }"),
+                (
+                    "typeof o",
+                    "{ f: () => boolean; g: (n: number) => boolean; h: () => string; \
+                     i: () => 1; j: () => 1; k: () => 1 | 2; }",
+                ),
+                ("typeof oc", "{ readonly f: () => boolean; }"),
+                (
+                    "typeof ocn",
+                    "{ readonly a: { readonly f: () => string; }; }",
+                ),
+                ("typeof ocm", "{ a: { readonly f: () => string; }; }"),
+                ("typeof oca", "{ readonly f: () => \"s\"; }"),
+                ("typeof ocat", "readonly [{ readonly f: () => \"s\"; }]"),
+                (
+                    "typeof ocan",
+                    "{ readonly a: { readonly f: () => \"s\"; }; }",
+                ),
+                ("typeof ocam", "{ a: { readonly f: () => \"s\"; }; }"),
+                ("typeof ocs", "{ readonly f: () => \"s\"; }"),
+                ("typeof om", "{ m(): boolean; }"),
+                ("typeof kept", "\"s\""),
+            ],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options:?}:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+const SATISFIES_CONTEXT: &str = "\
+const c1 = \"a\";
+const cAnn: \"a\" = \"a\";
+type SatL = { a: \"a\" };
+const satPartial = { a: 1 } satisfies Partial<{ a: 1 }>;
+const satReadonly = { a: 1 } satisfies Readonly<{ a: 1 }>;
+const satRecord = { a: 1 } satisfies Record<\"a\", 1>;
+const satPartialU = { k: \"x\" } satisfies Partial<{ k: \"x\" | \"y\" }>;
+const satPartialW = { a: 1 } satisfies Partial<{ a: number }>;
+const satRead = { a: c1 } satisfies { a: \"a\" };
+const satReadU = { a: c1 } satisfies { a: \"a\" | \"b\" };
+const satReadAlias = { a: c1 } satisfies SatL;
+const satReadW = { a: c1 } satisfies { a: string };
+const satReadAnn = { a: cAnn } satisfies { a: string };
+const satRecordS = { a: 1 } satisfies Record<string, 1>;
+const satReadArr = { a: [c1] } satisfies { a: \"a\"[] };
+const satReadArrW = { a: [c1] } satisfies { a: string[] };
+";
+
+/// A `satisfies` object's member keeps its literal exactly when its
+/// contextual type — the member the `satisfies` type gives it, through a
+/// mapped type or an alias — is a literal context for it, and that holds
+/// for the read of a widening `const` as for a fresh literal.
+///
+/// Measured on TypeScript 7.0.2, alike with `strictNullChecks` and
+/// `noImplicitAny` each on and off: `satPartial`, `satReadonly`,
+/// `satRecord` and `satRecordS` are `{ a: 1; }`, `satPartialU` `{ k: "x";
+/// }`, `satPartialW` `{ a: number; }`; `satRead`, `satReadU`,
+/// `satReadAlias` and `satReadAnn` are `{ a: "a"; }`, `satReadW` `{ a:
+/// string; }`; `satReadArr` is `{ a: "a"[]; }` and `satReadArrW` `{ a:
+/// string[]; }`.
+///
+/// Mutation: reading a mapped type's members off its one-level surface
+/// answers `satPartial` `{ a: number }`; widening a read member whatever
+/// its contextual type answers `satRead` `{ a: string }`.
+#[test]
+fn a_satisfies_member_keeps_the_literals_its_contextual_type_keeps() {
+    for compiler_options in [
+        None,
+        Some(LOOSE),
+        Some(r#"{ "strict": true, "noImplicitAny": false }"#),
+        Some(r#"{ "strict": false }"#),
+    ] {
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &[],
+                compiler_options,
+                ambient_lib: None,
+            },
+            SATISFIES_CONTEXT,
+            &[
+                ("typeof satPartial", "{ a: 1; }"),
+                ("typeof satReadonly", "{ a: 1; }"),
+                ("typeof satRecord", "{ a: 1; }"),
+                ("typeof satPartialU", "{ k: \"x\"; }"),
+                ("typeof satPartialW", "{ a: number; }"),
+                ("typeof satRead", "{ a: \"a\"; }"),
+                ("typeof satReadU", "{ a: \"a\"; }"),
+                ("typeof satReadAlias", "{ a: \"a\"; }"),
+                ("typeof satReadW", "{ a: string; }"),
+                ("typeof satReadAnn", "{ a: \"a\"; }"),
+                ("typeof satRecordS", "{ a: 1; }"),
+                ("typeof satReadArr", "{ a: \"a\"[]; }"),
+                ("typeof satReadArrW", "{ a: string[]; }"),
+            ],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options:?}:\n{}",
+            failures.join("\n")
+        );
+    }
 }
