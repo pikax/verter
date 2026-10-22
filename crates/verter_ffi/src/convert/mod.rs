@@ -30,6 +30,8 @@ mod string_helpers;
 mod typeinfo;
 
 #[cfg(test)]
+mod capture_equivalence_tests;
+#[cfg(test)]
 mod host_compile_request_tests;
 #[cfg(test)]
 mod offset_batch_tests;

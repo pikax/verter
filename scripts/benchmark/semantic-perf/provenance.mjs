@@ -14,29 +14,20 @@ export const TYPESCRIPT_VERSION = "7.0.2";
 
 /** Features no production build enables; a probe built with one is not the production library. */
 export const FORBIDDEN_FEATURES = {
-  verter_session: [
-    "test-support",
-    "test-util",
-    "oracle-gen",
-    "oracle-lift",
-    "attribution",
-    "currency_probe",
-  ],
-  verter_audit: ["attribution"],
-  verter_workspace: ["currency_probe"],
-  verter_bench: ["attribution", "currency_probe", "hotpath", "hotpath-alloc"],
+  verter_session: ["test-support", "test-util", "oracle-gen", "oracle-lift"],
+  verter_bench: ["hotpath-alloc"],
   verter_scheduler: ["test-support"],
 };
 
 /**
- * The features the observe build enables: `semantic-observe` and what it
- * implies. Only that build may carry them, and it must carry the gate.
+ * The features the observe build enables: the one coordinated
+ * `semantic-observe` gate. Only that build may carry it, and it must.
  */
 export const OBSERVE_FEATURES = {
-  verter_bench: ["semantic-observe", "attribution", "currency_probe", "hotpath"],
-  verter_audit: ["semantic-observe", "attribution"],
-  verter_session: ["semantic-observe", "attribution", "currency_probe", "hotpath"],
-  verter_workspace: ["semantic-observe", "currency_probe"],
+  verter_bench: ["semantic-observe"],
+  verter_audit: ["semantic-observe"],
+  verter_session: ["semantic-observe"],
+  verter_workspace: ["semantic-observe"],
   verter_semantic: ["semantic-observe"],
   verter_compiler: ["semantic-observe"],
   verter_scheduler: ["semantic-observe"],

@@ -25,11 +25,6 @@
 //! `Drop` if the caller forgets. The two paths are mutually
 //! exclusive — there is no double-release semantics.
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
-
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -232,12 +227,33 @@ impl SubmissionToken {
 /// both counters would grow toward O(|edges|) on dense graphs.
 /// This struct lets tests assert the O(V) bound directly rather
 /// than indirectly via wall-clock.
+///
+/// Only this crate's tests read the counters, so outside `cfg(test)`
+/// the struct is zero-size and [`Self::record_enqueue`] is a no-op:
+/// the production walk carries no counter and does no bookkeeping.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BfsMetrics {
     /// Total `frontier.push_back` invocations across the walk.
+    #[cfg(test)]
     pub(crate) enqueue_count: usize,
     /// Peak `frontier.len()` observed across the walk.
+    #[cfg(test)]
     pub(crate) max_frontier_len: usize,
+}
+
+impl BfsMetrics {
+    /// Record one `frontier.push_back`, given the frontier length just
+    /// after the push.
+    #[inline]
+    fn record_enqueue(&mut self, frontier_len: usize) {
+        #[cfg(test)]
+        {
+            self.enqueue_count = self.enqueue_count.saturating_add(1);
+            self.max_frontier_len = self.max_frontier_len.max(frontier_len);
+        }
+        #[cfg(not(test))]
+        let _ = frontier_len;
+    }
 }
 
 /// Request-group bookkeeping co-located on a DAG node.
@@ -284,6 +300,10 @@ impl RequestGroup {
 /// [`Self::fire`] AFTER the DAG lock is released. This keeps the
 /// callback-under-lock hazard out of both the single-request and the
 /// atomic-batch admission paths through one shared mechanism.
+///
+/// The event feeds only the audit record's share-reuse facts, so it is
+/// optional capture: it exists only with `semantic-observe`.
+#[cfg(feature = "semantic-observe")]
 pub struct DedupJoinerEvent {
     canonical: Arc<str>,
     joiner_context: verter_execution::request_context::OpaqueRequestContext,
@@ -291,6 +311,7 @@ pub struct DedupJoinerEvent {
     winner_audited: bool,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl DedupJoinerEvent {
     /// Invoke the joiner's `on_dedup_joiner` callback. MUST be called
     /// after the DAG lock has been released — the callback may re-enter
@@ -307,6 +328,7 @@ impl DedupJoinerEvent {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 impl std::fmt::Debug for DedupJoinerEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DedupJoinerEvent")
@@ -315,6 +337,18 @@ impl std::fmt::Debug for DedupJoinerEvent {
             .field("winner_audited", &self.winner_audited)
             .finish()
     }
+}
+
+/// What [`SchedulerDag::register_request`] hands back for a dedup join:
+/// the deferred audit event with `semantic-observe`, nothing without it.
+#[cfg(feature = "semantic-observe")]
+pub type DedupJoinObservation = Option<DedupJoinerEvent>;
+/// What [`SchedulerDag::register_request`] hands back for a dedup join:
+/// the deferred audit event with `semantic-observe`, nothing without it.
+#[cfg(not(feature = "semantic-observe"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DedupJoinObservation {
+    _uncaptured: (),
 }
 
 /// Per-node bookkeeping inside the DAG. `pub(in crate::dag)` so the
@@ -326,11 +360,11 @@ pub(in crate::dag) struct DagNode {
     pub(in crate::dag) identity: WorkNodeIdentity,
     pub(in crate::dag) kind: WorkKind,
     pub(in crate::dag) base_priority: Priority,
-    /// Wall-clock admission time. Retained ONLY for queue-dwell
-    /// audit (copied into [`ReadyJob::enqueue_time`] at dispatch);
-    /// it no longer influences selection order (the weighted-credit
-    /// lane selector replaced time-based aging).
-    pub(in crate::dag) enqueue_time: Instant,
+    /// Admission clock for the optional queue-dwell audit (copied into
+    /// [`ReadyJob::enqueue_time`] at dispatch). It never influences
+    /// selection order, and without `semantic-observe` it is zero-size
+    /// and reads no clock.
+    pub(in crate::dag) enqueue_time: verter_audit::observe::Stopwatch,
     /// The `(Priority, ResourceClass)` lane this token currently
     /// occupies in [`SchedulerDag::ready_lanes`], or `None` if the
     /// node is not currently dispatch-ready (gated, dispatched, or
@@ -496,7 +530,8 @@ pub struct ReadyJob {
     /// always the node's own base priority — selection-count credit
     /// never rewrites a node's priority.
     pub priority: Priority,
-    pub enqueue_time: Instant,
+    /// Admission clock for the optional queue-dwell audit.
+    pub enqueue_time: verter_audit::observe::Stopwatch,
     pub request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     /// Aggregate job token created at admission and shared unchanged with the
     /// executor. Never a winner request's private token.
@@ -650,6 +685,8 @@ fn class_for_index(index: usize) -> ResourceClass {
 /// [`SchedulerDag::cache_node_terminal_counts`]. `completed + cancelled`
 /// equals the number of [`WorkNodeIdentity::CacheNode`] identities that have
 /// terminalized (each terminalizes exactly once, complete XOR cancel).
+/// Test observability only: no production decision reads the split.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheNodeTerminalCounts {
     /// Cache nodes terminalized as success via [`SchedulerDag::complete`].
@@ -797,11 +834,6 @@ pub struct SchedulerDag {
     /// active-path skips, and empty lanes never debit it.
     credit: [i64; PRIORITY_LANE_COUNT],
     next_token: u64,
-    /// Aggregate in-flight permit counter — sum of cpu + io.
-    /// Surfaced via [`Self::in_flight_permits`] for diagnostics; not
-    /// used for admission decisions (the typed counters below own
-    /// that path).
-    capacity_counter: Arc<AtomicU64>,
     /// Bumped by [`Self::clear`]; reservations taken before a reset give
     /// nothing back after it (see `DagCapacityReservation::epoch`).
     reset_epoch: Arc<AtomicU64>,
@@ -819,12 +851,14 @@ pub struct SchedulerDag {
     /// [`Self::cache_node_terminal_counts`]; the router's cache-node arm relies
     /// on routing success to `complete` and failure/panic to `cancel`, so the
     /// split records whether a cache-node dispatch genuinely succeeded or was
-    /// failed/cancelled.
+    /// failed/cancelled. Test observability only.
+    #[cfg(test)]
     cache_node_completed: u64,
     /// Cumulative count of [`WorkNodeIdentity::CacheNode`] identities that
     /// reached terminal FAILURE/cancellation via [`Self::cancel`] (the
     /// router's failure/panic path, and the submit-failure release path). See
     /// [`Self::cache_node_completed`].
+    #[cfg(test)]
     cache_node_cancelled: u64,
 }
 
@@ -1146,12 +1180,13 @@ impl SchedulerDag {
             ready_lanes: Default::default(),
             credit: [0; PRIORITY_LANE_COUNT],
             next_token: 1,
-            capacity_counter: Arc::new(AtomicU64::new(0)),
             reset_epoch: Arc::new(AtomicU64::new(0)),
             cpu_counter: Arc::new(AtomicU64::new(0)),
             io_counter: Arc::new(AtomicU64::new(0)),
             budget,
+            #[cfg(test)]
             cache_node_completed: 0,
+            #[cfg(test)]
             cache_node_cancelled: 0,
         }
     }
@@ -1175,9 +1210,10 @@ impl SchedulerDag {
         }
     }
 
-    /// Current in-flight permit count across both pools (diagnostic).
+    /// Current in-flight permit count across both pools (diagnostic),
+    /// derived from the per-class counters that own admission.
     pub fn in_flight_permits(&self) -> u64 {
-        self.capacity_counter.load(Ordering::Acquire)
+        self.in_flight_cpu_permits() + self.in_flight_io_permits()
     }
 
     /// Current in-flight CPU permits (diagnostic).
@@ -1199,6 +1235,7 @@ impl SchedulerDag {
     /// `execute_cache_node` to `complete` and a failed/panicking one to
     /// `cancel`; this split therefore distinguishes a cache-node dispatch that
     /// genuinely succeeded from one that was failed.
+    #[cfg(test)]
     pub fn cache_node_terminal_counts(&self) -> CacheNodeTerminalCounts {
         CacheNodeTerminalCounts {
             completed: self.cache_node_completed,
@@ -1436,29 +1473,9 @@ impl SchedulerDag {
         )
     }
 
-    /// Reserve `permits` admission slots untyped (legacy / explicit
-    /// callers). Increments only the aggregate counter and leaves the
-    /// per-class counters untouched. Prefer
-    /// [`Self::try_reserve_for_class`] in dispatch paths so per-class
-    /// accounting stays consistent.
-    pub fn reserve_capacity(&self, permits: u32) -> DagCapacityReservation {
-        if permits > 0 {
-            self.capacity_counter
-                .fetch_add(permits as u64, Ordering::AcqRel);
-        }
-        DagCapacityReservation {
-            permits,
-            class: ResourceClass::Cpu, // untyped reservations carry no class; Cpu is the Debug-only default
-            class_counter: None,
-            counter: Some(Arc::clone(&self.capacity_counter)),
-            epoch: Some(self.reservation_epoch()),
-        }
-    }
-
     /// Try to reserve one admission slot for `class`. Returns `None`
     /// if the per-class budget is full. On success the returned
-    /// reservation decrements both the per-class counter and the
-    /// aggregate counter on release.
+    /// reservation decrements the per-class counter on release.
     ///
     /// This is the SINGLE admission-time accounting source. Permits
     /// are released EXACTLY ONCE — the by-value `release(self)`
@@ -1475,12 +1492,10 @@ impl SchedulerDag {
             counter.fetch_sub(1, Ordering::AcqRel);
             return None;
         }
-        self.capacity_counter.fetch_add(1, Ordering::AcqRel);
         Some(DagCapacityReservation {
             permits: 1,
             class,
             class_counter: Some(Arc::clone(counter)),
-            counter: Some(Arc::clone(&self.capacity_counter)),
             epoch: Some(self.reservation_epoch()),
         })
     }
@@ -1492,8 +1507,7 @@ impl SchedulerDag {
     /// permit it took to start its current job, but it is not
     /// actively doing useful work on that permit's resource —
     /// its thread is available to execute a transitive dependency
-    /// inline. This loan bumps the per-class counter (and the
-    /// aggregate) past the configured cap for the duration of the
+    /// inline. This loan bumps the per-class counter past the configured cap for the duration of the
     /// inline execute; the parked worker's original permit will
     /// release through the normal complete / cancel path once its
     /// own job resumes. The loan releases through the same
@@ -1513,12 +1527,10 @@ impl SchedulerDag {
             ResourceClass::Io => &self.io_counter,
         };
         counter.fetch_add(1, Ordering::AcqRel);
-        self.capacity_counter.fetch_add(1, Ordering::AcqRel);
         Some(DagCapacityReservation {
             permits: 1,
             class,
             class_counter: Some(Arc::clone(counter)),
-            counter: Some(Arc::clone(&self.capacity_counter)),
             epoch: Some(self.reservation_epoch()),
         })
     }
@@ -1706,7 +1718,10 @@ impl SchedulerDag {
             identity: identity.clone(),
             kind,
             base_priority: priority,
-            enqueue_time: Instant::now(),
+            // The queue-dwell clock also feeds the process-wide work
+            // attribution table (`TaskWait`), which the instrumented build
+            // selects as a whole, so it runs for every job of such a build.
+            enqueue_time: verter_audit::observe::Stopwatch::start(),
             request_context,
             cancellation: CancellationToken::aggregate(),
             deps_remaining,
@@ -1962,7 +1977,8 @@ impl SchedulerDag {
     /// — the cycle-filter contract is the bool, with no public API
     /// or result change from instrumentation. Metrics exist solely
     /// to make the enqueue-time-visited regression class
-    /// discriminable in tests.
+    /// discriminable in tests; outside `cfg(test)` they are
+    /// zero-size and record nothing.
     pub(crate) fn dep_reaches_owner_with_metrics(
         &self,
         owner_canonical: &Arc<str>,
@@ -2032,8 +2048,7 @@ impl SchedulerDag {
         // so a fan-in edge back to start can never re-enqueue it.
         visited.insert(start_id.clone());
         frontier.push_back(start_id);
-        metrics.enqueue_count = metrics.enqueue_count.saturating_add(1);
-        metrics.max_frontier_len = metrics.max_frontier_len.max(frontier.len());
+        metrics.record_enqueue(frontier.len());
 
         while let Some(current) = frontier.pop_front() {
             // Look up the current node's deps_remaining. A node that
@@ -2077,8 +2092,7 @@ impl SchedulerDag {
                     // makes it onto the frontier exactly once.
                     if next != owner_id && visited.insert(next.clone()) {
                         frontier.push_back(next);
-                        metrics.enqueue_count = metrics.enqueue_count.saturating_add(1);
-                        metrics.max_frontier_len = metrics.max_frontier_len.max(frontier.len());
+                        metrics.record_enqueue(frontier.len());
                     }
                 }
             }
@@ -2136,6 +2150,7 @@ impl SchedulerDag {
         // identity reaches here (the early-return above skips a no-op
         // complete), so this counts each cache node's success exactly once,
         // partitioning against the `cancel` failure tally.
+        #[cfg(test)]
         if matches!(identity, WorkNodeIdentity::CacheNode { .. }) {
             self.cache_node_completed += 1;
         }
@@ -2194,6 +2209,7 @@ impl SchedulerDag {
         // genuinely-present identity reaches here (the early-return above skips
         // a no-op cancel), so this counts each cache node's failure exactly
         // once, partitioning against the `complete` success tally.
+        #[cfg(test)]
         if matches!(identity, WorkNodeIdentity::CacheNode { .. }) {
             self.cache_node_cancelled += 1;
         }
@@ -2566,7 +2582,6 @@ impl SchedulerDag {
         // in a pool) belong to the pre-reset ledger: bump the epoch first so
         // they give nothing back against the zeroed counters.
         self.reset_epoch.fetch_add(1, Ordering::AcqRel);
-        self.capacity_counter.store(0, Ordering::Release);
         self.cpu_counter.store(0, Ordering::Release);
         self.io_counter.store(0, Ordering::Release);
     }
@@ -2592,14 +2607,17 @@ impl SchedulerDag {
     /// (single or batch) collects the events and fires them once the
     /// lock has dropped.
     ///
-    /// Returns `Some(event)` exactly when this registration was a
-    /// dedup join AND the joiner carried a `request_context`;
-    /// otherwise `None`.
+    /// With `semantic-observe`, returns `Some(event)` exactly when this
+    /// registration was a dedup join AND the joiner carried a
+    /// `request_context`; otherwise `None`. Without it there is no event.
     ///
     /// There is no group-level priority upgrade semantics: priority
     /// service lives on the DAG node and callers propagate urgency via
     /// [`Self::upgrade_priority`] on the matching identity directly.
-    #[must_use = "the returned DedupJoinerEvent must be fired after the DAG lock is released"]
+    #[cfg_attr(
+        feature = "semantic-observe",
+        must_use = "the returned DedupJoinerEvent must be fired after the DAG lock is released"
+    )]
     pub fn register_request(
         &mut self,
         canonical: &Arc<str>,
@@ -2607,7 +2625,7 @@ impl SchedulerDag {
         target: TargetStage,
         sender: CompletionSender<RequestResult>,
         request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
-    ) -> Option<DedupJoinerEvent> {
+    ) -> DedupJoinObservation {
         let key = FileGenKey {
             canonical: Arc::clone(canonical),
             generation,
@@ -2622,6 +2640,7 @@ impl SchedulerDag {
                 // Dedup: capture the winner details so the caller can
                 // observe them via `on_dedup_joiner` AFTER unlock. The
                 // callback is NOT fired here.
+                #[cfg(feature = "semantic-observe")]
                 let event = request_context.as_ref().map(|joiner_ctx| {
                     let (winner_id, winner_audited) = group
                         .winner_context
@@ -2635,6 +2654,8 @@ impl SchedulerDag {
                         winner_audited,
                     }
                 });
+                #[cfg(not(feature = "semantic-observe"))]
+                let event = DedupJoinObservation::default();
                 group.senders.push(sender);
                 return event;
             }
@@ -2644,7 +2665,7 @@ impl SchedulerDag {
             senders: vec![sender],
             winner_context: request_context,
         });
-        None
+        DedupJoinObservation::default()
     }
 
     /// Signal all waiter groups at `(canonical, generation)` matching

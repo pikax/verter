@@ -9,6 +9,6 @@ note: found an item that was configured out
   |
   | #[cfg(any(test, feature = "test-support"))]
   |          -------------------------------- the item is gated here
-  | #[cfg_attr(feature = "hotpath", hotpath::measure)]
+  | #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
   | pub fn compile(
   |        ^^^^^^^

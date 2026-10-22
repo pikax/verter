@@ -931,6 +931,72 @@ fn host_for_relation_tests() -> VerterHost {
     })
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
+#[test]
+fn captured_dispatch_emits_to_its_bound_observer_after_ambient_observer_changes() {
+    use std::sync::atomic::Ordering;
+    use verter_audit::observe::{Captured, ObserveMode};
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+
+    let host = host_for_relation_tests();
+    let request = RequestContext::for_root_entry(
+        1,
+        Arc::from("/captured.ts"),
+        || verter_audit::RequestKind::TypeResolution,
+        ObserveMode::Captured,
+        false,
+        false,
+        None,
+        0,
+        verter_execution::cancellation::CancellationToken::new(),
+    );
+    let _request = RequestContextGuard::install(Arc::clone(&request));
+    let view = host.resolver_store_view().into_owned_view();
+    let context = crate::resolver_core::HostResolverContext::<'_, Captured>::new(
+        &host,
+        &view,
+        Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&context);
+    let graph = dispatch.graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let before = request.substitute_top_level_calls.load(Ordering::Relaxed);
+    let nested = RequestContext::for_root_entry(
+        2,
+        Arc::from("/nested.ts"),
+        || verter_audit::RequestKind::TypeResolution,
+        ObserveMode::Captured,
+        false,
+        false,
+        None,
+        0,
+        verter_execution::cancellation::CancellationToken::new(),
+    );
+    let _nested = RequestContextGuard::install(Arc::clone(&nested));
+    let _ambient = verter_audit::observer::clear_observer();
+    let locks = request.node_arena_lock_acquisitions.load(Ordering::Relaxed);
+    let _node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "bound-receiver".into(),
+    )));
+    assert_eq!(
+        dispatch.substitute_semantic_type_param(string, string, number),
+        number
+    );
+    assert_eq!(
+        request.substitute_top_level_calls.load(Ordering::Relaxed) - before,
+        1,
+        "a captured execution keeps its receiver instead of looking it up per emission",
+    );
+    assert!(request.node_arena_lock_acquisitions.load(Ordering::Relaxed) > locks);
+    assert_eq!(
+        nested.node_arena_lock_acquisitions.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(nested.substitute_top_level_calls.load(Ordering::Relaxed), 0);
+}
+
 fn empty_surface(members: Vec<SurfaceMember>) -> SurfaceView {
     verter_type_engine::test_surface_view! {
         members: Arc::from(members.into_boxed_slice()),
@@ -2141,7 +2207,7 @@ fn type_expr_lowering_has_exactly_two_single_definition_producers() {
     // second eager lowering implementation under another type is not caught
     // by that; the two assertions below are the oracle for this test.
     let legacy = count_def_in_crates("fn shallow_lower_type_expr(");
-    let structural = count_def_in_crates("fn lower_type_expr_structural(");
+    let structural = count_def_in_crates("fn lower_type_expr_structural<");
     assert_eq!(
         legacy, 0,
         "the bare-mode `fn shallow_lower_type_expr(` wrapper is retired; \
@@ -3890,7 +3956,68 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_close() {
     );
     let a = resolve_relation_fixture_symbol(&host, canonical, "RecA");
     let b = resolve_relation_fixture_symbol(&host, canonical, "RecB");
-    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // An uncaptured request selects no explanation buffer: the same cold
+    // judgement, on a second host, records nothing and leases no operand.
+    {
+        let host = host_for_relation_tests();
+        upsert_relation_fixture(
+            &host,
+            canonical,
+            "export interface RecA { next: RecA }
+export interface RecB { next: RecB }
+",
+        );
+        let a = resolve_relation_fixture_symbol(&host, canonical, "RecA");
+        let b = resolve_relation_fixture_symbol(&host, canonical, "RecB");
+        let _uncaptured = verter_type_engine::request_context::RequestContextGuard::install(
+            verter_type_engine::request_context::RequestContext::for_root_entry(
+                1,
+                Arc::from(canonical),
+                || verter_audit::RequestKind::TypeResolution,
+                verter_audit::observe::ObserveMode::Uncaptured,
+                true,
+                true,
+                None,
+                0,
+                verter_execution::cancellation::CancellationToken::new(),
+            ),
+        );
+        let uncaptured = ProjectSemanticDispatch::new(&host);
+        let answer = uncaptured.execute_relate_pair_as_result_for_tests(a, b);
+        assert!(
+            matches!(&answer, RelationResult::Assignable { bindings } if bindings.is_empty()),
+            "the uncaptured answer is the recursive answer, got {answer:?}"
+        );
+        assert!(
+            uncaptured.take_relation_explanations().is_empty(),
+            "an uncaptured request records no explanation"
+        );
+    }
+
+    let _captured = verter_type_engine::request_context::RequestContextGuard::install(
+        verter_type_engine::request_context::RequestContext::for_root_entry(
+            2,
+            Arc::from(canonical),
+            || verter_audit::RequestKind::TypeResolution,
+            verter_audit::observe::ObserveMode::Captured,
+            false,
+            false,
+            None,
+            0,
+            verter_execution::cancellation::CancellationToken::new(),
+        ),
+    );
+    // A captured request runs a dispatcher compiled for captured execution,
+    // bound to a request context of the captured family.
+    let view = crate::VerterHost::resolver_store_view(&host).into_owned_view();
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Captured>::new(
+            &host,
+            &view,
+            Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let graph = host.project_type_store().semantic_graph();
 
     let cold = dispatch.execute_relate_pair_as_result_for_tests(a, b);

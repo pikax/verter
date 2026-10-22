@@ -113,44 +113,6 @@ impl SemanticGraphStore {
         out
     }
 
-    /// Diagnostics dump of every candidate in the families whose variant
-    /// label is `family_label` (see [`Self::memo_entry_counts_by_family`]):
-    /// one line per candidate with the family key, the slot, the result,
-    /// the carrier's canonicals and self-roots, and — for a family keyed by
-    /// a node — the origin scope of that node. Not on any hot path; a churn
-    /// measurement reads it to see what a growing family's keys carry.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn memo_family_dump_for_diagnostics(&self, family_label: &str) -> Vec<String> {
-        let entries = self.entries.lock();
-        let mut out: Vec<String> = Vec::new();
-        for (family, slots) in entries.iter() {
-            if family.variant_label() != family_label {
-                continue;
-            }
-            let mut key_nodes: Vec<String> = Vec::new();
-            family.for_each_node_id(|id| {
-                key_nodes.push(format!(
-                    "{id:?}@{:?}",
-                    self.arena.scope(id).map(|scope| scope.canonical_file())
-                ));
-            });
-            for (slot, entry) in slots.iter_populated_slots_all() {
-                out.push(format!(
-                    "{family:?} slot={slot:?} key_nodes={key_nodes:?} result={:?} \
-                     carrier_canonicals={:?} self_roots={:?} aggregated={:?}",
-                    entry.result,
-                    entry.read_set_signature.canonical_ids(),
-                    entry.self_root_canonicals,
-                    entry.read_set_signature.aggregated_domains(),
-                ));
-            }
-        }
-        drop(entries);
-        out.sort();
-        out
-    }
-
     /// Number of retained memo candidates across every family and slot.
     /// A slot holding variants for several store versions counts each, so
     /// unlike [`Self::memo_entry_count`] this sees superseded candidates a

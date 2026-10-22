@@ -1008,7 +1008,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             instantiated.normalized_type_args =
                 verter_type_expr::OwnedSlice::from(arguments.into_boxed_slice());
             instantiated.context.type_substitution =
-                crate::semantic_query::CanonicalTypeSubstitution::new(self.graph(), bindings);
+                crate::semantic_query::CanonicalTypeSubstitution::new(
+                    self.graph().store(),
+                    bindings,
+                );
             push_unique(out, instantiated);
         }
         true
@@ -1234,7 +1237,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             };
             let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
-                self.graph(),
+                self.graph().store(),
                 callee
                     .type_parameters
                     .iter()

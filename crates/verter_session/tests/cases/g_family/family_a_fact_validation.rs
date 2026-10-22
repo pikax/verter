@@ -400,7 +400,7 @@ fn central_fact_signature_helpers_are_provenance_pure() {
         (
             false,
             "resolver_core/component_meta_query_engine/mod.rs",
-            "pub(crate) fn engine_fact_signature_for_exported_type(",
+            "pub(crate) fn engine_fact_signature_for_exported_type<",
         ),
         (
             true,

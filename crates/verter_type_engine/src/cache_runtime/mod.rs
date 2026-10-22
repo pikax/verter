@@ -25,6 +25,7 @@ pub mod candidate_store;
 pub mod flow_slice_node;
 pub(crate) mod lookup_publish;
 pub mod node;
+pub mod occupancy;
 pub mod singleflight;
 pub(crate) mod singleflight_publish;
 pub mod world_snapshot;
@@ -67,6 +68,8 @@ pub(crate) use world_snapshot::{
 // the query-node consumers wire on top of this exported surface, which is
 // exercised by the cache-runtime tests independent of any particular
 // consumer.
+pub use occupancy::OccupancyCounter;
+
 #[allow(unused_imports)]
 pub(crate) use admission::NonAdmissionReason;
 #[allow(unused_imports)]

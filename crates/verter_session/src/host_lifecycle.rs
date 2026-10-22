@@ -25,10 +25,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::id::canonicalize_id;
+#[cfg(feature = "semantic-observe")]
+use crate::meta_provenance::MetaProvenanceSnapshot;
 use crate::shared::{read_lock, write_lock};
 use crate::VerterHost;
 use crate::{
-    meta_provenance::{MetaProvenance, MetaProvenanceSnapshot},
+    meta_provenance::MetaProvenance,
     types::{HostMetricsSnapshot, HostRetentionSnapshot},
 };
 use verter_type_engine::instant::Instant;
@@ -103,12 +105,16 @@ impl VerterHost {
         self.bump_store_view_epoch();
     }
 
-    /// Access provenance counters for component-meta observability.
+    /// Access provenance counters for component-meta observability. The
+    /// counters are kept, and readable, only under `semantic-observe`.
     pub fn provenance(&self) -> &Arc<MetaProvenance> {
         &self.provenance
     }
 
-    /// Snapshot provenance counters, including VFS counters from the active workspace.
+    /// Snapshot provenance counters, including VFS counters from the active
+    /// workspace and the scheduler's contention counters. Exists only under
+    /// `semantic-observe`: a build without it keeps no provenance.
+    #[cfg(feature = "semantic-observe")]
     pub fn provenance_snapshot(&self) -> MetaProvenanceSnapshot {
         use std::sync::atomic::Ordering::Relaxed;
         let mut snapshot = self.provenance.snapshot();

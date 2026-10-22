@@ -1058,7 +1058,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if rebuilt.as_slice() == members.as_ref()
                     && !members
                         .iter()
-                        .any(|member| is_nullable_node(graph, *member))
+                        .any(|member| is_nullable_node(graph.store(), *member))
                 {
                     node
                 } else {
@@ -1246,7 +1246,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if matches!(
                             graph.node_data(expanded).as_deref(),
                             Some(SemanticNodeData::Union(members))
-                                if members.iter().any(|member| is_nullable_node(graph, *member))
+                                if members.iter().any(|member| is_nullable_node(graph.store(), *member))
                         ) =>
                     {
                         // The checker keeps the alias on a union that still
@@ -1472,7 +1472,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let combinations = match super::canonical_algebra::admit_cross_product(
             factors.iter().map(Vec::len),
             // A combination holds each part's members once it is interned.
-            || super::canonical_algebra::flattened_arity(graph, factors.iter().map(Vec::as_slice)),
+            || {
+                super::canonical_algebra::flattened_arity(
+                    graph.store(),
+                    factors.iter().map(Vec::as_slice),
+                )
+            },
             Some(self.construction_meter()),
         ) {
             Ok(combinations) => combinations,
@@ -2856,7 +2861,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         callee_arg: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::FlowFunctionReturnIdentity> {
-        let data = crate::project_semantic_dispatch::node_data_for(self.graph(), callee_arg)?;
+        let data =
+            crate::project_semantic_dispatch::node_data_for(self.graph().store(), callee_arg)?;
         if let SemanticNodeData::Object(view) = data.as_ref() {
             if let [signature] = view.call_signatures.as_ref() {
                 return self.flow_return_callee_for_typeof_arg(*signature);
@@ -2965,7 +2971,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// single-member `FlowReturn` demand instead of a whole-signature
     /// composition.
     pub(super) fn is_flow_return_type_member_base(&self, node: SemanticNodeId) -> bool {
-        match crate::project_semantic_dispatch::node_data_for(self.graph(), node) {
+        match crate::project_semantic_dispatch::node_data_for(self.graph().store(), node) {
             Some(data) => self.is_flow_return_type_member_base_data(&data),
             None => false,
         }
@@ -3305,9 +3311,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // frame) never funnels through `execute_via_cold_build_helper`, so
         // the family's participation is recorded here — idempotent per
         // tag, no-op without an installed `RequestContext`.
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
             ctx.record_dispatched_query_tag(crate::semantic_query::SemanticQueryKeyTag::FlowReturn);
-        }
+        });
         // The callee schedule learns what each frame's call resolution
         // demanded, for the frame's own instantiations.
         self.note_flow_return_demand(&key);
@@ -3321,7 +3327,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // Cold-path flow-cycle sentinel: a re-entry only occurs
                 // while the component is being cold-evaluated (a warm
                 // hit never opens a frame to re-enter).
-                crate::flow_return_audit::record_flow_cycle_reentry(
+                crate::flow_return_audit::record_flow_cycle_reentry::<C::Observe>(
+                    crate::resolver_core::resolver_context::capture_targets(self.ctx),
                     u32::try_from(idx).unwrap_or(u32::MAX),
                     &key.function.declaration_slot.merged_symbol_name,
                 );
@@ -3491,7 +3498,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = if return_type == result.return_type() {
             result
         } else {
-            result.with_return_type(self.graph().as_ref(), return_type)
+            result.with_return_type(self.graph().store(), return_type)
         };
         let result = match predicate {
             Some(predicate) => result.with_inferred_predicate(predicate),
@@ -3987,7 +3994,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = if substituted == result.return_type() {
             result
         } else {
-            result.with_return_type(self.graph().as_ref(), substituted)
+            result.with_return_type(self.graph().store(), substituted)
         };
         match predicate {
             Some(predicate) => result.with_inferred_predicate(predicate),
@@ -4109,7 +4116,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if closed == node {
                 return result;
             }
-            result.with_return_type(self.graph().as_ref(), closed)
+            result.with_return_type(self.graph().store(), closed)
         }
     }
 
@@ -4149,7 +4156,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // wins when it has one).
         let result = if undecided && result.degradation().is_none() {
             FlowReturnResult::new_with_fresh_literal_arms(
-                self.graph().as_ref(),
+                self.graph().store(),
                 result.return_type(),
                 result.can_fall_through,
                 Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
@@ -4204,9 +4211,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !nullability.is_strict() {
             if contributions
                 .iter()
-                .any(|contribution| !is_nullable_node(graph, contribution.node))
+                .any(|contribution| !is_nullable_node(graph.store(), contribution.node))
             {
-                contributions.retain(|contribution| !is_nullable_node(graph, contribution.node));
+                contributions
+                    .retain(|contribution| !is_nullable_node(graph.store(), contribution.node));
             } else {
                 widening_nullish_only = contributions
                     .iter()
@@ -4236,7 +4244,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let arms: Vec<SemanticNodeId> = arms.iter().map(|arm| arm.node).collect();
         let joined = self.intern_normalized_union(&arms, nullability);
         let joined = self.normalize_widened_object_literals(joined, nullability);
-        if widening_nullish_only && is_nullable_node(graph, joined) {
+        if widening_nullish_only && is_nullable_node(graph.store(), joined) {
             return (
                 Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))),
                 undecided,
@@ -4465,7 +4473,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
         FlowReturnResult::new_with_fresh_literal_arms(
-            graph,
+            graph.store(),
             wrapper,
             result.can_fall_through,
             result.degradation(),
@@ -4480,7 +4488,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn materialize_wrap_typed_gap(&self, result: FlowReturnResult) -> FlowReturnResult {
         let marker = super::flow_return_callee::unmodeled_position_marker(self);
         FlowReturnResult::new_with_fresh_literal_arms(
-            self.graph(),
+            self.graph().store(),
             marker,
             result.can_fall_through,
             None,
@@ -4658,7 +4666,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 crate::semantic_query::PrimitiveKind::Number,
             ));
         let value = crate::semantic_query::FlowReturnResult::new(
-            self.graph(),
+            self.graph().store(),
             number,
             NormalCompletion::minted(false, CompletionConstruction::HermeticFixture),
             None,
@@ -4700,7 +4708,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// another demand, another runtime, another store, or a stale request
     /// generation is a typed partial, never a proof.
     pub(super) fn current_flow_evaluation_provenance(&self) -> FlowEvaluationProvenance {
-        let store_identity = Arc::as_ptr(self.graph()) as *const () as usize as u64;
+        let store_identity = std::ptr::from_ref::<crate::semantic_query_memo::SemanticGraphStore>(
+            self.graph().store(),
+        ) as *const () as usize as u64;
         let runtime_identity = self.dispatch_txn.borrow().obligations.instance_identity();
         FlowEvaluationProvenance::new(
             store_identity,
@@ -5978,7 +5988,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 self_roots,
                                 materialized,
                             }
-                            .held(self.graph());
+                            .held(self.graph().store());
                             self.dispatch_txn
                                 .borrow_mut()
                                 .flow
@@ -6170,7 +6180,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .map(|result| result.fresh_literal_arms().to_vec())
                     .unwrap_or_default();
                 let mut next = FlowReturnResult::new_with_fresh_literal_arms(
-                    graph,
+                    graph.store(),
                     // Each member joins under its OWN function's null
                     // algebra — a component may span projects.
                     self.intern_normalized_union(&flat, entries[i].key.context.policy.nullability),
@@ -6264,7 +6274,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let result = if component_is_fresh {
                 let widened = widen_literal_node(self, result.return_type());
                 let proof = result.independent_member(&entry.key).cloned();
-                let result = result.with_return_type(self.graph(), widened);
+                let result = result.with_return_type(self.graph().store(), widened);
                 // Widening is this producer's completed transformation of
                 // the certified value, rather than an arbitrary replacement.
                 if let Some(mut proof) = proof {
@@ -6715,7 +6725,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // (root and nested inline frames) passes through here; the warm
         // family hit in `execute_flow_return` returns before any frame
         // opens, so a warm hit can never reach this emission.
-        crate::flow_return_audit::record_flow_return_started(
+        crate::flow_return_audit::record_flow_return_started::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(self.ctx),
             &key.function.declaration_slot.defining_canonical,
             &key.function.declaration_slot.merged_symbol_name,
         );
@@ -6790,7 +6801,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     observed = exceeded.observed,
                     "flow-slice budget exceeded: typed Budget failure, ReturnOnly"
                 );
-                crate::flow_return_audit::record_flow_slice_budget_exceeded(&exceeded);
+                crate::flow_return_audit::record_flow_slice_budget_exceeded::<C::Observe>(
+                    crate::resolver_core::resolver_context::capture_targets(self.ctx),
+                    &exceeded,
+                );
                 return degraded(
                     FlowReturnFailure::Budget(
                         verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
@@ -7739,7 +7753,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // earlier in that order survives.
         let order: Vec<usize> = {
             let nodes: Vec<SemanticNodeId> = arms.iter().map(|arm| arm.node).collect();
-            crate::semantic_query::stable_key::union_rank_order(self.graph(), &nodes)
+            crate::semantic_query::stable_key::union_rank_order(self.graph().store(), &nodes)
         };
         let mut kept: Vec<bool> = vec![true; arms.len()];
         let mut decided: rustc_hash::FxHashMap<(SemanticNodeId, SemanticNodeId), bool> =
@@ -7899,9 +7913,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !nullability.is_strict() {
             if parts
                 .iter()
-                .any(|(node, _)| !is_nullable_node(graph, *node))
+                .any(|(node, _)| !is_nullable_node(graph.store(), *node))
             {
-                parts.retain(|(node, _)| !is_nullable_node(graph, *node));
+                parts.retain(|(node, _)| !is_nullable_node(graph.store(), *node));
             } else if !parts.is_empty() && parts.iter().all(|(_, widening)| *widening) {
                 parts = vec![(any, false)];
             }
@@ -8240,7 +8254,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ) => !(optional && nullability.is_strict()),
                 // A member whose value is a constant is a unit type.
                 Some(SemanticNodeData::EnumLiteral(literal)) => {
-                    super::canonical_algebra::enum_literal_is_unit(graph, literal)
+                    super::canonical_algebra::enum_literal_is_unit(graph.store(), literal)
                         && !(optional && nullability.is_strict())
                 }
                 _ => false,
@@ -8466,7 +8480,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !nullability.is_strict() {
             let (nullable, other): (Vec<FlowContribution>, Vec<FlowContribution>) = contributors
                 .into_iter()
-                .partition(|contribution| is_nullable_node(graph, contribution.node));
+                .partition(|contribution| is_nullable_node(graph.store(), contribution.node));
             if other.is_empty() {
                 widening_nullish_only = holds.is_empty()
                     && !nullable.is_empty()
@@ -8483,9 +8497,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // fail()` over `fail(): never` is `number`, as is a bare self-call.
         if contributors
             .iter()
-            .any(|contribution| !is_never_node(graph, contribution.node))
+            .any(|contribution| !is_never_node(graph.store(), contribution.node))
         {
-            contributors.retain(|contribution| !is_never_node(graph, contribution.node));
+            contributors.retain(|contribution| !is_never_node(graph.store(), contribution.node));
         }
         // Literal widening is a SINGLE-contributor rule (tsc aggregates
         // the return-expression types with `pushIfUnique`, then widens
@@ -8514,7 +8528,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if contribution.fresh_literal {
                 continue;
             }
-            for lit in top_level_literal_nodes_in(graph, contribution.node) {
+            for lit in top_level_literal_nodes_in(graph.store(), contribution.node) {
                 let data = graph.node_data(lit);
                 let fresh_here = contribution
                     .fresh_values
@@ -8636,7 +8650,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let return_type =
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
                 return Ok((
-                    FlowReturnResult::new(graph, return_type, can_fall_through, degradation),
+                    FlowReturnResult::new(
+                        graph.store(),
+                        return_type,
+                        can_fall_through,
+                        degradation,
+                    ),
                     false,
                 ));
             }
@@ -8724,12 +8743,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // values alone is the widening nullable type, and the checker's
         // return widening turns it into `any` (a declared `null` read
         // keeps `null`).
-        if widening_nullish_only && is_nullable_node(graph, return_type) {
+        if widening_nullish_only && is_nullable_node(graph.store(), return_type) {
             return_type = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
         }
         Ok((
             FlowReturnResult::new_with_fresh_literal_arms(
-                graph,
+                graph.store(),
                 return_type,
                 can_fall_through,
                 degradation,
@@ -9861,7 +9880,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return false;
         };
         let graph = self.graph();
-        let literals = top_level_literal_nodes_in(graph, return_type);
+        let literals = top_level_literal_nodes_in(graph.store(), return_type);
         !literals.is_empty()
             && literals.iter().all(|literal| {
                 let data = graph.node_data(*literal);
@@ -10975,7 +10994,12 @@ pub(super) trait FlowDemandDriver {
             verter_span::Span,
         ) -> super::call_resolve::ArgumentReadLiterals,
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>;
-    fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
+    fn arena(
+        &self,
+    ) -> super::arena_ops::ArenaOps<
+        '_,
+        <Self::Caps as crate::resolver_core::ResolverCapabilities>::Observe,
+    >;
     fn call_undecided_relations(&self) -> u64;
     fn discard_call_relation_observations(&self, count: u64);
     /// Count again the undecided relations a held executor attempt
@@ -11113,7 +11137,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         ProjectSemanticDispatch::unresolved_head_is_authored_import(self, scope, name)
     }
     fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
-        top_level_literal_nodes_in(self.graph(), node)
+        top_level_literal_nodes_in(self.graph().store(), node)
     }
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
         ProjectSemanticDispatch::widened_literal(self, node)
@@ -11694,7 +11718,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             self, canonical, owner, authored, reads,
         )
     }
-    fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
+    fn arena(&self) -> super::arena_ops::ArenaOps<'_, C::Observe> {
         super::arena_ops::ArenaOps::new(self.graph())
     }
     fn call_undecided_relations(&self) -> u64 {
@@ -11762,8 +11786,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         super::flow_products::LiteralProvenanceResult,
         verter_session_query::flow::policy::FlowGap,
     > {
-        let (membership, evidence) =
-            super::canonical_algebra::inspect_literal_provenance(self.graph(), inputs, result);
+        let (membership, evidence) = super::canonical_algebra::inspect_literal_provenance(
+            self.graph().store(),
+            inputs,
+            result,
+        );
         let incomplete = evidence.incomplete;
         self.deposit_canonical_evidence(evidence);
         if incomplete {
@@ -11822,7 +11849,10 @@ impl<D: FlowDemandDriver> crate::semantic_query::CheckerDiagnosticPrinter
 
 pub(super) struct FlowCx<'a, D: FlowDemandDriver> {
     driver: &'a D,
-    arena: super::arena_ops::ArenaOps<'a>,
+    arena: super::arena_ops::ArenaOps<
+        'a,
+        <D::Caps as crate::resolver_core::ResolverCapabilities>::Observe,
+    >,
     inputs: &'a dyn crate::resolver_core::request_ports::IndexedInputs,
     source: &'a dyn crate::resolver_core::request_ports::ExpressionSourceSelection<
         ExpressionDemand = <D::Caps as crate::resolver_core::ResolverCapabilities>::ExpressionDemand,
@@ -11843,7 +11873,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> FlowCx<'a, ProjectSemant
     }
 }
 impl<D: FlowDemandDriver> FlowCx<'_, D> {
-    fn graph(&self) -> &super::arena_ops::ArenaOps<'_> {
+    fn graph(
+        &self,
+    ) -> &super::arena_ops::ArenaOps<
+        '_,
+        <D::Caps as crate::resolver_core::ResolverCapabilities>::Observe,
+    > {
         &self.arena
     }
 }
@@ -12496,7 +12531,12 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         self.driver
             .resolve_scoped_argument_literal_provenance(canonical, owner, authored, reads)
     }
-    fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
+    fn arena(
+        &self,
+    ) -> super::arena_ops::ArenaOps<
+        '_,
+        <D::Caps as crate::resolver_core::ResolverCapabilities>::Observe,
+    > {
         self.arena
     }
     fn call_undecided_relations(&self) -> u64 {
@@ -16877,6 +16917,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         incoming: &[&FlowLayerState],
         observation: &FlowWriteObservation,
     ) -> FlowLayerState {
+        let _ = observation;
         let first = incoming.first().expect("a continuation has a predecessor");
         let frame_algebra = super::flow_products::DispatchFlowAlgebra {
             dispatch: self.dispatch,
@@ -18608,6 +18649,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         entry: &FlowProductStore,
         observation: &FlowWriteObservation,
     ) {
+        let _ = observation;
         let mut incoming: Vec<FlowLayerState> = Vec::with_capacity(2);
         if consequent_falls {
             incoming.push(FlowLayerState {
@@ -18652,6 +18694,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         entry: &FlowProductStore,
         observation: &FlowWriteObservation,
     ) -> FlowLayerState {
+        let _ = observation;
         let states: smallvec::SmallVec<[&FlowLayerState; 2]> = incoming.iter().collect();
         let mut joined = self.join_states(&states, observation);
         // The branch join over the function-scoped `var` layer — the ONE
@@ -18928,6 +18971,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         observation: &FlowWriteObservation,
         after: &FlowLayerState,
     ) -> FlowExecutedClauseWrites {
+        let _ = observation;
         FlowExecutedClauseWrites(after.products.writes_since(observation))
     }
 

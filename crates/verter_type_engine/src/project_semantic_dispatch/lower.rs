@@ -1274,14 +1274,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut Vec<LowerFrame<'e>>,
     ) -> LowerStep<'e> {
-        // Watchdog hooks for hang investigation. Both calls are inert
-        // when the watchdog has not been spawned (single relaxed atomic
-        // load + early return). When active, they advance a heartbeat
-        // counter and respond to the watchdog's stall signal by
-        // printing a self-backtrace from inside this lowering.
+        // Captured execution can participate in hang investigation:
+        // advance its heartbeat and answer a stall signal with a
+        // self-backtrace. Uncaptured execution reads no watchdog state.
         // See `loop5_instrumentation.rs` watchdog module.
-        crate::loop5_instrumentation::watchdog_beat();
-        crate::loop5_instrumentation::watchdog_check_and_dump("shallow_lower_type_expr");
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+            crate::loop5_instrumentation::watchdog_beat();
+            crate::loop5_instrumentation::watchdog_check_and_dump("shallow_lower_type_expr");
+        }
         let graph = self.graph();
         graph.record_decl_subexpression_lowering();
         match expr {
@@ -2338,7 +2339,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // distinct fingerprints. See
                 // [`crate::mapper_binder_registry`].
                 let mapper_decl_name = crate::mapper_binder_registry::mapper_binder_decl_name(
-                    graph,
+                    graph.store(),
                     source,
                     value,
                     *optional,
@@ -2429,7 +2430,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // 258K-collision count tracks 258K cold MappedType
                 // dispatches, indicating (b) — the registry is
                 // doing what it can.
-                if let Some(ctx) = crate::request_context::current_request_context() {
+                crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
                     let hb = mapper_decl.whole_hash;
                     let hash_u64 = u64::from_le_bytes([
                         hb[0], hb[1], hb[2], hb[3], hb[4], hb[5], hb[6], hb[7],
@@ -2442,7 +2443,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         display_name: Arc::clone(&mapper_display_name),
                     };
                     ctx.classify_mapper_binder_ordinal(identity, mapper_ordinal);
-                }
+                });
                 let parameter_id = graph.intern_node_with_scope(
                     SemanticNodeData::TypeParam {
                         decl: mapper_decl,
@@ -2619,7 +2620,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // binder node id directly, avoiding display-name
                 // conflation.
                 let kind = crate::semantic_query::MapperKind::classify_value_expr(
-                    graph,
+                    graph.store(),
                     value_sem,
                     source_sem,
                     parameter_id,
@@ -2639,12 +2640,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     over_type_variable: over_type_variable
                         || (matches!(source.as_ref(), TypeExpr::KeyOf(_))
                             && crate::semantic_query::keyof_operand_is_type_variable(
-                                graph, source_sem,
+                                graph.store(),
+                                source_sem,
                             )),
                     modifiers_type: match source.as_ref() {
                         TypeExpr::KeyOf(_) => None,
                         _ => crate::semantic_query::modifiers_type_of_key_parameter(
-                            graph, source_sem,
+                            graph.store(),
+                            source_sem,
                         ),
                     },
                 };

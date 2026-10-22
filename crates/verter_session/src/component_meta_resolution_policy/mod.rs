@@ -94,7 +94,7 @@ const TYPE_ROLE_MACRO_KINDS: &[AnalyzedMacroKind] = &[
 /// The pass is host-bounded: source raises route through the shared
 /// dispatch bridge, and declaration lookups walk the already-resolved
 /// registry plus on-demand declaration metadata.
-pub(crate) fn apply_component_meta_resolution_policy(
+pub(crate) fn apply_component_meta_resolution_policy<M: verter_audit::observe::ObserveExec>(
     analysis: &mut ComponentMetaAnalysis,
     type_registry: &[ResolvedTypeAnalysis],
     type_registry_meta: &[ResolvedTypeRegistryMeta],
@@ -102,11 +102,11 @@ pub(crate) fn apply_component_meta_resolution_policy(
     owner_canonical: &str,
     snapshot: Option<&FileAnalysisSnapshot>,
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
 ) {
     let macro_participating_idents: FxHashSet<ResolvedRootIdentity> = match snapshot {
@@ -139,7 +139,9 @@ pub(crate) fn apply_component_meta_resolution_policy(
 /// branches without standing up a full project + analysis pipeline.
 /// Production code paths build the set from the resolved snapshot and
 /// call `apply_component_meta_resolution_policy`.
-pub(crate) fn apply_component_meta_resolution_policy_with_participation(
+pub(crate) fn apply_component_meta_resolution_policy_with_participation<
+    M: verter_audit::observe::ObserveExec,
+>(
     analysis: &mut ComponentMetaAnalysis,
     type_registry: &[ResolvedTypeAnalysis],
     type_registry_meta: &[ResolvedTypeRegistryMeta],
@@ -147,11 +149,11 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
     owner_canonical: &str,
     macro_participating_idents: &FxHashSet<ResolvedRootIdentity>,
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
 ) {
     let registry = PolicyRegistry::build(type_registry, type_registry_meta);
@@ -267,13 +269,13 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
 /// - `X = ButtonProps` with `type ButtonProps = { a?: AvatarProps }`
 ///   → `{ ButtonProps, AvatarProps }` (named alias body contributes
 ///   its full reference closure)
-fn build_policy_macro_role_identities(
+fn build_policy_macro_role_identities<M: verter_audit::observe::ObserveExec>(
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
@@ -443,10 +445,10 @@ fn build_policy_macro_role_identities(
 ///
 /// Iterative (worklist + visited node-set) for stack safety on deeply
 /// nested or shared shapes.
-fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
+fn harvest_role_bearing_refs_node<F: FnMut(&str), M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     root: SemanticNodeId,
     mut sink: F,

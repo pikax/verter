@@ -18,10 +18,16 @@ mod carrier_routing_no_vue_gate;
 mod carrier_stable_unit_reuse;
 mod client_framework_manifest_ts_freshness;
 mod closed_session_audited_route_refusal;
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod component_meta_audit;
 mod content_mapper_projection;
 mod corpus_audit_layout;
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod corpus_audit_tests;
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod css_attribution_chargeable;
 mod defect_b_corpus_prevention_gate;
 mod exposed_binding_regression;

@@ -33,24 +33,32 @@
 //! in admission, warm/cold classification, or cache identity reads it
 //! back.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
+use verter_audit::WaitAudit;
 use verter_audit::{
-    AuditedResult, FlowDegradationTag, FlowFailureTag, FlowPartialityTag,
-    FlowReturnInferencePayload, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, WaitAudit,
+    AuditedResult, FlowReturnInferencePayload, RequestAuditRecord, RequestKind, RequestKindPayload,
+    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
 };
+#[cfg(feature = "semantic-observe")]
+use verter_audit::{FlowDegradationTag, FlowFailureTag, FlowPartialityTag};
 
+#[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::VerterHost;
+#[cfg(feature = "semantic-observe")]
 use verter_session_query::flow::policy::FlowGap;
-use verter_type_engine::instant::Instant;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::semantic_query::{
-    FlowReturnDegradation, FlowReturnFailure, FlowReturnResult, FlowReturnUnsupported,
-    ResolveCallFailure, ReturnProjectionDemand,
+    FlowReturnDegradation, FlowReturnUnsupported, ResolveCallFailure,
+};
+use verter_type_engine::semantic_query::{
+    FlowReturnFailure, FlowReturnResult, ReturnProjectionDemand,
 };
 
 /// Typed `Err` arm of the flow-return [`AuditedResult`] carrier —
@@ -134,56 +142,64 @@ impl VerterHost {
         demand: ReturnProjectionDemand,
         cancellation: Option<verter_execution::cancellation::CancellationToken>,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
-        self.flow_return_request(function, cancellation, |dispatch| {
-            let key = dispatch.flow_return_key_with_demand(function, demand);
-            // Typed incompleteness never publishes clean: an answer composed
-            // from a degraded member return carries a typed degradation.
-            let delivered = dispatch
-                .owning()
-                .execute_flow_return_observing_degraded_read(key);
-            let (step, partial) = delivered.value().clone();
-            #[cfg(feature = "test-support")]
-            verter_type_engine::cancel_trace::mark("evaluated");
-            match step {
-                verter_type_engine::semantic_query::FlowReturnStep::Aborted(abort) => {
-                    Err(match abort {
-                        verter_type_engine::semantic_query::ExecutionAbort::Cancelled => {
-                            FlowReturnError::Cancelled
+        // The root entry selects its capture execution once, here, and the
+        // whole request — context, dispatcher and the body below — runs
+        // compiled for it.
+        verter_audit::specialise!(
+            crate::capture::entry_mode(self, || RequestKind::FlowReturnInference) => M,
+            {
+                self.flow_return_request::<M>(function, cancellation, |dispatch| {
+                    let key = dispatch.flow_return_key_with_demand(function, demand);
+                    // Typed incompleteness never publishes clean: an answer composed
+                    // from a degraded member return carries a typed degradation.
+                    let delivered = dispatch
+                        .owning()
+                        .execute_flow_return_observing_degraded_read(key);
+                    let (step, partial) = delivered.value().clone();
+                    #[cfg(feature = "test-support")]
+                    verter_type_engine::cancel_trace::mark("evaluated");
+                    match step {
+                        verter_type_engine::semantic_query::FlowReturnStep::Aborted(abort) => {
+                            Err(match abort {
+                                verter_type_engine::semantic_query::ExecutionAbort::Cancelled => {
+                                    FlowReturnError::Cancelled
+                                }
+                                other => FlowReturnError::Aborted(other),
+                            })
                         }
-                        other => FlowReturnError::Aborted(other),
-                    })
-                }
-                verter_type_engine::semantic_query::FlowReturnStep::Complete(result) => {
-                    Ok(Arc::new(if partial {
-                        result.with_partial_interior()
-                    } else {
-                        result
-                    }))
-                }
-                verter_type_engine::semantic_query::FlowReturnStep::NoValue(failure) => {
-                    Err(FlowReturnError::Failure(failure))
-                }
-                // A hold cannot surface at a fresh top-level
-                // transaction (no in-flight frame exists to
-                // re-enter); treat a torn surfacing as
-                // undecided, never a fabricated value.
-                verter_type_engine::semantic_query::FlowReturnStep::Hold(_) => {
-                    Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-                }
+                        verter_type_engine::semantic_query::FlowReturnStep::Complete(result) => {
+                            Ok(Arc::new(if partial {
+                                result.with_partial_interior()
+                            } else {
+                                result
+                            }))
+                        }
+                        verter_type_engine::semantic_query::FlowReturnStep::NoValue(failure) => {
+                            Err(FlowReturnError::Failure(failure))
+                        }
+                        // A hold cannot surface at a fresh top-level
+                        // transaction (no in-flight frame exists to
+                        // re-enter); treat a torn surfacing as
+                        // undecided, never a fabricated value.
+                        verter_type_engine::semantic_query::FlowReturnStep::Hold(_) => {
+                            Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
+                        }
+                    }
+                })
             }
-        })
+        )
     }
 
     /// One audited flow-return request for `function` around `run`: the
     /// request id, context, audit registration, proven-current store view
     /// and dispatch every flow-return request builds, `run` over that
     /// dispatch, then the cancellation mapping and the audit record.
-    pub(crate) fn flow_return_request(
+    pub(crate) fn flow_return_request<M: verter_audit::observe::ObserveExec>(
         &self,
         function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         cancellation: Option<verter_execution::cancellation::CancellationToken>,
         run: impl FnOnce(
-            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
         ) -> Result<Arc<FlowReturnResult>, FlowReturnError>,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         let canonical_id: &str = function.anchor.canonical_id.as_ref();
@@ -192,6 +208,7 @@ impl VerterHost {
         // Stamp a fresh request id and bookkeeping for the harness'
         // multi-request guard. Mirrors the other audited entry-points.
         let request_id = self.next_request_id();
+        #[cfg(feature = "semantic-observe")]
         verter_type_engine::request_context::increment_requests_created();
 
         // Construct a per-request context. The footprint-attachment
@@ -200,45 +217,45 @@ impl VerterHost {
         // footprint when `footprint_capture=true`.
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
+        #[cfg(feature = "semantic-observe")]
         let footprint_scope = crate::typeinfo::footprint_attach::TypeinfoFootprintScope::install(
             self,
             request_id,
             footprint_capture,
         );
-        let caller_cancellable = cancellation.is_some();
-        let ctx = match cancellation {
-            None => RequestContext::with_kind_and_timing(
-                request_id,
-                Arc::<str>::from(canonical_id),
-                RequestKind::FlowReturnInference,
-                footprint_capture,
-                timing_capture,
-                footprint_scope.accumulator(),
-            ),
-            Some(cancellation) => RequestContext::with_kind_timing_and_cancellation(
-                request_id,
-                Arc::<str>::from(canonical_id),
-                RequestKind::FlowReturnInference,
-                footprint_capture,
-                timing_capture,
-                footprint_scope.accumulator(),
-                cancellation,
-            ),
-        };
+        #[cfg(feature = "semantic-observe")]
+        let accumulator = footprint_scope.accumulator();
+        #[cfg(not(feature = "semantic-observe"))]
+        let accumulator = None;
+        let ctx = crate::capture::root_entry_context_in_mode(
+            self,
+            request_id,
+            Arc::<str>::from(canonical_id),
+            || RequestKind::FlowReturnInference,
+            <M as verter_audit::observe::ObserveExec>::MODE,
+            footprint_capture,
+            timing_capture,
+            accumulator,
+            cancellation.unwrap_or_default(),
+        );
 
         // BEFORE installing the TLS guard: construct the registration.
-        let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        verter_debug_assert!(
-            ctx.audit_registration.get().is_none(),
-            "freshly-constructed RequestContext must have no audit_registration",
-        );
-        let _ = ctx.install_audit_registration(registration.clone());
+        #[cfg(feature = "semantic-observe")]
+        let registration = {
+            let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
+            verter_debug_assert!(
+                ctx.audit_registration.get().is_none(),
+                "freshly-constructed RequestContext must have no audit_registration",
+            );
+            let _ = ctx.install_audit_registration(registration.clone());
+            registration
+        };
 
         // Resolve against a PROVEN-CURRENT snapshot (this entry-point
         // returns the value with no outer publish fence). On sustained
         // churn surface the typed `UnstableState` error rather than
         // answering from superseded state.
-        let request_start = Instant::now();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let outcome: Result<Arc<FlowReturnResult>, FlowReturnError> = if ctx.is_cancelled() {
             // A request cancelled before it starts runs none of its work —
             // a warm read included, which checks no cancellation — and
@@ -247,32 +264,21 @@ impl VerterHost {
         } else {
             match crate::typeinfo::current_store_view_for_query(self) {
                 Some(current_view) => {
+                    // Admission snapshots the selected request's capture
+                    // receivers, so install it before constructing the resolver.
+                    let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                    let host_ctx = crate::resolver_core::HostResolverContext::from_current(
-                        self,
-                        &current_view,
-                        overlay,
-                    );
+                    let host_ctx =
+                        crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
+                            self,
+                            &current_view,
+                            overlay,
+                        );
                     let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-                        crate::resolver_core::HostCapabilities,
+                        crate::resolver_core::HostCapabilities<M>,
                     > = &host_ctx;
-                    match registration.as_ref() {
-                        AuditRequestRegistration::Active(_) => {
-                            let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                            let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
-                            run(&dispatch)
-                        }
-                        AuditRequestRegistration::Noop => {
-                            let _noop_guard = verter_audit::install_noop_observer();
-                            // The dispatch reads cancellation from the
-                            // installed request context, so a caller's
-                            // token needs it installed even with no audit.
-                            let _ctx_guard = caller_cancellable
-                                .then(|| RequestContextGuard::install(Arc::clone(&ctx)));
-                            let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
-                            run(&dispatch)
-                        }
-                    }
+                    let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
+                    run(&dispatch)
                 }
                 None => Err(FlowReturnError::UnstableState {
                     attempts: crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS as u8,
@@ -295,92 +301,104 @@ impl VerterHost {
             }
             other => other,
         };
-        let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
 
         // Filtered kinds: return the cheap default-filled record. The
         // query still ran; no payload was collected and nothing is
         // published.
-        if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            let state = if self.config.audit_enabled {
-                verter_audit::AuditCaptureState::FilteredNoop
-            } else {
-                verter_audit::AuditCaptureState::AuditDisabled
+        #[cfg(feature = "semantic-observe")]
+        if matches!(registration.as_ref(), AuditRequestRegistration::Active(_)) {
+            let total_ms = request_clock.elapsed_ms();
+            // Build the audit record — only the `Active` arm reaches here.
+            // Snapshot the per-request flow counters from the context.
+            let cold_computes = ctx.flow_return_cold_computes.load(Ordering::Relaxed);
+            let payload = FlowReturnInferencePayload {
+                function_symbol: function_symbol.to_string(),
+                cold_computes,
+                budget_exceeded_events: ctx.flow_return_budget_exceeded.load(Ordering::Relaxed),
+                cycle_reentry_holds: ctx.flow_return_cycle_reentries.load(Ordering::Relaxed),
+                partiality: observed_partiality(&outcome),
             };
-            let record =
-                noop_flow_return_record(request_id, canonical_id, ctx.parent_request_id, state);
-            return audited_from_outcome(outcome, record);
+            // Cold-vs-warm contract, counter side: a request that produced
+            // a value with ZERO cold evaluations was served warm.
+            let from_cache = outcome.is_ok() && cold_computes == 0;
+
+            let timings = RequestTimingAudit {
+                total_ms,
+                ..RequestTimingAudit::default()
+            };
+            let store = RequestStoreAudit {
+                cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+                bypass_diagnostics:
+                    crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
+                ..RequestStoreAudit::default()
+            };
+            let memory = RequestMemoryAudit {
+                process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
+                ..RequestMemoryAudit::default()
+            };
+            let waits = if ctx.timing_capture {
+                Some(WaitAudit {
+                    lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
+                    queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
+                    lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
+                })
+            } else {
+                None
+            };
+
+            // Finalise the footprint through the shared miner (drain +
+            // per-file attribution + deterministic mine). `(None, [])`
+            // when capture is off.
+            let (footprint, files) =
+                crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
+
+            let record = RequestAuditRecord {
+                request_id,
+                canonical_id: canonical_id.to_string(),
+                target_identity: Some(verter_audit::RequestTargetIdentity::registered(
+                    canonical_id,
+                )),
+                kind: RequestKind::FlowReturnInference,
+                parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
+                from_cache,
+                timings,
+                memory,
+                store,
+                footprint,
+                scheduler: ctx.scheduler_audit.lock().clone(),
+                files,
+                waits,
+                kind_payload: RequestKindPayload::FlowReturnInference(payload),
+                capture_state: verter_audit::AuditCaptureState::ActiveStored,
+                trace_id: ctx.trace_id.clone(),
+            };
+
+            let cloned = record.clone();
+            registration.finalize(record);
+            return audited_from_outcome(outcome, cloned);
         }
 
-        // Build the audit record — only the `Active` arm reaches here.
-        // Snapshot the per-request flow counters from the context.
-        let cold_computes = ctx.flow_return_cold_computes.load(Ordering::Relaxed);
-        let payload = FlowReturnInferencePayload {
-            function_symbol: function_symbol.to_string(),
-            cold_computes,
-            budget_exceeded_events: ctx.flow_return_budget_exceeded.load(Ordering::Relaxed),
-            cycle_reentry_holds: ctx.flow_return_cycle_reentries.load(Ordering::Relaxed),
-            partiality: observed_partiality(&outcome),
+        // Uncaptured: filtered or disabled by the host, or capture compiled
+        // out. The answer is the same; the record carries no observation.
+        #[cfg(feature = "semantic-observe")]
+        let parent_request_id = ctx.parent_request_id;
+        #[cfg(not(feature = "semantic-observe"))]
+        let parent_request_id = {
+            let _ = (
+                request_clock,
+                footprint_capture,
+                timing_capture,
+                function_symbol,
+            );
+            None::<u64>
         };
-        // Cold-vs-warm contract, counter side: a request that produced
-        // a value with ZERO cold evaluations was served warm.
-        let from_cache = outcome.is_ok() && cold_computes == 0;
-
-        let timings = RequestTimingAudit {
-            total_ms,
-            ..RequestTimingAudit::default()
-        };
-        let store = RequestStoreAudit {
-            cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
-            bypass_diagnostics: crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
-            ..RequestStoreAudit::default()
-        };
-        let memory = RequestMemoryAudit {
-            process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
-            ..RequestMemoryAudit::default()
-        };
-        let waits = if ctx.timing_capture {
-            Some(WaitAudit {
-                lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
-                queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
-                lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
-            })
-        } else {
-            None
-        };
-
-        // Finalise the footprint through the shared miner (drain +
-        // per-file attribution + deterministic mine). `(None, [])`
-        // when capture is off.
-        let (footprint, files) =
-            crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
-
-        let record = RequestAuditRecord {
-            request_id,
-            canonical_id: canonical_id.to_string(),
-            target_identity: Some(verter_audit::RequestTargetIdentity::registered(
-                canonical_id,
-            )),
-            kind: RequestKind::FlowReturnInference,
-            parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
-            from_cache,
-            timings,
-            memory,
-            store,
-            footprint,
-            scheduler: ctx.scheduler_audit.lock().clone(),
-            files,
-            waits,
-            kind_payload: RequestKindPayload::FlowReturnInference(payload),
-            capture_state: verter_audit::AuditCaptureState::ActiveStored,
-            trace_id: ctx.trace_id.clone(),
-        };
-
-        let cloned = record.clone();
-        registration.finalize(record);
-        audited_from_outcome(outcome, cloned)
+        let state = crate::capture::uncaptured_state(self.config.audit_enabled);
+        let record = noop_flow_return_record(request_id, canonical_id, parent_request_id, state);
+        audited_from_outcome(outcome, record)
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Project the outcome's OWN typed partiality reason onto the audit
 /// payload — the single observability projection of the flow
 /// vocabulary, and a pure read.
@@ -421,6 +439,7 @@ fn observed_partiality(
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Map one typed degradation reason onto its closed wire tag.
 ///
 /// EXHAUSTIVE, with no wildcard arm and no `Debug` formatting: a new
@@ -455,6 +474,7 @@ fn degradation_tag(degradation: FlowReturnDegradation) -> FlowDegradationTag {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Map one typed no-value failure onto its closed wire tag.
 ///
 /// EXHAUSTIVE through the nested closed enums too, so `Unsupported`,

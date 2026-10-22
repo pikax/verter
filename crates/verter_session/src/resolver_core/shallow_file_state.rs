@@ -182,14 +182,14 @@ impl Default for ResolutionBudgets {
     }
 }
 
-/// Counters tracking work done across the three resolution domains.
+/// Work the frontier traversal charges against its budget.
 ///
-/// These are per-request counters, not global accumulators.
+/// Per-request, not a global accumulator: `frontier_symbol_visits` is the
+/// running count the frontier checks against
+/// [`ResolutionBudgets::frontier_symbol_visits`].
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionCounters {
-    pub local_closure_steps: u64,
     pub frontier_symbol_visits: u64,
-    pub builder_expansion_steps: u64,
 }
 
 // ---------------------------------------------------------------------------

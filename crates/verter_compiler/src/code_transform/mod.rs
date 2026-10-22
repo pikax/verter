@@ -41,6 +41,19 @@ mod mapping_product;
 mod segmented;
 mod source_map;
 
+/// A standalone transform unit adopts the request's selection once, before
+/// constructing its mode-typed transform. Inner operations never read TLS.
+pub(crate) fn installed_capture_mode() -> verter_audit::observe::ObserveMode {
+    #[cfg(feature = "semantic-observe")]
+    {
+        verter_audit::observe::ObserveMode::select(verter_audit::current_observer().is_some())
+    }
+    #[cfg(not(feature = "semantic-observe"))]
+    {
+        verter_audit::observe::ObserveMode::Uncaptured
+    }
+}
+
 pub use chain::SourceMapChainError;
 pub use code_transform::CodeTransform;
 pub(crate) use code_transform::GeneratedContentMarker;

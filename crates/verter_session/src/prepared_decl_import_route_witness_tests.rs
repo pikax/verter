@@ -175,6 +175,8 @@ fn an_unrelated_appearance_leaves_the_recorded_witness_valid() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn a_second_bundle_read_through_one_view_warm_hits() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -386,6 +388,8 @@ fn component_meta_admits_nothing_for_an_owner_with_an_unrootable_witness() {
 mod resolution_signature_growth_tests;
 
 #[path = "non_cacheable_bundle_reuse_tests.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod non_cacheable_bundle_reuse_tests;
 
 #[path = "request_only_reuse_tests.rs"]

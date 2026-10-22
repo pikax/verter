@@ -39,7 +39,7 @@ use verter_type_engine::semantic_query::{
     SurfaceProvenanceContext, SurfaceView,
 };
 
-impl ComponentMetaQueryEngine<'_> {
+impl<M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'_, M> {
     /// Project a root symbol's whole-surface to its [`ExpandedObjectShape`] in
     /// NODE DOMAIN.
     ///
@@ -242,10 +242,10 @@ impl ComponentMetaQueryEngine<'_> {
 /// and construct signatures both publish as call signatures, matching the
 /// object-shape extraction convention), declared index signatures, and the
 /// synthetic open placeholder for a GENUINELY OPEN surface.
-fn expanded_shape_from_surface_view(
+fn expanded_shape_from_surface_view<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     surface: &SurfaceView,
     parent: Option<&SemanticTypeSource>,
@@ -336,8 +336,8 @@ fn expanded_shape_from_surface_view(
 /// member read, never the indexed access `Parent['name']`: under
 /// `strictNullChecks` an indexed access of an optional member reads its type
 /// plus `undefined`, and a further hop through it would read off that union.
-fn member_value_source(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn member_value_source<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     value: SemanticNodeId,
     name: &str,
     parent: Option<&SemanticTypeSource>,
@@ -375,8 +375,8 @@ fn member_value_source(
 /// signature's type parameters narrow to name+ordinal (bounds fail closed to
 /// `None`, matching the [`NarrowTypeParam`] producer contract). `None` for a
 /// non-`Function` signature node.
-fn expanded_call_signature_from_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn expanded_call_signature_from_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
 ) -> Option<ExpandedCallSignature> {
     let data = dispatch.graph().read_in_scope(node)?;
@@ -425,8 +425,8 @@ fn expanded_call_signature_from_node(
 /// The published SOURCE for a position with no appendable parent: the complete
 /// closed LEAF fact when the node is one, else the typed Unknown-leaf
 /// degradation.
-fn leaf_or_degraded_source(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn leaf_or_degraded_source<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
 ) -> SemanticTypeSource {
     dispatch

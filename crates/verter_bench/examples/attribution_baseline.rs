@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo run -p verter_bench --release --example attribution_baseline
-//! cargo run -p verter_bench --release --features attribution \
+//! cargo run -p verter_bench --release --features semantic-observe \
 //!     --example attribution_baseline -- --format tsv
 //! ```
 //!
@@ -26,7 +26,7 @@ use verter_workspace::{MemoryOptions, MemoryWorkspace};
 /// Heap attribution needs the wrapper installed as THE global allocator,
 /// which only a final binary can do. Installed on the measurement arm only,
 /// so the disabled arm links the plain system allocator.
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 #[global_allocator]
 static ALLOC: verter_audit::attribution::AttributingAllocator<std::alloc::System> =
     verter_audit::attribution::AttributingAllocator::new(std::alloc::System);
@@ -213,7 +213,7 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 fn emit_dataset(format: &str) {
     use verter_audit::attribution::{report, snapshot};
 
@@ -241,7 +241,7 @@ fn emit_dataset(format: &str) {
             }
             println!("\n── top sites by calls ──");
             let mut by_calls = rows.clone();
-            by_calls.sort_by(|a, b| b.calls.cmp(&a.calls));
+            by_calls.sort_by_key(|sample| std::cmp::Reverse(sample.calls));
             println!("{:<44}{:>12}{:>14}{:>12}", "site", "calls", "amount", "ms");
             for row in by_calls.iter().take(25) {
                 println!(
@@ -256,19 +256,19 @@ fn emit_dataset(format: &str) {
     }
 }
 
-#[cfg(not(feature = "attribution"))]
+#[cfg(not(feature = "semantic-observe"))]
 fn emit_dataset(_format: &str) {
     println!(
         "\nattribution feature is OFF — no counter table exists in this build.\n\
          This arm measures the disabled-instrumentation cost; rebuild with\n\
-         `--features attribution` for the dataset."
+         `--features semantic-observe` for the dataset."
     );
 }
 
 /// Run the workload twice under the same process and compare the determinism
 /// digests. Only meaningful with the feature on; without it there is nothing
 /// to read, so the check reports as not-applicable.
-#[cfg(feature = "attribution")]
+#[cfg(feature = "semantic-observe")]
 fn determinism_check(corpus: &[SourceFile]) {
     use verter_audit::attribution::{reset, snapshot, WorkSite};
 
@@ -320,7 +320,7 @@ fn determinism_check(corpus: &[SourceFile]) {
     );
 }
 
-#[cfg(not(feature = "attribution"))]
+#[cfg(not(feature = "semantic-observe"))]
 fn determinism_check(_corpus: &[SourceFile]) {}
 
 // entry
@@ -345,7 +345,7 @@ fn main() {
     let runs = flag("--runs", 3).max(1);
     let corpus = build_corpus(files);
 
-    let attribution_enabled = cfg!(feature = "attribution");
+    let attribution_enabled = cfg!(feature = "semantic-observe");
     eprintln!(
         "corpus: {} files ({} components + 1 shared module), runs: {}, attribution: {}",
         corpus.len(),
@@ -360,7 +360,7 @@ fn main() {
 
     let mut walls = Vec::with_capacity(runs);
     for _ in 0..runs {
-        #[cfg(feature = "attribution")]
+        #[cfg(feature = "semantic-observe")]
         verter_audit::attribution::reset();
         let (ms, _) = run_once(&corpus);
         walls.push(ms);

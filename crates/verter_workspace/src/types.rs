@@ -1,6 +1,9 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use verter_audit::observe::ObservedU64;
 use verter_session_query::resolution::{ResolvePhase, ResolveRequestKind};
 
 /// A parsed edge from a file's imports, recorded during upsert.
@@ -63,39 +66,59 @@ pub struct PackageManifest {
     pub raw: Option<Arc<str>>,
 }
 
+/// Workspace file-system and import-resolution work counters.
+///
+/// Optional measurement state: no resolution, caching or invalidation
+/// decision reads them. The work counters are zero-size without
+/// `semantic-observe`, so their writes compile to nothing, and the snapshot
+/// that reads them exists only where they are kept.
 #[derive(Debug, Default)]
 pub struct VfsProvenance {
-    pub import_resolution_cache_hit_count: AtomicU64,
-    pub import_resolution_cache_miss_count: AtomicU64,
-    pub dir_index_hit_count: AtomicU64,
-    pub dir_index_refresh_count: AtomicU64,
-    pub dir_index_dirty_rescan_count: AtomicU64,
-    pub native_fs_read_dir_count: AtomicU64,
-    pub native_fs_read_file_miss_count: AtomicU64,
+    pub import_resolution_cache_hit_count: ObservedU64,
+    pub import_resolution_cache_miss_count: ObservedU64,
+    pub dir_index_hit_count: ObservedU64,
+    pub dir_index_refresh_count: ObservedU64,
+    pub dir_index_dirty_rescan_count: ObservedU64,
+    pub native_fs_read_dir_count: ObservedU64,
+    pub native_fs_read_file_miss_count: ObservedU64,
     /// Live resolution-evidence reads: one per syscall issued by the
     /// independent evidence rail, which is the ONLY rail allowed to bypass
     /// the event-invalidated caches. Warm reuse is zero-syscall WITHIN a
     /// content generation, so a non-zero delta across repeated demands in one
-    /// generation is a defect this counter makes visible.
+    /// generation is a defect this counter makes visible. Only tests read it,
+    /// so it exists only under the observation gate (this crate's tests, its
+    /// `test-support` feature for dependents' tests, or `semantic-observe`).
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub resolution_evidence_live_read_count: AtomicU64,
 }
 
 impl VfsProvenance {
+    /// Read the kept counters. Exists only under the observation gate; the
+    /// work counters appear only under `semantic-observe`.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub fn snapshot(&self) -> VfsProvenanceSnapshot {
         VfsProvenanceSnapshot {
+            #[cfg(feature = "semantic-observe")]
             import_resolution_cache_hit_count: self
                 .import_resolution_cache_hit_count
                 .load(Ordering::Relaxed),
+            #[cfg(feature = "semantic-observe")]
             import_resolution_cache_miss_count: self
                 .import_resolution_cache_miss_count
                 .load(Ordering::Relaxed),
+            #[cfg(feature = "semantic-observe")]
             dir_index_hit_count: self.dir_index_hit_count.load(Ordering::Relaxed),
+            #[cfg(feature = "semantic-observe")]
             dir_index_refresh_count: self.dir_index_refresh_count.load(Ordering::Relaxed),
+            #[cfg(feature = "semantic-observe")]
             dir_index_dirty_rescan_count: self.dir_index_dirty_rescan_count.load(Ordering::Relaxed),
+            #[cfg(feature = "semantic-observe")]
             native_fs_read_dir_count: self.native_fs_read_dir_count.load(Ordering::Relaxed),
+            #[cfg(feature = "semantic-observe")]
             native_fs_read_file_miss_count: self
                 .native_fs_read_file_miss_count
                 .load(Ordering::Relaxed),
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             resolution_evidence_live_read_count: self
                 .resolution_evidence_live_read_count
                 .load(Ordering::Relaxed),
@@ -114,19 +137,31 @@ impl VfsProvenance {
         self.native_fs_read_dir_count.store(0, Ordering::Relaxed);
         self.native_fs_read_file_miss_count
             .store(0, Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         self.resolution_evidence_live_read_count
             .store(0, Ordering::Relaxed);
     }
 }
 
+/// Point-in-time read of [`VfsProvenance`]. Exists only under the
+/// observation gate; the work counters only under `semantic-observe`.
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VfsProvenanceSnapshot {
+    #[cfg(feature = "semantic-observe")]
     pub import_resolution_cache_hit_count: u64,
+    #[cfg(feature = "semantic-observe")]
     pub import_resolution_cache_miss_count: u64,
+    #[cfg(feature = "semantic-observe")]
     pub dir_index_hit_count: u64,
+    #[cfg(feature = "semantic-observe")]
     pub dir_index_refresh_count: u64,
+    #[cfg(feature = "semantic-observe")]
     pub dir_index_dirty_rescan_count: u64,
+    #[cfg(feature = "semantic-observe")]
     pub native_fs_read_dir_count: u64,
+    #[cfg(feature = "semantic-observe")]
     pub native_fs_read_file_miss_count: u64,
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub resolution_evidence_live_read_count: u64,
 }

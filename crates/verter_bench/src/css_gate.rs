@@ -669,17 +669,11 @@ fn machine_class() -> MachineClass {
 
 fn enabled_features() -> Vec<String> {
     let mut features = Vec::new();
-    if cfg!(feature = "hotpath") {
-        features.push("hotpath".to_string());
+    if cfg!(feature = "semantic-observe") {
+        features.push("semantic-observe".to_string());
     }
     if cfg!(feature = "hotpath-alloc") {
         features.push("hotpath-alloc".to_string());
-    }
-    if cfg!(feature = "currency_probe") {
-        features.push("currency_probe".to_string());
-    }
-    if cfg!(feature = "attribution") {
-        features.push("attribution".to_string());
     }
     features
 }

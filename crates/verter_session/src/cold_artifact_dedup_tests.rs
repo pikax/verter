@@ -16,11 +16,10 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
+use crate::meta_provenance::MetaProvenanceSnapshot;
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
-use crate::{
-    meta_provenance::MetaProvenanceSnapshot,
-    types::{HostConfig, UpsertRequest},
-};
 use verter_type_engine::semantic_query::ProjectionMode;
 
 fn make_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
@@ -47,6 +46,8 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
         .expect("upsert must succeed");
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn snap(host: &VerterHost) -> MetaProvenanceSnapshot {
     host.provenance().snapshot()
 }
@@ -77,6 +78,8 @@ const SCRATCH: &str = "export type Unrelated = { a: 1 };\n\
 
 const SCRATCH_ID: &str = "/workspace/src/scratch.ts";
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn assert_single_build(provenance: &MetaProvenanceSnapshot, label: &str) {
     assert_eq!(
         provenance.eval_program_parses, 1,
@@ -125,6 +128,8 @@ fn assert_single_build(provenance: &MetaProvenanceSnapshot, label: &str) {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn cold_resolve_builds_each_artifact_once() {
     let host = make_host(&[]);
@@ -137,6 +142,8 @@ fn cold_resolve_builds_each_artifact_once() {
     assert_single_build(&snap(&host), "cold_resolve_builds_each_artifact_once");
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn warm_resolve_builds_nothing() {
     let host = make_host(&[]);
@@ -188,6 +195,8 @@ fn warm_resolve_builds_nothing() {
 /// both directions — an over-eager artifact clear shows up as non-zero
 /// build counters, a freshness-gate break shows up the same way (stale
 /// rejection forces a rebuild).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn clear_compile_cache_retains_fresh_indexed_ready() {
     let host = make_host(&[]);
@@ -247,6 +256,8 @@ fn clear_compile_cache_retains_fresh_indexed_ready() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn concurrent_cold_resolves_collapse() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -339,6 +350,8 @@ fn concurrent_cold_resolves_collapse() {
 /// CANONICAL artifact (`IndexedReady.shallow_state`) is built from. A
 /// fallback env build hard-coded to `SourceType::ts()` mangles the TSX
 /// body and drops the value-symbol inventory from the indexed artifact.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vue_tsx_sfc_canonical_state_parses_under_authoritative_source_type() {
     let host = make_host(&[]);
@@ -394,6 +407,8 @@ fn vue_tsx_sfc_canonical_state_parses_under_authoritative_source_type() {
 /// `DeclarationScopePayload` source), NOT the whole-file eval env — so the
 /// probe asserts the bundle carries `T` while the env-build dedup counters
 /// stay pinned.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vue_generic_sfc_prepared_bundle_carries_script_setup_type_params() {
     let host = make_host(&[]);
@@ -446,6 +461,8 @@ fn vue_generic_sfc_prepared_bundle_carries_script_setup_type_params() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn route_then_deepen_is_one_build_per_file() {
     let host = make_host(&[]);
@@ -484,6 +501,8 @@ fn route_then_deepen_is_one_build_per_file() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn edit_invalidates_exactly_once() {
     let host = make_host(&[]);
@@ -509,6 +528,8 @@ fn edit_invalidates_exactly_once() {
 /// content-addressed payload (source / parse / analysis / env / shallow
 /// symbols) is reused and only the route surface (import_routes + route
 /// edges + hashes) is rebuilt.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn route_mutation_refreshes_edges_without_reparse() {
     let host = make_host(&[]);
@@ -604,6 +625,8 @@ fn route_mutation_refreshes_edges_without_reparse() {
 /// refresh is the correct route. The parse-env-MOVING case is pinned by
 /// `moved_parse_env_forces_full_rematerialise_not_edge_refresh`: a
 /// moved parse dimension must re-parse, never edge-refresh.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn project_mutation_refreshes_edges_without_reparse() {
     let host = make_host(&[]);
@@ -676,6 +699,8 @@ fn project_mutation_refreshes_edges_without_reparse() {
 /// The `is_generic_carrier` probe (`shallow_file_state`) must JOIN the
 /// canonical `IndexedReady` build — a COLD probe's build IS the
 /// IndexedReady build, never a second parallel artifact build.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn probe_reads_canonical_artifact() {
     let host = make_host(&[]);
@@ -710,6 +735,8 @@ fn probe_reads_canonical_artifact() {
 /// parse, one env, one shallow state, one materialisation) and NEVER
 /// touches the base artifact cache — the base canonical keeps no entry
 /// under its own (legacy) key for the overlay content.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn overlay_cold_build_is_single_and_never_touches_base_caches() {
     use crate::session_view::OverlaidView;
@@ -913,6 +940,8 @@ fn follower_arriving_after_mutation_does_not_adopt_fenced_flight_result() {
 /// silently decouples from the real publisher's shape (the clone is
 /// exhaustive-by-construction via struct-literal syntax: a new field is
 /// a COMPILE error here, which is the tripwire).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
     let host = make_host(&[]);
@@ -1350,6 +1379,8 @@ fn import_dependency_mutation_mid_flight_trips_the_publish_fence() {
 /// reset. Both a changed route and a value-identical steady-state re-push keep
 /// `project_generation` stable. A changed route still advances the dedicated
 /// resolution-fact and store-view witnesses.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn set_import_dependencies_routes_do_not_advance_project_generation() {
     let host = make_host(&[]);
@@ -1471,6 +1502,8 @@ fn restoring_unchanged_routes_after_source_edit_preserves_project_generation() {
 /// semantics as the base materialise + edge refresh — a generation move
 /// mid-flight serves the result to the caller (ReturnOnly) and publishes
 /// NOTHING.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn overlay_mid_flight_mutation_trips_the_overlay_publish_fence() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1599,6 +1632,8 @@ fn overlay_mid_flight_mutation_trips_the_overlay_publish_fence() {
 /// collapse contract. Deterministic schedule: the leader parks at its
 /// post-stamp seam; three followers join the overlay lane; release; all
 /// four serve the same published Arc and exactly one build ran.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn concurrent_overlay_materialise_collapses() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1718,6 +1753,8 @@ fn concurrent_overlay_materialise_collapses() {
 /// for a never-materialised canonical the more-sensitive `FileWholeHash`
 /// fact covers invalidation; for a stale surface the capture declines
 /// (`None`) so dependents fail warm validation and recompute themselves.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn route_fact_capture_is_side_effect_free() {
     let assert_no_builds = |provenance: &MetaProvenanceSnapshot, label: &str| {
@@ -2172,6 +2209,8 @@ fn land_project_shape_reset(host: &VerterHost) {
 /// view and the read-side fact rail cannot reject the entry. Admission
 /// itself must decline; the caller is still served (its request
 /// pre-dates the mutation).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn bundle_built_from_fenced_indexed_ready_is_served_but_not_admitted() {
     use std::sync::atomic::Ordering;
@@ -2266,6 +2305,8 @@ fn bundle_built_from_fenced_indexed_ready_is_served_but_not_admitted() {
 /// whose fact stamps (the owner's import-route witness) are read
 /// from the LIVE post-mutation state while its payload was computed
 /// from the superseded route surface — must never go warm.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn routed_shallow_bundle_built_from_fenced_indexed_ready_is_served_but_not_admitted() {
     use std::sync::atomic::Ordering;
@@ -2540,6 +2581,8 @@ fn route_entry_built_from_fenced_participant_serves_with_empty_facts() {
 /// `sfc_parses` rail — counting lives INSIDE the worker (the
 /// `parse::parse_sfc_counted` chokepoint), so no caller can run an
 /// uncounted parse and a lost worker-internal increment fails here.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn lazy_sfc_analysis_workers_count_their_structure_parse() {
     use std::sync::atomic::Ordering;
@@ -2589,6 +2632,8 @@ fn lazy_sfc_analysis_workers_count_their_structure_parse() {
 /// chokepoint (guard:
 /// `sfc_structure_parse_routes_through_the_counted_chokepoint`); this
 /// test pins that the counted lanes report the exact expected total.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vue_upsert_and_cold_build_run_exactly_one_counted_sfc_parse() {
     let host = make_host(&[]);
@@ -3040,6 +3085,8 @@ fn owner_import_surface_from_fenced_route_walk_is_served_but_not_admitted() {
 /// build against fresh state instead of adopting the fenced-derived
 /// bundle with no ReturnOnly signal (its enclosing compute could warm
 /// shared caches with it).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn fenced_bundle_flight_is_not_a_joinable_rendezvous() {
     use std::sync::atomic::Ordering;
@@ -3149,6 +3196,8 @@ fn fenced_bundle_flight_is_not_a_joinable_rendezvous() {
 /// burst member that adopted it would treat a canonical that HAS a
 /// live declaration surface as bundle-less with no ReturnOnly signal
 /// on its own request.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn fenced_surface_empty_miss_is_not_a_joinable_rendezvous() {
     use std::sync::atomic::Ordering;
@@ -3248,6 +3297,8 @@ fn fenced_surface_empty_miss_is_not_a_joinable_rendezvous() {
 /// lane adopts it without re-running the cold build. Proves the
 /// stability decision consults the serve's publication status rather
 /// than declining every miss.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn unfenced_surface_empty_miss_stays_a_joinable_rendezvous() {
     use verter_session_query::facts::store_view::StoreView;
@@ -3655,6 +3706,8 @@ fn overlay_lang_flip_parses_under_overlay_source_type() {
 /// `non_sfc_snapshot_parses` rail: exactly ONE counted full-program
 /// snapshot parse per non-SFC upsert. Discriminates the counter wiring
 /// — if the worker stopped counting, this pin fails.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn scheduler_source_lane_counts_one_non_sfc_snapshot_parse() {
     let host = make_host(&[]);
@@ -3677,6 +3730,8 @@ fn scheduler_source_lane_counts_one_non_sfc_snapshot_parse() {
 /// non-SFC canonical) and is guaranteed to panic identically, yielding
 /// the same empty snapshot — so the `non_sfc_snapshot_parses` rail
 /// stays at ZERO on the fatal lane.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn overlay_fatal_parse_publishes_empty_snapshot_without_second_parse() {
     use crate::session_view::OverlaidView;
@@ -3742,6 +3797,8 @@ const VUE_FIXTURE: &str = "<script setup lang=\"ts\">import { ref } from 'vue';\
 const VUE_OWNER: &str = "/workspace/src/Comp.vue";
 
 // @ai-generated
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn changed_workspace_reload_does_not_fence_out_its_own_cold_artifact() {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -3811,6 +3868,8 @@ fn changed_workspace_reload_does_not_fence_out_its_own_cold_artifact() {
 /// collapse further: the worker's OXC arena is per-file/per-version
 /// and dropped after lowering (never retained in host caches), so the
 /// flight's borrowed eval program must be its own parse.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vue_cold_build_parses_the_script_program_once() {
     let host = make_host(&[(VUE_OWNER, VUE_FIXTURE)]);
@@ -3854,6 +3913,8 @@ fn vue_cold_build_parses_the_script_program_once() {
 
 /// Eager upsert lane: the upsert-time `parse_vue_snapshot` funnels
 /// through the same single-script-parse snapshot builder.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vue_upsert_eager_snapshot_parses_the_script_program_once() {
     let host = make_host(&[]);
@@ -3896,6 +3957,8 @@ fn vue_upsert_eager_snapshot_parses_the_script_program_once() {
 /// Overlay lane: the overlay materialiser snapshots the OVERLAY
 /// content inside its flight (no scheduler snapshot exists for overlay
 /// bytes) — same single-script-parse contract as the base lane.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vue_overlay_cold_flight_parses_the_script_program_once() {
     use crate::session_view::OverlaidView;
@@ -3939,6 +4002,7 @@ fn vue_overlay_cold_flight_parses_the_script_program_once() {
 /// canonical's REAL source directly into `FileArtifactStore` (no
 /// scheduler ingress) — the artifact-only scope `read_analysis_source`
 /// serves without loading the canonical into the scheduler.
+#[cfg(feature = "semantic-observe")]
 fn seed_artifact_only_vue(host: &VerterHost, canonical: &str, source: &str) {
     let mut artifact = crate::project_type_store::IndexedReady::new_for_test(
         verter_semantic_source::source_hash::hash_16(source.as_bytes()),
@@ -3963,6 +4027,8 @@ fn seed_artifact_only_vue(host: &VerterHost, canonical: &str, source: &str) {
 /// threaded into the template-analysis computation, which must not
 /// re-derive them with a second `parse_vue_snapshot` over the same
 /// source.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn artifact_only_carrier_analysis_fails_closed_without_registered_structure() {
     let host = make_host(&[(VUE_OWNER, VUE_FIXTURE)]);
@@ -4004,6 +4070,8 @@ fn artifact_only_carrier_analysis_fails_closed_without_registered_structure() {
 /// fail identically (the `.vue` mirror of the non-SFC fatal-arm
 /// contract pinned by
 /// `overlay_fatal_parse_publishes_empty_snapshot_without_second_parse`).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vue_fatal_script_parse_defaults_outputs_without_second_parse() {
     use crate::session_view::OverlaidView;
@@ -4186,6 +4254,8 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
 /// (the `install_fact_tracer` chokepoint every enclosing producer's
 /// admission gate consults) — exactly what the unrootable-wildcard
 /// route exit already does for the route-walk shape of the same hole.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     // One unresolvable direct import. The typed refusal seam makes its
@@ -4262,6 +4332,8 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
 /// admit normally. Proves the marking keys on rootability, not on
 /// skip-ness: over-decline would refuse every owner with an
 /// unresolvable import.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn rooted_import_skip_does_not_raise_enclosing_suppression() {
     let host = make_host(&[]);

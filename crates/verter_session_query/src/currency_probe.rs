@@ -1,12 +1,12 @@
 //! Opt-in wall-clock/call-count probe rail for the path-precise resolution
 //! currency chokepoints.
 //!
-//! COMPILED OUT unless the `currency_probe` feature is on. The feature is
-//! absent from `default`, is not requested by any production edge (`verter_napi`,
-//! `verter_lsp`, `verter_wasm`, `verter_tsc`), and is enabled only by the
-//! `verter_bench` measurement harness. With the feature off,
-//! [`probe_scope!`] expands to nothing and this module exposes no state, so a
-//! production build carries neither the atomics nor the `Instant::now()` pairs.
+//! COMPILED OUT unless the coordinated `semantic-observe` feature is on. The
+//! feature is absent from `default`, is not requested by any production edge
+//! (`verter_napi`, `verter_lsp`, `verter_wasm`, `verter_tsc`), and is enabled
+//! only by measurement harnesses. With the feature off, [`probe_scope!`]
+//! expands to nothing and this module exposes no state, so a production build
+//! carries neither the atomics nor the `Instant::now()` pairs.
 //!
 //! This exists to attribute the per-file currency tax across
 //! `ensure_indexed_ready_serve`, `resolve_snapshot_imports`,
@@ -15,7 +15,7 @@
 //! that calls another instrumented site reports INCLUSIVE nanoseconds.
 
 /// One instrumented site's totals.
-#[cfg(feature = "currency_probe")]
+#[cfg(feature = "semantic-observe")]
 #[derive(Clone, Copy, Debug)]
 pub struct ProbeRow {
     pub name: &'static str,
@@ -23,7 +23,7 @@ pub struct ProbeRow {
     pub ns: u64,
 }
 
-#[cfg(feature = "currency_probe")]
+#[cfg(feature = "semantic-observe")]
 mod imp {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -94,7 +94,7 @@ mod imp {
 
     pub struct Guard {
         site: &'static Site,
-        start: std::time::Instant,
+        start: verter_audit::instant::Instant,
     }
 
     impl Guard {
@@ -102,7 +102,7 @@ mod imp {
         pub fn new(site: &'static Site) -> Self {
             Self {
                 site,
-                start: std::time::Instant::now(),
+                start: verter_audit::instant::Instant::now(),
             }
         }
     }
@@ -136,10 +136,10 @@ mod imp {
     }
 }
 
-#[cfg(feature = "currency_probe")]
+#[cfg(feature = "semantic-observe")]
 pub use imp::{reset, snapshot, Guard, Site};
 
-#[cfg(feature = "currency_probe")]
+#[cfg(feature = "semantic-observe")]
 #[doc(hidden)]
 pub mod sites {
     pub use super::imp::*;
@@ -147,8 +147,8 @@ pub mod sites {
 
 /// Time the enclosing scope into the named probe site.
 ///
-/// Expands to nothing when `currency_probe` is off.
-#[cfg(feature = "currency_probe")]
+/// Expands to nothing when `semantic-observe` is off.
+#[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! probe_scope {
     ($site:ident) => {
@@ -157,7 +157,7 @@ macro_rules! probe_scope {
     };
 }
 
-#[cfg(not(feature = "currency_probe"))]
+#[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! probe_scope {
     ($site:ident) => {};
@@ -165,8 +165,8 @@ macro_rules! probe_scope {
 
 /// Tally `$amount` into the named probe site's accumulator (one call each).
 /// Used for non-time quantities (observation counts). Expands to nothing when
-/// `currency_probe` is off — `$amount` is NOT evaluated.
-#[cfg(feature = "currency_probe")]
+/// `semantic-observe` is off — `$amount` is NOT evaluated.
+#[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! probe_tally {
     ($site:ident, $amount:expr) => {{
@@ -177,7 +177,7 @@ macro_rules! probe_tally {
     }};
 }
 
-#[cfg(not(feature = "currency_probe"))]
+#[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! probe_tally {
     ($site:ident, $amount:expr) => {};

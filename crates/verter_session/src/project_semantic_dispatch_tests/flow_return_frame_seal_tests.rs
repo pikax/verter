@@ -13,7 +13,6 @@ use std::sync::Arc;
 use super::*;
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
-use verter_type_engine::project_semantic_dispatch::flow_products::FlowNarrowed;
 use verter_type_engine::semantic_query::{
     FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
 };
@@ -99,22 +98,28 @@ fn make_seal_host() -> Arc<VerterHost> {
     host
 }
 
+/// These tests read the request's flow counters, which only captured
+/// execution records.
+type CapturedCaps = crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>;
+
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, CapturedCaps>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Captured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
 }
 
-fn key_for(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    name: &str,
-) -> FlowReturnKey {
+fn key_for(dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>, name: &str) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             verter_type_expr::OwnedStr::from(SEAL_CANONICAL),
@@ -160,7 +165,7 @@ fn evaluate(host: &Arc<VerterHost>, name: &str) -> Option<Outcome> {
 
 #[track_caller]
 fn member(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
@@ -178,7 +183,7 @@ fn member(
 
 #[track_caller]
 fn assert_marker(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     what: &str,
 ) {
@@ -200,11 +205,11 @@ fn assert_marker(
 /// positional marker.
 #[track_caller]
 fn assert_string_or_marker_array(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     what: &str,
 ) {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let element = match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Array { element, .. }) => *element,
         other => panic!("{what}: the array survives, got {other:?}"),
@@ -236,7 +241,7 @@ fn assert_string_or_marker_array(
 
 #[track_caller]
 fn assert_string_label(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     what: &str,
 ) {
@@ -458,12 +463,14 @@ fn an_unmodeled_array_element_marks_only_its_own_position() {
 // merge runs under.
 // ────────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "semantic-observe")]
 /// Frames whose semantic state the product domains actually carry: a
 /// binding whose slot facts a discharge must rest on, a branch whose
 /// merge exercises the frame join, and a mutual component whose members
 /// publish together.
 const PRODUCT_CANONICAL: &str = "/ws/flow-products.ts";
 
+#[cfg(feature = "semantic-observe")]
 const PRODUCT_FIXTURE: &str = r#"
 export function boundControl(c: boolean) {
   const k = 1;
@@ -516,6 +523,7 @@ export function scBoundB(c: boolean) {
 }
 "#;
 
+#[cfg(feature = "semantic-observe")]
 /// Two frames with the SAME body and different signature ARITY.
 ///
 /// The body returns out of a `try`, so the `finally` boundary merges the
@@ -528,6 +536,7 @@ export function scBoundB(c: boolean) {
 /// two bodies must be identical for the comparison to mean anything.
 const WIDE_SIGNATURE_ARITY: usize = 256;
 
+#[cfg(feature = "semantic-observe")]
 fn signature_arity_fixtures() -> String {
     let mut source = String::new();
     // bounded-loop: the two declared fixture arities.
@@ -547,6 +556,7 @@ fn signature_arity_fixtures() -> String {
     source
 }
 
+#[cfg(feature = "semantic-observe")]
 fn make_product_host() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let _ = host.upsert(UpsertRequest {
@@ -561,10 +571,8 @@ fn make_product_host() -> Arc<VerterHost> {
     host
 }
 
-fn product_key(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    name: &str,
-) -> FlowReturnKey {
+#[cfg(feature = "semantic-observe")]
+fn product_key(dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>, name: &str) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             verter_type_expr::OwnedStr::from(PRODUCT_CANONICAL),
@@ -581,14 +589,16 @@ fn product_key(
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_fault_injection::{
     ObservedProduct, ProductObservation,
 };
 
+#[cfg(feature = "semantic-observe")]
 /// Project a recorded observation onto arena-free structural text so two
 /// hosts are comparable.
 fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalProductObservation {
-    use super::flow_products::WideningMembership;
+    use super::flow_products::{FlowNarrowed, WideningMembership};
     fn structural_type(ty: &verter_type_expr::TypeExpr) -> String {
         use verter_type_expr::TypeExpr;
         match ty {
@@ -672,6 +682,7 @@ fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalPro
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 #[derive(Debug, PartialEq, Eq)]
 struct CanonicalProductObservation {
     products: Vec<(super::flow_solve::FlowDomain, usize, String)>,
@@ -680,6 +691,7 @@ struct CanonicalProductObservation {
     report: super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
 }
 
+#[cfg(feature = "semantic-observe")]
 /// One evaluated demand: the structural type it served (arena-free, so
 /// two hosts are comparable), the slot candidate count, and how many cold
 /// computations the run performed.
@@ -690,6 +702,8 @@ struct ProductRun {
     observations: Vec<CanonicalProductObservation>,
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Serve `name` `demands` times, EACH through a fresh store view — the
 /// warm read of a published candidate runs against a view where the cold
 /// build's artifacts are visible — under ONE request context, so the
@@ -735,6 +749,8 @@ fn run_product(host: &Arc<VerterHost>, name: &str, demands: u32) -> ProductRun {
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A demand's completeness rests on the frame's PRODUCT evidence: a
 /// planned binding obligation discharges only when the evaluation
 /// actually produced that binding's definite-assignment product.
@@ -827,6 +843,8 @@ fn flow_discharge_requires_product_evidence() {
     });
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Equivalent demand and actual predecessor orders preserve every observed
 /// product, exact execution evidence, discharge claim, served type and warm hit.
 /// The second host reverses request order and feeds each multiway join its
@@ -913,6 +931,8 @@ fn flow_product_execution_is_permutation_deterministic() {
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Acyclic continuation joins require no fixed-point iterations. The
 /// materialized-product limit is independent: exhausting it refuses the
 /// entire transaction and retains no candidate.
@@ -966,6 +986,8 @@ fn flow_product_budget_boundary_is_exact_and_never_warm() {
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Unread signature parameters do not create product subjects. Both frames
 /// have the same selected body and must serve the same value and warm within
 /// the same demand-derived product policy despite their different arities.

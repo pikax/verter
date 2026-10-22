@@ -662,6 +662,8 @@ fn evaluate_indexed_access_terminal_in_navigate_stays_shallow() {
 // exactly one audit record per request
 // ──────────────────────────────────────────────────────────────────
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// REGRESSION: a single audited `getComponentMeta` request emits
 /// exactly one `RequestAuditRecord`. The per-macro projectors must
 /// not invoke any audited public host method (`*_with_audit`), or

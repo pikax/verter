@@ -1,13 +1,16 @@
 #![deny(missing_docs)]
-//! [`AuditObserver`] trait + the [`current_observer`] TLS accessor.
+//! [`AuditObserver`] trait, the [`crate::observe!`] emission macro and,
+//! with `semantic-observe`, the observer TLS slot.
 //!
 //! Lower crates emit through this trait; they never reach into
 //! `verter_session` or `verter_scheduler` for context. The session
 //! layer's concrete `RequestContext` implements `AuditObserver`, and
 //! `RequestContextGuard::install` populates the substrate's TLS slot
-//! alongside its own bookkeeping.
+//! alongside its own bookkeeping for a captured request.
 
+#[cfg(feature = "semantic-observe")]
 use std::cell::RefCell;
+#[cfg(feature = "semantic-observe")]
 use std::sync::Arc;
 
 use crate::origin_graph::VfsLayer;
@@ -373,8 +376,8 @@ pub enum AuditEvent {
 ///
 /// The default implementations are no-ops so producers only override
 /// the methods they care about. The session-side `RequestContext`
-/// provides full implementations; the [`crate::noop::NoOpObserver`]
-/// and trivial test fakes leave them defaulted.
+/// provides full implementations; trivial test fakes leave them
+/// defaulted.
 pub trait AuditObserver: Send + Sync {
     /// Counter-style attribution for events without structured
     /// payload. Producers that already have a typed signal (file
@@ -412,16 +415,17 @@ pub trait AuditObserver: Send + Sync {
     /// audited stage. The first call wins on the per-request slot;
     /// subsequent calls bump the dispatch counter on the previously
     /// captured [`SchedulerAudit`]. The session-side `RequestContext`
-    /// implements this; the substrate's [`crate::noop::NoOpObserver`]
-    /// leaves it as a default no-op.
+    /// implements this.
     fn record_scheduler_dispatch(&self, _audit: SchedulerAudit) {}
 }
 
+#[cfg(feature = "semantic-observe")]
 thread_local! {
-    /// Owned slot for the current thread's [`AuditObserver`]. Installed
-    /// either by [`crate::noop::install_noop_observer`] (for filtered
-    /// requests) or by the session-side `RequestContextGuard::install`
-    /// path (for active requests).
+    /// Owned slot for the current thread's [`AuditObserver`]. Installed by
+    /// the session-side `RequestContextGuard::install` path for a request
+    /// whose root entry selected captured execution. Compiled only with
+    /// `semantic-observe`: a default build has no observer slot, so no
+    /// producer can poll one.
     static CURRENT_OBSERVER: RefCell<Option<Arc<dyn AuditObserver>>> =
         const { RefCell::new(None) };
 }
@@ -429,9 +433,9 @@ thread_local! {
 /// Return a clone of the currently installed observer, or `None`
 /// when no observer has been planted on this thread.
 ///
-/// Cost: ~3 ns on miss, ~5 ns on hit (the cost is one TLS load + one
-/// `Arc::clone` on the success path). Same order of magnitude as the
-/// scheduler's existing `current_request_id()`.
+/// Exists only with `semantic-observe`. Producers emit through
+/// [`crate::observe!`], which expands to nothing in a default build.
+#[cfg(feature = "semantic-observe")]
 #[must_use]
 pub fn current_observer() -> Option<Arc<dyn AuditObserver>> {
     CURRENT_OBSERVER.with(|slot| slot.borrow().as_ref().map(Arc::clone))
@@ -441,9 +445,10 @@ pub fn current_observer() -> Option<Arc<dyn AuditObserver>> {
 /// returning an RAII guard that restores the previous slot on drop.
 ///
 /// Public so the session-side `RequestContextGuard::install` can plant
-/// an `Arc<RequestContext>` (which implements [`AuditObserver`])
-/// without going through `install_noop_observer`. Stack-safe — drop
-/// restores whatever value the slot held before the install.
+/// an `Arc<RequestContext>` (which implements [`AuditObserver`]) for a
+/// captured request. Stack-safe — drop restores whatever value the slot
+/// held before the install.
+#[cfg(feature = "semantic-observe")]
 #[must_use]
 pub fn install_observer(observer: Arc<dyn AuditObserver>) -> ObserverGuard {
     let prev = CURRENT_OBSERVER.with(|slot| slot.replace(Some(observer)));
@@ -454,27 +459,28 @@ pub fn install_observer(observer: Arc<dyn AuditObserver>) -> ObserverGuard {
 /// value for restoration on drop. The empty-slot mirror of
 /// [`install_observer`].
 ///
-/// Used by the scheduler's cooperative inline-execute path when the
-/// dispatched job has no `winner_ctx`: the inline branch runs on the
-/// CALLING worker's thread, so without a clear of the substrate
-/// observer slot the outer request's `AuditObserver` would still be
-/// visible to lower crates emitting through [`current_observer`],
+/// Installed for an uncaptured request and by the scheduler's cooperative
+/// inline-execute path when the dispatched job has no `winner_ctx`: the
+/// inline branch runs on the CALLING worker's thread, so without a clear
+/// the outer request's observer would still be visible to lower crates
 /// and the inner stage's events would be misattributed to the outer
 /// request. Stack-safe — drop restores whatever value the slot held
 /// before the clear.
+#[cfg(feature = "semantic-observe")]
 #[must_use]
 pub fn clear_observer() -> ObserverGuard {
     let prev = CURRENT_OBSERVER.with(|slot| slot.replace(None));
     ObserverGuard { prev }
 }
 
-/// RAII guard returned by [`install_observer`] (and by
-/// [`crate::noop::install_noop_observer`]). Restores the previous
-/// observer on drop.
+/// RAII guard returned by [`install_observer`] and [`clear_observer`].
+/// Restores the previous observer on drop.
+#[cfg(feature = "semantic-observe")]
 pub struct ObserverGuard {
     prev: Option<Arc<dyn AuditObserver>>,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl Drop for ObserverGuard {
     fn drop(&mut self) {
         let prev = self.prev.take();
@@ -482,4 +488,75 @@ impl Drop for ObserverGuard {
             slot.replace(prev);
         });
     }
+}
+
+/// Emit to the current request's audit observer.
+///
+/// Two forms:
+///
+/// - `observe!(M => on receiver => |obs| body)` emits from execution compiled for the mode
+///   type `M` ([`crate::observe::ObserveExec`]). The uncaptured expansion is
+///   a constant-false branch: it reads no observer slot and builds no
+///   payload. Hot paths — anything an execution unit runs per operation —
+///   use this form.
+/// - `observe!(|obs| body)` reads the observer slot directly. It belongs only
+///   at once-per-request or once-per-phase boundaries (a root entry's
+///   record, a compile phase timing), never inside a per-operation path.
+///
+/// Both run the body with the installed observer when the binary is built
+/// with `semantic-observe` and the running request selected captured
+/// execution at its root entry.
+///
+/// Without `semantic-observe` the body is type-checked inside a closure
+/// that is never constructed or called: no observer slot is read, no
+/// argument or payload is built and no code is emitted. The body
+/// therefore stays valid in default builds, and values it borrows count
+/// as used.
+///
+/// The body is a callback in either build: `return` exits only that callback.
+/// Its payload locals stay outside the emitting caller's debug stack frame.
+#[cfg(feature = "semantic-observe")]
+#[macro_export]
+macro_rules! observe {
+    ($M:ty => on $receiver:expr => |$obs:ident| $body:expr) => {{
+        if <$M as $crate::observe::ObserveExec>::CAPTURED {
+            if let ::core::option::Option::Some(observer) = $receiver {
+                // Keep callback returns local and payload temporaries out of
+                // recursive callers' debug stack frames.
+                #[allow(clippy::redundant_closure_call)]
+                (|$obs: &dyn $crate::AuditObserver| {
+                    $body;
+                })(observer);
+            }
+        }
+    }};
+    (|$obs:ident| $body:expr) => {{
+        if let ::core::option::Option::Some(observer) = $crate::observer::current_observer() {
+            #[allow(clippy::redundant_closure_call)]
+            (|$obs: &dyn $crate::AuditObserver| {
+                $body;
+            })(&*observer);
+        }
+    }};
+}
+
+/// Emit to the current request's audit observer.
+///
+/// See the `semantic-observe` form. In this default build the body is
+/// type-checked but never evaluated.
+#[cfg(not(feature = "semantic-observe"))]
+#[macro_export]
+macro_rules! observe {
+    ($M:ty => on $receiver:expr => |$obs:ident| $body:expr) => {{
+        let _ = ::core::marker::PhantomData::<$M>;
+        $crate::observe!(|$obs| $body)
+    }};
+    (|$obs:ident| $body:expr) => {{
+        #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
+        if false {
+            let _ = |$obs: &dyn $crate::AuditObserver| {
+                $body;
+            };
+        }
+    }};
 }

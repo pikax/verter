@@ -95,7 +95,7 @@ global: boolean, };
  * Every audited entry-point now returns a [`RequestAuditRecord`]
  * unconditionally (the [`crate::AuditedResult`] carrier's `audit`
  * field is mandatory in both arms). This discriminant lets a consumer
- * tell apart the three capture regimes without inspecting the rest of
+ * tell apart the capture regimes without inspecting the rest of
  * the envelope:
  *
  * - [`AuditCaptureState::ActiveStored`] — the consumer filter accepted
@@ -108,8 +108,12 @@ global: boolean, };
  * - [`AuditCaptureState::AuditDisabled`] — audit was disabled at the
  *   host config (`audit_enabled = false`). No observer was installed;
  *   the returned record is the cheap default-filled envelope.
+ * - [`AuditCaptureState::Unavailable`] — the binary was built without
+ *   the `semantic-observe` capture feature. Nothing was measured; the
+ *   record's metric fields carry no observation and must not be read
+ *   as zero metrics.
  */
-export type AuditCaptureState = "ActiveStored" | "FilteredNoop" | "AuditDisabled";
+export type AuditCaptureState = "ActiveStored" | "FilteredNoop" | "AuditDisabled" | "Unavailable";
 
 /**
  * One audited diagnostic entry. Audit-substrate mirror of

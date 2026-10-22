@@ -85,10 +85,10 @@ pub(crate) use crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_
 // Test-only re-exports — `meta_resolve_tests.rs` references
 // `super::HostComponentMetaResolver` and bare `resolve_jsdoc_tag_type`
 // via `super::*` glob.
+#[cfg(all(test, feature = "semantic-observe"))]
+pub(crate) use crate::host_manage::jsdoc_resolve::resolve_jsdoc_tag_type;
 #[cfg(test)]
-pub(crate) use crate::host_manage::jsdoc_resolve::{
-    resolve_jsdoc_tag_type, HostComponentMetaResolver,
-};
+pub(crate) use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
 pub(crate) use macro_member_walk::{
     collect_define_props_root_names, slot_binding_targets_define_props_root,
 };
@@ -103,9 +103,10 @@ pub(crate) use origin_graph::build_origin_graph;
 // `host_manage/component_meta_request_impl.rs` (host-impl tier per
 // §10a.0.A). The re-export re-points at the new home so the
 // `crate::meta_resolve::*` public surface stays intact for callers.
+#[cfg(feature = "semantic-observe")]
+pub(crate) use crate::host_manage::component_meta_request_impl::request_source_performed_compute;
 pub(crate) use crate::host_manage::component_meta_request_impl::{
-    request_source_performed_compute, should_skip_imported_registry_seed_refresh,
-    trace_request_source,
+    should_skip_imported_registry_seed_refresh, trace_request_source,
 };
 pub use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedJsdocBlock,

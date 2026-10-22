@@ -20,6 +20,7 @@ use verter_type_engine::semantic_query_memo::inflight::MAX_INFLIGHT_RETRIES;
 use verter_type_engine::semantic_query_memo::scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, SccRootWitness,
 };
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::semantic_query_memo::test_support::test_trigger_inflight_abort;
 
 #[allow(unused_imports)]

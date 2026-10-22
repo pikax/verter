@@ -8,7 +8,7 @@
 //!
 //! The schema itself is compiled unconditionally — it carries no
 //! storage and no reader. Only the counter table and its accessors are
-//! behind the `attribution` feature, which is what keeps a production
+//! behind the `semantic-observe` feature, which is what keeps a production
 //! build unable to resolve a path from a counter back into a decision
 //! (see the module docs on [`super`]).
 

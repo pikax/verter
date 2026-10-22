@@ -13,7 +13,9 @@ use verter_session_query::function_program::{FunctionProgramDiscovery, FunctionP
 use verter_parser::utils::oxc::script::raw_surface::SymbolSpace;
 use verter_semantic_source::decl_body_memo::*;
 use verter_semantic_source::decl_lowering::DeclLoweringCounters;
-use verter_session_query::declarations::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
+#[cfg(feature = "semantic-observe")]
+use verter_session_query::declarations::TypeDeclKind;
+use verter_session_query::declarations::{AugmentationScopeKind, ValueDeclKind};
 use verter_session_query::source::demand::DemandOutcome;
 use verter_session_query::source::snapshot::SnapshotKey;
 use verter_type_expr::facts::ValueAnnotationClass;
@@ -136,11 +138,15 @@ fn memo_for_canonical(
     )
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn bodies(p: &DeclLoweringCounters) -> u64 {
     p.decl_bodies_lowered
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn parses(p: &DeclLoweringCounters) -> u64 {
     p.eval_program_parses
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -152,6 +158,8 @@ const FIVE_DECLS: &str = "export type Unrelated = { a: 1 };\n\
      type Var2 = { v: 2 };\n\
      type Var3 = { v: 3 };\n";
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn demand_lowers_only_the_demanded_statement() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
@@ -183,6 +191,8 @@ fn demand_lowers_only_the_demanded_statement() {
     assert_eq!(bodies(&provenance), 1, "a warm demand lowers nothing");
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn distinct_demands_share_one_retained_parse() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
@@ -202,6 +212,8 @@ fn distinct_demands_share_one_retained_parse() {
     assert_eq!(bodies(&provenance), 3);
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn merged_interface_demand_folds_all_contributors() {
     let (memo, provenance) = memo_for(
@@ -263,6 +275,8 @@ fn demanded_type_decl_copies_exact_vue_ignored_heritage_facts_from_headers() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn class_statement_backfills_its_value_sibling() {
     let (memo, provenance) = memo_for("class K { a: number }\ntype Other = { o: 1 };\n");
@@ -427,6 +441,8 @@ fn jsdoc_typedef_preserves_qualified_nullable_dependency_paths() {
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn concurrent_first_touch_lowers_once() {
@@ -531,6 +547,8 @@ fn concurrent_broken_lease_demand_every_waiter_sees_lease_miss() {
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn whole_env_is_a_memoized_whole_file_demand() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
@@ -547,6 +565,8 @@ fn whole_env_is_a_memoized_whole_file_demand() {
     assert_eq!(bodies(&provenance), 5, "the env is memoized — no rebuild");
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn jsdoc_typedef_lowers_on_demand() {
     let (memo, provenance) =
@@ -566,6 +586,8 @@ fn jsdoc_typedef_lowers_on_demand() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn augmentation_scoped_demand_lowers_only_the_block() {
     let source = r#"declare module "vue" {
@@ -611,6 +633,8 @@ type FileScope = { f: 1 };
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn unknown_names_are_none_without_lowering() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
@@ -638,6 +662,8 @@ fn unknown_names_are_none_without_lowering() {
 /// non-blocking accessors) must NEVER
 /// trigger lowering — the whole point of a peek is that it never calls
 /// `acquire_lease`'s worker-thread rendezvous.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn peek_never_triggers_lowering() {
     use verter_session_query::resolution::AttemptOutcome;
@@ -708,6 +734,8 @@ fn peek_need_inputs_carries_the_correct_declaration_space() {
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn peek_after_demand_serves_the_same_cached_entry() {
     use verter_session_query::resolution::AttemptOutcome;
@@ -740,6 +768,8 @@ fn peek_after_demand_serves_the_same_cached_entry() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn peek_unknown_symbol_is_a_stable_complete_none() {
     use verter_session_query::resolution::AttemptOutcome;
@@ -764,6 +794,8 @@ fn peek_unknown_symbol_is_a_stable_complete_none() {
     assert_eq!(parses(&provenance), 0, "peeking a miss parses nothing");
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn peek_value_decl_after_demand_serves_the_same_cached_entry() {
     use verter_session_query::resolution::AttemptOutcome;
@@ -1327,6 +1359,8 @@ fn concurrent_type_and_value_demand_of_merged_name_does_not_deadlock() {
 /// `*_materialized` probes), while the work / parse counters stay flat: a
 /// silently-memoized wrong-empty entry (the release defect) would flip a
 /// `*_materialized` probe to `true` — GREEN only when NOTHING is admitted.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
@@ -2485,6 +2519,8 @@ fn function_program_index_hash_tracks_body_content_across_files() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
     use verter_semantic::analysis::function_program::take_nested_callable_walk_visits_for_tests;
@@ -2572,6 +2608,8 @@ fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn retained_call_arguments_carry_exact_identifier_occurrences() {
     use verter_session_query::analysis::indexed_value::IndexedValueReadRoot::{
@@ -2642,6 +2680,8 @@ fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn retained_call_type_query_keeps_its_distinct_source_origin() {
     use verter_session_query::analysis::indexed_value::IndexedValueReadRoot::{
@@ -2704,6 +2744,8 @@ fn a_frame_lowered_call_argument_keeps_no_indexed_record() {
     ));
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn indexed_expression_endpoint_shares_lazy_snapshot_and_index() {
     let (memo, provenance) = memo_for("function f(value:string){return target(value);} function target(value:string){return value;}");
@@ -2732,6 +2774,8 @@ fn indexed_expression_endpoint_shares_lazy_snapshot_and_index() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn indexed_expression_endpoint_broken_pin_is_a_miss_without_reparse() {
     let (memo, provenance) =
@@ -2774,6 +2818,8 @@ fn indexed_expression_endpoint_macro_and_capture_keep_seeded_absence() {
     assert!(demand.flow_capture_authorities(&[]).value.is_none());
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn indexed_expression_endpoint_macro_reuses_parse_and_refuses_broken_pin() {
     let source = "defineProps<{ value: string }>()";

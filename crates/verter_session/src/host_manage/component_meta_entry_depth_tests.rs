@@ -14,6 +14,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -104,6 +105,8 @@ impl Drop for ColdBodyProbe {
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn producer_misses(host: &VerterHost) -> u64 {
     host.provenance()
         .resolver_node_cache_misses
@@ -127,6 +130,8 @@ fn assert_sibling_exact(host: &VerterHost) {
 /// Mutations: adding the cut-short lookup's `MISSING_DEPENDENCY` back in
 /// `adopt_projection_result`, or dropping the isolated-root arm of
 /// `classify_final_component_retention`, fails this test.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn a_real_depth_trip_is_delivered_as_depth_and_replayed_without_the_producer() {
     let host = isolated_depth_refusal_host();
@@ -182,6 +187,8 @@ fn a_real_depth_trip_is_delivered_as_depth_and_replayed_without_the_producer() {
 
 /// The resolution entry path seals the same refusal when it is the first
 /// caller, and the plain path repeats it.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn the_resolution_entry_path_seals_the_same_depth_refusal() {
     let host = isolated_depth_refusal_host();

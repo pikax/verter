@@ -290,9 +290,6 @@ static_assertions::assert_not_impl_any!(OutputLease: Default);
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
-    use std::sync::Arc;
-
     use super::{OutputProjector, TestOutputCap};
     use verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores;
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
@@ -309,7 +306,7 @@ mod tests {
         let (_stores, foreign, _claims) = EngineStores::create(
             None,
             verter_session_query::retention::StoreAccount::default(),
-            &Arc::new(AtomicU64::new(0)),
+            &verter_type_engine::cache_runtime::OccupancyCounter::new(),
             verter_execution::tasks::TaskRegistry::default(),
         );
         let _ = foreign.materialize_output_type_expr(&dispatch, SemanticNodeId(0));
@@ -340,9 +337,6 @@ mod tests {
 
 #[cfg(test)]
 mod carrier_identity_tests {
-    use std::sync::atomic::AtomicU64;
-    use std::sync::Arc;
-
     use super::{OutputProjector, TestOutputCap};
     use verter_type_engine::project_semantic_dispatch::engine_resources::{
         EngineStores, OutputAuthority,
@@ -355,7 +349,7 @@ mod carrier_identity_tests {
         EngineStores::create(
             None,
             verter_session_query::retention::StoreAccount::default(),
-            &Arc::new(AtomicU64::new(0)),
+            &verter_type_engine::cache_runtime::OccupancyCounter::new(),
             verter_execution::tasks::TaskRegistry::default(),
         )
         .1

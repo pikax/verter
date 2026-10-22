@@ -1,5 +1,7 @@
 use super::*;
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolved_meta_reuses_resolver_cache_after_legacy_slot_is_cleared() {
     let project = make_project();
@@ -130,6 +132,8 @@ fn resolved_meta_partial_direct_publish_refuses_validated_and_legacy_slots() {
 ///
 /// In every row: no fabricated slots/bindings, `synthesis_should_suppress`,
 /// and no `ComponentMetaResultDb` warm on replay.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn an_unresolvable_slot_surface_never_publishes_complete_or_warm() {
@@ -2632,6 +2636,8 @@ defineSlots<ButtonSlots>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn payload_cache_get_resolved_reuses_full_slot() {
     let project = make_project();

@@ -17,44 +17,76 @@
 //! and the consumer/fact-kind mappings.
 
 #[path = "fact_matrix/harness.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod harness;
 
 // ── app_config_proof × * ────────────────────────────────────────────
 #[path = "fact_matrix/app_config_proof_import_ref.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod app_config_proof_import_ref;
 #[path = "fact_matrix/app_config_proof_member.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod app_config_proof_member;
 #[path = "fact_matrix/app_config_proof_member_presence.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod app_config_proof_member_presence;
 #[path = "fact_matrix/app_config_proof_module_augmentation_index_shape.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod app_config_proof_module_augmentation_index_shape;
 #[path = "fact_matrix/app_config_proof_observes_no_route_facts.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod app_config_proof_observes_no_route_facts;
 
 // ── materialize_structure × * ───────────────────────────────────────
 
 // ── memo_entry × * ───────────────────────────────────────────────────
 #[path = "fact_matrix/memo_entry_barrel_route_dispatch.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod memo_entry_barrel_route_dispatch;
 #[path = "fact_matrix/memo_entry_import_ref.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod memo_entry_import_ref;
 #[path = "fact_matrix/memo_entry_member.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod memo_entry_member;
 #[path = "fact_matrix/memo_entry_member_presence.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod memo_entry_member_presence;
 #[path = "fact_matrix/memo_entry_module_augmentation_index_shape.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod memo_entry_module_augmentation_index_shape;
 
 // ── owner_import_surface × * ─────────────────────────────────────────
 #[path = "fact_matrix/owner_import_surface_barrel_route.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod owner_import_surface_barrel_route;
 #[path = "fact_matrix/owner_import_surface_import_ref.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod owner_import_surface_import_ref;
 #[path = "fact_matrix/owner_import_surface_member.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod owner_import_surface_member;
 #[path = "fact_matrix/owner_import_surface_member_presence.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod owner_import_surface_member_presence;
 #[path = "fact_matrix/owner_import_surface_module_augmentation_index_shape.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod owner_import_surface_module_augmentation_index_shape;
 
 // ── compile_tier × * ─────────────────────────────────────────────────

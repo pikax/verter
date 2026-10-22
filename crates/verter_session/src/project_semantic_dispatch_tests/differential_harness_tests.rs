@@ -510,8 +510,10 @@ impl<'a> Matrix<'a> {
             for function in functions {
                 let store_view = host.resolver_store_view_read().into_owned_view();
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let host_ctx =
-                    crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+                let host_ctx = crate::resolver_core::HostResolverContext::<
+                    '_,
+                    verter_audit::observe::Uncaptured,
+                >::new(&host, &store_view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&host_ctx);
                 let key = verter_type_engine::semantic_query::FlowReturnKey {
                     function: dispatch.flow_function_slot_for(
@@ -549,7 +551,10 @@ impl<'a> Matrix<'a> {
         let canonical = format!("{}/probe.ts", self.settings[0].root);
         let store_view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let key = verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
@@ -882,24 +887,29 @@ fn observe_with_deadline(
     let thread_host = Arc::clone(host);
     let canonical = canonical.to_owned();
     let symbol = symbol.to_owned();
-    let thread = std::thread::spawn(move || {
-        let observed = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            observe(&thread_host, &canonical, &symbol, scoped)
-        }))
-        .unwrap_or_else(|payload| {
-            let message = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| {
-                    payload
-                        .downcast_ref::<&str>()
-                        .map(|text| (*text).to_owned())
-                })
-                .unwrap_or_default();
-            (Observed::Panicked(message), Vec::new())
-        });
-        let _ = sender.send(observed);
-    });
+    // Match the host CPU workers' stack: debug signature relations must
+    // reach their logical depth guard before the platform's stack guard.
+    let thread = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let observed = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                observe(&thread_host, &canonical, &symbol, scoped)
+            }))
+            .unwrap_or_else(|payload| {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|text| (*text).to_owned())
+                    })
+                    .unwrap_or_default();
+                (Observed::Panicked(message), Vec::new())
+            });
+            let _ = sender.send(observed);
+        })
+        .expect("start semantic observation worker");
     match await_row(&thread, &receiver, ROW_CPU_BUDGET, ROW_NO_PROGRESS_BACKSTOP) {
         Ok(observed) => observed,
         Err(RowOverdue::Disconnected) => (
@@ -1094,7 +1104,12 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (O
     let _request = verter_type_engine::request_context::install_test_request_for(canonical);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     let _demand_scope = scoped.then(|| {
@@ -1139,7 +1154,7 @@ fn print(
     if depth > 64 {
         return "<unrendered deep>".to_owned();
     }
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let Some(data) = graph.node_data(node) else {
         return "<evicted>".to_owned();
     };
@@ -1437,8 +1452,11 @@ fn operand(
         // A union the checker prints as one enum name needs none.
         Some(SemanticNodeData::Union(members)) => {
             !in_union
-                && verter_type_engine::semantic_query::printed_union_arms(dispatch.graph(), members)
-                    .len()
+                && verter_type_engine::semantic_query::printed_union_arms(
+                    dispatch.graph().store(),
+                    members,
+                )
+                .len()
                     > 1
         }
         Some(SemanticNodeData::Intersection(_)) => !in_union,
@@ -1460,7 +1478,7 @@ fn signature_text(
     depth: usize,
     arrow: &str,
 ) -> String {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let Some(data) = graph.node_data(node) else {
         return "<evicted>".to_owned();
     };

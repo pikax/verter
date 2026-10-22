@@ -241,6 +241,8 @@ fn merged_interface_indexed_access_work_is_linear() {
 /// contributors' lowering to the decl-lowering workers in batches: the
 /// rendezvous count stays flat as the contributor count grows. A warm
 /// repeat lowers nothing and hands nothing off.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn contributor_bodies_lower_once_in_batches_per_shard() {
     for global in [false, true] {

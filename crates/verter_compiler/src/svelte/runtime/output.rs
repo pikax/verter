@@ -142,71 +142,74 @@ impl SvelteRuntimeOutput {
         want_source_map: bool,
         allocator: &Allocator,
     ) -> Result<(String, Option<String>), ClientCompileError> {
-        if !want_source_map {
-            return Ok((self.text, None));
-        }
-
-        let mut transform = CodeTransform::new(source, allocator);
-        if !source.is_empty() {
-            transform.remove(0, source.len() as u32);
-        }
-
-        let mut mappings = self.mappings;
-        mappings.sort_by_key(|mapping| (mapping.generated_start, mapping.generated_end));
-
-        let mut items = Vec::with_capacity(mappings.len() * 2 + 1);
-        let mut cursor = 0usize;
-        for mapping in mappings {
-            let start = mapping.generated_start as usize;
-            let end = mapping.generated_end as usize;
-            let invalid = if start == end {
-                Some(GeneratedSourceMapInvalidReason::EmptyGeneratedRange)
-            } else if start > self.text.len() || end > self.text.len() {
-                Some(GeneratedSourceMapInvalidReason::GeneratedRangeOutOfBounds)
-            } else if !self.text.is_char_boundary(start) || !self.text.is_char_boundary(end) {
-                Some(GeneratedSourceMapInvalidReason::GeneratedRangeNotUtf8Boundary)
-            } else if start < cursor {
-                Some(GeneratedSourceMapInvalidReason::OverlappingGeneratedRanges)
-            } else {
-                let source_start = mapping.source_start as usize;
-                if source_start >= source.len() {
-                    Some(GeneratedSourceMapInvalidReason::SourceOffsetOutOfBounds)
-                } else if !source.is_char_boundary(source_start) {
-                    Some(GeneratedSourceMapInvalidReason::SourceOffsetNotUtf8Boundary)
-                } else {
-                    None
-                }
-            };
-            if let Some(reason) = invalid {
-                return Err(ClientCompileError::GeneratedSourceMapInvalid { reason });
+        verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
+            if !want_source_map {
+                return Ok((self.text, None));
             }
-            if cursor < start {
-                let content = allocator.alloc_str(&self.text[cursor..start]);
+
+            let mut transform = CodeTransform::<M>::new_in(source, allocator);
+            if !source.is_empty() {
+                transform.remove(0, source.len() as u32);
+            }
+
+            let mut mappings = self.mappings;
+            mappings.sort_by_key(|mapping| (mapping.generated_start, mapping.generated_end));
+
+            let mut items = Vec::with_capacity(mappings.len() * 2 + 1);
+            let mut cursor = 0usize;
+            for mapping in mappings {
+                let start = mapping.generated_start as usize;
+                let end = mapping.generated_end as usize;
+                let invalid = if start == end {
+                    Some(GeneratedSourceMapInvalidReason::EmptyGeneratedRange)
+                } else if start > self.text.len() || end > self.text.len() {
+                    Some(GeneratedSourceMapInvalidReason::GeneratedRangeOutOfBounds)
+                } else if !self.text.is_char_boundary(start) || !self.text.is_char_boundary(end) {
+                    Some(GeneratedSourceMapInvalidReason::GeneratedRangeNotUtf8Boundary)
+                } else if start < cursor {
+                    Some(GeneratedSourceMapInvalidReason::OverlappingGeneratedRanges)
+                } else {
+                    let source_start = mapping.source_start as usize;
+                    if source_start >= source.len() {
+                        Some(GeneratedSourceMapInvalidReason::SourceOffsetOutOfBounds)
+                    } else if !source.is_char_boundary(source_start) {
+                        Some(GeneratedSourceMapInvalidReason::SourceOffsetNotUtf8Boundary)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(reason) = invalid {
+                    return Err(ClientCompileError::GeneratedSourceMapInvalid { reason });
+                }
+                if cursor < start {
+                    let content = allocator.alloc_str(&self.text[cursor..start]);
+                    items.push((0, None, content));
+                }
+                let content = allocator.alloc_str(&self.text[start..end]);
+                items.push((0, Some((mapping.source_start, 0)), content));
+                cursor = end;
+            }
+            if cursor < self.text.len() {
+                let content = allocator.alloc_str(&self.text[cursor..]);
                 items.push((0, None, content));
             }
-            let content = allocator.alloc_str(&self.text[start..end]);
-            items.push((0, Some((mapping.source_start, 0)), content));
-            cursor = end;
-        }
-        if cursor < self.text.len() {
-            let content = allocator.alloc_str(&self.text[cursor..]);
-            items.push((0, None, content));
-        }
-        transform.batch_prepend_left_with_source_map(&items);
+            transform.batch_prepend_left_with_source_map(&items);
 
-        let code = transform.build_string();
-        if code != self.text {
-            return Err(ClientCompileError::GeneratedSourceMapInvalid {
-                reason: GeneratedSourceMapInvalidReason::GeneratedCodeChanged,
+            let code = transform.build_string();
+            if code != self.text {
+                return Err(ClientCompileError::GeneratedSourceMapInvalid {
+                    reason: GeneratedSourceMapInvalidReason::GeneratedCodeChanged,
+                });
+            }
+            let map_name = filename.map_or("(unknown)", map_basename);
+            let source_map = transform.generate_map_json(SourceMapOptions {
+                source: Some(map_name),
+                file: Some(map_name),
+                include_content: true,
             });
-        }
-        let map_name = filename.map_or("(unknown)", map_basename);
-        let source_map = transform.generate_map_json(SourceMapOptions {
-            source: Some(map_name),
-            file: Some(map_name),
-            include_content: true,
-        });
-        Ok((code, Some(source_map)))
+            Ok((code, Some(source_map)))
+
+        })
     }
 }
 

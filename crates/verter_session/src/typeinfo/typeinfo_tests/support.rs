@@ -17,8 +17,11 @@ pub(super) use verter_type_engine::semantic_query::ProjectionMode;
 
 pub(super) const COMPONENT_TYPES: &str = include_str!("fixtures/component_types.ts");
 pub(super) const SCOPE_TYPES: &str = include_str!("fixtures/scope.ts");
+#[cfg(feature = "semantic-observe")]
 pub(super) const FOOTPRINT_NEEDED: &str = include_str!("fixtures/footprint_needed.ts");
+#[cfg(feature = "semantic-observe")]
 pub(super) const FOOTPRINT_OWNER: &str = include_str!("fixtures/footprint_owner.ts");
+#[cfg(feature = "semantic-observe")]
 pub(super) const FOOTPRINT_UNUSED: &str = include_str!("fixtures/footprint_unused.ts");
 pub(super) const MENU_LIKE: &str = include_str!("fixtures/menu_like.ts");
 pub(super) const MESSAGE_LIST_LIKE: &str = include_str!("fixtures/message_list_like.ts");
@@ -173,7 +176,12 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
 
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     // Base = the declaration CARRIER (a `DeclPlaceholder`), NOT a
@@ -240,10 +248,30 @@ pub(crate) fn evaluate_expr(
     (expr, record)
 }
 
+/// `true` when this build captures audit records. A build without
+/// `semantic-observe` answers every request identically but its records
+/// carry no observation; the record-reading assertions below then check
+/// that the record says so instead of reading absent metrics.
+pub(super) fn records_capture(record: &verter_audit::RequestAuditRecord) -> bool {
+    if cfg!(feature = "semantic-observe") {
+        true
+    } else {
+        assert_eq!(
+            record.capture_state,
+            verter_audit::AuditCaptureState::Unavailable,
+            "a build without capture must report unavailable capture"
+        );
+        false
+    }
+}
+
 pub(super) fn assert_query_mode(
     record: &verter_audit::RequestAuditRecord,
     mode: ProjectionModeTag,
 ) {
+    if !records_capture(record) {
+        return;
+    }
     match &record.kind_payload {
         RequestKindPayload::TypeResolution(payload) => {
             assert_eq!(payload.query_mode, mode);
@@ -618,7 +646,12 @@ pub(crate) fn template_literal_reduce_read_with_work_limit(
 
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     if let Some(work_limit) = work_limit {
         dispatch.set_connected_limits_for_tests(work_limit, 24);
@@ -672,6 +705,9 @@ pub(super) fn assert_declared_dependency_includes(
     record: &verter_audit::RequestAuditRecord,
     canonical_id: &str,
 ) {
+    if !records_capture(record) {
+        return;
+    }
     let declared = declared_dependency_file_names(record);
     assert!(
         declared.iter().any(|path| path == canonical_id),
@@ -683,6 +719,9 @@ pub(super) fn assert_declared_dependency_excludes(
     record: &verter_audit::RequestAuditRecord,
     canonical_id: &str,
 ) {
+    if !records_capture(record) {
+        return;
+    }
     let declared = declared_dependency_file_names(record);
     assert!(
         !declared.iter().any(|path| path == canonical_id),
@@ -710,6 +749,9 @@ pub(super) fn assert_request_loaded_files_exclude(
     record: &verter_audit::RequestAuditRecord,
     canonical_id: &str,
 ) {
+    if !records_capture(record) {
+        return;
+    }
     let loaded = request_loaded_file_names(record);
     assert!(
         !loaded.iter().any(|path| path == canonical_id),
@@ -718,6 +760,9 @@ pub(super) fn assert_request_loaded_files_exclude(
 }
 
 pub(super) fn assert_no_fresh_source_loading(record: &verter_audit::RequestAuditRecord) {
+    if !records_capture(record) {
+        return;
+    }
     let footprint = record
         .footprint
         .as_ref()
@@ -740,6 +785,9 @@ pub(super) fn assert_no_fresh_source_loading(record: &verter_audit::RequestAudit
 }
 
 pub(super) fn assert_no_route_misses(record: &verter_audit::RequestAuditRecord) {
+    if !records_capture(record) {
+        return;
+    }
     let layers = &record.store.cache_layers;
     assert_eq!(
         layers.route_db.misses, 0,

@@ -150,8 +150,10 @@ jobs:
 
       # --- Build the CANDIDATE (HEAD): native + binaries ---
       - name: Build candidate (native + verter-tsc + verter_lsp)
+        # Axis A attributes carrier counts and costs from `compileWithAudit`
+        # records, which only a binding built with `semantic-observe` captures.
         run: |
-          pnpm run build:native
+          pnpm --filter @verter/native build:observe
           cargo build --release -p verter_tsc -p verter_lsp
           mkdir -p artifacts/candidate-bin
           cp target/release/verter-tsc artifacts/candidate-bin/
@@ -166,8 +168,14 @@ jobs:
           cd ../verter-baseline
           pnpm install --frozen-lockfile
           # Axis A loads each side's OWN @verter/native, so the baseline worktree
-          # MUST build native too (not only the binaries).
-          pnpm run build:native
+          # MUST build native too (not only the binaries). A baseline that
+          # compiles audit capture behind `semantic-observe` builds the capturing
+          # binding, like the candidate; an older one captures unconditionally.
+          if node -e "process.exit(require('./packages/native/package.json').scripts['build:observe'] ? 0 : 1)"; then
+            pnpm --filter @verter/native build:observe
+          else
+            pnpm run build:native
+          fi
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-baseline" cargo build --release -p verter_tsc -p verter_lsp
           mkdir -p "$GITHUB_WORKSPACE/artifacts/baseline-bin"
           cp "$GITHUB_WORKSPACE/target-baseline/release/verter-tsc" "$GITHUB_WORKSPACE/artifacts/baseline-bin/"

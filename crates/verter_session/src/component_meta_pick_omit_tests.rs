@@ -79,6 +79,7 @@ fn build_hermetic_project_with_workspace_graph(files: &[(&str, &str)]) -> Arc<Me
 /// resolution into a MID-WALK budget trip (a budget-tripped partial that
 /// surfaces as a complete `QueryResult::Value` via the
 /// `ProjectPath`-over-`InstantiationRef` walker path).
+#[cfg(feature = "semantic-observe")]
 fn build_hermetic_project_with_budget(
     files: &[(&str, &str)],
     projection_op_budget: usize,
@@ -602,6 +603,7 @@ export interface ChatMessageSlots {
 /// completes quickly without tripping the projection budget.
 #[test]
 fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
+    #[cfg(feature = "semantic-observe")]
     use std::sync::atomic::Ordering::Relaxed;
     use verter_type_expr::TypeExpr;
 
@@ -833,22 +835,26 @@ fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
 
     // The completed, non-suppressed result must WARM the final-result
     // cache: a second resolve is served from `ComponentMetaResultDb`.
-    let hits_before = host
-        .provenance()
-        .component_meta_result_cache_hits
-        .load(Relaxed);
-    let (_meta2, _res2) = host
-        .get_component_meta_with_resolution(canonical)
-        .expect("second resolve must succeed");
-    let hits_after = host
-        .provenance()
-        .component_meta_result_cache_hits
-        .load(Relaxed);
-    assert!(
-        hits_after > hits_before,
-        "a non-suppressed carrier-stopped result MUST warm the final-result cache; the second \
-         resolve should be a warm hit (hits_before={hits_before}, hits_after={hits_after})"
-    );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let hits_before = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        let (_meta2, _res2) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("second resolve must succeed");
+        let hits_after = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        assert!(
+            hits_after > hits_before,
+            "a non-suppressed carrier-stopped result MUST warm the final-result cache; the second \
+             resolve should be a warm hit (hits_before={hits_before}, hits_after={hits_after})"
+        );
+    }
 }
 
 /// §5 MANDATORY discrimination proof for the A2 signal split — the
@@ -872,6 +878,8 @@ fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
 /// Reverting the walker's `result_is_partial` fold leaves the Value-partial
 /// with `synthesis_should_suppress == false` and the second resolve
 /// warm-hits — i.e. this test FAILS without the fold and PASSES with it.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn chatmessages_budget_tripped_value_partial_does_not_warm_final_result_cache() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1525,6 +1533,7 @@ fn consumer_indexed_access_through_symbolic_omit_works() {
 /// Enumerating `BigProps<T>` over the open `T` instantiates each level
 /// and evaluates each member's conditional generic — a cost that exceeds
 /// test's explicit low allowance, so the surface trips the fuse.
+#[cfg(feature = "semantic-observe")]
 fn finite_large_generic_dts() -> String {
     use std::fmt::Write as _;
 
@@ -1574,6 +1583,7 @@ fn finite_large_generic_dts() -> String {
 /// SFC consuming the finite-large generic surface: open `generic="T"`,
 /// `withDefaults(defineProps<BigProps<T>>())`, and several generic
 /// `defineModel<…>()` (mirroring Table.vue's 13 models).
+#[cfg(feature = "semantic-observe")]
 const FINITE_LARGE_GENERIC_VUE: &str = r#"<script setup lang="ts" generic="T extends Row">
 import type { Row, Cell, BigProps } from './big'
 
@@ -1687,6 +1697,8 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
 /// still produces a partial that is REFUSED warm admission — the
 /// no-poison invariant is preserved. This pins the invariant: it would
 /// FAIL if partials were wrongly allowed to warm.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn genuine_runaway_budget_trip_still_refused_warm_admission() {
     use std::sync::atomic::Ordering::Relaxed;

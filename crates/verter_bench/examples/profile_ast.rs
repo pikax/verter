@@ -10,10 +10,10 @@
 //!
 //! Usage:
 //!   # AST-only timing report:
-//!   cargo run -p verter_bench --example profile_ast --release --features=hotpath
+//!   cargo run -p verter_bench --example profile_ast --release --features=semantic-observe
 //!
 //!   # Full compile timing report:
-//!   VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath
+//!   VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=semantic-observe
 //!
 //!   # With memory allocation tracking:
 //!   cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc
@@ -127,7 +127,7 @@ fn load_fixture(name: &str) -> String {
 }
 
 /// AST-only pipeline: tokenize → AST → OXC expression parsing.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 fn run_pipeline(source: &str) {
     let bytes = source.as_bytes();
     let opts = SyntaxPluginOptions::default();
@@ -152,14 +152,14 @@ fn run_pipeline(source: &str) {
 }
 
 /// Full compile pipeline: tokenize → parse → style → script → template codegen.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 fn run_compile(source: &str) {
     let alloc = Allocator::default();
     let result = compile(source, &VueMacroSemanticInput::Unavailable, &alloc);
     std::hint::black_box(result);
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::main(limit = 40))]
+#[cfg_attr(feature = "semantic-observe", hotpath::main(limit = 40))]
 fn main() {
     let full_mode = std::env::var("VERTER_PROFILE_FULL").is_ok();
     let mode_label = if full_mode {

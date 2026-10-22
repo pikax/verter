@@ -236,7 +236,14 @@ function ideCase(compiled) {
   };
 }
 
-const results = { loaded: true, surface: enumerateSurface(binding), cases: {} };
+const results = {
+  loaded: true,
+  surface: enumerateSurface(binding),
+  // "Available" only for a binding built with `semantic-observe`; the audited
+  // compile below can return a stored record only then.
+  captureAvailability: binding.captureAvailability(),
+  cases: {},
+};
 
 // SUCCESS + the optional-product axis
 {

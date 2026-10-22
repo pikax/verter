@@ -432,10 +432,10 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
     Ok(result)
 }
 
-/// Whether this binary has optional semantic capture compiled in.
+/// Whether this binary has optional semantic capture compiled in, read from
+/// the session layer — the one availability authority the bindings report.
 pub fn capture_available() -> bool {
-    verter_audit::observe::CaptureAvailability::compiled()
-        == verter_audit::observe::CaptureAvailability::Available
+    verter_session::capture::availability() == verter_audit::observe::CaptureAvailability::Available
 }
 
 /// Read a session job from `path`.

@@ -1,4 +1,4 @@
-//! Disabled-arm proofs (`attribution` feature off — production/gate
+//! Disabled-arm proofs (`semantic-observe` feature off — production/gate
 //! config).
 //!
 //! 1. Macros do not evaluate their amount/digest argument.

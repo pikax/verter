@@ -237,7 +237,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let substitution_runtime =
             (!substitution.is_empty()).then_some((store_identity, generation));
         Ok(SemanticOperand::from_authored_authority(
-            Some(self.graph()),
+            Some(self.graph().store()),
             locator,
             substitution,
             split_env,

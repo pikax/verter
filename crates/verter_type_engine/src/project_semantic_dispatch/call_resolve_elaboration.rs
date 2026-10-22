@@ -1054,7 +1054,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         ordered.sort_by_key(|&node| {
-            crate::semantic_query::display::checker_relation_order_rank(graph, node)
+            crate::semantic_query::display::checker_relation_order_rank(graph.store(), node)
         });
         ordered
     }

@@ -46,7 +46,7 @@ impl SegmentAnchor {
     }
 }
 
-impl<'a> CodeTransform<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// Checked segmented overwrite. Fails atomically (no mutation on `Err`)
     /// for a malformed/empty range, out-of-order or overlapping anchors,
     /// out-of-range/`source_pos` mid-character, a target not entirely in one

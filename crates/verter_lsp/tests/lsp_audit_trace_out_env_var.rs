@@ -5,6 +5,10 @@
 //! record is appended to the named path as a single JSON line. The
 //! test populates a temp directory, sets the env var, drives one
 //! audited LSP run, and asserts the file holds the produced record.
+//!
+//! The trace-out drainer appends captured records, which exist only with
+//! `semantic-observe`; the test runs in the instrumentation lane.
+#![cfg(feature = "semantic-observe")]
 
 use std::sync::Arc;
 
@@ -28,10 +32,10 @@ async fn audited_lsp_run_appends_jsonline_to_trace_out_when_env_var_set() {
     }
 
     let canonical = "/trace.vue".to_string();
-    let _ = audit_harness::run_with_audit::<u8, _, _>(
+    let _ = audit_harness::run_with_audit::<u8, _, _, _>(
         &std::sync::Arc::clone(&host),
         LspMethodTag::Hover,
-        verter_audit::RequestTargetIdentity::registered(canonical),
+        || verter_audit::RequestTargetIdentity::registered(canonical),
         Some(tower_lsp_server::ls_types::Position {
             line: 1,
             character: 1,

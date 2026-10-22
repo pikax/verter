@@ -893,6 +893,8 @@ defineProps<{ value: number | bigint }>()
     assert!(!props.props[0].type_shape.skip_check());
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn scheduler_submits_once_for_multi_macro_sfc_without_member_fanout() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1054,6 +1056,8 @@ fn a_production_cancelled_mid_flight_is_discarded_without_poisoning_the_retry() 
 /// A cancelled requester of a shared production leaves it without
 /// publishing anything for itself, and the live requester that joined the
 /// same production is answered completely.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_cancelled_requester_does_not_poison_a_live_one_on_the_same_production() {

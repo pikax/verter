@@ -435,8 +435,8 @@ pub struct AnalysisReady {
 /// Host-owned cache of per-file [`AnalysisReady`] artifacts.
 pub struct AnalysisReadyDb {
     entries: DashMap<AnalysisArtifactKey, Arc<AnalysisReady>>,
-    live_counter: Arc<AtomicU64>,
-    stale_sweeps: Arc<AtomicU64>,
+    live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
+    stale_sweeps: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`verter_type_engine::cache_schema`] for the contract.
     schema_version: u32,
@@ -447,7 +447,10 @@ impl AnalysisReadyDb {
         Self::with_counters(Default::default(), Default::default())
     }
 
-    pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counters(
+        live: verter_type_engine::cache_runtime::OccupancyCounter,
+        stale: verter_type_engine::cache_runtime::OccupancyCounter,
+    ) -> Self {
         Self::with_counters_and_schema_version(
             live,
             stale,
@@ -467,8 +470,8 @@ impl AnalysisReadyDb {
     }
 
     fn with_counters_and_schema_version(
-        live: Arc<AtomicU64>,
-        stale: Arc<AtomicU64>,
+        live: verter_type_engine::cache_runtime::OccupancyCounter,
+        stale: verter_type_engine::cache_runtime::OccupancyCounter,
         schema_version: u32,
     ) -> Self {
         Self {
@@ -481,12 +484,28 @@ impl AnalysisReadyDb {
 
     /// Strict lookup by full key.
     #[must_use]
+    /// [`Self::get_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get(&self, key: &AnalysisArtifactKey) -> Option<Arc<AnalysisReady>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), key)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub fn get_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        key: &AnalysisArtifactKey,
+    ) -> Option<Arc<AnalysisReady>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = self.entries.get(key).map(|v| v.clone());
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .analysis
@@ -498,7 +517,7 @@ impl AnalysisReadyDb {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -507,12 +526,30 @@ impl AnalysisReadyDb {
     /// the requested scope. This is the bitflag-based containment rule
     /// called out in the project-global overhaul plan.
     #[must_use]
+    /// [`Self::find_satisfying_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn find_satisfying(
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
         requested_scope: AnalysisScope,
     ) -> Option<Arc<AnalysisReady>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.find_satisfying_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, whole_hash, requested_scope)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub fn find_satisfying_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        whole_hash: Hash16,
+        requested_scope: AnalysisScope,
+    ) -> Option<Arc<AnalysisReady>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -530,7 +567,7 @@ impl AnalysisReadyDb {
             }
             found
         };
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .analysis
@@ -542,7 +579,7 @@ impl AnalysisReadyDb {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -900,33 +937,37 @@ impl verter_type_engine::invalidation_domain::InvalidationByCanonical for Depend
 
 /// Per-layer debug counters / cache stats for observability.
 ///
-/// The plan requires explicit counters for live entries, stale entries,
-/// sweeps, evictions, and in-flight waiters so memory and coherence behavior
-/// is measurable in tests and benchmarks. Each counter is `Arc<AtomicU64>`
-/// so the owning DB can hold a handle and update it in-place; the
-/// [`ProjectTypeStoreCounters`] struct stays as a single observation
-/// surface for tests and telemetry.
+/// Explicit counters for live entries, stale entries, sweeps, evictions,
+/// and in-flight waiters make memory and coherence behavior measurable in
+/// tests and benchmarks. Each counter is a shared
+/// [`OccupancyCounter`](verter_type_engine::cache_runtime::OccupancyCounter) handle so the owning DB can hold a clone and
+/// update it in place; the [`ProjectTypeStoreCounters`] struct stays as a
+/// single observation surface. No production decision reads the counts, so
+/// the handles keep a count only under the observation gate (tests, the
+/// `test-support` feature, or `semantic-observe`) and are zero-size, with
+/// no-op writes, everywhere else; [`Self::snapshot`] exists only there.
 #[derive(Debug, Default, Clone)]
 pub struct ProjectTypeStoreCounters {
-    pub indexed_live: Arc<AtomicU64>,
-    pub indexed_stale_sweeps: Arc<AtomicU64>,
-    pub analysis_live: Arc<AtomicU64>,
-    pub analysis_stale_sweeps: Arc<AtomicU64>,
-    pub owner_import_live: Arc<AtomicU64>,
-    pub component_meta_live: Arc<AtomicU64>,
-    pub component_meta_stale_sweeps: Arc<AtomicU64>,
-    pub inflight_waiters: Arc<AtomicU64>,
+    pub indexed_live: verter_type_engine::cache_runtime::OccupancyCounter,
+    pub indexed_stale_sweeps: verter_type_engine::cache_runtime::OccupancyCounter,
+    pub analysis_live: verter_type_engine::cache_runtime::OccupancyCounter,
+    pub analysis_stale_sweeps: verter_type_engine::cache_runtime::OccupancyCounter,
+    pub owner_import_live: verter_type_engine::cache_runtime::OccupancyCounter,
+    pub component_meta_live: verter_type_engine::cache_runtime::OccupancyCounter,
+    pub component_meta_stale_sweeps: verter_type_engine::cache_runtime::OccupancyCounter,
+    pub inflight_waiters: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Live entry count summed across all 10 component-meta engine cache
     /// DBs (Step 3 closure). Each typed DB shares this counter so the
     /// snapshot reflects total host-owned cache occupancy without
     /// per-DB plumbing in the snapshot surface.
-    pub component_meta_cache_live: Arc<AtomicU64>,
+    pub component_meta_cache_live: verter_type_engine::cache_runtime::OccupancyCounter,
 }
 
 impl ProjectTypeStoreCounters {
     /// Snapshot numeric counters for test assertions and telemetry. Uses
     /// `Relaxed` ordering because these are diagnostic counters, not
     /// synchronization primitives.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     #[must_use]
     pub fn snapshot(&self) -> ProjectTypeStoreCounterSnapshot {
         ProjectTypeStoreCounterSnapshot {
@@ -944,6 +985,7 @@ impl ProjectTypeStoreCounters {
 }
 
 /// Immutable snapshot of [`ProjectTypeStoreCounters`] for test assertions.
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectTypeStoreCounterSnapshot {
     pub indexed_live: u64,
@@ -1148,7 +1190,7 @@ impl std::fmt::Debug for ProjectTypeStore {
             )
             .field("indexed_entries", &self.indexed.len())
             .field("analysis_entries", &self.analysis.len())
-            .field("counters", &self.counters.snapshot())
+            .field("counters", &self.counters)
             .finish_non_exhaustive()
     }
 }
@@ -1243,21 +1285,21 @@ impl ProjectTypeStore {
     ) -> (Self, EngineGrants) {
         let retention_account = store_account.clone();
         let counters = ProjectTypeStoreCounters::default();
-        // Each backing DB holds the same `Arc<AtomicU64>` counters as
+        // Each backing DB holds a clone of the same counter handles as
         // `counters` so the `snapshot()` method sees in-place updates.
         let indexed = FileArtifactStore::with_counters(
-            Arc::clone(&counters.indexed_live),
-            Arc::clone(&counters.indexed_stale_sweeps),
+            counters.indexed_live.clone(),
+            counters.indexed_stale_sweeps.clone(),
         );
         let analysis = AnalysisReadyDb::with_counters(
-            Arc::clone(&counters.analysis_live),
-            Arc::clone(&counters.analysis_stale_sweeps),
+            counters.analysis_live.clone(),
+            counters.analysis_stale_sweeps.clone(),
         );
         let owner_import_surfaces =
-            OwnerImportSurfaceDb::with_counter(Arc::clone(&counters.owner_import_live));
+            OwnerImportSurfaceDb::with_counter(counters.owner_import_live.clone());
         let component_meta_results = ComponentMetaResultDb::with_counters_and_account(
-            Arc::clone(&counters.component_meta_live),
-            Arc::clone(&counters.component_meta_stale_sweeps),
+            counters.component_meta_live.clone(),
+            counters.component_meta_stale_sweeps.clone(),
             store_account.clone(),
         );
         // The engine's own stores and the one output authority minted for
@@ -1292,9 +1334,9 @@ impl ProjectTypeStore {
             mapper_binders: mapper_binder_registry,
         } = engine;
         let app_config_no_override_proof =
-            crate::app_config_proof_db::AppConfigNoOverrideProofDb::with_counter(Arc::clone(
-                &counters.component_meta_cache_live,
-            ));
+            crate::app_config_proof_db::AppConfigNoOverrideProofDb::with_counter(
+                counters.component_meta_cache_live.clone(),
+            );
         let store = Self {
             project_generation: Arc::new(AtomicU64::new(0)),
             indexed,

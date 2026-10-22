@@ -48,6 +48,12 @@ match-all project. Guards: `crates/verter_napi/src/project_config_tests.rs`,
 
 ## Audit & footprint
 
+Uncaptured component-meta fallback records carry `RequestKindPayload::None`
+for unavailable, disabled, filtered and missing/evicted-record paths. Only
+genuinely captured records carry a `ComponentMetaPayload`, including its
+legacy zero-valued compatibility fields.
+
+
 Per-request semantic footprint observability splits across two crates:
 
 - **`verter_audit`** (substrate) — owns `RequestAuditRecord` envelope, `RequestKind` / `RequestKindPayload` discriminants, all per-kind payload structs (`ComponentMetaPayload`, `TypeResolutionPayload`, `SemanticAnalysisPayload`, `CompilePayload`, `WorkspacePayload`, `LspRequestPayload`, `McpToolPayload`, `BundlerBatchPayload`), producer-side `AuditObserver` trait + `AuditEvent` counter hook, `StructuredAuditEvent` enum + variant payloads (in `verter_audit::origin_graph`), `AuditConfig` + `AuditConsumerFilter`, trivial `NoOpObserver`.
@@ -795,7 +801,7 @@ npx tsx packages/benchmark/src/trace-check.ts \
 For native hotspot attribution on a real `nuxt/ui` component, use the real-project profiler:
 
 ```bash
-cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath -- Accordion
+cargo run -p verter_bench --example profile_real_component_meta --release --features=semantic-observe -- Accordion
 ```
 
 Useful environment variables:

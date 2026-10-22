@@ -292,7 +292,12 @@ fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries()
         .into_cold_seed_view()
         .with_session_overlay(&host, &view);
     let completion = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = SessionResolverContext::from_cold_seed(&host, &view, &store_view, completion);
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(
+        &host,
+        &view,
+        &store_view,
+        completion,
+    );
 
     assert!(ctx.ensure_indexed_ready_serve(canonical).is_none());
     assert!(host

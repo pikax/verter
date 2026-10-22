@@ -48,6 +48,7 @@ fn through(
     workspace.resolve_import_outcome_with_overlay(overlay, MAIN, specifier, CONTEXT)
 }
 
+#[cfg(feature = "semantic-observe")]
 fn producer_runs(workspace: &MemoryWorkspace) -> u64 {
     workspace
         .vfs_provenance_snapshot()
@@ -85,12 +86,15 @@ fn a_workspace_answer_the_overlay_cannot_reach_is_reused_under_it() {
     let workspace = workspace(&[("/p/a.ts", "export const a = 1\n")]);
     let base = workspace.resolve_import_outcome(MAIN, "./a", CONTEXT);
     assert_eq!(target(&base), Some("/p/a.ts"));
+    #[cfg(feature = "semantic-observe")]
     let runs = producer_runs(&workspace);
 
     let unrelated = overlay(&[("/q/scratch.ts", "export {}\n")], &[]);
     let under = through(&workspace, &unrelated, "./a");
     assert_eq!(target(&under), Some("/p/a.ts"));
     assert!(under.trace().reused(), "the workspace candidate is reused");
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
         producer_runs(&workspace),
         runs,
@@ -147,6 +151,7 @@ fn an_overlay_answer_that_depends_only_on_existence_survives_body_edits() {
         target(&through(&workspace, &first, "./dep")),
         Some("/p/dep.ts")
     );
+    #[cfg(feature = "semantic-observe")]
     let runs = producer_runs(&workspace);
 
     // Another request, another snapshot, the same file with another body.
@@ -154,6 +159,8 @@ fn an_overlay_answer_that_depends_only_on_existence_survives_body_edits() {
     let warm = through(&workspace, &edited, "./dep");
     assert_eq!(target(&warm), Some("/p/dep.ts"));
     assert!(warm.trace().reused());
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
         producer_runs(&workspace),
         runs,

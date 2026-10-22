@@ -303,6 +303,8 @@ jobs:
             --cargo-profile no-debug-assertions
       - name: Clippy (wasm32-unknown-unknown)
         run: cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
+      - name: Check the instrumented wasm32 build
+        run: cargo check --target wasm32-unknown-unknown -p verter_wasm --features semantic-observe
       - name: Clippy (transport-equivalence feature)
         run: cargo clippy -p verter_session --tests --features transport-authoritative -- -D warnings
 
@@ -452,6 +454,59 @@ jobs:
         uses: dorny/test-reporter@v3
         with:
           name: Rust Core Test Results (${{ matrix.shard }}/4)
+          path: ${{ steps.junit.outputs.path }}
+          reporter: java-junit
+          fail-on-error: false
+
+  # The instrumentation lane. Audit capture, footprints and timing compile only
+  # under the default-off `semantic-observe` feature, so the core shards above
+  # build them away and the suites that read a captured record run here, with
+  # the feature on for every workspace member that declares it
+  # (`scripts/observe-lane.mjs` derives that set from `cargo metadata`). The
+  # test selection is the same provider-free core filter.
+  rust-observe:
+    name: Rust Test (instrumentation)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: rust-observe
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Fetch locked Cargo dependencies
+        run: cargo fetch --locked
+      - name: Run the instrumentation lane
+        timeout-minutes: 80
+        env:
+          NEXTEST_PROFILE: ci
+        run: node scripts/observe-lane.mjs run
+      - name: Locate nextest JUnit report
+        if: always()
+        id: junit
+        run: |
+          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
+          if [ -z "$found" ]; then
+            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
+            exit 1
+          fi
+          echo "path=$found" >> "$GITHUB_OUTPUT"
+      - name: Test report
+        if: always() && steps.junit.outputs.path != ''
+        uses: dorny/test-reporter@v3
+        with:
+          name: Rust Instrumentation Test Results
           path: ${{ steps.junit.outputs.path }}
           reporter: java-junit
           fail-on-error: false
@@ -1148,6 +1203,51 @@ jobs:
       - name: Test @verter/wasm
         run: pnpm --filter @verter/wasm test
 
+  # The wasm half of the instrumentation lane: a release module built with
+  # `semantic-observe`, so the @verter/wasm specs that read captured records
+  # run (the module wasm-build ships is uncaptured and runs only their
+  # unavailable-capture cases).
+  wasm-observe-test:
+    name: WASM Package Tests (instrumentation)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: wasm-observe-test
+      - name: Install wasm-bindgen CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.122
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build instrumented WASM (semantic-observe)
+        run: pnpm --filter @verter/wasm run build:observe
+      # Fail before any suite runs if the feature did not reach the module:
+      # every captured case would otherwise be skipped.
+      - name: Verify the module captures
+        run: >-
+          node --input-type=module -e "import { readFileSync } from 'node:fs';
+          const m = await import('./packages/wasm/wasm/verter_wasm.js');
+          m.initSync({ module: readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm') });
+          const a = m.captureAvailability();
+          if (a !== 'Available') { console.error('::error::instrumented module reports capture ' + a); process.exit(1); }"
+      - name: Build TS packages
+        run: pnpm run build:ts
+      - name: Test @verter/wasm (capture available)
+        run: pnpm --filter @verter/wasm test
+
   # ---------------------------------------------------------------------------
   # Browser-host-domain gate (BWH1). Builds nothing itself: wasm-build already
   # produced the session artifact. This lane re-runs the wasm32 census, the
@@ -1557,6 +1657,47 @@ jobs:
           --filter @verter/typeinfo
           --filter @verter/vue-conformance-oracle
           run test
+
+  # The native instrumentation lane. Request audit records, footprints and the
+  # provenance walkers compile only under the default-off `semantic-observe`
+  # feature, so `native-test` above runs the capture-aware specs against a
+  # binding that reports unavailable capture. This job builds the binding with
+  # the feature on and runs the same suites, so their captured-record cases
+  # execute somewhere. Same dependency-closure gate as `native-test`.
+  native-observe-test:
+    name: Native Package Tests (instrumentation)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.native == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: native-observe-test
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build instrumented native binding (semantic-observe, debug)
+        run: pnpm --filter @verter/native build:observe:debug
+      # Fail before any suite runs if the feature did not reach the binding:
+      # every captured case would otherwise be skipped and the lane would pass
+      # having proven nothing.
+      - name: Verify the binding captures
+        run: >-
+          node -e "const a = require('./packages/native/index.js').captureAvailability();
+          if (a !== 'Available') { console.error('::error::instrumented binding reports capture ' + a); process.exit(1); }"
+      - name: Build TS packages
+        run: pnpm run build:ts
+      - name: Test @verter/native (capture available)
+        run: pnpm --filter @verter/native test
+      - name: Test @verter/typeinfo (capture available)
+        run: pnpm --filter @verter/typeinfo test
 
   # Native + WASM transport-route comparison, executed. Clippy in
   # rust-build-configs only compiles the feature; this job builds the two
@@ -2253,6 +2394,7 @@ jobs:
       - rust-build-configs
       - rust-test-build
       - rust-test
+      - rust-observe
       - rust-providers-live
       - compiler-contracts
       - bf2-authoritative
@@ -2269,6 +2411,8 @@ jobs:
       - editor-neutral-lsp
       - vscode-e2e
       - native-test
+      - native-observe-test
+      - wasm-observe-test
       - transport-route-equivalence
       - dx-harness-hermetic
       - build-lsp-debug

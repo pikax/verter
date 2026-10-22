@@ -303,7 +303,7 @@ fn print_counters(label: &str, c: &Counters, per: usize) {
     }
 }
 
-#[cfg(feature = "currency_probe")]
+#[cfg(feature = "semantic-observe")]
 fn print_probe(per: usize) {
     let snap = verter_session_query::currency_probe::snapshot();
     if snap.is_empty() {
@@ -337,15 +337,15 @@ fn print_probe(per: usize) {
     }
 }
 
-#[cfg(not(feature = "currency_probe"))]
+#[cfg(not(feature = "semantic-observe"))]
 fn print_probe(_per: usize) {}
 
-#[cfg(feature = "currency_probe")]
+#[cfg(feature = "semantic-observe")]
 fn reset_probe() {
     verter_session_query::currency_probe::reset();
 }
 
-#[cfg(not(feature = "currency_probe"))]
+#[cfg(not(feature = "semantic-observe"))]
 fn reset_probe() {}
 
 // ─────────────────────────── M1: lint ───────────────────────────

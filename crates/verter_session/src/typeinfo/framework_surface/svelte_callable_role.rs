@@ -9,8 +9,8 @@ use verter_type_engine::semantic_query::SemanticNodeId;
 
 /// Compare one prop value's resolved identity with package-validated Svelte
 /// `Snippet` import identities.
-pub(super) fn classify_svelte_callable_role(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn classify_svelte_callable_role<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     prop_value: SemanticNodeId,
     snippet_imports: &[SvelteSnippetImportFact],
 ) -> PropCallableRole {

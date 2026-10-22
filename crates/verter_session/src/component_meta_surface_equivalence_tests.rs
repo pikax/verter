@@ -804,6 +804,8 @@ defineProps<Props>()
 /// the carrier's dependents among other cross-file/imported entries — the
 /// control is purely LOCAL, so it rules out a global clear, not over-eviction
 /// of a DIFFERENT carrier's dependents.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn cross_file_contributor_edit_misses_warm_and_roots_readset_on_carrier() {
     use std::sync::atomic::Ordering::Relaxed;

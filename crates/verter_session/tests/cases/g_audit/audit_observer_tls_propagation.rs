@@ -16,6 +16,8 @@ use verter_type_engine::request_context::{
     current_request_context, RequestContext, RequestContextGuard,
 };
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn substrate_current_observer_returns_session_request_context_when_installed() {
     // Pre-state: no observer is installed on this thread.

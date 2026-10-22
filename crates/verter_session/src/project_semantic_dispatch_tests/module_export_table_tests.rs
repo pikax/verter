@@ -275,8 +275,10 @@ fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize)
     // consumers do, so completed proofs validate once in that view.
     let table_view = host.resolver_store_view_read().into_owned_view();
     let table_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let table_ctx =
-        crate::resolver_core::HostResolverContext::new(&host, &table_view, table_overlay);
+    let table_ctx = crate::resolver_core::HostResolverContext::<
+        '_,
+        verter_audit::observe::Uncaptured,
+    >::new(&host, &table_view, table_overlay);
     let signature_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
     let root = table_ctx
         .module_export_table("/wb/m0.ts")
@@ -307,7 +309,10 @@ fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize)
     );
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host, &view, overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let (_guard, _) = dispatch.enter_connected_demand(false);
     let result = dispatch.execute_read(SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
@@ -552,7 +557,10 @@ fn check_export_table_and_namespace_work(count: usize) -> [(&'static str, usize)
     );
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host, &view, overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let root = ValueRootKey {
@@ -845,7 +853,10 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
         );
         let view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let started = std::time::Instant::now();
         let context = ProjectionReductionContext::published(ProjectionMode::Expanded);

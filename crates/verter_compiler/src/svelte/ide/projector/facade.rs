@@ -26,7 +26,7 @@ use crate::code_transform::CodeTransform;
 use verter_span::Span;
 
 pub(super) fn append_svelte_public_facade<'a>(
-    ct: &mut CodeTransform<'a>,
+    ct: &mut CodeTransform<'a, impl verter_audit::observe::ObserveExec>,
     at: u32,
     props: Option<(&str, Span)>,
     dialect: SvelteIdeDialect,

@@ -323,43 +323,47 @@ pub(crate) struct AugmentationContributions {
 /// audit schema. This is emitted only after at least one augmenter contributed
 /// and after the exact augmenter-set fingerprint has been observed by the
 /// consumer's fact tracer.
-fn emit_module_augmentation_stitched_event(
+fn emit_module_augmentation_stitched_event<M: verter_audit::observe::ObserveExec>(
+    observation: &crate::request_observers::CaptureTargets,
     target: &verter_session_query::resolution::AugmentationTargetKind,
     augmenter_count: u32,
     fingerprint: crate::semantic_query::HashValue,
 ) {
-    use verter_audit::AugmentationTargetKindTag;
-    use verter_session_query::resolution::AugmentationTargetKind;
+    let _ = observation;
+    // Optional capture: the event and its payload are built only when an
+    // accumulator is installed, and never in a default build.
+    crate::component_meta_trace_structured!(M => on observation.accumulator.as_deref() => {
+        use verter_audit::AugmentationTargetKindTag;
+        use verter_session_query::resolution::AugmentationTargetKind;
 
-    let (target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern) =
-        match target {
-            AugmentationTargetKind::ExternalSpecifier(specifier) => (
-                AugmentationTargetKindTag::ExternalSpecifier,
-                Some(Arc::<str>::from(specifier.as_ref())),
-                None,
-                None,
-            ),
-            AugmentationTargetKind::ResolvedRelativeCanonical(canonical) => (
-                AugmentationTargetKindTag::ResolvedRelativeCanonical,
-                None,
-                Some(Arc::clone(canonical)),
-                None,
-            ),
-            AugmentationTargetKind::WildcardAmbient(pattern) => (
-                AugmentationTargetKindTag::WildcardAmbient,
-                None,
-                None,
-                Some(Arc::<str>::from(pattern.as_ref())),
-            ),
-            AugmentationTargetKind::GlobalAugmentation => (
-                AugmentationTargetKindTag::GlobalAugmentation,
-                None,
-                None,
-                None,
-            ),
-        };
+        let (target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern) =
+            match target {
+                AugmentationTargetKind::ExternalSpecifier(specifier) => (
+                    AugmentationTargetKindTag::ExternalSpecifier,
+                    Some(Arc::<str>::from(specifier.as_ref())),
+                    None,
+                    None,
+                ),
+                AugmentationTargetKind::ResolvedRelativeCanonical(canonical) => (
+                    AugmentationTargetKindTag::ResolvedRelativeCanonical,
+                    None,
+                    Some(Arc::clone(canonical)),
+                    None,
+                ),
+                AugmentationTargetKind::WildcardAmbient(pattern) => (
+                    AugmentationTargetKindTag::WildcardAmbient,
+                    None,
+                    None,
+                    Some(Arc::<str>::from(pattern.as_ref())),
+                ),
+                AugmentationTargetKind::GlobalAugmentation => (
+                    AugmentationTargetKindTag::GlobalAugmentation,
+                    None,
+                    None,
+                    None,
+                ),
+            };
 
-    crate::request_observers::push_structured_event(
         verter_audit::structured_event::StructuredAuditEvent::ModuleAugmentationStitched {
             target_kind_tag,
             external_specifier,
@@ -367,8 +371,8 @@ fn emit_module_augmentation_stitched_event(
             wildcard_pattern,
             augmenter_count,
             fingerprint,
-        },
-    );
+        }
+    });
 }
 
 /// One resolved heritage base from a class's `extends` clause
@@ -1548,9 +1552,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mut suspend: Option<&mut Option<Box<TypeofBuild>>>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Telemetry for the typeof traversal site.
-        if let Some(observer) = verter_audit::current_observer() {
+        verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
             observer.record_event(verter_audit::AuditEvent::BuildTypeofCall);
-        }
+        });
         // Self-version rooting: observe the value-root scope
         // canonical.s `IndexedReady` ONCE through the overlay-aware
         // `ensure_indexed_ready_serve` accessor. The single observed
@@ -1567,9 +1571,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(indexed) => indexed,
             None => {
                 // Telemetry: prepared-value miss site.
-                if let Some(observer) = verter_audit::current_observer() {
+                verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                     observer.record_event(verter_audit::AuditEvent::BuildTypeofPreparedValueMiss);
-                }
+                });
                 return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
             }
         };
@@ -3745,13 +3749,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // entry on `(decl_canonical, observed_hash)`.
         self.graph().record_instantiate();
         let fence = self.dep_signature_for(decl_canonical, observed_hash);
-        let base = self
-            .graph()
-            .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
-        self.graph().record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            self.graph(),
             result,
             OriginEdgeKind::Instantiate,
-            Arc::from(vec![base].into_boxed_slice()),
+            Arc::from([self.graph().intern_node_with_scope(
+                SemanticNodeData::Opaque(QueryError::Miss),
+                scope.clone(),
+            )]),
             OriginMeta::None,
             fence.clone(),
         );
@@ -5799,12 +5804,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // this request" without false positives from peer dispatches in
         // workspace-parallel runs.
         if matches!(body_mode, crate::semantic_query::ProjectionMode::Expanded) {
-            crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Some(ctx) = crate::request_context::current_request_context() {
-                ctx.expanded_instantiate_calls
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            if cfg!(any(test, feature = "test-support"))
+                || <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
+            {
+                crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
+                ctx.expanded_instantiate_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
             // Synthesis-scoped attribution: bump the
             // synthesis-attributable counter ONLY when the slot-binding
             // synthesis phase is active. The request-wide counter above
@@ -5813,7 +5823,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // "an Expanded Instantiate fired INSIDE slot-binding synthesis"
             // — the eagerness defect `enrich_does_not_eagerly_instantiate_carrier`
             // gates on (must stay zero).
-            crate::request_context::note_expanded_instantiate_for_synthesis_scope();
+            crate::request_context::note_expanded_instantiate_for_synthesis_scope::<C::Observe>(
+                crate::resolver_core::resolver_context::capture_targets(self.ctx),
+            );
         }
 
         let decl_canonical = &base.defining_canonical;
@@ -5933,13 +5945,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // origin-walks resolve through the carrier: sources are the
             // builtin base node + each arg.
             let fence = self.project_generation_signature();
-            let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
-            inst_sources.push(base);
-            inst_sources.extend(args.iter().copied());
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 carrier,
                 OriginEdgeKind::Instantiate,
-                Arc::from(inst_sources.into_boxed_slice()),
+                std::iter::once(base).chain(args.iter().copied()).collect(),
                 OriginMeta::None,
                 fence.clone(),
             );
@@ -5960,58 +5970,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if self.runtime_nominal_identity(&builtin_identity).is_some() {
             return InstantiateStart::Done(Box::new(builtin_application_carrier(builtin_identity)));
         }
-
-        // A built-in utility's instantiation, once a gate below has proved its
-        // identity.
-        let builtin_utility_output = |builtin_utility: Option<BuiltinUtility>| {
-            // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
-            // `ReturnType<F>`, …) inspects its argument nodes to form the
-            // result — `build_builtin_utility` reads `X`'s Object surface,
-            // enumerates `K`'s key space, walks `F`'s call signature, etc.
-            // The result therefore transitively depends on the file
-            // content each file-derived argument was lowered from. Derive
-            // the self-roots from the `args` node set (the same
-            // file-derived-input rooting `KeyOf` / `MappedType` /
-            // `IndexedAccess` use): each `NodeScopeId::File`-scoped arg
-            // contributes one `(canonical, observed_hash)` self-root so an
-            // edit to that file rejects this utility memo entry on the
-            // strict warm-read validator. Structural args (`Global`-scoped
-            // primitives, literal-union key sets) contribute nothing.
-            let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
-            // Builtin-utility results are NEVER macro-T own-body (by
-            // design): `defineProps<Omit<Vendor, K>>()` surfaces
-            // members that came from `Vendor` via the utility, none of
-            // which the author wrote in the macro T body. Downgrade the
-            // provenance to structural so the utility's produced members
-            // report `declared_in_macro_type_arg = false`. (A carrier
-            // `CarrierProps extends Omit<Vendor, K>` is the SEPARATE
-            // direct-decl case: CarrierProps's own body is stamped below
-            // and only its `extends`-reached members go through this
-            // utility path as structural.)
-            // `builtin_utility` is the identity the gate proved; builders never
-            // resolve a spelling themselves.
-            let (utility_result, utility_fence, utility_is_partial, approximation) = self
-                .build_builtin_utility(
-                    base,
-                    decl_name.as_ref(),
-                    builtin_utility,
-                    args,
-                    context.into_structural_provenance(),
-                );
-            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                (utility_result, utility_fence).into();
-            // Two-signal fold: a mapper-utility surface whose
-            // nested KeyOf/MappedType subquery was genuinely incomplete
-            // (budget / recursion / walker-fatal) surfaces here as a
-            // complete-looking `Value` shell — carry its partiality
-            // through the published value so the component-meta + shape /
-            // materialize warm gates refuse it. Benign non-cacheability of
-            // the nested read does NOT taint this (it is `cache_suppress`
-            // on the inner memo only).
-            output.fold_partial(utility_is_partial);
-            output.approximation = approximation;
-            output.with_observed_self_roots(observed_self_roots)
-        };
 
         // 2. Built-in utility dispatch.
         // A utility name (Partial, Pick, ReturnType, etc.) that the user
@@ -6044,7 +6002,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return InstantiateStart::Done(Box::new(builtin_application_carrier(builtin_identity)));
             }
 
-            return InstantiateStart::Done(Box::new(builtin_utility_output(builtin_utility)));
+            return InstantiateStart::Done(Box::new(self.build_instantiated_builtin_utility(
+                base,
+                decl_name,
+                args,
+                context,
+                builtin_utility,
+            )));
         }
 
         // 3. Resolve prepared type decl via `SessionDispatchHost` — the adapter
@@ -6070,6 +6034,97 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             out.cache_suppress = true;
             return InstantiateStart::Done(Box::new(out));
         }
+        self.begin_prepared_instantiation(
+            base,
+            args,
+            &builtin_identity,
+            is_non_file_base,
+            scope,
+            context,
+            suspend,
+        )
+    }
+
+    /// Build the builtin answer without retaining declaration-building locals.
+    #[inline(never)]
+    fn build_instantiated_builtin_utility(
+        &self,
+        base: SemanticNodeId,
+        decl_name: &OwnedStr,
+        args: &Arc<[SemanticNodeId]>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        builtin_utility: Option<BuiltinUtility>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
+        // `ReturnType<F>`, …) inspects its argument nodes to form the
+        // result — `build_builtin_utility` reads `X`'s Object surface,
+        // enumerates `K`'s key space, walks `F`'s call signature, etc.
+        // The result therefore transitively depends on the file
+        // content each file-derived argument was lowered from. Derive
+        // the self-roots from the `args` node set (the same
+        // file-derived-input rooting `KeyOf` / `MappedType` /
+        // `IndexedAccess` use): each `NodeScopeId::File`-scoped arg
+        // contributes one `(canonical, observed_hash)` self-root so an
+        // edit to that file rejects this utility memo entry on the
+        // strict warm-read validator. Structural args (`Global`-scoped
+        // primitives, literal-union key sets) contribute nothing.
+        let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+        // Builtin-utility results are NEVER macro-T own-body (by
+        // design): `defineProps<Omit<Vendor, K>>()` surfaces
+        // members that came from `Vendor` via the utility, none of
+        // which the author wrote in the macro T body. Downgrade the
+        // provenance to structural so the utility's produced members
+        // report `declared_in_macro_type_arg = false`. (A carrier
+        // `CarrierProps extends Omit<Vendor, K>` is the SEPARATE
+        // direct-decl case: CarrierProps's own body is stamped below
+        // and only its `extends`-reached members go through this
+        // utility path as structural.)
+        // `builtin_utility` is the identity the gate proved; builders never
+        // resolve a spelling themselves.
+        let (utility_result, utility_fence, utility_is_partial, approximation) = self
+            .build_builtin_utility(
+                base,
+                decl_name.as_ref(),
+                builtin_utility,
+                args,
+                context.into_structural_provenance(),
+            );
+        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+            (utility_result, utility_fence).into();
+        // Two-signal fold: a mapper-utility surface whose
+        // nested KeyOf/MappedType subquery was genuinely incomplete
+        // (budget / recursion / walker-fatal) surfaces here as a
+        // complete-looking `Value` shell — carry its partiality
+        // through the published value so the component-meta + shape /
+        // materialize warm gates refuse it. Benign non-cacheability of
+        // the nested read does NOT taint this (it is `cache_suppress`
+        // on the inner memo only).
+        output.fold_partial(utility_is_partial);
+        output.approximation = approximation;
+        output.with_observed_self_roots(observed_self_roots)
+    }
+
+    /// Keep declaration lookup, binding and its build frame off the builtin
+    /// utility path's recursive stack. In debug builds, the unused locals of
+    /// this path otherwise enlarge every nested builtin instantiation frame.
+    #[inline(never)]
+    fn begin_prepared_instantiation(
+        &self,
+        base: SemanticNodeId,
+        args: &Arc<[SemanticNodeId]>,
+        identity: &crate::semantic_query::DeclIdentity,
+        is_non_file_base: bool,
+        scope: NodeScopeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+        suspend: bool,
+    ) -> InstantiateStart {
+        let decl_canonical = &identity.canonical_id;
+        let decl_owner = identity.owner;
+        let decl_name = &identity.decl_name;
+        let decl_whole_hash = identity.whole_hash;
+        let body_mode = context.mode;
+
+        let adapter = SessionDispatchHost::from_facade(self);
         let ri = ResolvedRootIdentity::new_in_owner(
             decl_canonical.as_ref(),
             decl_owner,
@@ -6147,7 +6202,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // the body it spells: the keyword is not a reference to evaluate.
         if prepared.body_facts.classification == verter_type_expr::facts::TypeBodyClass::Intrinsic {
             let mut output = match adapter.resolve_intrinsic_alias(decl_name.as_ref()) {
-                Some(utility) => builtin_utility_output(Some(utility)),
+                Some(utility) => self.build_instantiated_builtin_utility(
+                    base,
+                    decl_name,
+                    args,
+                    context,
+                    Some(utility),
+                ),
                 None => (
                     QueryResult::Value(self.opaque(QueryError::UnsupportedIntrinsic {
                         name: verter_type_expr::OwnedStr::from(decl_name.as_ref()),
@@ -6184,9 +6245,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // behaviour at solve.rs:2580.
         // Instrumentation: callsite attribution for
         // `prepared_decl_bundle_warm` reads from `build_instantiate`.
-        if let Some(obs) = verter_audit::current_observer() {
+        verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |obs| {
             obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCallsiteBuildInstantiate);
-        }
+        });
         let scope_payload = self
             .ctx
             .prepared_decl_bundle(decl_canonical.as_ref())
@@ -6939,13 +7000,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let fence = self.dep_signature_for(decl_canonical, decl_whole_hash);
 
         // Instantiate edge: result <- [base, args...].
-        let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
-        inst_sources.push(base);
-        inst_sources.extend(args.iter().copied());
-        self.graph().record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            self.graph(),
             result,
             OriginEdgeKind::Instantiate,
-            Arc::from(inst_sources.into_boxed_slice()),
+            std::iter::once(base).chain(args.iter().copied()).collect(),
             OriginMeta::None,
             fence.clone(),
         );
@@ -6955,7 +7014,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // position; at shell level this aggregates on the result node
         // per lazy block.
         for (param_name, arg_id) in substitutions {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 result,
                 OriginEdgeKind::SubstituteTypeParam,
                 Arc::from(vec![arg_id].into_boxed_slice()),
@@ -7543,7 +7603,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         if let Some((target, fingerprint)) = &plan.stitched {
-            emit_module_augmentation_stitched_event(
+            emit_module_augmentation_stitched_event::<C::Observe>(
+                crate::resolver_core::resolver_context::capture_targets(self.ctx),
                 target,
                 plan.contributor_roots.len() as u32,
                 *fingerprint,
@@ -8511,7 +8572,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 context_free,
             }));
         }
-        emit_module_augmentation_stitched_event(
+        emit_module_augmentation_stitched_event::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(self.ctx),
             &target,
             contributor_roots.len() as u32,
             augmenter_set.fingerprint,
@@ -11688,13 +11750,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Helper: emit the common `Instantiate` + per-arg
         // `SubstituteTypeParam` edges on a utility result node.
         let record_utility_edges = |result_id: SemanticNodeId| {
-            let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
-            inst_sources.push(base);
-            inst_sources.extend(args.iter().copied());
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 result_id,
                 OriginEdgeKind::Instantiate,
-                Arc::from(inst_sources.into_boxed_slice()),
+                std::iter::once(base).chain(args.iter().copied()).collect(),
                 OriginMeta::None,
                 fence.clone(),
             );
@@ -11702,15 +11762,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // Use the utility's declared type-parameter name when
                 // known; fall back to a positional label only for
                 // unknown utilities (which return Opaque anyway).
-                let param_name: Arc<str> = param_names
-                    .get(idx)
-                    .map(|n| Arc::<str>::from(*n))
-                    .unwrap_or_else(|| Arc::<str>::from(format!("T{idx}")));
-                graph.record_origin_edge(
+                crate::semantic_query_memo::record_origin_edge!(
+                    graph,
                     result_id,
                     OriginEdgeKind::SubstituteTypeParam,
-                    Arc::from(vec![*arg_id].into_boxed_slice()),
-                    OriginMeta::SubstitutedParam(verter_type_expr::OwnedStr::from(param_name)),
+                    Arc::from([*arg_id]),
+                    OriginMeta::SubstitutedParam(verter_type_expr::OwnedStr::from(
+                        param_names
+                            .get(idx)
+                            .map(|n| Arc::<str>::from(*n))
+                            .unwrap_or_else(|| Arc::<str>::from(format!("T{idx}"))),
+                    )),
                     fence.clone(),
                 );
             }
@@ -12024,7 +12086,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             "NoInfer" if args.len() == 1 => {
                 let source = args[0];
                 let result = graph.intern_node(SemanticNodeData::Alias(source));
-                graph.record_origin_edge(
+                crate::semantic_query_memo::record_origin_edge!(
+                    graph,
                     result,
                     OriginEdgeKind::AliasResolve,
                     Arc::from(vec![source].into_boxed_slice()),
@@ -12172,7 +12235,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // accessor maps as the property it is.
                 let picked = crate::semantic_query::members_with_accessors_as_properties(
                     picked,
-                    self.graph(),
+                    &self.graph(),
                     |signature| self.materialize_returned_callable(signature),
                 );
                 let result_surface = SurfaceView::from_members(picked, None);
@@ -12320,7 +12383,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let entries = match crate::semantic_query::accessor_property_slots(
                     &kept_members,
-                    self.graph(),
+                    &self.graph(),
                     |signature| self.materialize_returned_callable(signature),
                 ) {
                     Some(slots) => {
@@ -14403,7 +14466,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (start_base, start_index) = if path.len() < 2 {
             (base, 0usize)
         } else {
-            find_longest_warm_prefix(self.graph(), self.ctx, base, path, |receipt| {
+            find_longest_warm_prefix(self.graph().store(), self.ctx, base, path, |receipt| {
                 self.admits_served(receipt)
             })
             .unwrap_or((base, 0))
@@ -14530,7 +14593,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // can recover the entry path without rebuilding it from per-hop
         // edges.
         if result != base {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 result,
                 OriginEdgeKind::ProjectPath,
                 Arc::from(vec![base].into_boxed_slice()),
@@ -15254,7 +15318,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             member_literals.push((node, key));
         }
         for (lit_id, key) in &member_literals {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 *lit_id,
                 OriginEdgeKind::ProjectMember,
                 Arc::from(vec![base].into_boxed_slice()),
@@ -16413,7 +16478,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // edge so origin-graph consumers still see the structural
             // dependency; per-member edges only emit on the
             // publication path below.
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -16449,7 +16515,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source,
                 mapper: mapper.clone(),
             });
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -16686,7 +16753,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source,
                 mapper: mapper.clone(),
             });
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -16821,7 +16889,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let value_reads_modifiers_member = modifiers_member_index.is_some()
             && mapper.modifiers_type.is_some_and(|modifiers| {
                 crate::semantic_query::MapperKind::classify_value_expr(
-                    graph,
+                    graph.store(),
                     mapper.value_expr,
                     modifiers,
                     mapper.parameter_node,
@@ -17191,7 +17259,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source,
                 mapper: mapper.clone(),
             });
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -17229,7 +17298,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         //    - Normalize: result ← [source, key_space, value_expr,
         //      name_remap?] (the full contribution set).
         //    - ProjectMember per produced member.
-        graph.record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            graph,
             node,
             OriginEdgeKind::Normalize,
             Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -17237,7 +17307,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             fence.clone(),
         );
         for (value_id, key) in project_member_edges {
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 value_id,
                 OriginEdgeKind::ProjectMember,
                 Arc::from(vec![source, mapper.key_space].into_boxed_slice()),
@@ -17314,7 +17385,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // mapped-member materialization cache would key on. The
         // classifier records the tuple in the per-request observed
         // set and bumps the matching unique/repeated counter pair.
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
             ctx.classify_mapped_member_materialization(
                 crate::request_context::MappedMemberIdentity {
                     parameter_node: mapper.parameter_node.0,
@@ -17324,7 +17395,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     variant: 0,
                 },
             );
-        }
+        });
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
         let resolved = self
@@ -17420,7 +17491,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().record_mapped_per_k_materialization();
         // Instrumentation — selected-key variant.
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
             ctx.classify_mapped_member_materialization(
                 crate::request_context::MappedMemberIdentity {
                     parameter_node: mapper.parameter_node.0,
@@ -17430,7 +17501,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     variant: 1,
                 },
             );
-        }
+        });
         self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg)
     }
 
@@ -18259,7 +18330,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let node = composite.node;
         let fence = self.project_generation_signature();
         if members.len() > 1 {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::clone(members),
@@ -20525,7 +20597,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // An enum member interpolates as its value; a member whose
             // value is not a constant is no literal and spells any string.
             Some(SemanticNodeData::EnumLiteral(literal)) => {
-                if super::canonical_algebra::enum_literal_is_unit(graph, literal) {
+                if super::canonical_algebra::enum_literal_is_unit(graph.store(), literal) {
                     let base = literal.base;
                     drop(data);
                     // The member is its own constituent, whatever its value.
@@ -20838,7 +20910,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     QueryResult::Value(type_args[0])
                 } else {
                     let read = self.execute_read(SemanticQueryKey::reduce_intersection_operands(
-                        self.graph(),
+                        self.graph().store(),
                         Arc::clone(type_args),
                     ));
                     crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
@@ -21042,7 +21114,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 match self
                     .execute_read(
                         crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
-                            self.graph(),
+                            self.graph().store(),
                             std::sync::Arc::from(members.to_vec().into_boxed_slice()),
                         ),
                     )
@@ -21336,7 +21408,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         derived
             && (is_union
                 || !rebuilt.iter().any(|&arm| {
-                    super::walk::value_may_contribute_call_signatures(self.graph(), arm)
+                    super::walk::value_may_contribute_call_signatures(self.graph().store(), arm)
                 }))
     }
 }

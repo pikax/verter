@@ -24,6 +24,7 @@ import {
   emptyOperationFailures,
   nodeGlobalsPresent,
   canonicalizeTypeInfo,
+  queryCaptureFailures,
 } from "../packages/browser-host/src/index.js";
 import { pnpmCommand, resolvePnpm } from "./gate-internals.mjs";
 
@@ -32,7 +33,12 @@ const defaultRepoRoot = path.dirname(scriptDir);
 
 export const ENGINES = ["chromium", "firefox", "webkit"];
 export const FORBIDDEN_NATIVE_CRATES = ["tokio", "rayon", "mio", "nix", "tempfile", "socket2"];
-export const REQUIRED_ARTIFACT_EXPORTS = ["default", "initSync", "VerterHost"];
+export const REQUIRED_ARTIFACT_EXPORTS = [
+  "default",
+  "initSync",
+  "VerterHost",
+  "captureAvailability",
+];
 export const REQUIRED_HOST_METHODS = [
   "upsert",
   "compileRequest",
@@ -163,6 +169,23 @@ export function compareIdentities(native, browser) {
   return failures;
 }
 
+/**
+ * The native probe and the WASM module are built from the same tree with the
+ * same features, so the query's stored-record outcome must agree: a
+ * divergence means one side captures audit records and the other does not.
+ */
+export function compareCapture(native, browser) {
+  const nativeRow = native?.operations?.query?.[0];
+  const browserRow = browser?.operations?.query?.[0];
+  if (nativeRow == null || browserRow == null) return [];
+  if (nativeRow.hasRecord !== browserRow.hasRecord) {
+    return [
+      `native/browser audit capture diverges: native hasRecord=${String(nativeRow.hasRecord)} browser hasRecord=${String(browserRow.hasRecord)} (capture ${String(browserRow.capture)})`,
+    ];
+  }
+  return [];
+}
+
 export function evaluateBrowserResult(engine, result) {
   const failures = [];
   if (!result) {
@@ -181,6 +204,7 @@ export function evaluateBrowserResult(engine, result) {
   failures.push(
     ...emptyOperationFailures(result.operations).map((reason) => `${engine}: ${reason}`),
   );
+  failures.push(...queryCaptureFailures(result.operations).map((reason) => `${engine}: ${reason}`));
   return failures;
 }
 
@@ -472,6 +496,9 @@ export async function runGate({
     }
     failures.push(...evaluateBrowserResult(engine, result));
     failures.push(...compareIdentities(parsed.receipt, result));
+    failures.push(
+      ...compareCapture(parsed.receipt, result).map((reason) => `${engine}: ${reason}`),
+    );
   }
 
   const metrics = {
@@ -482,6 +509,7 @@ export async function runGate({
     const result = browserRun.results?.[engine];
     metrics.engines[engine] = {
       startupMs: result?.startupMs ?? null,
+      captureAvailability: result?.operations?.query?.[0]?.capture ?? null,
       memory: result?.memory ?? { retainedBytes: null, unavailable: "engine did not report" },
     };
   }

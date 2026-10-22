@@ -3,8 +3,13 @@
 //!
 //! This crate holds DTOs for the audit record envelope, the
 //! per-`RequestKind` payload data structs, the [`AuditObserver`]
-//! trait that lower crates emit through, the [`current_observer`] TLS
-//! accessor, and a [`NoOpObserver`] for filtered requests.
+//! trait that lower crates emit through with [`observe!`], and the
+//! capture-availability vocabulary in [`observe`].
+//!
+//! Capture is optional state. Without the `semantic-observe` feature the
+//! observer slot, its install guards and every producer emission compile
+//! away; the DTOs stay, so a default build can still describe a record as
+//! [`AuditCaptureState::Unavailable`].
 //!
 //! The substrate is intentionally a leaf — it must NOT depend on any
 //! other `verter_*` crate apart from [`verter_span`]. Higher layers
@@ -16,7 +21,7 @@
 //!
 //! - [`attribution`] — measurement-only work attribution: the closed
 //!   [`attribution::WorkSite`] schema plus, behind the non-default
-//!   `attribution` feature, the counter table and its reader. Nothing
+//!   `semantic-observe` feature, the counter table and its reader. Nothing
 //!   in a default build can read a counter, so it cannot become a
 //!   semantic authority.
 //! - [`record`] — top-level [`record::RequestAuditRecord`] envelope plus
@@ -42,9 +47,11 @@
 //! - [`structured_event`] — [`structured_event::StructuredAuditEvent`]
 //!   enum.
 //! - [`observer`] — [`observer::AuditObserver`] trait,
-//!   [`observer::AuditEvent`], [`observer::current_observer`] TLS
-//!   accessor, [`observer::install_noop_observer`] guard.
-//! - [`noop`] — [`noop::NoOpObserver`] trivial implementation.
+//!   [`observer::AuditEvent`] and, with `semantic-observe`, the
+//!   observer TLS slot and its install/clear guards.
+//! - [`observe`] — compile-time capture availability, the execution
+//!   mode a root entry selects, and zero-size counters for optional
+//!   per-request state.
 //! - [`config`] — [`config::AuditConfig`] + consumer filter.
 //! - [`payloads`] — per-`RequestKind` payload data structs.
 //! - [`scheduler`] — [`scheduler::SchedulerAudit`] +
@@ -61,7 +68,6 @@ pub mod files;
 pub mod footprint;
 pub mod instant;
 pub mod memory;
-pub mod noop;
 pub mod observe;
 pub mod observer;
 pub mod origin_graph;
@@ -90,8 +96,10 @@ pub use footprint::{
     TruncationCounters, VfsReadRecord,
 };
 pub use memory::{current_process_rss, RequestMemoryAudit};
-pub use noop::{install_noop_observer, NoOpObserver, NoOpObserverGuard};
-pub use observer::{clear_observer, current_observer, AuditEvent, AuditObserver};
+pub use observe::{CaptureAvailability, Captured, ObserveExec, ObserveMode, Uncaptured};
+#[cfg(feature = "semantic-observe")]
+pub use observer::{clear_observer, current_observer, install_observer, ObserverGuard};
+pub use observer::{AuditEvent, AuditObserver};
 pub use origin_graph::{
     AuditPropertyKey, AuditTopLevelOwnerKind, AuditUniqueSymbolIdentity, ConditionalBranch,
     DerivationEdgeRaw, DerivationEdgeRecord, DerivationSubgraph, DispatchKeyKind, EdgeId,

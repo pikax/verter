@@ -11,9 +11,12 @@
  * not lower structured `ImportSpec` payloads correctly.
  */
 
+import { captureAvailability } from "@verter/native";
 import { describe, expect, it } from "vitest";
 
 import { TypeInfoSession } from "../src/index.js";
+
+const captured = captureAvailability() === "Available";
 
 describe("typeinfo evaluate with structured ImportSpec", () => {
   it("named-import with localAlias + typeOnly resolves the renamed symbol", () => {
@@ -90,7 +93,9 @@ describe("typeinfo evaluate with structured ImportSpec", () => {
         },
       ],
     });
-    expect(result.auditRecord).toBeDefined();
+    // The audited request completed: a capturing binding carries its
+    // record, a default binding carries none.
+    expect(result.auditRecord !== undefined).toBe(captured);
     session.host.close();
   });
 });

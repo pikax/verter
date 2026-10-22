@@ -7,7 +7,9 @@
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
-use verter_audit::{payloads::tags::BundlerKindTag, RequestAuditRecord, RequestKind, WorkspaceOp};
+#[cfg(feature = "semantic-observe")]
+use verter_audit::{payloads::tags::BundlerKindTag, RequestKind};
+use verter_audit::{RequestAuditRecord, WorkspaceOp};
 use verter_session::CompileTarget;
 
 /// Workspace op argument decoded from a JSON string. Mirrors the
@@ -35,6 +37,7 @@ impl From<WorkspaceOpArgWasm> for WorkspaceOp {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Filter for `getAuditRecords`. `serde_wasm_bindgen` decodes the
 /// JS object into this shape.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -45,6 +48,7 @@ pub(crate) struct AuditRecordFilterWasm {
     pub limit: Option<u32>,
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Args for `getBundlerBatchSummary`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,10 +75,12 @@ pub(crate) fn stored_audit_record_to_json_string(
     match record.capture_state {
         verter_audit::AuditCaptureState::ActiveStored => audit_record_to_json_string(record),
         verter_audit::AuditCaptureState::FilteredNoop
-        | verter_audit::AuditCaptureState::AuditDisabled => Ok(JsValue::NULL),
+        | verter_audit::AuditCaptureState::AuditDisabled
+        | verter_audit::AuditCaptureState::Unavailable => Ok(JsValue::NULL),
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Convert a list of `RequestAuditRecord`s into a JSON string `JsValue`.
 pub(crate) fn audit_record_list_to_json_string(
     records: &[RequestAuditRecord],
@@ -100,6 +106,7 @@ pub(crate) fn parse_compile_target_wasm(name: &str) -> Result<CompileTarget, JsV
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Match the textual `kind` filter against a `RequestKind`.
 ///
 /// Delegates to [`RequestKind::matches_filter`] so the WASM surface
@@ -110,6 +117,7 @@ pub(crate) fn kind_matches_wasm(filter: &str, kind: &RequestKind) -> bool {
     kind.matches_filter(filter)
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Map a textual bundler-kind tag.
 pub(crate) fn parse_bundler_kind_wasm(name: Option<&str>) -> BundlerKindTag {
     match name.unwrap_or("Vite") {
@@ -122,9 +130,47 @@ pub(crate) fn parse_bundler_kind_wasm(name: Option<&str>) -> BundlerKindTag {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Parse a decimal-string request id (matching the JSON
 /// serialization on the record) into a `u64`.
 pub(crate) fn parse_request_id_str_wasm(s: &str) -> Result<u64, JsValue> {
     s.parse::<u64>()
         .map_err(|e| JsValue::from_str(&format!("expected decimal request id, got '{s}': {e}")))
+}
+
+/// Message every audit method reports when this module was built without
+/// `semantic-observe`: capture is unavailable, not empty.
+pub(crate) const CAPTURE_UNAVAILABLE: &str =
+    "audit capture is unavailable: this module was built without the semantic-observe feature";
+
+/// The error an audit method returns when capture is compiled out.
+pub(crate) fn capture_unavailable_error() -> JsValue {
+    JsValue::from_str(CAPTURE_UNAVAILABLE)
+}
+
+/// Whether this module can capture audit records: `"Available"` when it
+/// was built with `semantic-observe`, `"Unavailable"` otherwise. Every
+/// audit method of an unavailable module reports that capture is
+/// unavailable instead of returning empty or zero records.
+#[wasm_bindgen(js_name = "captureAvailability")]
+pub fn capture_availability() -> String {
+    match verter_session::capture::availability() {
+        verter_audit::CaptureAvailability::Available => "Available",
+        verter_audit::CaptureAvailability::Unavailable => "Unavailable",
+    }
+    .to_string()
+}
+
+#[cfg(test)]
+mod capture_availability_tests {
+    #[test]
+    fn availability_names_the_build() {
+        let expected = if cfg!(feature = "semantic-observe") {
+            "Available"
+        } else {
+            "Unavailable"
+        };
+        assert_eq!(super::capture_availability(), expected);
+        assert!(super::CAPTURE_UNAVAILABLE.contains("built without the semantic-observe feature"));
+    }
 }

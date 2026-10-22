@@ -277,7 +277,12 @@ pub(super) fn with_probe_outcome_on_host<R>(
         .unwrap_or_else(|| panic!("the probe `{probe}` produced no flow-return result"));
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     // A read of a global the ambient library declares is scoped by the
@@ -695,7 +700,12 @@ pub(super) fn return_failures_in_one_host(
     }
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _demand_scope = project.ambient_lib.map(|_| {
         super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(PROBE_FILE))
@@ -760,8 +770,10 @@ pub(super) fn mismatches_in_one_host_observing(
                 .unwrap_or_else(|| panic!("the probe `{probe}` produced no flow-return result"));
             let store_view = host.resolver_store_view_read().into_owned_view();
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+            let host_ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::new(&host, &store_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let _builder = dispatch.enter_construction_scope();
             let node = dispatch

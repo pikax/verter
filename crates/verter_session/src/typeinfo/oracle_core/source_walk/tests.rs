@@ -43,7 +43,11 @@ fn walk(host: &VerterHost, locator: &SourceLocator) -> SourceWalkResult {
     // production `into_owned_view` allowlist guard exempts `*/tests.rs`).
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(host, &store_view, overlay);
+    let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        host,
+        &store_view,
+        overlay,
+    );
     resolve_source_declarations(&ctx, locator)
 }
 

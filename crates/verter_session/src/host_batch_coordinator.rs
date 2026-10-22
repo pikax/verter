@@ -636,6 +636,8 @@ mod tests {
     /// forgot the accounting (or ran it per item) would record `0` /
     /// `items.len()` instead of `1`; a coordinator that accounted on the
     /// empty path would record `1` instead of `0`.
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn run_batch_accounts_submission_once_per_nonempty_batch() {

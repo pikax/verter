@@ -66,7 +66,10 @@ pub(super) fn empty_sfc_script_block(
 /// SFC source may contain content between root-level blocks (e.g., HTML comments,
 /// whitespace). This content is not valid JS and must be blanked out.
 pub(crate) fn remove_inter_block_gaps(
-    code_transform: &mut crate::code_transform::CodeTransform,
+    code_transform: &mut crate::code_transform::CodeTransform<
+        '_,
+        impl verter_audit::observe::ObserveExec,
+    >,
     input_len: u32,
     ranges: &[(u32, u32)],
 ) {

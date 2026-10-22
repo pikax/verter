@@ -3873,30 +3873,37 @@ impl NapiVerterHost {
     /// the entry: a second call after a single insert returns null.
     #[napi(js_name = "getLastAuditRecord")]
     pub fn get_last_audit_record(&self) -> Result<Option<Buffer>> {
-        use verter_audit::batch::AuditRecordSource;
-        let host = std::sync::Arc::clone(&self.inner);
-        catch_panic(std::panic::AssertUnwindSafe(move || {
-            let store = host.host_audit_runtime().audit_records_store();
-            let mut latest_id: Option<u64> = None;
-            let mut latest_at: Option<std::time::Instant> = None;
-            store.for_each_record(&mut |inserted_at, record| {
-                let is_newer = match latest_at {
-                    None => true,
-                    Some(prev) => inserted_at > prev,
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            Err(audit::capture_unavailable_error())
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            use verter_audit::batch::AuditRecordSource;
+            let host = std::sync::Arc::clone(&self.inner);
+            catch_panic(std::panic::AssertUnwindSafe(move || {
+                let store = host.host_audit_runtime().audit_records_store();
+                let mut latest_id: Option<u64> = None;
+                let mut latest_at: Option<std::time::Instant> = None;
+                store.for_each_record(&mut |inserted_at, record| {
+                    let is_newer = match latest_at {
+                        None => true,
+                        Some(prev) => inserted_at > prev,
+                    };
+                    if is_newer {
+                        latest_at = Some(inserted_at);
+                        latest_id = Some(record.request_id);
+                    }
+                });
+                let Some(id) = latest_id else {
+                    return Ok(None);
                 };
-                if is_newer {
-                    latest_at = Some(inserted_at);
-                    latest_id = Some(record.request_id);
+                match store.take(id) {
+                    Some(rec) => audit::encode_record(&rec).map(Some),
+                    None => Ok(None),
                 }
-            });
-            let Some(id) = latest_id else {
-                return Ok(None);
-            };
-            match store.take(id) {
-                Some(rec) => audit::encode_record(&rec).map(Some),
-                None => Ok(None),
-            }
-        }))?
+            }))?
+        }
     }
 
     /// Non-destructive filtered query over the host's audit store.
@@ -3906,36 +3913,44 @@ impl NapiVerterHost {
         &self,
         filter: Option<audit::NapiAuditRecordFilter>,
     ) -> Result<Buffer> {
-        use verter_audit::batch::AuditRecordSource;
-        let filter = filter.unwrap_or_default();
-        let kind_filter = filter.kind;
-        let since = match filter.since_request_id.as_deref() {
-            Some(s) => Some(audit::parse_request_id_str(s)?),
-            None => None,
-        };
-        let limit = filter.limit.map(|n| n as usize);
-        let host = std::sync::Arc::clone(&self.inner);
-        catch_panic(std::panic::AssertUnwindSafe(move || {
-            let store = host.host_audit_runtime().audit_records_store();
-            let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
-            store.for_each_record(&mut |_inserted_at, record| {
-                if let Some(filter_kind) = kind_filter.as_deref() {
-                    if !audit::kind_matches(filter_kind, &record.kind) {
-                        return;
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (filter,);
+            Err(audit::capture_unavailable_error())
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            use verter_audit::batch::AuditRecordSource;
+            let filter = filter.unwrap_or_default();
+            let kind_filter = filter.kind;
+            let since = match filter.since_request_id.as_deref() {
+                Some(s) => Some(audit::parse_request_id_str(s)?),
+                None => None,
+            };
+            let limit = filter.limit.map(|n| n as usize);
+            let host = std::sync::Arc::clone(&self.inner);
+            catch_panic(std::panic::AssertUnwindSafe(move || {
+                let store = host.host_audit_runtime().audit_records_store();
+                let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
+                store.for_each_record(&mut |_inserted_at, record| {
+                    if let Some(filter_kind) = kind_filter.as_deref() {
+                        if !audit::kind_matches(filter_kind, &record.kind) {
+                            return;
+                        }
                     }
-                }
-                if let Some(since_id) = since {
-                    if record.request_id <= since_id {
-                        return;
+                    if let Some(since_id) = since {
+                        if record.request_id <= since_id {
+                            return;
+                        }
                     }
+                    collected.push(record.clone());
+                });
+                if let Some(n) = limit {
+                    collected.truncate(n);
                 }
-                collected.push(record.clone());
-            });
-            if let Some(n) = limit {
-                collected.truncate(n);
-            }
-            audit::encode_record_list(&collected)
-        }))?
+                audit::encode_record_list(&collected)
+            }))?
+        }
     }
 
     /// Run the bundler-batch aggregator over the host's audit store
@@ -3947,49 +3962,57 @@ impl NapiVerterHost {
         &self,
         args: Option<audit::NapiBundlerBatchSummaryArgs>,
     ) -> Result<Buffer> {
-        use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator};
-        let args = args.unwrap_or_default();
-        let kind = audit::parse_bundler_kind(args.kind.as_deref());
-        let since_id = match args.since_request_id.as_deref() {
-            Some(s) => Some(audit::parse_request_id_str(s)?),
-            None => None,
-        };
-        let host = std::sync::Arc::clone(&self.inner);
-        catch_panic(std::panic::AssertUnwindSafe(move || {
-            let store = host.host_audit_runtime().audit_records_store();
-            // The aggregator keys its `since` filter by `Instant`,
-            // but we accept a request-id watermark from JS callers
-            // (instants do not survive a JSON round-trip). Walk the
-            // store once to find the most-recent `inserted_at` whose
-            // request_id is `<= since_id`; an unmatched watermark
-            // (id newer than anything in the store) yields `None` —
-            // equivalent to "no records pass the filter".
-            let since_instant: Option<std::time::Instant> = match since_id {
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (args,);
+            Err(audit::capture_unavailable_error())
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator};
+            let args = args.unwrap_or_default();
+            let kind = audit::parse_bundler_kind(args.kind.as_deref());
+            let since_id = match args.since_request_id.as_deref() {
+                Some(s) => Some(audit::parse_request_id_str(s)?),
                 None => None,
-                Some(target_id) => {
-                    let mut best: Option<std::time::Instant> = None;
-                    store.for_each_record(&mut |inserted_at, record| {
-                        if record.request_id <= target_id {
-                            best = match best {
-                                None => Some(inserted_at),
-                                Some(prev) if inserted_at > prev => Some(inserted_at),
-                                Some(prev) => Some(prev),
-                            };
-                        }
-                    });
-                    best
-                }
             };
-            let aggregator = BatchAuditAggregator::new(store.as_ref(), kind);
-            let payload = aggregator.summarize(since_instant);
-            let bytes = serde_json::to_vec(&payload).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("bundler batch summary serialization error: {e}"),
-                )
-            })?;
-            Ok(Buffer::from(bytes))
-        }))?
+            let host = std::sync::Arc::clone(&self.inner);
+            catch_panic(std::panic::AssertUnwindSafe(move || {
+                let store = host.host_audit_runtime().audit_records_store();
+                // The aggregator keys its `since` filter by `Instant`,
+                // but we accept a request-id watermark from JS callers
+                // (instants do not survive a JSON round-trip). Walk the
+                // store once to find the most-recent `inserted_at` whose
+                // request_id is `<= since_id`; an unmatched watermark
+                // (id newer than anything in the store) yields `None` —
+                // equivalent to "no records pass the filter".
+                let since_instant: Option<std::time::Instant> = match since_id {
+                    None => None,
+                    Some(target_id) => {
+                        let mut best: Option<std::time::Instant> = None;
+                        store.for_each_record(&mut |inserted_at, record| {
+                            if record.request_id <= target_id {
+                                best = match best {
+                                    None => Some(inserted_at),
+                                    Some(prev) if inserted_at > prev => Some(inserted_at),
+                                    Some(prev) => Some(prev),
+                                };
+                            }
+                        });
+                        best
+                    }
+                };
+                let aggregator = BatchAuditAggregator::new(store.as_ref(), kind);
+                let payload = aggregator.summarize(since_instant);
+                let bytes = serde_json::to_vec(&payload).map_err(|e| {
+                    Error::new(
+                        Status::GenericFailure,
+                        format!("bundler batch summary serialization error: {e}"),
+                    )
+                })?;
+                Ok(Buffer::from(bytes))
+            }))?
+        }
     }
 
     // =========================================================================

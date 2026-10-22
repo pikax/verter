@@ -10,18 +10,19 @@ description = "Workspace layer for Verter — file access, resolution, project o
 publish = false
 
 [features]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# forwards to the lower layers (including the query boundary's currency probe
+# rail) and compiles this crate's `hotpath` measurement attributes. Requested
+# only by measurement harnesses through the session; no production edge
+# enables it.
 semantic-observe = [
   "verter_audit/semantic-observe",
+  "verter_execution/semantic-observe",
   "verter_scheduler/semantic-observe",
   "verter_semantic/semantic-observe",
-  "currency_probe",
-  "hotpath",
+  "verter_session_query/semantic-observe",
+  "dep:hotpath",
 ]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
-# Measurement-only: enables the `currency_probe` wall-clock/call-count rail
-# (`src/currency_probe.rs`). Absent from `default`; requested ONLY by the
-# `verter_bench` measurement harness, never by a production edge.
-currency_probe = ["verter_session_query/currency_probe"]
 # Tests that require third-party repository checkouts beside this repo
 # (Testing-Hermeticity): excluded from the default canonical run; enable
 # explicitly with `--features external-corpus`.
@@ -65,6 +66,9 @@ verter_type_expr = { workspace = true }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 verter_parser = { path = "../verter_parser" }

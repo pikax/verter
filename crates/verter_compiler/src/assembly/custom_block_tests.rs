@@ -939,6 +939,9 @@ fn stale_cancelled_partial_and_source_mismatch_cannot_publish_or_warm() {
         .unwrap();
 }
 
+// Counts transform work through the audit observer, which exists only
+// with optional capture compiled in.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn construction_is_metadata_only_and_unknown_absent_cells_do_zero_work() {
     use std::sync::{
@@ -977,7 +980,12 @@ fn construction_is_metadata_only_and_unknown_absent_cells_do_zero_work() {
     set.attach_custom_blocks(vec![opaque]).unwrap();
     assert_eq!(observer.0.load(Ordering::SeqCst), 0);
     let allocator = oxc_allocator::Allocator::default();
-    let mut transform = crate::code_transform::CodeTransform::new("x", &allocator);
+    let mut transform =
+        crate::code_transform::CodeTransform::<verter_audit::observe::Captured>::new_in(
+            "x", &allocator,
+        );
     transform.overwrite(0, 1, "y");
+    // The transform publishes its operation tally once, when it drops.
+    drop(transform);
     assert!(observer.0.load(Ordering::SeqCst) > 0);
 }

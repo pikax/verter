@@ -28,9 +28,9 @@
 use verter_session::{CompileProfile, FileLanguage};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-use super::canary_harness::{
-    meta_hits, meta_misses, prime_compile, standalone_host, upsert, workspace_host,
-};
+#[cfg(feature = "semantic-observe")]
+use super::canary_harness::{meta_hits, meta_misses};
+use super::canary_harness::{prime_compile, standalone_host, upsert, workspace_host};
 
 /// Resolve the evaluated type of a single prop from an
 /// `ExpandedComponentTypes` snapshot by demand-materializing its
@@ -351,6 +351,8 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
 /// regression that invalidated on any upsert — or a signature that
 /// bubbled unrelated facts — would force a miss and the
 /// `meta_hits` advance assertion fails.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn unrelated_file_upsert_keeps_component_meta_warm() {
     let (workspace, host) = workspace_host(&[

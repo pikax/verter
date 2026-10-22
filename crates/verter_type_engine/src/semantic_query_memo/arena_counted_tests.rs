@@ -1,6 +1,8 @@
 use super::*;
 use crate::semantic_query::LiteralValue;
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
     use std::sync::{
@@ -124,7 +126,11 @@ fn counted_stale_child_is_refused_before_allocating_parent() {
     let id = root.id();
     drop(root);
     assert!(matches!(
-        arena.try_intern_owned(SemanticNodeData::Alias(id), NodeScopeId::Global),
+        arena.try_intern_owned::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            SemanticNodeData::Alias(id),
+            NodeScopeId::Global
+        ),
         Err(crate::semantic_query::QueryError::StaleSemanticOperand)
     ));
     assert_eq!(arena.live_len(), 0);
