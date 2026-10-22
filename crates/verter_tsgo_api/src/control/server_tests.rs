@@ -111,7 +111,10 @@ fn spawn_fake_tsgo_cfg(
                             &mut write,
                             &id,
                             serde_json::json!({
-                                "serverInfo": { "name": "faketsgo", "version": "7.0.1-rc" },
+                                "serverInfo": {
+                                    "name": "faketsgo",
+                                    "version": crate::toolchain::policy::TYPESCRIPT_PIN
+                                },
                                 "capabilities": {},
                             }),
                         )
@@ -330,7 +333,10 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
         .await
         .expect("waitInitialized timed out")
         .expect("waitInitialized");
-    assert_eq!(witness.server_info_version.as_deref(), Some("7.0.1-rc"));
+    assert_eq!(
+        witness.server_info_version.as_deref(),
+        Some(crate::toolchain::policy::TYPESCRIPT_PIN)
+    );
     assert_eq!(witness.observed_initialize_id, serde_json::json!(1));
     assert_eq!(witness.root_uri.as_deref(), Some("file:///w"));
 

@@ -480,7 +480,7 @@ fn an_absent_or_rejected_provider_earns_a_distinct_no_provider_receipt() {
 #[test]
 fn a_multi_line_reason_is_collapsed_into_one_greppable_receipt_line() {
     let reason = "no usable tsgo engine found for the `--lsp` surface.\n  - [VERTER_TSGO_BIN \
-                  override] /x/tsgo: tsgo 7.0.0-dev.20260526.1 is a nightly prerelease\n\n  \
+                  override] /x/tsgo: tsgo 7.1.0-dev.20261022.1 is a nightly prerelease\n\n  \
                   install a supported engine";
     let line = absent_provider_receipt_line("some_test_tsgo", "tsgo", false, reason);
 

@@ -1075,7 +1075,7 @@ async fn relay_reemits_api_session_request_and_parses_handle() {
 // ────────────────────────────────────────────────────────────────────────────
 // Ordering: the injected didOpen is observed on the ordered server wire
 // BEFORE the sync-barrier request (the overlay is registered before any
-// `--api` updateSnapshot could enumerate roots).
+// `--api` getCurrentLanguageServerSnapshot could enumerate roots).
 // ────────────────────────────────────────────────────────────────────────────
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2005,7 +2005,10 @@ async fn relay_captures_in_band_initialize_witness_as_handshake_passes() {
     let init_resp = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 7,
-        "result": { "serverInfo": { "name": "tsgo", "version": "7.0.1-rc" }, "capabilities": {} },
+        "result": {
+            "serverInfo": { "name": "tsgo", "version": crate::toolchain::policy::TYPESCRIPT_PIN },
+            "capabilities": {}
+        },
     });
     write_frame(&mut server_write, &init_resp).await;
     let forwarded_resp = read_frame(&mut editor_read).await;
@@ -2020,7 +2023,7 @@ async fn relay_captures_in_band_initialize_witness_as_handshake_passes() {
         .expect("the handshake completed, so a witness must be present");
     assert_eq!(
         witness.server_info_version.as_deref(),
-        Some("7.0.1-rc"),
+        Some(crate::toolchain::policy::TYPESCRIPT_PIN),
         "the in-band serverInfo.version is captured"
     );
     assert_eq!(
@@ -2083,7 +2086,7 @@ async fn relay_witness_carries_the_servers_semantic_token_legend() {
         "jsonrpc": "2.0",
         "id": 3,
         "result": {
-            "serverInfo": { "name": "tsgo", "version": "7.0.2" },
+            "serverInfo": { "name": "tsgo", "version": crate::toolchain::policy::TYPESCRIPT_PIN },
             "capabilities": {
                 "semanticTokensProvider": { "legend": legend, "range": true, "full": true }
             },

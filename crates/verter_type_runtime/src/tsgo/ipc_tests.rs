@@ -5523,8 +5523,8 @@ async fn tsgo_sends_no_workspace_configuration_notification() {
 // readonly=2, static=3, deprecated=4, abstract=5, async=6, modification=7,
 // documentation=8, defaultLibrary=9, local=10.
 //
-// tsgo emits tokens in ITS OWN server-advertised legend (observed live on the
-// pinned 7.0.2: interface=3, variable=8, function=13 — a DIFFERENT order), so
+// tsgo emits tokens in ITS OWN server-advertised legend (observed live on
+// 7.1.0-beta: interface=3, variable=8, function=13 — a DIFFERENT order), so
 // the provider must retain the `initialize`-result legend and remap BOTH the
 // type index and the modifier bitset by NAME before returning. An unmapped
 // token type or modifier bit drops the token (fail closed — absent beats
@@ -5779,7 +5779,7 @@ async fn non_owning_transport_semantic_tokens_fail_closed_until_witness_legend_a
 
 /// The tsgo `initialize` client capabilities must advertise
 /// `textDocument.semanticTokens` — the engine gates the ENTIRE feature on it
-/// (verified live on the pinned 7.0.2: without the capability the initialize
+/// (verified live on 7.1.0-beta: without the capability the initialize
 /// result advertises an EMPTY legend and `semanticTokens/full` returns zero
 /// data for every file). The advertised vocabulary is Verter's PUBLISHED
 /// legend, so the server's negotiated echo can only contain names the shared

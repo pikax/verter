@@ -1517,9 +1517,9 @@ async fn read_loop(
                                     .and_then(|item| item.get("section"))
                                     .and_then(|s| s.as_str())
                                     .unwrap_or("");
-                                // TSGO 7.0.2 requests the sections `js/ts`,
+                                // The engine requests the sections `js/ts`,
                                 // `typescript`, `javascript`, `editor` (verified
-                                // live) and reads inlay-hint preferences NESTED
+                                // live on 7.1.0-beta) and reads inlay-hint preferences NESTED
                                 // under `typescript.inlayHints` /
                                 // `javascript.inlayHints`. TypeScript inlay
                                 // hints are all preference-gated (off by
@@ -3268,7 +3268,7 @@ fn build_client_capabilities() -> serde_json::Value {
             },
             // `get_semantic_tokens` pulls `textDocument/semanticTokens/full`.
             // The engine gates the WHOLE feature on this capability (verified
-            // live on the pinned 7.0.2: without it the initialize result
+            // live on 7.1.0-beta: without it the initialize result
             // advertises an EMPTY legend and every request returns zero data).
             // The advertised names are Verter's PUBLISHED legend — the server
             // intersects them with its own vocabulary and echoes the negotiated
