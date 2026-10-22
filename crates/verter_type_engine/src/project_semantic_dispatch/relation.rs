@@ -1346,6 +1346,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             let mut txn = self.dispatch_txn.borrow_mut();
             if let Some(idx) = txn.reentry().find(&identity) {
+                let pair = [key.source, key.target];
                 if let Some(session) = txn.active_session_mut().filter(|session| {
                     session.context_key().verdict_use
                         == crate::semantic_query::InferenceVerdictUse::CandidatesOnly
@@ -1353,7 +1354,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // inferFromTypes records circularity without depending on
                     // an assignability hypothesis. An undecided fixed-member
                     // trial must not poison its enclosing proof component.
-                    session.inference_circularity = true;
+                    session.inference_circularity |=
+                        self.pair_mentions_session_variable(session, pair);
                     return Some(RelationStep::Assignable {
                         bindings: Arc::from([]),
                     });
@@ -1361,7 +1363,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let evidence = txn.reentry().assumption_evidence(idx);
                 txn.obligations.record_assumption(idx);
                 if let Some(session) = txn.active_session_mut() {
-                    session.inference_circularity = true;
+                    session.inference_circularity |=
+                        self.pair_mentions_session_variable(session, pair);
                 }
                 return Some(RelationStep::Assumed(evidence));
             }
@@ -1711,7 +1714,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if expanding == 3 {
             if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
-                session.inference_circularity = true;
+                session.inference_circularity |=
+                    self.pair_mentions_session_variable(session, carriers);
             }
             self.note_relation_context_dependent();
             self.fold_into_top_build_local_taint_with(
@@ -9985,6 +9989,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         Some(assignable(bindings))
+    }
+
+    /// Whether either side of `pair` mentions a variable `session` infers.
+    /// The checker's inference walk stops at a target that could contain no
+    /// type variable (`couldContainTypeVariables`), so a cycle the relation
+    /// meets beneath a pair naming none of the session's variables — a
+    /// generic method instantiated in another's context, its own type
+    /// parameters one level deeper each time — is no inference circularity.
+    /// A sealed carrier, whose parts are not enumerable here, counts as
+    /// mentioning one.
+    fn pair_mentions_session_variable(
+        &self,
+        session: &InferenceSession,
+        pair: [SemanticNodeId; 2],
+    ) -> bool {
+        let graph = self.graph();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut stack = pair.to_vec();
+        while let Some(node) = stack.pop() {
+            if session.infers(node) {
+                return true;
+            }
+            if !seen.insert(node) {
+                continue;
+            }
+            if let Some(data) = graph.node_data(node) {
+                if matches!(
+                    data.for_each_child(|child| stack.push(child)),
+                    crate::semantic_query::ChildWalk::Sealed
+                ) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// A fixed union member matches only when the shared inference walk
