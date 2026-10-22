@@ -8,7 +8,9 @@ import type { NativeTypeExpr, NativeEvaluatedField } from "./type-expr-bridge.js
 import {
   DecodedTypeGraph,
   createGraphTypeExprRef,
+  LITERAL_NUMBER,
   LITERAL_STRING,
+  MEMBER_PROPERTY,
   NODE_ARRAY,
   NODE_CONDITIONAL,
   NODE_FUNCTION,
@@ -16,6 +18,7 @@ import {
   NODE_KEY_OF,
   NODE_LITERAL,
   NODE_MAPPED,
+  NODE_OBJECT,
   NODE_PRIMITIVE,
   NODE_REF,
   NODE_UNION,
@@ -429,6 +432,33 @@ describe("typeExprToDescriptor", () => {
       ),
     ).toEqual({ kind: "literal", value: "red" });
 
+    // A numeric index reads the member keyed by that number.
+    expect(
+      typeExprToDescriptor(
+        {
+          kind: "indexedAccess",
+          object: { kind: "ref", name: "Keyed", typeArguments: [] },
+          index: { kind: "literal", literalKind: "number", value: 7 },
+        },
+        new Map([["Keyed", keyed]]),
+      ),
+    ).toEqual({
+      kind: "union",
+      types: [
+        { kind: "primitive", name: "number" },
+        { kind: "primitive", name: "undefined" },
+      ],
+    });
+
+    // `keyof` keeps a number key a number literal, as TypeScript does.
+    expect(typeExprToDescriptor({ kind: "keyOf", operand: keyed })).toEqual({
+      kind: "union",
+      types: [
+        { kind: "literal", value: "color" },
+        { kind: "literal", value: 7 },
+      ],
+    });
+
     expect(
       typeExprToDescriptor({
         kind: "mapped",
@@ -440,8 +470,78 @@ describe("typeExprToDescriptor", () => {
       kind: "object",
       properties: [
         { name: "color", type: { kind: "literal", value: "color" }, optional: false },
-        { name: "7", type: { kind: "literal", value: "7" }, optional: true },
+        { name: "7", type: { kind: "literal", value: 7 }, optional: true },
       ],
+    });
+
+    // A mapped value indexing the source by its parameter reads the number key.
+    expect(
+      typeExprToDescriptor(
+        {
+          kind: "mapped",
+          parameter: "K",
+          source: { kind: "union", types: [{ kind: "literal", literalKind: "number", value: 7 }] },
+          value: {
+            kind: "indexedAccess",
+            object: { kind: "ref", name: "Keyed", typeArguments: [] },
+            index: { kind: "typeParameter", name: "K" },
+          },
+        },
+        new Map([["Keyed", keyed]]),
+      ),
+    ).toEqual({
+      kind: "object",
+      properties: [
+        {
+          name: "7",
+          type: {
+            kind: "union",
+            types: [
+              { kind: "primitive", name: "number" },
+              { kind: "primitive", name: "undefined" },
+            ],
+          },
+          optional: false,
+        },
+      ],
+    });
+  });
+
+  it("indexes and enumerates a graph member by its number key", () => {
+    const graph = new DecodedTypeGraph(
+      ["K"],
+      [
+        { kind: NODE_PRIMITIVE, primitive: 1 }, // 1: string
+        {
+          kind: NODE_OBJECT,
+          members: [
+            {
+              kind: MEMBER_PROPERTY,
+              key: { kind: "number", value: 7 },
+              typeNodeId: 1,
+              optional: false,
+              readonly: false,
+              keyNameId: 0,
+              keyTypeNodeId: 0,
+              valueTypeNodeId: 0,
+              functionNodeId: 0,
+              methodKind: 0,
+              hasImplementationBody: false,
+            },
+          ],
+        }, // 2: { 7: string }
+        { kind: NODE_LITERAL, literalKind: LITERAL_NUMBER, numberValue: 7 }, // 3: 7
+        { kind: NODE_INDEXED_ACCESS, objectNodeId: 2, indexNodeId: 3 }, // 4: { 7: string }[7]
+        { kind: NODE_KEY_OF, operandNodeId: 2 }, // 5: keyof { 7: string }
+      ],
+    );
+    expect(typeExprToDescriptor(createGraphTypeExprRef(graph, 4), new Map())).toEqual({
+      kind: "primitive",
+      name: "string",
+    });
+    expect(typeExprToDescriptor(createGraphTypeExprRef(graph, 5))).toEqual({
+      kind: "literal",
+      value: 7,
     });
   });
 

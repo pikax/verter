@@ -260,6 +260,13 @@ type NativeTypeRegistry = Map<string, NativeTypeExprLike>;
 interface FinitePropertyEntry {
   name: string;
   optional: boolean;
+  /** The key as a number, when a number keys the member. */
+  numberKey?: number;
+}
+
+/** A finite key as the literal type `keyof` and a mapped parameter bind it. */
+function finiteEntryKey(entry: FinitePropertyEntry): string | number {
+  return entry.numberKey ?? entry.name;
 }
 
 interface NativeTupleElement {
@@ -667,10 +674,11 @@ function resolveIndexedAccessDescriptor(
 ): TypeDescriptor | undefined {
   const resolvedObject = resolveRegistryExpr(objectExpr, nativeRegistry, visiting);
   const resolvedIndex = resolveRegistryExpr(indexExpr, nativeRegistry, visiting);
-  const propertyName = resolveStringLiteralValue(resolvedIndex);
-  if (propertyName === undefined) {
+  const propertyKey = resolvePropertyKeyLiteral(resolvedIndex);
+  if (propertyKey === undefined) {
     return undefined;
   }
+  const propertyName = String(propertyKey);
 
   const property = resolveObjectProperty(
     resolvedObject,
@@ -767,20 +775,38 @@ function resolveRegistryExpr(
   return expr;
 }
 
-function resolveStringLiteralValue(expr: NativeTypeExprLike): string | undefined {
+/** The string or number a literal key type names, if it is one. */
+function resolvePropertyKeyLiteral(expr: NativeTypeExprLike): string | number | undefined {
   if (isGraphTypeExprRef(expr)) {
     const node = expr.graph.getNode(expr.nodeId);
-    if (node.kind === NODE_LITERAL && node.literalKind === LITERAL_STRING && node.stringId) {
+    if (node.kind !== NODE_LITERAL) {
+      return undefined;
+    }
+    if (node.literalKind === LITERAL_STRING && node.stringId) {
       return expr.graph.getString(node.stringId);
+    }
+    if (node.literalKind === LITERAL_NUMBER && node.numberValue !== undefined) {
+      return node.numberValue;
     }
     return undefined;
   }
 
-  if (expr.kind === "literal" && expr.literalKind === "string") {
+  if (expr.kind === "literal" && (expr.literalKind === "string" || expr.literalKind === "number")) {
     return expr.value;
   }
 
   return undefined;
+}
+
+/** A finite source entry for a literal key type. */
+function literalKeyEntry(expr: NativeTypeExprLike): FinitePropertyEntry | undefined {
+  const key = resolvePropertyKeyLiteral(expr);
+  if (key === undefined) {
+    return undefined;
+  }
+  return typeof key === "number"
+    ? { name: String(key), optional: false, numberKey: key }
+    : { name: key, optional: false };
 }
 
 function isSameTypeExprReference(left: NativeTypeExprLike, right: NativeTypeExprLike): boolean {
@@ -1437,7 +1463,7 @@ function resolveKeyOfDescriptor(
   if (!entries || entries.length === 0) {
     return undefined;
   }
-  return union(entries.map((entry) => literal(entry.name)));
+  return union(entries.map((entry) => literal(finiteEntryKey(entry))));
 }
 
 function resolveMappedDescriptor(
@@ -1468,7 +1494,7 @@ function resolveMappedDescriptor(
       type: resolveMappedValueDescriptor(
         mapped.value,
         mapped.parameterName,
-        entry.name,
+        finiteEntryKey(entry),
         registry,
         visiting,
         graphVisiting,
@@ -1586,7 +1612,7 @@ function isRecordKeyDomainDescriptor(descriptor: TypeDescriptor): boolean {
 function resolveMappedValueDescriptor(
   expr: NativeTypeExprLike,
   parameterName: string,
-  propertyName: string,
+  propertyKey: string | number,
   nativeRegistry: NativeTypeRegistry,
   visiting: Set<string>,
   graphVisiting: Set<number>,
@@ -1606,7 +1632,7 @@ function resolveMappedValueDescriptor(
             resolveMappedIndexedAccessDescriptor(
               createGraphTypeExprRef(expr.graph, node.operandNodeId),
               parameterName,
-              propertyName,
+              propertyKey,
               nativeRegistry,
               visiting,
               graphVisiting,
@@ -1616,14 +1642,14 @@ function resolveMappedValueDescriptor(
             graphVisiting,
           );
         return resolved && resolved.length > 0
-          ? union(resolved.map((entry) => literal(entry.name)))
+          ? union(resolved.map((entry) => literal(finiteEntryKey(entry))))
           : typeExprToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
       }
       case NODE_INDEXED_ACCESS: {
         const resolved = resolveMappedIndexedAccessDescriptor(
           expr,
           parameterName,
-          propertyName,
+          propertyKey,
           nativeRegistry,
           visiting,
           graphVisiting,
@@ -1632,14 +1658,14 @@ function resolveMappedValueDescriptor(
       }
       case NODE_TYPE_PARAMETER:
         if (expr.graph.getString(node.nameId) === parameterName) {
-          return literal(propertyName);
+          return literal(propertyKey);
         }
         break;
       case NODE_PARENTHESIZED:
         return resolveMappedValueDescriptor(
           createGraphTypeExprRef(expr.graph, node.innerNodeId),
           parameterName,
-          propertyName,
+          propertyKey,
           nativeRegistry,
           visiting,
           graphVisiting,
@@ -1654,7 +1680,7 @@ function resolveMappedValueDescriptor(
             resolveMappedIndexedAccessDescriptor(
               expr.operand,
               parameterName,
-              propertyName,
+              propertyKey,
               nativeRegistry,
               visiting,
               graphVisiting,
@@ -1664,14 +1690,14 @@ function resolveMappedValueDescriptor(
             graphVisiting,
           );
         return resolved && resolved.length > 0
-          ? union(resolved.map((entry) => literal(entry.name)))
+          ? union(resolved.map((entry) => literal(finiteEntryKey(entry))))
           : typeExprToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
       }
       case "indexedAccess": {
         const resolved = resolveMappedIndexedAccessDescriptor(
           expr,
           parameterName,
-          propertyName,
+          propertyKey,
           nativeRegistry,
           visiting,
           graphVisiting,
@@ -1680,14 +1706,14 @@ function resolveMappedValueDescriptor(
       }
       case "typeParameter":
         if (expr.name === parameterName) {
-          return literal(propertyName);
+          return literal(propertyKey);
         }
         break;
       case "parenthesized":
         return resolveMappedValueDescriptor(
           expr.inner,
           parameterName,
-          propertyName,
+          propertyKey,
           nativeRegistry,
           visiting,
           graphVisiting,
@@ -1701,7 +1727,7 @@ function resolveMappedValueDescriptor(
 function resolveMappedIndexedAccessDescriptor(
   expr: NativeTypeExprLike,
   parameterName: string,
-  propertyName: string,
+  propertyKey: string | number,
   nativeRegistry: NativeTypeRegistry,
   visiting: Set<string>,
   graphVisiting: Set<number>,
@@ -1711,11 +1737,9 @@ function resolveMappedIndexedAccessDescriptor(
     return undefined;
   }
   const index = mappedIndexMatchesParameter(parts.index, parameterName)
-    ? ({
-        kind: "literal",
-        literalKind: "string",
-        value: propertyName,
-      } satisfies NativeTypeExpr)
+    ? ((typeof propertyKey === "number"
+        ? { kind: "literal", literalKind: "number", value: propertyKey }
+        : { kind: "literal", literalKind: "string", value: propertyKey }) satisfies NativeTypeExpr)
     : parts.index;
   return resolveIndexedAccessDescriptor(
     parts.object,
@@ -1744,10 +1768,10 @@ function resolveFiniteSourceEntries(
         );
       case NODE_UNION: {
         const entries = node.typeNodeIds.map((id) =>
-          resolveStringLiteralValue(createGraphTypeExprRef(expr.graph, id)),
+          literalKeyEntry(createGraphTypeExprRef(expr.graph, id)),
         );
-        return entries.every((entry): entry is string => entry !== undefined)
-          ? entries.map((name) => ({ name, optional: false }))
+        return entries.every((entry): entry is FinitePropertyEntry => entry !== undefined)
+          ? entries
           : undefined;
       }
       default:
@@ -1759,9 +1783,9 @@ function resolveFiniteSourceEntries(
     case "keyOf":
       return resolveFiniteObjectEntries(expr.operand, nativeRegistry, visiting, graphVisiting);
     case "union": {
-      const entries = expr.types.map((type) => resolveStringLiteralValue(type));
-      return entries.every((entry): entry is string => entry !== undefined)
-        ? entries.map((name) => ({ name, optional: false }))
+      const entries = expr.types.map((type) => literalKeyEntry(type));
+      return entries.every((entry): entry is FinitePropertyEntry => entry !== undefined)
+        ? entries
         : undefined;
     }
     default:
@@ -1788,6 +1812,7 @@ function resolveFiniteObjectEntries(
           .map((member) => ({
             name: graphPropertyKeyName(expr.graph.getString.bind(expr.graph), member.key)!,
             optional: member.optional,
+            ...(member.key.kind === "number" ? { numberKey: member.key.value } : {}),
           }));
       case NODE_INTERSECTION: {
         const entries = node.typeNodeIds
@@ -1856,7 +1881,16 @@ function resolveFiniteObjectEntries(
     case "object":
       return expr.properties.flatMap((member) => {
         const name = member.memberKind === "property" ? nativeMemberStringName(member) : undefined;
-        return name === undefined ? [] : [{ name, optional: member.optional ?? false }];
+        if (name === undefined) {
+          return [];
+        }
+        return [
+          {
+            name,
+            optional: member.optional ?? false,
+            ...(member.key?.kind === "number" ? { numberKey: member.key.value } : {}),
+          },
+        ];
       });
     case "intersection": {
       const entries = expr.types
