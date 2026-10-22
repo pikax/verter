@@ -842,18 +842,11 @@ fn push_member_name(output: &mut String, name: &str) {
     }
 }
 
+/// Whether a string-keyed member name prints bare: an identifier only. A digit
+/// spelling stays quoted, since `{ '7': A }` and `{ 7: A }` address one
+/// property but differ in type identity (`keyof` is `'7'` against `7`); only a
+/// number key prints bare.
 fn is_bare_member_name(name: &str) -> bool {
-    if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
-        // A bare numeric key names the property its number's canonical
-        // spelling names, so it stays bare only when that spelling is the
-        // name itself: a bare `0123`, or digits beyond the exact integers,
-        // would name another property than the quoted string does.
-        return name
-            .parse::<i64>()
-            .ok()
-            .and_then(CanonicalIndexInt::from_canonical_i64)
-            .is_some_and(|index| index.to_string() == name);
-    }
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;

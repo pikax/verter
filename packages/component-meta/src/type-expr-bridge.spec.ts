@@ -25,60 +25,94 @@ import {
 // typeExprToDescriptor: primitives
 // =============================================================================
 
+/**
+ * `infer` declares its binder only inside a conditional's `extends` clause;
+ * the true branch references it by name.
+ */
+function inExtendsClause(infer: NativeTypeExpr): NativeTypeExpr {
+  return {
+    kind: "conditional",
+    check: { kind: "ref", name: "T", typeArguments: [] },
+    extends: infer,
+    trueType: { kind: "infer", name: "U" },
+    falseType: { kind: "primitive", name: "never" },
+  };
+}
+
 describe("typeExprToDescriptor", () => {
   it("renders an array constraint on an unreduced infer", () => {
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: {
-        kind: "array",
-        readonly: false,
-        element: { kind: "primitive", name: "string" },
-      },
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: {
+          kind: "array",
+          readonly: false,
+          element: { kind: "primitive", name: "string" },
+        },
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends string[]) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends string[]" });
   });
 
   it("renders a graph constraint on an unreduced infer", () => {
     const graph = new DecodedTypeGraph([], [{ kind: NODE_PRIMITIVE, primitive: 1 }]);
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: createGraphTypeExprRef(graph, 1),
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: createGraphTypeExprRef(graph, 1),
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends string) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends string" });
   });
 
   it("renders a function constraint on an unreduced infer", () => {
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: {
-        kind: "function",
-        parameters: [],
-        returnType: { kind: "primitive", name: "string" },
-      },
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: {
+          kind: "function",
+          parameters: [],
+          returnType: { kind: "primitive", name: "string" },
+        },
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends (() => string)) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends (() => string)" });
   });
 
   it("parenthesizes a union array constraint on an unreduced infer", () => {
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: {
-        kind: "array",
-        readonly: false,
-        element: {
-          kind: "union",
-          types: [
-            { kind: "primitive", name: "string" },
-            { kind: "primitive", name: "number" },
-          ],
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: {
+          kind: "array",
+          readonly: false,
+          element: {
+            kind: "union",
+            types: [
+              { kind: "primitive", name: "string" },
+              { kind: "primitive", name: "number" },
+            ],
+          },
         },
-      },
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends (string | number)[]) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends (string | number)[]" });
   });
 
   it("renders a graph function constraint on an unreduced infer", () => {
@@ -94,12 +128,17 @@ describe("typeExprToDescriptor", () => {
         },
       ],
     );
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: createGraphTypeExprRef(graph, 2),
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: createGraphTypeExprRef(graph, 2),
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends (() => string)) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends (() => string)" });
   });
 
   it("parenthesizes a graph union array constraint on an unreduced infer", () => {
@@ -112,12 +151,17 @@ describe("typeExprToDescriptor", () => {
         { kind: NODE_ARRAY, elementNodeId: 3, readonly: false },
       ],
     );
-    const result = typeExprToDescriptor({
-      kind: "infer",
-      name: "U",
-      constraint: createGraphTypeExprRef(graph, 4),
+    const result = typeExprToDescriptor(
+      inExtendsClause({
+        kind: "infer",
+        name: "U",
+        constraint: createGraphTypeExprRef(graph, 4),
+      }),
+    );
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends (infer U extends (string | number)[]) ? U : never",
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends (string | number)[]" });
   });
 
   it("converts primitive types", () => {

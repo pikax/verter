@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use verter_type_expr::{
-    render_type_expr_display, FunctionExpr, FunctionParam, IndexSignature, LiteralValue,
-    MappedModifier, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
-    RecursiveConditionalBranch, RecursiveConditionalFrame, SyntheticCarrierKey,
-    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeExprDisplayError, TypeParam,
-    UnknownValue, ValueRef,
+    render_type_expr_display, AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam,
+    IndexSignature, LiteralValue, MappedModifier, MethodSignature, ObjectExpr, ObjectMember,
+    ObjectProperty, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame,
+    SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeExprDisplayError,
+    TypeParam, UnknownValue, ValueRef,
 };
 
 fn reference(name: &str) -> TypeExpr {
@@ -467,5 +467,36 @@ fn an_infer_bound_by_an_enclosing_clause_renders_as_a_reference() {
             .expect("the conditional renders")
             .text,
         "T extends { a: infer U } ? T extends { b: U } ? U : 2 : T extends { c: infer U } ? U : never"
+    );
+}
+
+#[test]
+fn a_digit_spelled_string_key_stays_quoted_apart_from_its_number_key() {
+    // `{ '7': A }` and `{ 7: B }` address one property, but `keyof` is `'7'`
+    // for the first and `7` for the second: only the number key prints bare.
+    let expression = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
+        properties: vec![
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "7".into(),
+                reference("A"),
+                false,
+                false,
+            )),
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                AuthoredPropertyKey::Number(
+                    CanonicalIndexInt::from_canonical_i64(7).expect("7 is a canonical index"),
+                ),
+                reference("B"),
+                false,
+                false,
+            )),
+        ],
+    }));
+    assert_eq!(
+        render_type_expr_display(&expression)
+            .expect("the object renders")
+            .text,
+        "{ '7': A; 7: B }"
     );
 }

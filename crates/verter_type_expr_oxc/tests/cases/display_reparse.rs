@@ -137,7 +137,12 @@ fn a_const_type_parameter_keeps_its_modifier() {
 }
 
 #[test]
-fn a_numeric_key_stays_bare_only_when_it_is_its_canonical_spelling() {
+fn a_member_key_keeps_its_string_or_number_spelling() {
+    // `keyof` is `'7'` for the string key and `7` for the number key.
+    assert_eq!(
+        render_and_reparse("{ '7': A } | { 7: B }"),
+        "{ '7': A } | { 7: B }"
+    );
     assert_eq!(
         render_and_reparse(
             "{ '0123': A; 7: B; '1e3': C; '12345678901234567890': D; '9007199254740993': E }"

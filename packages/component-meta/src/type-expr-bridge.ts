@@ -2808,6 +2808,61 @@ function inferForm(name: string, constraint: Printed | undefined): Printed {
     : printed(`infer ${name}`, PREC_PREFIX);
 }
 
+/**
+ * Printing state. The typed form carries one `infer` variant for a binder's
+ * declaration and its references, so, as the Rust display renderer does, the
+ * printer tracks which binders an `extends` clause declares and which are in
+ * scope: an `infer` declares its binder only inside an `extends` clause
+ * where no enclosing clause already binds that name. `graphActive` holds the
+ * graph nodes being printed, so a cyclic node table cannot recurse forever.
+ */
+interface PrintScope {
+  inExtends: boolean;
+  bound: string[];
+  declaring: string[][];
+  graphActive: Set<number>;
+}
+
+function newPrintScope(): PrintScope {
+  return { inExtends: false, bound: [], declaring: [], graphActive: new Set() };
+}
+
+/** A conditional: its `extends` clause binders are in scope in the true branch alone. */
+function printConditional<N>(
+  scope: PrintScope,
+  print: (node: N) => Printed,
+  check: N,
+  extendsType: N,
+  trueType: N,
+  falseType: N,
+): Printed {
+  const enclosing = scope.inExtends;
+  const checkText = print(check);
+  scope.declaring.push([]);
+  scope.inExtends = true;
+  const extendsText = print(extendsType);
+  const boundLength = scope.bound.length;
+  scope.bound.push(...scope.declaring.pop()!);
+  scope.inExtends = enclosing;
+  const trueText = print(trueType);
+  scope.bound.length = boundLength;
+  const falseText = print(falseType);
+  return conditionalForm(checkText, extendsText, trueText, falseText);
+}
+
+/** An `infer`: a binder's declaration, or a reference to a binder in scope. */
+function printInfer(
+  scope: PrintScope,
+  name: string,
+  constraint: () => Printed | undefined,
+): Printed {
+  if (!scope.inExtends || scope.bound.includes(name)) {
+    return printed(name, PREC_PRIMARY);
+  }
+  scope.declaring.at(-1)?.push(name);
+  return inferForm(name, constraint());
+}
+
 function mappedForm(
   parameter: string,
   source: Printed,
@@ -2874,14 +2929,13 @@ function signatureText(
 }
 
 /**
- * A member name: bare when it is an identifier or the canonical spelling of
- * its number, quoted otherwise (`"0123"` names another property than `0123`).
+ * A string-keyed member name: bare when it is an identifier, quoted otherwise.
+ * A digit spelling stays quoted too: `{ "7": A }` and `{ 7: A }` address one
+ * property but differ in type identity (`keyof` is `"7"` against `7`), so only
+ * a number key prints bare.
  */
 function memberName(name: string): string {
   if (/^[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*$/u.test(name)) {
-    return name;
-  }
-  if (/^[0-9]+$/.test(name) && String(Number(name)) === name) {
     return name;
   }
   return quoteStringLiteral(name);
@@ -2947,12 +3001,26 @@ function mappedReadonlyPrefix(code: number): string {
 }
 
 function graphTypeExprToString(expr: GraphTypeExprRef): string {
-  return printGraph(expr.graph, expr.nodeId).text;
+  return printGraph(expr.graph, expr.nodeId, newPrintScope()).text;
 }
 
-function printGraph(graph: DecodedTypeGraph, nodeId: number): Printed {
+function printGraph(graph: DecodedTypeGraph, nodeId: number, scope: PrintScope): Printed {
+  // A cyclic node table has no finite spelling: its back-edge prints as
+  // `unknown` rather than recursing.
+  if (scope.graphActive.has(nodeId)) {
+    return printed("unknown", PREC_PRIMARY);
+  }
+  scope.graphActive.add(nodeId);
+  try {
+    return printGraphNode(graph, nodeId, scope);
+  } finally {
+    scope.graphActive.delete(nodeId);
+  }
+}
+
+function printGraphNode(graph: DecodedTypeGraph, nodeId: number, scope: PrintScope): Printed {
   const node = graph.getNode(nodeId);
-  const at = (id: number) => printGraph(graph, id);
+  const at = (id: number) => printGraph(graph, id, scope);
   const atLowest = (id: number) => operand(at(id), PREC_LOWEST);
   // Every graph node kind has a structural spelling; the exhaustive switch
   // makes a new kind a compile error here instead of a leaked placeholder.
@@ -3003,9 +3071,9 @@ function printGraph(graph: DecodedTypeGraph, nodeId: number): Printed {
         node.readonly,
       );
     case NODE_OBJECT:
-      return objectForm(node.members.flatMap((member) => graphMemberText(graph, member)));
+      return objectForm(node.members.flatMap((member) => graphMemberText(graph, member, scope)));
     case NODE_FUNCTION:
-      return printed(graphSignatureText(graph, node, " => "), PREC_CONDITIONAL_OR_FUNCTION);
+      return printed(graphSignatureText(graph, node, " => ", scope), PREC_CONDITIONAL_OR_FUNCTION);
     case NODE_KEY_OF:
       return printed(`keyof ${operand(at(node.operandNodeId), PREC_PREFIX)}`, PREC_PREFIX);
     case NODE_TYPE_OF:
@@ -3019,11 +3087,13 @@ function printGraph(graph: DecodedTypeGraph, nodeId: number): Printed {
         PREC_POSTFIX,
       );
     case NODE_CONDITIONAL:
-      return conditionalForm(
-        at(node.checkNodeId),
-        at(node.extendsNodeId),
-        at(node.trueTypeNodeId),
-        at(node.falseTypeNodeId),
+      return printConditional(
+        scope,
+        at,
+        node.checkNodeId,
+        node.extendsNodeId,
+        node.trueTypeNodeId,
+        node.falseTypeNodeId,
       );
     case NODE_MAPPED:
       return mappedForm(
@@ -3042,8 +3112,7 @@ function printGraph(graph: DecodedTypeGraph, nodeId: number): Printed {
     case NODE_PARENTHESIZED:
       return printed(`(${atLowest(node.innerNodeId)})`, PREC_PRIMARY);
     case NODE_INFER:
-      return inferForm(
-        graph.getString(node.nameId),
+      return printInfer(scope, graph.getString(node.nameId), () =>
         node.constraintNodeId ? at(node.constraintNodeId) : undefined,
       );
     case NODE_REST:
@@ -3069,17 +3138,18 @@ function graphSignatureText(
   graph: DecodedTypeGraph,
   node: Extract<GraphNodeRecord, { kind: typeof NODE_FUNCTION }>,
   separator: " => " | ": ",
+  scope: PrintScope,
 ): string {
   const typeParameters = node.typeParameterNodeIds.map((id) => {
     const parameter = graph.getNode(id);
     if (parameter.kind !== NODE_TYPE_PARAMETER) {
-      return printGraph(graph, id).text;
+      return printGraph(graph, id, scope).text;
     }
     return typeParameterText(
       graph.getString(parameter.nameId),
       false,
-      parameter.constraintNodeId ? printGraph(graph, parameter.constraintNodeId) : undefined,
-      parameter.defaultNodeId ? printGraph(graph, parameter.defaultNodeId) : undefined,
+      parameter.constraintNodeId ? printGraph(graph, parameter.constraintNodeId, scope) : undefined,
+      parameter.defaultNodeId ? printGraph(graph, parameter.defaultNodeId, scope) : undefined,
     );
   });
   const parameters = node.parameters.map((parameter, index) =>
@@ -3088,16 +3158,20 @@ function graphSignatureText(
       index,
       parameter.optional,
       parameter.rest,
-      printGraph(graph, parameter.typeNodeId),
+      printGraph(graph, parameter.typeNodeId, scope),
     ),
   );
   const returnText = node.returnTypeNodeId
-    ? operand(printGraph(graph, node.returnTypeNodeId), PREC_LOWEST)
+    ? operand(printGraph(graph, node.returnTypeNodeId, scope), PREC_LOWEST)
     : "unknown";
   return signatureText(typeParameters, parameters, returnText, separator);
 }
 
-function graphMemberKey(graph: DecodedTypeGraph, key: GraphPropertyKeyRecord): string {
+function graphMemberKey(
+  graph: DecodedTypeGraph,
+  key: GraphPropertyKeyRecord,
+  scope: PrintScope,
+): string {
   switch (key.kind) {
     case "string":
       return memberName(graph.getString(key.nameId));
@@ -3106,26 +3180,30 @@ function graphMemberKey(graph: DecodedTypeGraph, key: GraphPropertyKeyRecord): s
     case "uniqueSymbol":
       return `[${graph.getString(key.nameId)}]`;
     case "computed":
-      return `[${operand(printGraph(graph, key.nodeId), PREC_LOWEST)}]`;
+      return `[${operand(printGraph(graph, key.nodeId, scope), PREC_LOWEST)}]`;
   }
 }
 
 /** One member's text, or none for a member kind with no spelling. */
-function graphMemberText(graph: DecodedTypeGraph, member: GraphObjectMemberRecord): string[] {
+function graphMemberText(
+  graph: DecodedTypeGraph,
+  member: GraphObjectMemberRecord,
+  scope: PrintScope,
+): string[] {
   const readonly = member.readonly ? "readonly " : "";
   const optional = member.optional ? "?" : "";
   const signature = (separator: " => " | ": ") => {
     const fn = member.functionNodeId ? graph.getNode(member.functionNodeId) : undefined;
-    return fn?.kind === NODE_FUNCTION ? graphSignatureText(graph, fn, separator) : undefined;
+    return fn?.kind === NODE_FUNCTION ? graphSignatureText(graph, fn, separator, scope) : undefined;
   };
   switch (member.kind) {
     case MEMBER_PROPERTY:
       return [
-        `${readonly}${graphMemberKey(graph, member.key)}${optional}: ${operand(printGraph(graph, member.typeNodeId), PREC_LOWEST)}`,
+        `${readonly}${graphMemberKey(graph, member.key, scope)}${optional}: ${operand(printGraph(graph, member.typeNodeId, scope), PREC_LOWEST)}`,
       ];
     case MEMBER_INDEX_SIGNATURE:
       return [
-        `${readonly}[${graph.getStringMaybe(member.keyNameId) || "key"}: ${operand(printGraph(graph, member.keyTypeNodeId), PREC_LOWEST)}]: ${operand(printGraph(graph, member.valueTypeNodeId), PREC_LOWEST)}`,
+        `${readonly}[${graph.getStringMaybe(member.keyNameId) || "key"}: ${operand(printGraph(graph, member.keyTypeNodeId, scope), PREC_LOWEST)}]: ${operand(printGraph(graph, member.valueTypeNodeId, scope), PREC_LOWEST)}`,
       ];
     case MEMBER_CALL_SIGNATURE: {
       const text = signature(": ");
@@ -3137,12 +3215,14 @@ function graphMemberText(graph: DecodedTypeGraph, member: GraphObjectMemberRecor
     }
     case MEMBER_METHOD: {
       const text = signature(": ");
-      return text === undefined ? [] : [`${graphMemberKey(graph, member.key)}${optional}${text}`];
+      return text === undefined
+        ? []
+        : [`${graphMemberKey(graph, member.key, scope)}${optional}${text}`];
     }
     case MEMBER_SPREAD:
       // Type syntax has no spread member; the pre-fold operand prints as
       // `...(T)`, as the Rust renderer spells it.
-      return [`...(${operand(printGraph(graph, member.typeNodeId), PREC_LOWEST)})`];
+      return [`...(${operand(printGraph(graph, member.typeNodeId, scope), PREC_LOWEST)})`];
     default:
       return [];
   }
@@ -3164,20 +3244,23 @@ export function buildEvaluatedTypeMap(
 }
 
 function nativeTypeExprToString(expr: NativeTypeExpr): string {
-  return printNative(expr).text;
+  return printNative(expr, newPrintScope()).text;
 }
 
 /** The display text of a type expression: TypeScript type syntax that reparses to it. */
 export function typeExprDisplayText(expr: NativeTypeExprLike): string {
-  return printNativeLike(expr).text;
+  return printNativeLike(expr, newPrintScope()).text;
 }
 
-function printNativeLike(expr: NativeTypeExprLike): Printed {
-  return isGraphTypeExprRef(expr) ? printGraph(expr.graph, expr.nodeId) : printNative(expr);
+function printNativeLike(expr: NativeTypeExprLike, scope: PrintScope): Printed {
+  return isGraphTypeExprRef(expr)
+    ? printGraph(expr.graph, expr.nodeId, scope)
+    : printNative(expr, scope);
 }
 
-function printNative(expr: NativeTypeExpr): Printed {
-  const atLowest = (child: NativeTypeExpr) => operand(printNative(child), PREC_LOWEST);
+function printNative(expr: NativeTypeExpr, scope: PrintScope): Printed {
+  const print = (child: NativeTypeExpr) => printNative(child, scope);
+  const atLowest = (child: NativeTypeExpr) => operand(print(child), PREC_LOWEST);
   switch (expr.kind) {
     case "primitive":
       return printed(expr.name, PREC_PRIMARY);
@@ -3198,25 +3281,25 @@ function printNative(expr: NativeTypeExpr): Printed {
     case "typeParameter":
       return printed(expr.name, PREC_PRIMARY);
     case "keyOf":
-      return printed(`keyof ${operand(printNative(expr.operand), PREC_PREFIX)}`, PREC_PREFIX);
+      return printed(`keyof ${operand(print(expr.operand), PREC_PREFIX)}`, PREC_PREFIX);
     case "typeOf": {
       const args = expr.typeArgs ?? [];
       const instantiation = args.length > 0 ? `<${args.map(atLowest).join(", ")}>` : "";
       return printed(`typeof ${expr.path.join(".")}${instantiation}`, PREC_PREFIX);
     }
     case "union":
-      return joined(expr.types.map(printNative), " | ", PREC_UNION, "never");
+      return joined(expr.types.map(print), " | ", PREC_UNION, "never");
     case "intersection":
-      return joined(expr.types.map(printNative), " & ", PREC_INTERSECTION, "unknown");
+      return joined(expr.types.map(print), " & ", PREC_INTERSECTION, "unknown");
     case "array":
-      return arrayForm(printNative(expr.element), expr.readonly);
+      return arrayForm(print(expr.element), expr.readonly);
     case "tuple":
       return tupleForm(
         expr.elements.map((element) => {
           const nestedRest = element.ty.kind === "rest" ? element.ty.inner : undefined;
           return {
             label: element.label ?? undefined,
-            type: printNative(nestedRest ?? element.ty),
+            type: print(nestedRest ?? element.ty),
             optional: element.optional,
             rest: element.rest || nestedRest !== undefined,
           };
@@ -3224,41 +3307,45 @@ function printNative(expr: NativeTypeExpr): Printed {
         expr.readonly,
       );
     case "object":
-      return objectForm(expr.properties.flatMap(nativeMemberText));
+      return objectForm(expr.properties.flatMap((member) => nativeMemberText(member, scope)));
     case "function":
-      return printed(nativeSignatureText(expr, " => "), PREC_CONDITIONAL_OR_FUNCTION);
+      return printed(nativeSignatureText(expr, " => ", scope), PREC_CONDITIONAL_OR_FUNCTION);
     case "constructorType":
       return printed(
-        `${expr.abstract ? "abstract " : ""}new ${nativeSignatureText(expr, " => ")}`,
+        `${expr.abstract ? "abstract " : ""}new ${nativeSignatureText(expr, " => ", scope)}`,
         PREC_CONDITIONAL_OR_FUNCTION,
       );
     case "indexedAccess":
       return printed(
-        `${operand(printNative(expr.object), PREC_POSTFIX)}[${atLowest(expr.index)}]`,
+        `${operand(print(expr.object), PREC_POSTFIX)}[${atLowest(expr.index)}]`,
         PREC_POSTFIX,
       );
     case "conditional":
-      return conditionalForm(
-        printNative(expr.check),
-        printNative(expr.extends),
-        printNative(expr.trueType),
-        printNative(expr.falseType),
+      return printConditional(
+        scope,
+        print,
+        expr.check,
+        expr.extends,
+        expr.trueType,
+        expr.falseType,
       );
     case "mapped":
       return mappedForm(
         expr.parameter,
-        printNative(expr.source),
-        expr.nameType ? printNative(expr.nameType) : undefined,
-        printNative(expr.value),
+        print(expr.source),
+        expr.nameType ? print(expr.nameType) : undefined,
+        print(expr.value),
         mappedOptionalToken(mappedModifierToCode(expr.optional)),
         mappedReadonlyPrefix(mappedModifierToCode(expr.readonly)),
       );
     case "templateLiteral":
-      return templateForm(expr.quasis, expr.expressions.map(printNative));
+      return templateForm(expr.quasis, expr.expressions.map(print));
     case "parenthesized":
       return printed(`(${atLowest(expr.inner)})`, PREC_PRIMARY);
     case "infer":
-      return inferForm(expr.name, expr.constraint ? printNativeLike(expr.constraint) : undefined);
+      return printInfer(scope, expr.name, () =>
+        expr.constraint ? printNativeLike(expr.constraint, scope) : undefined,
+      );
     case "rest":
       return printed(`...${atLowest(expr.inner)}`, PREC_PRIMARY);
     case "unknown":
@@ -3276,23 +3363,22 @@ function printNative(expr: NativeTypeExpr): Printed {
   }
 }
 
-function nativeSignatureText(fn: NativeFunctionExpr, separator: " => " | ": "): string {
+function nativeSignatureText(
+  fn: NativeFunctionExpr,
+  separator: " => " | ": ",
+  scope: PrintScope,
+): string {
+  const print = (child: NativeTypeExpr) => printNative(child, scope);
   const typeParameters = (fn.typeParameters ?? []).map((parameter) =>
     typeParameterText(
       parameter.name,
       parameter.isConst === true,
-      parameter.constraint ? printNative(parameter.constraint) : undefined,
-      parameter.default ? printNative(parameter.default) : undefined,
+      parameter.constraint ? print(parameter.constraint) : undefined,
+      parameter.default ? print(parameter.default) : undefined,
     ),
   );
   const parameters = fn.parameters.map((parameter, index) =>
-    parameterText(
-      parameter.name,
-      index,
-      parameter.optional,
-      parameter.rest,
-      printNative(parameter.ty),
-    ),
+    parameterText(parameter.name, index, parameter.optional, parameter.rest, print(parameter.ty)),
   );
   // A predicate signature prints its predicate in the return position
   // (`x is T`, `asserts this`), never the `boolean` / `void` it denotes.
@@ -3300,15 +3386,16 @@ function nativeSignatureText(fn: NativeFunctionExpr, separator: " => " | ": "): 
   let returnText: string;
   if (predicate) {
     const subject = predicate.this ? "this" : (predicate.parameter ?? "this");
-    const target = predicate.ty ? ` is ${operand(printNative(predicate.ty), PREC_LOWEST)}` : "";
+    const target = predicate.ty ? ` is ${operand(print(predicate.ty), PREC_LOWEST)}` : "";
     returnText = `${predicate.asserts ? "asserts " : ""}${subject}${target}`;
   } else {
-    returnText = fn.returnType ? operand(printNative(fn.returnType), PREC_LOWEST) : "unknown";
+    returnText = fn.returnType ? operand(print(fn.returnType), PREC_LOWEST) : "unknown";
   }
   return signatureText(typeParameters, parameters, returnText, separator);
 }
 
-function nativeMemberKey(member: NativeObjectMember): string | undefined {
+function nativeMemberKey(member: NativeObjectMember, scope: PrintScope): string | undefined {
+  const print = (child: NativeTypeExpr) => printNative(child, scope);
   const key = member.key;
   if (!key) {
     return member.name === undefined ? undefined : memberName(member.name);
@@ -3321,43 +3408,42 @@ function nativeMemberKey(member: NativeObjectMember): string | undefined {
     case "uniqueSymbol":
       return `[${key.identity.symbol}]`;
     case "computed":
-      return `[${operand(printNative(key.expression), PREC_LOWEST)}]`;
+      return `[${operand(print(key.expression), PREC_LOWEST)}]`;
   }
 }
 
 /** One member's text, or none for a member missing what it prints. */
-function nativeMemberText(member: NativeObjectMember): string[] {
+function nativeMemberText(member: NativeObjectMember, scope: PrintScope): string[] {
+  const print = (child: NativeTypeExpr) => printNative(child, scope);
   const readonly = member.readonly ? "readonly " : "";
   const optional = member.optional ? "?" : "";
   switch (member.memberKind) {
     case "property": {
-      const key = nativeMemberKey(member);
+      const key = nativeMemberKey(member, scope);
       return key === undefined || member.ty === undefined
         ? []
-        : [`${readonly}${key}${optional}: ${operand(printNative(member.ty), PREC_LOWEST)}`];
+        : [`${readonly}${key}${optional}: ${operand(print(member.ty), PREC_LOWEST)}`];
     }
     case "indexSignature":
       return member.keyType === undefined || member.valueType === undefined
         ? []
         : [
-            `${readonly}[${member.keyName || "key"}: ${operand(printNative(member.keyType), PREC_LOWEST)}]: ${operand(printNative(member.valueType), PREC_LOWEST)}`,
+            `${readonly}[${member.keyName || "key"}: ${operand(print(member.keyType), PREC_LOWEST)}]: ${operand(print(member.valueType), PREC_LOWEST)}`,
           ];
     case "callSignature":
-      return member.function ? [nativeSignatureText(member.function, ": ")] : [];
+      return member.function ? [nativeSignatureText(member.function, ": ", scope)] : [];
     case "constructSignature":
-      return member.function ? [`new ${nativeSignatureText(member.function, ": ")}`] : [];
+      return member.function ? [`new ${nativeSignatureText(member.function, ": ", scope)}`] : [];
     case "method": {
-      const key = nativeMemberKey(member);
+      const key = nativeMemberKey(member, scope);
       return key === undefined || !member.function
         ? []
-        : [`${key}${optional}${nativeSignatureText(member.function, ": ")}`];
+        : [`${key}${optional}${nativeSignatureText(member.function, ": ", scope)}`];
     }
     case "spread":
       // Type syntax has no spread member; the pre-fold operand prints as
       // `...(T)`, as the Rust renderer spells it.
-      return member.ty === undefined
-        ? []
-        : [`...(${operand(printNative(member.ty), PREC_LOWEST)})`];
+      return member.ty === undefined ? [] : [`...(${operand(print(member.ty), PREC_LOWEST)})`];
     default:
       return [];
   }
