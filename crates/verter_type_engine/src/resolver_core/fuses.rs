@@ -5,6 +5,12 @@
 //! with provenance attached, instead of hanging or replaying proof paths.
 //!
 //! Fuse-tripped results MUST NOT be published to shared DB layers.
+//!
+//! Only route and registry fan-out work that no semantic query counts keeps
+//! a fuse here. Projection work is charged to the request's operation
+//! account ([`crate::request_budget::RequestBudget`]), which semantic
+//! dispatch charges per counted query and replays stored receipts into; it
+//! has no second count here.
 
 /// Default fuse budgets. These are architecture rules, not tuning hints.
 pub struct FuseBudgets {
@@ -14,12 +20,6 @@ pub struct FuseBudgets {
     pub imported_root_fanout: usize,
     /// Maximum transitive names per request during registry deepening.
     pub registry_deepening_fanout: usize,
-    /// Maximum member-surface recursion levels.
-    pub member_surface_recursion_depth: usize,
-    /// Maximum projection ops per request.
-    pub projection_op_count: usize,
-    /// Maximum union branches per member before collapsing.
-    pub union_member_explosion: usize,
 }
 
 impl Default for FuseBudgets {
@@ -28,9 +28,6 @@ impl Default for FuseBudgets {
             wildcard_route_fanout: 500,
             imported_root_fanout: 200,
             registry_deepening_fanout: 300,
-            member_surface_recursion_depth: 10,
-            projection_op_count: crate::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
-            union_member_explosion: 100,
         }
     }
 }
@@ -65,9 +62,6 @@ pub struct FuseState {
     pub wildcard_sources_processed: usize,
     pub imported_roots_resolved: usize,
     pub registry_names_enqueued: usize,
-    pub current_member_recursion_depth: usize,
-    pub projection_ops_executed: usize,
-    pub union_members_processed: usize,
     pub trips: Vec<FuseTrip>,
 }
 
@@ -124,58 +118,6 @@ impl FuseState {
         }
         false
     }
-
-    pub fn push_member_recursion(&mut self) -> usize {
-        self.current_member_recursion_depth += 1;
-        self.current_member_recursion_depth
-    }
-
-    pub fn pop_member_recursion(&mut self) {
-        self.current_member_recursion_depth = self.current_member_recursion_depth.saturating_sub(1);
-    }
-
-    pub fn check_member_recursion_depth(&mut self, budgets: &FuseBudgets) -> bool {
-        if self.current_member_recursion_depth > budgets.member_surface_recursion_depth {
-            self.trips.push(FuseTrip::new(
-                "member_surface_recursion_depth",
-                budgets.member_surface_recursion_depth,
-                self.current_member_recursion_depth,
-            ));
-            return true;
-        }
-        false
-    }
-
-    pub fn check_projection_op_count(&mut self, budgets: &FuseBudgets) -> bool {
-        self.projection_ops_executed += 1;
-        if self.projection_ops_executed > budgets.projection_op_count {
-            self.trips.push(FuseTrip::new(
-                "projection_op_count",
-                budgets.projection_op_count,
-                self.projection_ops_executed,
-            ));
-            return true;
-        }
-        false
-    }
-
-    pub fn check_union_member_explosion(&mut self, budgets: &FuseBudgets) -> bool {
-        self.union_members_processed += 1;
-        if self.union_members_processed > budgets.union_member_explosion {
-            self.trips.push(FuseTrip::new(
-                "union_member_explosion",
-                budgets.union_member_explosion,
-                self.union_members_processed,
-            ));
-            return true;
-        }
-        false
-    }
-
-    /// Reset union member counter (called per-member to track per-member branch count).
-    pub fn reset_union_members(&mut self) {
-        self.union_members_processed = 0;
-    }
 }
 
 #[cfg(test)]
@@ -188,12 +130,6 @@ mod tests {
         assert_eq!(budgets.wildcard_route_fanout, 500);
         assert_eq!(budgets.imported_root_fanout, 200);
         assert_eq!(budgets.registry_deepening_fanout, 300);
-        assert_eq!(budgets.member_surface_recursion_depth, 10);
-        assert_eq!(
-            budgets.projection_op_count,
-            crate::request_budget::DEFAULT_PROJECTION_OP_BUDGET
-        );
-        assert_eq!(budgets.union_member_explosion, 100);
     }
 
     #[test]
@@ -214,57 +150,21 @@ mod tests {
     }
 
     #[test]
-    fn member_recursion_depth_tracking() {
-        let budgets = FuseBudgets {
-            member_surface_recursion_depth: 2,
-            ..FuseBudgets::default()
-        };
-        let mut state = FuseState::new();
-
-        state.push_member_recursion();
-        assert!(!state.check_member_recursion_depth(&budgets));
-        state.push_member_recursion();
-        assert!(!state.check_member_recursion_depth(&budgets));
-        state.push_member_recursion();
-        assert!(state.check_member_recursion_depth(&budgets)); // Depth 3 > budget 2
-        state.pop_member_recursion();
-        assert_eq!(state.current_member_recursion_depth, 2);
-    }
-
-    #[test]
     fn multiple_fuses_can_trip() {
         let budgets = FuseBudgets {
             imported_root_fanout: 1,
-            projection_op_count: 1,
+            registry_deepening_fanout: 1,
             ..FuseBudgets::default()
         };
         let mut state = FuseState::new();
 
         state.check_imported_root_fanout(&budgets); // 1 (at budget)
         state.check_imported_root_fanout(&budgets); // 2 (trips)
-        state.check_projection_op_count(&budgets); // 1 (at budget)
-        state.check_projection_op_count(&budgets); // 2 (trips)
+        state.check_registry_deepening_fanout(&budgets); // 1 (at budget)
+        state.check_registry_deepening_fanout(&budgets); // 2 (trips)
 
         assert_eq!(state.trips.len(), 2);
         assert_eq!(state.trips[0].fuse_name, "imported_root_fanout");
-        assert_eq!(state.trips[1].fuse_name, "projection_op_count");
-    }
-
-    #[test]
-    fn union_member_explosion_trips_and_resets() {
-        let budgets = FuseBudgets {
-            union_member_explosion: 2,
-            ..FuseBudgets::default()
-        };
-        let mut state = FuseState::new();
-
-        assert!(!state.check_union_member_explosion(&budgets));
-        assert!(!state.check_union_member_explosion(&budgets));
-        assert!(state.check_union_member_explosion(&budgets)); // 3rd trips
-        assert!(state.has_tripped());
-        assert_eq!(state.trips[0].fuse_name, "union_member_explosion");
-
-        state.reset_union_members();
-        assert_eq!(state.union_members_processed, 0);
+        assert_eq!(state.trips[1].fuse_name, "registry_deepening_fanout");
     }
 }

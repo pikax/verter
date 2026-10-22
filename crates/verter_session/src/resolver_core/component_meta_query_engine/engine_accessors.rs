@@ -8,23 +8,19 @@ use super::ComponentMetaQueryEngine;
 use verter_type_engine::resolver_core::FuseTrip;
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    pub fn enter_member_surface(&mut self) -> bool {
-        self.fuse_state.push_member_recursion();
-        !self
-            .fuse_state
-            .check_member_recursion_depth(&self.fuse_budgets)
-    }
-
-    pub fn exit_member_surface(&mut self) {
-        self.fuse_state.pop_member_recursion();
-    }
-
-    /// `pub(crate)` accessor for the projection-op fuse budget check. The bridge
-    /// helpers in `meta_resolve.rs` call it to gate the same projection-op
-    /// budget the engine itself enforces.
+    /// Whether the request's operation account has passed its cap. The
+    /// engine keeps no count of its own: every projection it enters is a
+    /// semantic dispatch charged to that account, so this only reads it.
+    /// An exhausted account marks the request's result budget-partial, so
+    /// the surface the skipped projection would have fed is never admitted
+    /// warm.
     pub(crate) fn projection_op_budget_exhausted(&mut self) -> bool {
-        self.fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
+        let exhausted = verter_type_engine::request_context::current_request_budget()
+            .is_some_and(|budget| budget.is_exhausted());
+        if exhausted {
+            verter_type_engine::request_context::mark_request_result_inference_budget_exceeded();
+        }
+        exhausted
     }
 
     /// Check wildcard route fanout budget. Returns `true` if within budget.
@@ -46,18 +42,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         !self
             .fuse_state
             .check_registry_deepening_fanout(&self.fuse_budgets)
-    }
-
-    /// Check union/member explosion budget. Returns `true` if within budget.
-    pub fn allow_union_member(&mut self) -> bool {
-        !self
-            .fuse_state
-            .check_union_member_explosion(&self.fuse_budgets)
-    }
-
-    /// Reset union member counter for per-member branch counting.
-    pub fn reset_union_members(&mut self) {
-        self.fuse_state.reset_union_members();
     }
 
     /// Whether any fuse has tripped.

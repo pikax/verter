@@ -62,8 +62,8 @@
 //!   one published),
 //! - interrupted results (panic / stack overflow / OS error caught by
 //!   the cooperative-admission guard),
-//! - budget-exceeded results (FuseBudgets tripped before the projection
-//!   converged), and
+//! - budget-exceeded results (the request's operation account or a
+//!   route fan-out fuse tripped before the projection converged), and
 //! - partial results (any path that returned `Opaque(Miss)` or an
 //!   intentionally incomplete shape because a strict-legality precondition
 //!   was not met).
@@ -328,7 +328,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `scope_shadowings` | (a) | Per-request `Arc<ScopeShadowing>` memo derived from `scope_payloads`; built once per scope so the Pick/Omit gate is O(1) per field. Shares `scope_payloads`'s request-local lifecycle. |
 /// | `prepared_type_decls` | (a) | Arc-cache for `verter_retention::heap_size::OwnedValue<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
-/// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
+/// | `fuse_budgets` / `fuse_state` | (a) | Request-local route/registry fan-out fuse rails; projection work is charged to the request's operation account instead. |
 ///
 /// **Audit conclusion:** all (b) producer caches operate at the
 /// pre-lowering `TypeExpr` identity space, which dispatch's

@@ -3364,3 +3364,58 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
          slot vacant on a non-cacheable read instead of caching the degraded `None`",
     );
 }
+
+/// The engine keeps no projection count of its own: it reads the request's
+/// operation account. A fresh account lets projections through without
+/// marking anything; once the account is past its cap the engine skips the
+/// projection and marks the request result partial, so the surface the
+/// skipped projection would have fed is refused warm admission.
+#[test]
+fn projection_gate_reads_the_request_operation_account() {
+    use verter_type_engine::request_context::{
+        current_request_result_is_partial, RequestContext, RequestContextGuard,
+    };
+    let host = build_route_only_reexport_host();
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &dispatch);
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/m4_src/index.ts"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        1,
+    );
+    let budget = Arc::clone(&ctx.projection_budget);
+    let _guard = RequestContextGuard::install(ctx);
+
+    assert!(!engine.projection_op_budget_exhausted());
+    assert!(
+        !budget.check_projection_op_count(),
+        "the one allowed operation"
+    );
+    assert!(
+        !engine.projection_op_budget_exhausted(),
+        "an account at its cap is not exhausted"
+    );
+    assert!(!current_request_result_is_partial());
+    assert_eq!(
+        budget.projection_ops_executed_count(),
+        1,
+        "reading the account spends nothing"
+    );
+
+    assert!(
+        budget.check_projection_op_count(),
+        "the operation past the cap"
+    );
+    assert!(engine.projection_op_budget_exhausted());
+    assert!(
+        current_request_result_is_partial(),
+        "a skipped projection leaves the request result partial"
+    );
+    assert_eq!(budget.projection_ops_executed_count(), 2);
+}

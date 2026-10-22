@@ -163,15 +163,14 @@ fn component_meta_evaluated_budget_error(
     analysis: Option<&verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
     evaluated_types: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
 ) -> Option<MetaError> {
-    // Walker overflow is no longer meaningful — the solver path replaced
-    // the legacy imported-eval walker. Only check symbolic expansion budget.
+    // The typed stop reasons on the expanded surface are the only budget
+    // authority; the message names no step count because no step count
+    // decides it.
     if evaluated_types.is_some_and(component_meta_expansion_budget_exceeded)
         && component_meta_symbolic_budget_is_fatal(analysis)
     {
         return Some(MetaError::Host(format!(
-            "component-meta symbolic expansion budget exceeded (maxSteps={}) for '{}'",
-            crate::host_manage::component_meta_symbolic_step_budget(),
-            canonical_or_alias,
+            "component-meta symbolic expansion budget exceeded for '{canonical_or_alias}'",
         )));
     }
 

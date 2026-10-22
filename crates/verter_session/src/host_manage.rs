@@ -269,7 +269,6 @@ pub(crate) fn component_meta_options_fingerprint(options: &ComponentMetaOptions)
 // one `Relaxed` `fetch_add` when present. The hot-path counters never
 // take a lock and never allocate.
 
-const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
 pub(in crate::host_manage) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
 impl FallthroughResolutionView for crate::types::FallthroughResolution {
@@ -886,10 +885,6 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             overrides,
         )
     }
-}
-
-pub(crate) fn component_meta_symbolic_step_budget() -> usize {
-    COMPONENT_META_MAX_SYMBOLIC_STEPS
 }
 
 fn macro_debug_summary(snapshot: &FileAnalysisSnapshot) -> String {
