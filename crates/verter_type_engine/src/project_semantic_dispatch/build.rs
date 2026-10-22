@@ -9277,7 +9277,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// ([`Self::lib_global_declaration`]), then the program's files in
     /// program file order, then by canonical path — among every
     /// module's `declare global` contribution and every script's file-scope
-    /// interface. `None` when neither declares such a global type.
+    /// interface that its identity addresses
+    /// ([`Self::identity_addresses_global_contribution`]). `None` when none
+    /// declares such a global type.
     ///
     /// A `declare global` block in a SCRIPT is an error that binds nothing.
     /// The declaration's `Instantiate` folds in every later declaration.
@@ -9294,10 +9296,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             name,
             verter_session_query::facts::SymbolSpace::Type,
         );
-        let first = population
-            .entries
-            .iter()
-            .find(|entry| declares_global_type(entry))?;
+        let first = population.entries.iter().find(|entry| {
+            declares_global_type(entry) && self.identity_addresses_global_contribution(entry, name)
+        })?;
         Some(ResolvedRootIdentity::new_in_owner(
             Arc::clone(&first.artifact_key.canonical),
             first.owner,
@@ -9307,13 +9308,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Whether `(canonical, owner, name)` addresses ONE declaration of the
     /// merged GLOBAL type `name` a reference in `demand_canonical` reads —
-    /// the project's library declaration, a module's `declare global`
+    /// a declaration of the project's library, a module's `declare global`
     /// contribution or a script's file-scope declaration — not only the
     /// first of them ([`Self::first_global_declaration`]): every one of
-    /// them declares the same global symbol. A module's `declare global`
-    /// contribution is not addressed by the identity when the module also
-    /// declares a module-scope type of the name, which the identity names
-    /// instead.
+    /// them declares the same global symbol, and every library that
+    /// declares it is one of them.
     pub(super) fn is_global_type_declaration(
         &self,
         demand_canonical: &str,
@@ -9344,14 +9343,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             ContributorOrigin::FileScopeInterface
                                 | ContributorOrigin::FileScopeType
                         )))
-                && (entry.origin != ContributorOrigin::DeclareGlobal
-                    || self
-                        .ctx
-                        .ensure_indexed_ready_serve(canonical)
-                        .is_some_and(|serve| {
-                            !serve.indexed.shallow_state.has_type_symbol_in(owner, name)
-                        }))
+                && self.identity_addresses_global_contribution(entry, name)
         })
+    }
+
+    /// Whether the identity `(canonical, owner, name)` of the global
+    /// contributor `entry` addresses its contribution to the GLOBAL type
+    /// `name`. Every contribution's does, except a module's `declare
+    /// global` one when the module also declares a module-scope type of the
+    /// name: the identity names that module-scope type, an ordinary type
+    /// the module's own references and its importers read. Such a
+    /// contribution still merges into the global, whose identity is a
+    /// declaration that addresses it.
+    fn identity_addresses_global_contribution(
+        &self,
+        entry: &verter_session_query::inputs::contributors::ContributorEntry,
+        name: &str,
+    ) -> bool {
+        entry.origin != verter_session_query::inputs::contributors::ContributorOrigin::DeclareGlobal
+            || self
+                .ctx
+                .ensure_indexed_ready_serve(entry.artifact_key.canonical.as_ref())
+                .is_some_and(|serve| {
+                    !serve
+                        .indexed
+                        .shallow_state
+                        .has_type_symbol_in(entry.owner, name)
+                })
     }
 
     /// Whether the declaration `(canonical, owner, name)` a reference in

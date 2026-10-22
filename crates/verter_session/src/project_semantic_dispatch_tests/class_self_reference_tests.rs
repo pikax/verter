@@ -206,10 +206,114 @@ const comp=defineComponent({data(){return {n:3 as const}},methods:{m(){return th
     }
 }
 
+/// Every automatic library that declares `ThisType` declares the marker,
+/// not only the first: a reference written in a second library, which
+/// reads that library's own declaration, names it as the first library's
+/// does. TypeScript answers `3` with the alias's library alone and beside
+/// an earlier one.
+#[test]
+fn contextual_this_marker_is_named_by_every_declaring_library() {
+    use super::checker_probe_lane_tests::{
+        mismatches_in, mismatches_on_host, probe_host, ProbeProject,
+    };
+    let reader = "export function obj() { return { m() { return this.n; } } satisfies LibMethods<{ n: 3 }>; }";
+    let rows = [("ReturnType<ReturnType<typeof obj>['m']>", "3")];
+    let second = "interface ThisType<T> {}\ntype LibMethods<T> = ThisType<T>;";
+    let alone = mismatches_in(
+        ProbeProject {
+            ambient_lib: Some(second),
+            ..Default::default()
+        },
+        reader,
+        &rows,
+    );
+    assert!(alone.is_empty(), "alone: {}", alone.join("\n"));
+    let project = ProbeProject {
+        ambient_lib: Some("interface ThisType<T> {}"),
+        ..Default::default()
+    };
+    let host = probe_host(project);
+    register_second_library(&host, second);
+    let beside = mismatches_on_host(&host, project, reader, &rows);
+    assert!(beside.is_empty(), "beside a library: {}", beside.join("\n"));
+}
+
+/// Registers `source` as a second automatic library of `host`'s probe
+/// project, after the one its [`ProbeProject`] registered.
+///
+/// [`ProbeProject`]: super::checker_probe_lane_tests::ProbeProject
+fn register_second_library(host: &crate::VerterHost, source: &str) {
+    host.workspace()
+        .register_ambient_lib(verter_workspace::AmbientLibSpec {
+            project_id: None,
+            canonical_id: std::sync::Arc::from("lib.second.d.ts"),
+            source: std::sync::Arc::from(source),
+        })
+        .expect("the second library registers against the probe's project");
+}
+
+/// A module that declares a module-scope `ThisType` beside its own
+/// `declare global` one contributes to the global marker, but its
+/// declaration identity names the module-scope type. A reader in another
+/// module names the global through a declaration that addresses it — the
+/// library's, or a later module's or script's global one — so it keeps
+/// its contextual receiver; a module importing the namesake reads an
+/// ordinary type. TypeScript answers `3` for the global reader and `4`
+/// for the importer in every row.
+#[test]
+fn a_global_reader_beside_a_module_local_namesake_keeps_the_marker() {
+    use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
+    let shadowing =
+        "export interface ThisType<T> { shadow: T }\ndeclare global { interface ThisType<T> {} }";
+    let reader = "type Methods<T> = ThisType<T>;
+export function obj() { return { m() { return this.n; } } satisfies Methods<{ n: 3 }>; }";
+    let importer = "import type { ThisType as Local } from './a';
+export function obj() { return { shadow: { n: 4 as const }, m() { return this.shadow.n; } } satisfies Local<{ n: 4 }> & { m(): 4 }; }";
+    let global_rows = [("ReturnType<ReturnType<typeof obj>['m']>", "3")];
+    let local_rows = [("ReturnType<ReturnType<typeof obj>['m']>", "4")];
+    let later_module = "export {}; declare global { interface ThisType<T> {} }";
+    let later_script = "interface ThisType<T> {}";
+    let mut failures = Vec::new();
+    for (label, files, ambient_lib) in [
+        (
+            "beside the library",
+            &[("a.ts", shadowing)][..],
+            Some("interface ThisType<T> {}"),
+        ),
+        (
+            "before a later module",
+            &[("a.ts", shadowing), ("b.ts", later_module)][..],
+            None,
+        ),
+        (
+            "before a later script",
+            &[("a.ts", shadowing), ("b.d.ts", later_script)][..],
+            None,
+        ),
+    ] {
+        let project = ProbeProject {
+            files,
+            ambient_lib,
+            ..Default::default()
+        };
+        for (role, source, rows) in [
+            ("global reader", reader, &global_rows),
+            ("importer", importer, &local_rows),
+        ] {
+            failures.extend(
+                mismatches_in(project, source, rows)
+                    .into_iter()
+                    .map(|failure| format!("{label}, {role}: {failure}")),
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A module's OWN `interface ThisType` — not in `declare global`, beside a
-/// global one in the library, or beside its own `declare global` one — is
-/// a different symbol from the global marker: the literal's receiver stays
-/// its contextual type, as TypeScript reads it.
+/// global one in one library or in two, or beside its own `declare global`
+/// one — is a different symbol from the global marker: the literal's
+/// receiver stays its contextual type, as TypeScript reads it.
 #[test]
 fn module_local_this_type_interface_is_not_the_contextual_this_marker() {
     let local = "interface ThisType<T> { shadow: T }
@@ -230,6 +334,15 @@ export function shadowed() { return { shadow: { n: 4 as const }, m() { return th
         let failures = super::checker_probe_lane_tests::mismatches_in(project, &source, &rows);
         assert!(failures.is_empty(), "{label}: {}", failures.join("\n"));
     }
+    let host = super::checker_probe_lane_tests::probe_host(library);
+    register_second_library(&host, "interface ThisType<T> {}");
+    let failures =
+        super::checker_probe_lane_tests::mismatches_on_host(&host, library, local, &rows);
+    assert!(
+        failures.is_empty(),
+        "beside two libraries: {}",
+        failures.join("\n")
+    );
 }
 
 #[test]
