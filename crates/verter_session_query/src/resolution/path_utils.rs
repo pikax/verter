@@ -40,8 +40,11 @@ pub fn path_is_carrier(path: &str) -> bool {
         .carrier_extensions()
         .iter()
         .any(|ext| {
-            let needle = format!(".{ext}");
-            path.len() > needle.len() && path.ends_with(&needle)
+            // `path` ends with `.{ext}` and is longer than it, checked
+            // without spelling the suffix.
+            path.len() > ext.len() + 1
+                && path.ends_with(ext)
+                && path.as_bytes()[path.len() - ext.len() - 1] == b'.'
         })
 }
 

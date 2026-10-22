@@ -974,7 +974,7 @@ impl RequestOverlayRoot {
     /// roots.
     fn build(world: &CapturedResolutionWorld, overlay: &ResolutionOverlaySnapshot) -> Option<Self> {
         let base_key = |canonical: &str, make: fn(CanonicalResolutionId) -> ResolutionFactKey| {
-            make(CanonicalResolutionId::new(canonical.to_owned()))
+            make(CanonicalResolutionId::new(canonical))
         };
         let mut primitive = rustc_hash::FxHashMap::default();
         // parent directory -> the paths under it whose existence moves.
@@ -3515,7 +3515,7 @@ impl ResolutionTransaction {
             .path_probes
             .push((canonical.to_string(), outcome));
         self.observe(ResolutionFactKey::PathProbe {
-            canonical: CanonicalResolutionId::new(canonical.to_string()),
+            canonical: CanonicalResolutionId::new(canonical),
             population: self.population(),
         });
         self.observe_recovery_chain(canonical);
@@ -3545,7 +3545,7 @@ impl ResolutionTransaction {
             .manifests
             .push((canonical.to_string(), fingerprint));
         self.observe(ResolutionFactKey::Manifest {
-            canonical: CanonicalResolutionId::new(canonical.to_string()),
+            canonical: CanonicalResolutionId::new(canonical),
             population: self.population(),
         });
     }
@@ -3561,7 +3561,7 @@ impl ResolutionTransaction {
             .realpaths
             .push((requested.to_string(), resolved.map(str::to_string)));
         self.observe(ResolutionFactKey::Realpath {
-            requested: CanonicalResolutionId::new(requested.to_string()),
+            requested: CanonicalResolutionId::new(requested),
             population: self.population(),
         });
         self.observe_recovery_chain(requested);
@@ -3572,7 +3572,7 @@ impl ResolutionTransaction {
 
     fn observe_canonical_recovery_scope(&mut self, canonical_prefix: &str) {
         self.observe(ResolutionFactKey::RecoveryScope {
-            canonical_prefix: CanonicalResolutionId::new(canonical_prefix.to_string()),
+            canonical_prefix: CanonicalResolutionId::new(canonical_prefix),
             population: self.population(),
         });
     }
@@ -3587,7 +3587,7 @@ impl ResolutionTransaction {
     }
 
     fn observe_recovery_chain(&mut self, canonical: &str) {
-        for prefix in ancestor_scopes(canonical) {
+        for prefix in ancestor_scope_prefixes(canonical) {
             self.observe(ResolutionFactKey::RecoveryScope {
                 canonical_prefix: CanonicalResolutionId::new(prefix),
                 population: self.population(),
@@ -3629,17 +3629,19 @@ impl ResolutionTransaction {
 }
 
 pub(crate) fn ancestor_scopes(path: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = path;
-    while let Some(index) = current.rfind('/') {
-        let prefix = if index == 0 { "/" } else { &current[..index] };
-        out.push(prefix.to_owned());
-        if prefix == "/" {
-            break;
-        }
-        current = prefix;
-    }
-    out
+    ancestor_scope_prefixes(path).map(str::to_owned).collect()
+}
+
+/// The prefixes [`ancestor_scopes`] lists, nearest first, borrowed from
+/// `path` instead of copied.
+fn ancestor_scope_prefixes(path: &str) -> impl Iterator<Item = &str> {
+    let mut current = Some(path);
+    std::iter::from_fn(move || {
+        let index = current?.rfind('/')?;
+        let prefix = if index == 0 { "/" } else { &current?[..index] };
+        current = (prefix != "/").then_some(prefix);
+        Some(prefix)
+    })
 }
 
 #[cfg(test)]
@@ -4043,7 +4045,7 @@ mod transaction_contract_tests {
 
     fn path_probe(name: &str) -> ResolutionFactKey {
         ResolutionFactKey::PathProbe {
-            canonical: CanonicalResolutionId::new(name.to_string()),
+            canonical: CanonicalResolutionId::new(name),
             population: ResolutionPopulation::Base,
         }
     }
@@ -4345,7 +4347,7 @@ mod root_graph_tests {
 
     fn leaf(name: &str) -> ResolutionFactKey {
         ResolutionFactKey::PathProbe {
-            canonical: CanonicalResolutionId::new(name.to_string()),
+            canonical: CanonicalResolutionId::new(name),
             population: ResolutionPopulation::Base,
         }
     }

@@ -361,6 +361,11 @@ impl<'a> ResolveFrame<'a> {
     }
 
     fn seed_precomputed_geometry(&self) {
+        // The relative spellings are seeded together: size the table once.
+        self.memo
+            .normalized
+            .borrow_mut()
+            .reserve(self.geometry.relative_probe_candidates.len() + 1);
         if let Some(base) = &self.geometry.relative_base {
             self.memo.remember_canonical(base);
         }
@@ -670,12 +675,8 @@ fn prefers_declaration_files(context: ResolutionContext) -> bool {
     )
 }
 
-fn arc_strings(values: Vec<String>) -> Arc<[Arc<str>]> {
-    values
-        .into_iter()
-        .map(Arc::<str>::from)
-        .collect::<Vec<_>>()
-        .into()
+fn arc_strings(values: Vec<Arc<str>>) -> Arc<[Arc<str>]> {
+    values.into()
 }
 
 #[cfg(test)]

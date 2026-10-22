@@ -20,13 +20,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::priority_frontier::priority_frontier_with_budgets;
-use crate::{
-    AttemptOutput, CompletedAttempt, KernelAttempt, ResolverAttemptView, ResolverObservation,
-};
-use verter_session_query::resolution::{
-    AttemptOutcome, ConsumedResolutionObservationKey, ResolutionBasis,
-};
+use crate::input_resolution_budgets::CompletedWitnessRetentionKey;
+use crate::priority_frontier::{CandidateOutput, PriorityFrontierState, RecordedCandidate};
+use crate::resolver_attempt_view::SnapshotRead;
+use crate::{AttemptOutput, InputResolutionRetention, KernelAttempt, ResolverAttemptView};
+use verter_session_query::resolution::{ConsumedResolutionObservationKey, ResolutionBasis};
 
 /// Mirrors `resolve_ts_source_sibling`'s own match arms exactly
 /// (`crates/verter_workspace/src/resolver.rs`).
@@ -111,14 +109,24 @@ pub(crate) fn build_probe_candidate_list(
     base: &str,
     apply_source_sibling: bool,
     prefers_declarations: bool,
-) -> Vec<String> {
-    let mut out = Vec::new();
+) -> Vec<Arc<str>> {
+    let mut out = Vec::with_capacity(probe_extensions_list().len() + PROBE_INDEX_FILES.len() + 4);
+    // Each candidate is spelled once, in a reused buffer, straight into the
+    // shared string its probe key will hold.
+    let mut spelling = String::with_capacity(base.len() + 16);
+    let mut push = |parts: [&str; 3]| {
+        spelling.clear();
+        for part in parts {
+            spelling.push_str(part);
+        }
+        out.push(Arc::<str>::from(spelling.as_str()));
+    };
 
     if apply_source_sibling {
         if let Some((runtime_ext, source_exts)) = js_family_source_exts(base) {
             if let Some(stem) = base.strip_suffix(runtime_ext) {
                 for ext in source_exts {
-                    out.push(format!("{stem}{ext}"));
+                    push([stem, ext, ""]);
                 }
             }
         }
@@ -128,7 +136,7 @@ pub(crate) fn build_probe_candidate_list(
         if let Some((runtime_ext, companion_exts)) = js_family_companion_exts(base) {
             if let Some(stem) = base.strip_suffix(runtime_ext) {
                 for ext in companion_exts {
-                    out.push(format!("{stem}{ext}"));
+                    push([stem, ext, ""]);
                 }
             }
         }
@@ -136,7 +144,7 @@ pub(crate) fn build_probe_candidate_list(
 
     let has_extension = Path::new(base).extension().is_some();
     if has_extension {
-        out.push(base.to_string());
+        push([base, "", ""]);
     }
     // A dotted import stem is not necessarily a complete source filename:
     // `./types.d` and `./Button.types` still need `.ts` probing. Keep explicit
@@ -146,15 +154,23 @@ pub(crate) fn build_probe_candidate_list(
         apply_source_sibling && !extensions.iter().any(|extension| base.ends_with(extension));
     if !has_extension || dotted_import_stem {
         for ext in extensions {
-            out.push(format!("{base}{ext}"));
+            push([base, ext, ""]);
         }
     }
 
+    let directory = base.trim_end_matches('/');
     for index_name in PROBE_INDEX_FILES {
-        out.push(format!("{}/{}", base.trim_end_matches('/'), index_name));
+        push([directory, "/", index_name]);
     }
 
     out
+}
+
+/// The directory whose ancestors, with itself, are `path`'s recovery
+/// scopes: the first prefix [`ancestor_scopes`] lists.
+fn nearest_scope(path: &str) -> Option<&str> {
+    path.rfind('/')
+        .map(|index| if index == 0 { "/" } else { &path[..index] })
 }
 
 /// Ancestor-directory chain of `path` — same algorithm as the legacy
@@ -163,8 +179,7 @@ pub(crate) fn build_probe_candidate_list(
 pub(crate) fn ancestor_scopes(path: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = path;
-    while let Some(index) = current.rfind('/') {
-        let prefix = if index == 0 { "/" } else { &current[..index] };
+    while let Some(prefix) = nearest_scope(current) {
         out.push(prefix.to_string());
         if prefix == "/" {
             break;
@@ -174,16 +189,107 @@ pub(crate) fn ancestor_scopes(path: &str) -> Vec<String> {
     out
 }
 
+/// How many prefixes [`ancestor_scopes`] lists for `path`, without
+/// spelling them.
+fn ancestor_scope_count(path: &str) -> usize {
+    let mut count = 0;
+    let mut current = path;
+    while let Some(prefix) = nearest_scope(current) {
+        count += 1;
+        if prefix == "/" {
+            break;
+        }
+        current = prefix;
+    }
+    count
+}
+
+/// The recovery-scope witnesses of `path`, nearest ancestor first: exactly
+/// [`ancestor_scopes`], as the keys an output records.
+///
+/// Every path in one directory has the same chain, and the candidates of an
+/// import — and the imports of a barrel — share their directory, so the
+/// chain is built once and shared instead of being spelled again for every
+/// candidate. The chain is a pure function of the spelling; each thread keeps
+/// the chains of the last few directories it used.
+pub(crate) fn recovery_scope_chain(path: &str) -> Arc<[ConsumedResolutionObservationKey]> {
+    let Some(directory) = nearest_scope(path) else {
+        return Arc::from([]);
+    };
+    SCOPE_CHAINS.with(|chains| {
+        let mut chains = chains.borrow_mut();
+        if let Some(chain) = chains.get(directory) {
+            return chain;
+        }
+        #[cfg(test)]
+        SCOPE_CHAIN_BUILDS.set(SCOPE_CHAIN_BUILDS.get() + 1);
+        let chain: Arc<[ConsumedResolutionObservationKey]> = ancestor_scopes(path)
+            .into_iter()
+            .map(|prefix| ConsumedResolutionObservationKey::RecoveryScope {
+                canonical_prefix: Arc::from(prefix),
+            })
+            .collect();
+        chains.insert(&chain);
+        chain
+    })
+}
+
+/// The chains of the last [`SCOPE_CHAIN_SLOTS`] directories, replaced in
+/// turn. Each slot is keyed by its chain's first scope, which is the
+/// directory itself.
+#[derive(Default)]
+struct ScopeChainMemo {
+    slots: [Option<Arc<[ConsumedResolutionObservationKey]>>; SCOPE_CHAIN_SLOTS],
+    next: usize,
+}
+
+const SCOPE_CHAIN_SLOTS: usize = 4;
+
+impl ScopeChainMemo {
+    fn get(&self, directory: &str) -> Option<Arc<[ConsumedResolutionObservationKey]>> {
+        self.slots
+            .iter()
+            .flatten()
+            .find_map(|chain| match chain.first() {
+                Some(ConsumedResolutionObservationKey::RecoveryScope { canonical_prefix })
+                    if canonical_prefix.as_ref() == directory =>
+                {
+                    Some(Arc::clone(chain))
+                }
+                _ => None,
+            })
+    }
+
+    fn insert(&mut self, chain: &Arc<[ConsumedResolutionObservationKey]>) {
+        self.slots[self.next] = Some(Arc::clone(chain));
+        self.next = (self.next + 1) % SCOPE_CHAIN_SLOTS;
+    }
+}
+
+thread_local! {
+    static SCOPE_CHAINS: std::cell::RefCell<ScopeChainMemo> =
+        std::cell::RefCell::new(ScopeChainMemo::default());
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Recovery-scope chains built (not reused) on this thread.
+    pub(crate) static SCOPE_CHAIN_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn record_recovery_scopes(
     output: &mut AttemptOutput,
     path: &str,
 ) -> Result<(), verter_session_query::resolution::AttemptFailure> {
-    for prefix in ancestor_scopes(path) {
-        output.record_consumed_resolution_observation(
-            ConsumedResolutionObservationKey::RecoveryScope {
-                canonical_prefix: Arc::from(prefix),
-            },
-        )?;
+    record_scope_chain(output, &recovery_scope_chain(path))
+}
+
+fn record_scope_chain(
+    output: &mut AttemptOutput,
+    chain: &[ConsumedResolutionObservationKey],
+) -> Result<(), verter_session_query::resolution::AttemptFailure> {
+    for key in chain {
+        output.record_consumed_resolution_observation(key.clone())?;
     }
     Ok(())
 }
@@ -195,64 +301,122 @@ pub(crate) fn record_recovery_scopes(
 /// up with `real_path` and records both the probe and the realpath as
 /// consumed, plus recovery-scope ancestors for both the requested and
 /// resolved paths.
-pub(crate) fn evaluate_probe_candidate(
+///
+/// The output goes where the frontier says ([`CandidateOutput`]): straight
+/// into the frontier's own output while no block is held, and nowhere once
+/// one is — then a miss only checks that its witnesses could have been
+/// retained, and a hit, which cannot win, records nothing.
+fn evaluate_probe_candidate(
     view: &ResolverAttemptView,
-    candidate: &str,
-) -> KernelAttempt<Option<String>> {
-    match view.path_probe(candidate) {
-        AttemptOutcome::NeedInputs(load_set) => AttemptOutcome::NeedInputs(load_set),
-        AttemptOutcome::Terminal(failure) => AttemptOutcome::Terminal(failure),
-        AttemptOutcome::Complete(probe) => match probe {
-            verter_session_query::resolution::PathProbe::File
-            | verter_session_query::resolution::PathProbe::Directory => {
-                match view.real_path(candidate) {
-                    AttemptOutcome::NeedInputs(load_set) => AttemptOutcome::NeedInputs(load_set),
-                    AttemptOutcome::Terminal(failure) => AttemptOutcome::Terminal(failure),
-                    AttemptOutcome::Complete(resolved) => {
-                        let resolved_id = resolved
-                            .as_ref()
-                            .map(|r| r.to_string())
-                            .unwrap_or_else(|| candidate.to_string());
-                        let mut output = AttemptOutput::new();
-                        if let Err(failure) = output.record_consumed_resolution_observation(
-                            ConsumedResolutionObservationKey::PathProbe {
-                                path: Arc::from(candidate),
-                            },
-                        ) {
-                            return AttemptOutcome::Terminal(failure);
-                        }
-                        if let Err(failure) = output.record_consumed_resolution_observation(
+    candidate: &Arc<str>,
+    output: CandidateOutput<'_>,
+    recorded_chain: &mut Option<Arc<[ConsumedResolutionObservationKey]>>,
+) -> RecordedCandidate<String> {
+    let probe = match view.path_probe_shared(candidate) {
+        SnapshotRead::Known(probe) => probe,
+        SnapshotRead::Missing(input, basis) => {
+            return RecordedCandidate::NeedInput(input.into_key(), *basis)
+        }
+        SnapshotRead::Unavailable(observation) => return unavailable(observation),
+    };
+    match probe {
+        verter_session_query::resolution::PathProbe::File
+        | verter_session_query::resolution::PathProbe::Directory => {
+            let resolved = match view.real_path_shared(candidate) {
+                SnapshotRead::Known(resolved) => resolved,
+                SnapshotRead::Missing(input, basis) => {
+                    return RecordedCandidate::NeedInput(input.into_key(), *basis)
+                }
+                SnapshotRead::Unavailable(observation) => return unavailable(observation),
+            };
+            let resolved_id = resolved
+                .as_ref()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| candidate.to_string());
+            if let CandidateOutput::Accumulate(mut accumulator) = output {
+                let output = accumulator.output();
+                let recorded = output
+                    .record_consumed_resolution_observation(
+                        ConsumedResolutionObservationKey::PathProbe {
+                            path: Arc::clone(candidate),
+                        },
+                    )
+                    .and_then(|()| {
+                        output.record_consumed_resolution_observation(
                             ConsumedResolutionObservationKey::RealPath {
-                                path: Arc::from(candidate),
+                                path: Arc::clone(candidate),
                             },
-                        ) {
-                            return AttemptOutcome::Terminal(failure);
-                        }
-                        if let Err(failure) = record_recovery_scopes(&mut output, candidate)
-                            .and_then(|()| record_recovery_scopes(&mut output, &resolved_id))
-                        {
-                            return AttemptOutcome::Terminal(failure);
-                        }
-                        AttemptOutcome::Complete(CompletedAttempt::new(Some(resolved_id), output))
-                    }
+                        )
+                    })
+                    .and_then(|()| record_candidate_chain(output, candidate, recorded_chain))
+                    .and_then(|()| record_candidate_chain(output, &resolved_id, recorded_chain));
+                if let Err(failure) = recorded {
+                    return RecordedCandidate::Terminal(failure);
                 }
             }
-            _ => {
-                let mut output = AttemptOutput::new();
-                if let Err(failure) = output.record_consumed_resolution_observation(
-                    ConsumedResolutionObservationKey::PathProbe {
-                        path: Arc::from(candidate),
-                    },
-                ) {
-                    return AttemptOutcome::Terminal(failure);
+            RecordedCandidate::Hit(resolved_id)
+        }
+        _ => {
+            let recorded = match output {
+                CandidateOutput::Accumulate(mut accumulator) => {
+                    let output = accumulator.output();
+                    output
+                        .record_consumed_resolution_observation(
+                            ConsumedResolutionObservationKey::PathProbe {
+                                path: Arc::clone(candidate),
+                            },
+                        )
+                        .and_then(|()| record_candidate_chain(output, candidate, recorded_chain))
                 }
-                if let Err(failure) = record_recovery_scopes(&mut output, candidate) {
-                    return AttemptOutcome::Terminal(failure);
+                // The probe witness and the candidate's ancestors, which are
+                // distinct keys.
+                CandidateOutput::Discard => {
+                    InputResolutionRetention::current_admits_fresh_completed_witnesses(
+                        1 + ancestor_scope_count(candidate),
+                        || {
+                            std::iter::once(ConsumedResolutionObservationKey::PathProbe {
+                                path: Arc::clone(candidate),
+                            })
+                            .chain(recovery_scope_chain(candidate).to_vec())
+                            .map(CompletedWitnessRetentionKey::ConsumedResolutionObservation)
+                        },
+                    )
                 }
-                AttemptOutcome::Complete(CompletedAttempt::new(None, output))
+            };
+            match recorded {
+                Ok(()) => RecordedCandidate::Miss,
+                Err(failure) => RecordedCandidate::Terminal(failure),
             }
-        },
+        }
     }
+}
+
+fn unavailable<T>(
+    observation: verter_session_query::resolution::ResolverObservationKind,
+) -> RecordedCandidate<T> {
+    RecordedCandidate::Terminal(
+        verter_session_query::resolution::AttemptFailure::ObservationUnavailable { observation },
+    )
+}
+
+/// Records `path`'s recovery scopes into the frontier's output. The chain
+/// last recorded there is already held whole, so recording it again would
+/// change nothing and is skipped.
+fn record_candidate_chain(
+    output: &mut AttemptOutput,
+    path: &str,
+    recorded_chain: &mut Option<Arc<[ConsumedResolutionObservationKey]>>,
+) -> Result<(), verter_session_query::resolution::AttemptFailure> {
+    let chain = recovery_scope_chain(path);
+    if recorded_chain
+        .as_ref()
+        .is_some_and(|recorded| Arc::ptr_eq(recorded, &chain))
+    {
+        return Ok(());
+    }
+    record_scope_chain(output, &chain)?;
+    *recorded_chain = Some(chain);
+    Ok(())
 }
 
 /// Evaluates the full path-probe candidate sequence in one attempt (no
@@ -269,25 +433,33 @@ pub(crate) fn probe_path_for_context(
     prefers_declarations: bool,
 ) -> KernelAttempt<Option<String>> {
     let candidates = build_probe_candidate_list(base, apply_source_sibling, prefers_declarations);
-    priority_frontier_with_budgets(
-        expected_basis,
-        view.input_resolution_budgets(),
-        candidates,
-        |candidate| evaluate_probe_candidate(view, &candidate),
-    )
+    evaluate_probe_candidates(view, expected_basis, &candidates)
 }
 
+/// Runs `candidates` through one priority frontier (see
+/// [`crate::priority_frontier`] for the rules), each candidate recording
+/// its witnesses where the frontier says.
 pub(crate) fn evaluate_probe_candidates(
     view: &ResolverAttemptView,
     expected_basis: ResolutionBasis,
     candidates: &[Arc<str>],
 ) -> KernelAttempt<Option<String>> {
-    priority_frontier_with_budgets(
-        expected_basis,
-        view.input_resolution_budgets(),
-        candidates,
-        |candidate| evaluate_probe_candidate(view, candidate),
-    )
+    let mut frontier =
+        PriorityFrontierState::new_with_budgets(expected_basis, view.input_resolution_budgets());
+    // The last recovery-scope chain recorded into the frontier's output.
+    let mut recorded_chain = None;
+    for candidate in candidates {
+        let step = evaluate_probe_candidate(
+            view,
+            candidate,
+            frontier.candidate_output(),
+            &mut recorded_chain,
+        );
+        if let Some(outcome) = frontier.push_recorded(step) {
+            return outcome;
+        }
+    }
+    frontier.finish()
 }
 
 pub(crate) fn probe_path_with_memo(

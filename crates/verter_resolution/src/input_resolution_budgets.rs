@@ -103,6 +103,8 @@ impl InputResolutionRetention {
         &self,
         key: CompletedWitnessRetentionKey,
     ) -> Result<(), verter_session_query::resolution::AttemptFailure> {
+        #[cfg(test)]
+        WITNESS_RETAINS.set(WITNESS_RETAINS.get() + 1);
         let mut retained = self
             .state
             .completed_witnesses
@@ -147,6 +149,71 @@ impl InputResolutionRetention {
         }
         retained.insert(key, 1);
         Ok(())
+    }
+
+    /// Whether a fresh output in the current retention scope could retain
+    /// `distinct` distinct witnesses, answered without retaining them.
+    ///
+    /// The answer, including the failure, is exactly what recording the
+    /// witnesses into a new [`crate::AttemptOutput`] and dropping it would
+    /// produce. When even an all-new set fits, `keys` is never called; only
+    /// at the edge of the budget are the witnesses already retained looked
+    /// up. Outside any scope a new output gets a fresh default ledger.
+    pub(crate) fn current_admits_fresh_completed_witnesses<I>(
+        distinct: usize,
+        keys: impl FnOnce() -> I,
+    ) -> Result<(), verter_session_query::resolution::AttemptFailure>
+    where
+        I: IntoIterator<Item = CompletedWitnessRetentionKey>,
+    {
+        CURRENT_RETENTION.with(|current| match current.borrow().last() {
+            Some(retention) => retention.admits_fresh_completed_witnesses(distinct, keys),
+            None => {
+                let maximum = InputResolutionBudgets::default().completed_witness_retention();
+                admit_new_witnesses(0, distinct, false, maximum)
+            }
+        })
+    }
+
+    fn admits_fresh_completed_witnesses<I>(
+        &self,
+        distinct: usize,
+        keys: impl FnOnce() -> I,
+    ) -> Result<(), verter_session_query::resolution::AttemptFailure>
+    where
+        I: IntoIterator<Item = CompletedWitnessRetentionKey>,
+    {
+        let retained = self
+            .state
+            .completed_witnesses
+            .lock()
+            .expect("completed-witness retention lock poisoned");
+        #[cfg(test)]
+        let forced = self
+            .state
+            .has_forced_completed_witness_count
+            .load(Ordering::Acquire);
+        #[cfg(not(test))]
+        let forced = false;
+        #[cfg(test)]
+        let current = if forced {
+            self.state
+                .forced_completed_witness_count
+                .load(Ordering::Acquire)
+        } else {
+            u32::try_from(retained.len()).unwrap_or(u32::MAX)
+        };
+        #[cfg(not(test))]
+        let current = u32::try_from(retained.len()).unwrap_or(u32::MAX);
+        let maximum = self.state.budgets.completed_witness_retention();
+        if u64::from(current) + distinct as u64 <= u64::from(maximum) {
+            return Ok(());
+        }
+        let new = keys()
+            .into_iter()
+            .filter(|key| !retained.contains_key(key))
+            .count();
+        admit_new_witnesses(current, new, forced, maximum)
     }
 
     pub(crate) fn release_completed_witness(&self, key: &CompletedWitnessRetentionKey) {
@@ -239,6 +306,48 @@ impl Default for InputResolutionRetention {
     fn default() -> Self {
         Self::new(InputResolutionBudgets::default())
     }
+}
+
+/// Replays `retain_completed_witness` for `new` witnesses the ledger does not
+/// hold yet, starting from `current` retained. A forced test count does not
+/// grow as witnesses are inserted, exactly as in `retain_completed_witness`.
+fn admit_new_witnesses(
+    current: u32,
+    new: usize,
+    forced: bool,
+    maximum: u32,
+) -> Result<(), verter_session_query::resolution::AttemptFailure> {
+    let mut current = current;
+    for _ in 0..new {
+        let Some(prospective) = current.checked_add(1) else {
+            return Err(
+                verter_session_query::resolution::AttemptFailure::InputResolutionCompletedWitnessRetentionLimit {
+                    retained: current,
+                    prospective: u32::MAX,
+                    maximum,
+                },
+            );
+        };
+        if prospective > maximum {
+            return Err(
+                verter_session_query::resolution::AttemptFailure::InputResolutionCompletedWitnessRetentionLimit {
+                    retained: current,
+                    prospective,
+                    maximum,
+                },
+            );
+        }
+        if !forced {
+            current = prospective;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Witness retentions requested on this thread, repeats included.
+    pub(crate) static WITNESS_RETAINS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 thread_local! {
