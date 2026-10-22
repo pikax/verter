@@ -454,9 +454,12 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
 
   // Fire-and-forget start. A start that was abandoned because the session ended
   // is the expected outcome of deactivating mid-start, not a failure to surface.
+  // Any other failure has no caller to reach, so it is logged rather than
+  // rethrown into an unhandled rejection in the extension host.
   const startLanguageServerInBackground = () => {
     ensureLanguageServerStarted().catch((error) => {
-      if (!(error instanceof StartAbandonedError)) throw error;
+      if (error instanceof StartAbandonedError) return;
+      log.error("Failed to start the Verter language server in the background", error);
     });
   };
 
