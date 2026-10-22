@@ -1426,7 +1426,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                 matches!(
                     fact,
                     FactVersionRef::FileWholeHash { canonical_id, hash }
-                        if canonical_id.as_str() == key.owner_canonical.as_ref()
+                        if &**canonical_id == key.owner_canonical.as_ref()
                             && *hash == owner_whole_hash
                 )
             })
@@ -1445,7 +1445,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                         canonical_id,
                         kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                         ..
-                    } if canonical_id.as_str() == owner
+                    } if &**canonical_id == owner
                 )
             })
             .cloned()
@@ -1642,7 +1642,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             if let Some(hash) = self.ctx.authoritative_current_content_hash(owner_canonical) {
                 crate::resolver_core::resolver_context::observe_fan_out(
                     FactVersionRef::FileWholeHash {
-                        canonical_id: owner_canonical.to_owned(),
+                        canonical_id: owner_canonical.into(),
                         hash,
                     },
                 );

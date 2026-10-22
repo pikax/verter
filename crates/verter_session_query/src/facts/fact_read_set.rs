@@ -1352,7 +1352,7 @@ mod finalise_tests {
 
     fn fact(index: usize) -> FactVersionRef {
         FactVersionRef::FileWholeHash {
-            canonical_id: format!("/fact-{index}.ts"),
+            canonical_id: format!("/fact-{index}.ts").into(),
             hash: [(index & 0xff) as u8; 16],
         }
     }

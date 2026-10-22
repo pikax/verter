@@ -1183,6 +1183,7 @@ impl VerterHost {
                     format!("owner={} dispatch_authority=true", canonical),
                 );
             }
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             if query_engine.has_fuse_tripped() {
                 for trip in query_engine.fuse_trips() {
                     verter_type_engine::component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
@@ -1288,20 +1289,24 @@ impl VerterHost {
         // the two in lock-step.
         let request_result_partial =
             verter_type_engine::request_context::current_request_result_is_partial();
+        let request_reasons = verter_type_engine::request_context::current_request_result_reasons();
+        let propagated_or_named = if request_reasons.is_empty() {
+            verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED
+        } else {
+            request_reasons
+        };
         let completeness = match (synthesis_suppression, request_result_partial) {
             (Some(reasons), true) => {
                 verter_type_engine::semantic_query::ResultCompleteness::partial(
-                    reasons
-                        .get()
-                        .union(verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED),
+                    reasons.get().union(propagated_or_named),
                 )
             }
             (Some(reasons), false) => {
                 verter_type_engine::semantic_query::ResultCompleteness::partial(reasons.get())
             }
-            (None, true) => verter_type_engine::semantic_query::ResultCompleteness::partial(
-                verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
-            ),
+            (None, true) => {
+                verter_type_engine::semantic_query::ResultCompleteness::partial(propagated_or_named)
+            }
             (None, false) => verter_type_engine::semantic_query::ResultCompleteness::Complete,
         };
         let synthesis_should_suppress = completeness.is_partial();
@@ -3292,10 +3297,11 @@ impl VerterHost {
         facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
     ) {
+        let canonical_id = verter_session_query::facts::version::SharedCanonical::new(canonical);
         if let Some(hash) = self.current_or_read_whole_hash(canonical) {
             let file_fact =
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.to_string(),
+                    canonical_id: canonical_id.id(),
                     hash,
                 };
             if seen.insert(file_fact.clone()) {
@@ -3305,7 +3311,7 @@ impl VerterHost {
 
         if let Some(artifacts) = self.current_content_pinned_artifacts(canonical) {
             if let Some(parse_fact) =
-                self.syntactic_route_interface_fact_for_indexed(canonical, &artifacts.indexed)
+                self.syntactic_route_interface_fact_for_indexed(&canonical_id, &artifacts.indexed)
             {
                 let fact =
                     verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);

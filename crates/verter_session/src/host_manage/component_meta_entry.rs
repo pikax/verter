@@ -239,7 +239,7 @@ pub(crate) fn strip_owner_route_fact(
                     canonical_id,
                     kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                     ..
-                } if canonical_id == owner_canonical
+                } if **canonical_id == *owner_canonical
             )
         })
         .cloned()

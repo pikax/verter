@@ -6,7 +6,7 @@ use crate::facts::version::{FactHash16, ParseFactRef};
 
 fn whole_hash(canonical: String) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: canonical,
+        canonical_id: canonical.into(),
         hash: FactHash16::default(),
     }
 }
@@ -105,4 +105,177 @@ fn an_alias_set_counts_each_allocation_once_past_its_inline_capacity() {
         );
     }
     assert_eq!(aliases.len(), names.len());
+}
+
+fn decision_fact(importer: &str, specifier: &str) -> FactVersionRef {
+    use crate::facts::resolution::{
+        ResolutionFactKey, ResolutionFactRef, ResolutionFactVersion, ResolutionQueryKey,
+        ResolveContextId,
+    };
+    use crate::resolution::dto::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+    let query = ResolutionQueryKey::importer(
+        importer,
+        specifier,
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::EsmImport,
+        },
+        ResolveContextId::unowned(),
+        crate::resolution::resolution_world_identity::ResolutionPopulation::Base,
+    );
+    FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(ResolutionFactRef::new(
+        ResolutionFactKey::decision(query),
+        ResolutionFactVersion::fresh(1),
+    )))
+}
+
+#[test]
+fn a_cloned_fact_charges_its_shared_canonical_once_per_alias_set() {
+    let canonical = "c".repeat(3_000);
+    let fact = whole_hash(canonical.clone());
+    let clone = fact.clone();
+    let mut aliases = AliasSet::new();
+    assert_eq!(
+        fact_heap_bytes(&fact, &mut aliases),
+        arc_block_bytes(canonical.len()),
+        "the canonical is charged as its one shared block"
+    );
+    assert_eq!(
+        fact_heap_bytes(&clone, &mut aliases),
+        0,
+        "a clone shares the canonical this charge already counted"
+    );
+    assert_eq!(
+        fact_heap_bytes(&fact, &mut aliases),
+        0,
+        "a repeat costs nothing more"
+    );
+    drop(clone);
+    // A canonical one fact alone owns is counted without a set entry.
+    let mut alone = AliasSet::new();
+    assert_eq!(
+        fact_heap_bytes(&fact, &mut alone),
+        arc_block_bytes(canonical.len())
+    );
+    assert!(alone.is_empty());
+    // The contract for a single-owner text: counted each time its owner is
+    // measured, as the `String` it replaced was. No charge measures one
+    // fact twice (see `FactMeasure`).
+    assert_eq!(
+        fact_heap_bytes(&fact, &mut alone),
+        arc_block_bytes(canonical.len()),
+        "a single-owner canonical is counted per pass"
+    );
+    assert!(alone.is_empty());
+    // A collecting measurement charges the canonical inline: it is never
+    // registered as a shared leaf of its own.
+    let mut collecting = AliasSet::collecting();
+    assert_eq!(
+        fact_heap_bytes(&fact, &mut collecting),
+        arc_block_bytes(canonical.len())
+    );
+    assert!(collecting.take_leaves().is_empty());
+}
+
+#[test]
+fn a_cloned_decision_charges_its_shared_query_once_per_alias_set() {
+    let importer = "i".repeat(2_000);
+    let fact = decision_fact(&importer, "./dep");
+    let clone = fact.clone();
+    let mut aliases = AliasSet::new();
+    let once = fact_heap_bytes(&fact, &mut aliases);
+    assert_eq!(
+        once,
+        arc_block_bytes(std::mem::size_of::<
+            crate::facts::resolution::ResolutionQueryKey,
+        >()) + arc_block_bytes(importer.len())
+            + arc_block_bytes("./dep".len()),
+        "the query identity and its texts are each charged once"
+    );
+    assert_eq!(
+        fact_heap_bytes(&clone, &mut aliases),
+        0,
+        "a clone shares the query this charge already counted"
+    );
+    assert_eq!(
+        fact_heap_bytes(&fact, &mut aliases),
+        0,
+        "a repeat costs nothing more"
+    );
+}
+
+#[test]
+fn an_owned_fact_signature_charges_a_canonical_its_facts_share_once() {
+    let shared = whole_hash("s".repeat(10_000));
+    let facts: Vec<FactVersionRef> = (0..8).map(|_| shared.clone()).collect();
+    let signature = crate::facts::fact_cache::OwnedFactSignature::from(facts);
+    let charged = signature.offer(&mut AliasSet::estimating());
+    assert!(charged >= 10_000, "the shared canonical is charged");
+    assert!(
+        charged < 20_000,
+        "eight facts naming one canonical charge its text once, not eight times: {charged}"
+    );
+}
+
+#[test]
+fn an_empty_canonical_charges_nothing() {
+    let empty = FactVersionRef::FileWholeHash {
+        canonical_id: Arc::default(),
+        hash: FactHash16::default(),
+    };
+    assert_eq!(fact_heap_bytes(&empty, &mut AliasSet::new()), 0);
+    assert_eq!(fact_heap_bytes(&empty, &mut AliasSet::collecting()), 0);
+    // Every shared-text path charges the static empty text nothing.
+    let shared_empty: Arc<str> = Arc::default();
+    assert_eq!(arc_str_bytes(&shared_empty, &mut AliasSet::new()), 0);
+    let mut collecting = AliasSet::collecting();
+    assert_eq!(arc_str_bytes(&shared_empty, &mut collecting), 0);
+    assert!(collecting.take_leaves().is_empty());
+    let list: Arc<[Arc<str>]> = Arc::from(vec![Arc::default(), Arc::default()]);
+    assert_eq!(
+        arc_str_list_bytes(&list, &mut AliasSet::new()),
+        arc_block_bytes(2 * std::mem::size_of::<Arc<str>>())
+    );
+    assert_eq!(
+        verter_retention::heap_size::footprint(&shared_empty).bytes,
+        0,
+        "a tree's raw empty text costs nothing"
+    );
+    // An empty text built as its own allocation still costs its counters.
+    let allocated = FactVersionRef::FileWholeHash {
+        canonical_id: Arc::from(String::new()),
+        hash: FactHash16::default(),
+    };
+    assert_eq!(
+        fact_heap_bytes(&allocated, &mut AliasSet::new()),
+        arc_block_bytes(0)
+    );
+}
+
+#[test]
+fn in_population_copies_a_shared_decision_query() {
+    use crate::facts::resolution::ResolutionFactKey;
+    use crate::resolution::resolution_world_identity::{ResolutionPopulation, SessionFingerprint};
+    let FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(fact)) =
+        decision_fact("/src/main.ts", "./dep")
+    else {
+        unreachable!("a decision fact");
+    };
+    let base = fact.key.clone();
+    let session = ResolutionPopulation::Session(SessionFingerprint::from_raw(1));
+    let moved = base.in_population(session);
+    assert_eq!(base.population(), ResolutionPopulation::Base);
+    assert_eq!(moved.population(), session);
+    let (
+        ResolutionFactKey::Decision { query: before },
+        ResolutionFactKey::Decision { query: after },
+    ) = (&fact.key, &moved)
+    else {
+        unreachable!("both are decisions");
+    };
+    assert!(
+        !Arc::ptr_eq(before, after),
+        "the rewritten key owns its own copy of the query"
+    );
+    assert_eq!(fact.key.population(), ResolutionPopulation::Base);
 }

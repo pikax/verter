@@ -486,7 +486,7 @@ mod recorder_tests {
                 &tracer
             ));
             let fact = FactVersionRef::FileWholeHash {
-                canonical_id: "/rec.ts".to_string(),
+                canonical_id: "/rec.ts".into(),
                 hash: [3u8; 16],
             };
             observe_fan_out(fact.clone());
@@ -495,7 +495,7 @@ mod recorder_tests {
         }
         // Observed after the scope closed: not recorded.
         observe_fan_out(FactVersionRef::FileWholeHash {
-            canonical_id: "/after.ts".to_string(),
+            canonical_id: "/after.ts".into(),
             hash: [4u8; 16],
         });
         clear();
@@ -521,7 +521,7 @@ mod fan_out_tests {
         let signature = seal_canonical_signature(
             (0..16)
                 .map(|i| FactVersionRef::FileWholeHash {
-                    canonical_id: format!("/fact-{i}.ts"),
+                    canonical_id: format!("/fact-{i}.ts").into(),
                     hash: [i; 16],
                 })
                 .collect(),
@@ -585,7 +585,7 @@ mod fan_out_tests {
         install(&inner);
 
         observe_fan_out(FactVersionRef::FileWholeHash {
-            canonical_id: "/fan.ts".to_string(),
+            canonical_id: "/fan.ts".into(),
             hash: [7u8; 16],
         });
 
@@ -602,7 +602,7 @@ mod fan_out_tests {
     #[test]
     fn a_delivering_scope_stops_the_fan_out_below_it() {
         let fact = |canonical: &str| FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: [3u8; 16],
         };
         let outer = FactReadSetCell::new();
@@ -640,7 +640,7 @@ mod fan_out_tests {
     #[test]
     fn owned_fan_out_without_tracers_is_a_noop() {
         observe_fan_out(FactVersionRef::FileWholeHash {
-            canonical_id: "/none.ts".to_string(),
+            canonical_id: "/none.ts".into(),
             hash: [9u8; 16],
         });
     }

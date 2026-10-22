@@ -2610,7 +2610,7 @@ fn invalidating_a_canonical_drops_the_refusals_its_failed_prefix_reached() {
         )
     };
     let file = |canonical: &str| FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_owned(),
+        canonical_id: canonical.into(),
         hash: [9; 16],
     };
     // The failed prefix consumed `mid`, which consumed `base`; neither is

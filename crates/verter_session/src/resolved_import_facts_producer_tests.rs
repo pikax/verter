@@ -177,7 +177,7 @@ fn producer_readmits_when_no_single_candidate_holds_both_the_witness_and_the_pay
     // non-empty so strict admission accepts it.
     let mut w_fake = w_real.clone();
     w_fake.push(FactVersionRef::FileWholeHash {
-        canonical_id: "/dep.ts".to_string(),
+        canonical_id: "/dep.ts".into(),
         hash: [0xAB; 16],
     });
     assert_ne!(

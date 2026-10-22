@@ -115,7 +115,7 @@ fn accumulate_carrier_deps_descends_carrier_args() {
             matches!(
                 f,
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                    if canonical_id == "/dep.ts"
+                    if &**canonical_id == "/dep.ts"
             )
         });
         assert!(

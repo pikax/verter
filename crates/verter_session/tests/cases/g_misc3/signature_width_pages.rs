@@ -34,7 +34,7 @@ impl StoreView for TestView {
 fn wide_facts(prefix: &str, count: usize) -> Vec<FactVersionRef> {
     let facts: Vec<FactVersionRef> = (0..count)
         .map(|i| FactVersionRef::FileWholeHash {
-            canonical_id: format!("/src/{prefix}_{i:07}.ts"),
+            canonical_id: format!("/src/{prefix}_{i:07}.ts").into(),
             hash: [(i % 256) as u8; 16],
         })
         .collect();

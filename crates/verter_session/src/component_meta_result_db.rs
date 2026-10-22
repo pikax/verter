@@ -147,7 +147,7 @@ mod tests {
             .unwrap()
             .whole_hash;
         let owner_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/w/owner.vue".to_string(),
+            canonical_id: "/w/owner.vue".into(),
             hash: owner_hash,
         };
 
@@ -317,7 +317,7 @@ mod tests {
             read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
                 Arc::from(vec![
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                        canonical_id: "/w/Accordion.vue".to_string(),
+                        canonical_id: "/w/Accordion.vue".into(),
                         hash: [1u8; 16],
                     },
                 ]),
@@ -591,11 +591,11 @@ mod tests {
             .unwrap();
         let dep_hash = host.ensure_indexed_ready(dep).unwrap().whole_hash;
         let owner_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: owner_hash,
         };
         let dep_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: dep.to_string(),
+            canonical_id: dep.into(),
             hash: dep_hash,
         };
         let key = mk_result_key(canonical, [0u8; 16]);
@@ -935,7 +935,7 @@ mod tests {
             .unwrap();
         let owner_hash = host.ensure_indexed_ready(canonical).unwrap().whole_hash;
         let owner_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             hash: owner_hash,
         };
         let key = mk_result_key(canonical, [7u8; 16]);
@@ -1605,7 +1605,7 @@ mod tests {
     fn observe_owner(canonical: &str, owner_hash: Hash16) {
         verter_type_engine::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_string(),
+                canonical_id: canonical.into(),
                 hash: owner_hash,
             },
         );

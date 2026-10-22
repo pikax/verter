@@ -38,7 +38,7 @@ fn slot_binding_graph_fact_tracer_carries_module_aug_index_shape() {
     // augmentation-shape shifts reach the captured signature when
     // a slot-payload type depends on a globally-augmented module.
     let aug_index_fact = FactVersionRef::RouteSurface(RouteSurfaceFactRef {
-        canonical_id: "/src/Comp.vue".to_owned(),
+        canonical_id: "/src/Comp.vue".into(),
         key: FactKey::ModuleAugmentationIndexShape {
             target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
             external_specifier: Some(InternedSpecifier::from("vue")),

@@ -29,7 +29,7 @@ fn slot_binding_graph_fact_tracer_carries_import_ref() {
 
     let import_ref_fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(
         verter_session_query::facts::fact_cache::ParseFactRef {
-            canonical_id: "/src/Comp.vue".to_owned(),
+            canonical_id: "/src/Comp.vue".into(),
             key: FactKey::ImportRef {
                 specifier: InternedSpecifier::from("./slots"),
                 binding: InternedName::from("Slots"),

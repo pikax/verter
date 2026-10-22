@@ -20,7 +20,7 @@ fn slot_binding_graph_signature_carries_member_presence() {
 
     let presence_fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(
         verter_session_query::facts::fact_cache::ParseFactRef {
-            canonical_id: "/src/slots.ts".to_owned(),
+            canonical_id: "/src/slots.ts".into(),
             key: FactKey::MemberPresence {
                 exporter: InternedName::from("Slots"),
                 name: verter_type_expr::facts::FactPropertyKey::identifier("default"),

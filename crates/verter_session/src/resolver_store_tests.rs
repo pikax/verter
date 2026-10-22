@@ -21,7 +21,7 @@ fn validates_accepts_untracked_file_whole_hash() {
     // Tracked file with matching hash — should validate.
     assert!(view.validates(
         &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/src/Accordion.vue".to_string(),
+            canonical_id: "/src/Accordion.vue".into(),
             hash: [1u8; 16],
         }
     ));
@@ -29,7 +29,7 @@ fn validates_accepts_untracked_file_whole_hash() {
     // Tracked file with mismatching hash — should reject.
     assert!(!view.validates(
         &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/src/Accordion.vue".to_string(),
+            canonical_id: "/src/Accordion.vue".into(),
             hash: [2u8; 16],
         }
     ));
@@ -38,7 +38,7 @@ fn validates_accepts_untracked_file_whole_hash() {
     assert!(
         view.validates(
             &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
+                canonical_id: "/node_modules/vue/dist/vue.d.mts".into(),
                 hash: [42u8; 16],
             }
         ),
@@ -59,7 +59,7 @@ fn validates_derived_fact_hash_semantics() {
     assert!(
         view.validates(
             &verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
-                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
+                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".into(),
                 kind: verter_session_query::facts::fact_cache::DerivedFactKind::DirectSource,
                 hash: [99u8; 16],
             }
@@ -71,7 +71,7 @@ fn validates_derived_fact_hash_semantics() {
     assert!(
         !view.validates(
             &verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
-                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
+                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".into(),
                 kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                 hash: [99u8; 16],
             }
@@ -97,7 +97,7 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
     // Tracked file — matches.
     assert!(view.validates(
         &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/src/tracked.ts".to_string(),
+            canonical_id: "/src/tracked.ts".into(),
             hash: [1u8; 16],
         }
     ));
@@ -105,7 +105,7 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
     // Tracked file — mismatched hash rejected.
     assert!(!view.validates(
         &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/src/tracked.ts".to_string(),
+            canonical_id: "/src/tracked.ts".into(),
             hash: [2u8; 16],
         }
     ));
@@ -116,7 +116,7 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
     assert!(
         view.validates(
             &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
+                canonical_id: "/node_modules/vue/dist/vue.d.mts".into(),
                 hash: [42u8; 16],
             }
         ),
@@ -151,7 +151,7 @@ mod file_source_env_validation {
         language_of: &str,
     ) -> FactVersionRef {
         FactVersionRef::FileSourceEnv {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical.into(),
             parse_env_hash: ParseEnvHash::from_env_hash([env_byte; 16]),
             parse_key: verter_session_query::source::toolchain::parse_key_for_test(
                 language_of,
@@ -168,7 +168,7 @@ mod file_source_env_validation {
 
     fn whole_hash_fact() -> FactVersionRef {
         FactVersionRef::FileWholeHash {
-            canonical_id: CONTRIB.to_string(),
+            canonical_id: CONTRIB.into(),
             hash: CONTRIB_HASH,
         }
     }
@@ -804,7 +804,7 @@ mod syntactic_route_interface_fact {
         assert!(facts.iter().any(|fact| matches!(
             fact,
             FactVersionRef::Parse(parse)
-                if parse.canonical_id == "/src/route.ts"
+                if &*parse.canonical_id == "/src/route.ts"
                     && parse.key == FactKey::SyntacticRouteInterface
                     && parse.lane == FactLane::Semantic
         )));
@@ -814,7 +814,7 @@ mod syntactic_route_interface_fact {
                 canonical_id,
                 kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                 ..
-            } if canonical_id == "/src/route.ts"
+            } if &**canonical_id == "/src/route.ts"
         )));
     }
 

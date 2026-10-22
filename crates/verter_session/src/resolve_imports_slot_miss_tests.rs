@@ -71,7 +71,7 @@ fn import_clause_fact(
     expected_hash: verter_session_query::analysis::types::Hash16,
 ) -> FactVersionRef {
     FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-        canonical_id: OWNER.to_string(),
+        canonical_id: OWNER.into(),
         key: FactKey::ResolvedImportClause {
             specifier: InternedSpecifier::from("./dep"),
             binding: InternedName::from("a"),
@@ -205,7 +205,7 @@ fn a_present_candidate_with_a_matching_fact_still_validates() {
     // Built from the ADMITTED payload, not from a hand-written hash, so a
     // pass here means the real hit path is intact.
     let fact = FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-        canonical_id: OWNER.to_string(),
+        canonical_id: OWNER.into(),
         key: FactKey::ResolvedImportClause {
             specifier: InternedSpecifier::from(entry.specifier.as_ref()),
             binding: InternedName::from(entry.binding.as_ref()),

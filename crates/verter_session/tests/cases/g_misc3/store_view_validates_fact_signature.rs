@@ -11,7 +11,7 @@ use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
 fn test_fact(n: u8) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: format!("validate_test_{n}.ts"),
+        canonical_id: format!("validate_test_{n}.ts").into(),
         hash: [n; 16],
     }
 }

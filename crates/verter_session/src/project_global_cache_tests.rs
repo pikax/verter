@@ -701,7 +701,7 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
         matches!(
             fact,
             FactVersionRef::Parse(parse)
-                if parse.canonical_id == "/w/barrel.ts"
+                if &*parse.canonical_id == "/w/barrel.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )
     });
@@ -715,7 +715,7 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
     let final_target_present = surface.read_set_signature.facts.iter().any(|fact| {
         matches!(
             fact,
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == "/w/a.ts"
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == "/w/a.ts"
         )
     });
     assert!(
@@ -761,7 +761,7 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
         .iter()
         .find_map(|fact| match fact {
             FactVersionRef::Parse(parse)
-                if parse.canonical_id == "/w/barrel.ts"
+                if &*parse.canonical_id == "/w/barrel.ts"
                     && matches!(
                         parse.key,
                         verter_session_query::facts::FactKey::SyntacticRouteInterface
@@ -790,7 +790,7 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
         .iter()
         .find_map(|fact| match fact {
             FactVersionRef::Parse(parse)
-                if parse.canonical_id == "/w/barrel.ts"
+                if &*parse.canonical_id == "/w/barrel.ts"
                     && matches!(
                         parse.key,
                         verter_session_query::facts::FactKey::SyntacticRouteInterface

@@ -532,7 +532,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
         .find(|fact| {
             matches!(
                 fact,
-                FactVersionRef::FileSourceEnv { canonical_id, .. } if canonical_id == "/aug.ts"
+                FactVersionRef::FileSourceEnv { canonical_id, .. } if &**canonical_id == "/aug.ts"
             )
         })
         .expect(
@@ -549,7 +549,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     else {
         unreachable!("matched FileSourceEnv above");
     };
-    assert_eq!(canonical_id, "/aug.ts");
+    assert_eq!(&*canonical_id, "/aug.ts");
     // Recorded from the EXACT artifact key: the language column equals the
     // contributor's registry row (never re-derived from another canonical).
     assert_eq!(
@@ -563,7 +563,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
         .current_or_read_whole_hash("/aug.ts")
         .expect("live whole hash for /aug.ts");
     let whole_hash_fact = FactVersionRef::FileWholeHash {
-        canonical_id: "/aug.ts".to_string(),
+        canonical_id: "/aug.ts".into(),
         hash: aug_hash,
     };
 
@@ -672,7 +672,7 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
                 parse_env_hash,
                 parse_key,
                 file_language_id,
-            } if canonical_id == "/aug.ts" => Some((
+            } if &**canonical_id == "/aug.ts" => Some((
                 parse_env_hash.to_owned(),
                 parse_key.clone(),
                 file_language_id.clone(),
@@ -841,7 +841,7 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
             signature.iter().any(|fact| matches!(
                 fact,
                 FactVersionRef::FileWholeHash { canonical_id, hash }
-                    if canonical_id == augmenter && *hash == live_hash
+                    if &**canonical_id == augmenter && *hash == live_hash
             )),
             "the folded contributor {augmenter} must be version-rooted on the parent \
              read-set (FileWholeHash at its live content version)"
@@ -855,7 +855,7 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
             .find(|fact| {
                 matches!(
                     fact,
-                    FactVersionRef::FileSourceEnv { canonical_id, .. } if canonical_id == augmenter
+                    FactVersionRef::FileSourceEnv { canonical_id, .. } if &**canonical_id == augmenter
                 )
             })
             .unwrap_or_else(|| {

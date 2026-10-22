@@ -5,8 +5,13 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::{RelationDemand, RelationDemandOutcome};
+use verter_session::for_tests::{
+    with_relation_comparisons_for_tests, RelationDemand, RelationDemandOutcome,
+};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::project_semantic_dispatch::connected_demand::{
+    RELATION_PAIR_BYTES, RELATION_UNITS_PER_COMPARISON,
+};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 use super::{live_bytes, peak_live_bytes, reset_alloc_counter};
@@ -120,6 +125,94 @@ fn relate_measured(count: usize, limit: Option<u64>) -> MeasuredRelation {
     }
 }
 
+/// The checker's relation-complexity allowance for one relation check (its
+/// `relationCount` start over an empty cache, `16,000,000 >> 3`): past it the
+/// check is refused with TS2859 and recovers as `not assignable`.
+const CHECKER_RELATION_COMPARISONS: u32 = 16_000_000 >> 3;
+
+/// The structured pairs object arms against the same arms reversed relate
+/// when the relation runs to completion: `n(n+1)/2`, each arm scanning the
+/// reversed target up to its partner.
+fn reversed_pairs(count: usize) -> usize {
+    count * (count + 1) / 2
+}
+
+/// How relating `count` reversed arms ends under an allowance of `allowance`
+/// comparisons: assignable while every pair fits the allowance, the
+/// checker's TS2859 recovery — `not assignable` — once the pairs exceed it.
+fn expected_reversed_outcome(count: usize, allowance: u32) -> RelationDemandOutcome {
+    if reversed_pairs(count) > allowance as usize {
+        RelationDemandOutcome::NotAssignable
+    } else {
+        RelationDemandOutcome::Assignable
+    }
+}
+
+/// Relate `count` reversed arms under the checker's allowance, or under
+/// `allowance` comparisons when given, and check what the relation held
+/// against what it charged, per comparison the demand actually ran (its
+/// work over the units one comparison costs at most), never per pair the
+/// shape would relate in full: a relation the allowance stops runs fewer
+/// comparisons than the shape's pairs, and normalising its bytes by the
+/// pairs would understate them. Returns the active bytes per comparison.
+fn assert_relation_within_charge(count: usize, allowance: Option<u32>) -> i64 {
+    let MeasuredRelation {
+        demand,
+        peak,
+        resident,
+    } = match allowance {
+        Some(allowance) => {
+            with_relation_comparisons_for_tests(allowance, || relate_measured(count, None))
+        }
+        None => relate_measured(count, None),
+    };
+    let allowance = allowance.unwrap_or(CHECKER_RELATION_COMPARISONS);
+    let pairs = reversed_pairs(count);
+    let comparisons = demand.work / RELATION_UNITS_PER_COMPARISON;
+    eprintln!(
+        "reversed-{count} (allowance {allowance}): {:?}, {comparisons} comparisons run of {pairs} \
+         pairs, active {} bytes per comparison (peak live {peak}), resident {} bytes per \
+         comparison ({resident}), charged {} bytes per comparison ({})",
+        demand.outcome,
+        peak / comparisons.max(1) as i64,
+        resident / comparisons.max(1) as i64,
+        demand.bytes / comparisons.max(1) as u64,
+        demand.bytes
+    );
+    assert_eq!(
+        demand.outcome,
+        expected_reversed_outcome(count, allowance),
+        "{count} arms under {allowance} comparisons: every arm of S fits an arm of T, \
+         and a check past its allowance recovers as false"
+    );
+    assert!(!demand.memory_limit_tripped);
+    assert!(
+        comparisons > 0,
+        "{count} arms: the relation ran no comparisons"
+    );
+    assert!(
+        comparisons <= pairs.min(allowance as usize),
+        "{count} arms: {comparisons} comparisons counted past the {pairs} pairs \
+         or the {allowance}-comparison allowance"
+    );
+    let comparisons = comparisons as i64;
+    assert!(
+        demand.bytes as i64 >= comparisons * RELATION_PAIR_BYTES as i64,
+        "{count} arms: {} bytes charged for {comparisons} comparisons",
+        demand.bytes
+    );
+    assert!(
+        peak <= demand.bytes as i64,
+        "{count} arms: the relation held {peak} live bytes but charged only {}",
+        demand.bytes
+    );
+    assert!(
+        resident < 128 * comparisons,
+        "{count} arms: {resident} bytes stay resident after the relation settles"
+    );
+    peak / comparisons
+}
+
 /// Object arms against the same arms reversed relate `n(n+1)/2` structured
 /// pairs, each arm scanning the reversed target up to its partner: under the
 /// default allowance the relation settles `assignable` without tripping the
@@ -129,15 +222,19 @@ fn relate_measured(count: usize, limit: Option<u64>) -> MeasuredRelation {
 /// the relation holds — is attributed here by the allocator, independently
 /// of the ledger's own figures. Its peak stays within the construction bytes
 /// the demand charged, so the charge never understates what the relation
-/// holds; it stays the same per pair as the pairs grow, and the relation
-/// leaves no per-pair record (no proof or explanation population) resident
-/// after it settles.
+/// holds; it stays the same per comparison run as the arms grow, and the
+/// relation leaves no per-comparison record (no proof or explanation
+/// population) resident after it settles. A relation whose comparison
+/// allowance stops it is measured per comparison it ran, so it can satisfy
+/// neither the growth nor the residency bound by dividing by pairs it never
+/// related.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings agree): `[S] extends [T] ?
-/// 1 : 2` is `1` over 200 reversed arms.
+/// 1 : 2` is `1` over 200 reversed arms, `1` at 1,800 and `2` under TS2859
+/// at 2,100.
 #[test]
 fn a_relation_holds_no_more_than_it_charges() {
-    // More sizes are measured on request (`VERTER_RELATION_PAIR_ARMS=600,1800`);
+    // More sizes are measured on request (`VERTER_RELATION_PAIR_ARMS=2100,3200`);
     // the default two keep the canary fast.
     let requested: Vec<usize> = std::env::var("VERTER_RELATION_PAIR_ARMS")
         .map(|sizes| {
@@ -147,47 +244,19 @@ fn a_relation_holds_no_more_than_it_charges() {
                 .collect()
         })
         .unwrap_or_default();
-    let mut active_per_pair = Vec::new();
+    let mut active_per_comparison = Vec::new();
     for count in [100, 200].into_iter().chain(requested) {
-        let MeasuredRelation {
-            demand,
-            peak,
-            resident,
-        } = relate_measured(count, None);
-        let pairs = (count * (count + 1) / 2) as i64;
-        eprintln!(
-            "reversed-{count}: {:?}, {pairs} pairs, active {} bytes per pair (peak live {peak}), \
-             resident {} bytes per pair ({resident}), charged {} bytes per pair ({})",
-            demand.outcome,
-            peak / pairs,
-            resident / pairs,
-            demand.bytes as i64 / pairs,
-            demand.bytes
-        );
-        if count <= 200 {
-            assert_eq!(
-                demand.outcome,
-                RelationDemandOutcome::Assignable,
-                "every arm of S fits an arm of T"
-            );
-        }
-        assert!(!demand.memory_limit_tripped);
-        assert!(
-            peak <= demand.bytes as i64,
-            "{count} arms: the relation held {peak} live bytes but charged only {}",
-            demand.bytes
-        );
-        assert!(
-            resident < 128 * pairs,
-            "{count} arms: {resident} bytes stay resident after the relation settles"
-        );
-        active_per_pair.push(peak / pairs);
+        active_per_comparison.push(assert_relation_within_charge(count, None));
     }
+    // 200 arms relate 20,100 pairs; an allowance of a quarter of them stops
+    // the check part way, the way the checker's own allowance stops 2,100
+    // arms, at a size the default run reaches quickly.
+    active_per_comparison.push(assert_relation_within_charge(200, Some(5_000)));
     assert!(
-        active_per_pair
+        active_per_comparison
             .iter()
-            .all(|per_pair| per_pair * 4 <= active_per_pair[0] * 5),
-        "the working state per pair grows with the pairs: {active_per_pair:?}"
+            .all(|per_comparison| per_comparison * 4 <= active_per_comparison[0] * 5),
+        "the working state per comparison grows with the arms: {active_per_comparison:?}"
     );
 }
 

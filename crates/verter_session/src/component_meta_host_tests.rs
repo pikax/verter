@@ -693,10 +693,7 @@ defineProps<ButtonProps>()
 #[test]
 fn component_meta_budget_errors_surface_on_new_session_api() {
     let host = ComponentMetaHost::new_standalone_with_scheduler_config(
-        crate::types::HostConfig {
-            external_resolution_step_budget: Some(40),
-            ..crate::types::HostConfig::default()
-        },
+        crate::types::HostConfig::default(),
         verter_scheduler::scheduler::SchedulerConfig {
             cpu_threads: 1,
             ..verter_scheduler::scheduler::SchedulerConfig::default()
@@ -763,7 +760,7 @@ defineProps<Props>()
         .expect("large finite heritage graph should resolve successfully")
         .expect("component meta should be present");
 
-    // All 2005 interfaces should contribute one prop each
+    // Every imported interface contributes one prop.
     assert_eq!(
         meta.props.len(),
         import_count,

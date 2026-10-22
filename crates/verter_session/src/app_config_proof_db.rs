@@ -65,20 +65,18 @@ fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool 
     match fact {
         FactVersionRef::FileWholeHash {
             canonical_id: c, ..
-        } => c.as_str() == canonical_id,
+        } => **c == *canonical_id,
         FactVersionRef::DerivedFactHash {
             canonical_id: c, ..
-        } => c.as_str() == canonical_id,
-        FactVersionRef::Parse(parse_fact) => parse_fact.canonical_id.as_str() == canonical_id,
+        } => **c == *canonical_id,
+        FactVersionRef::Parse(parse_fact) => *parse_fact.canonical_id == *canonical_id,
         FactVersionRef::ResolveImports(resolve_fact) => {
             resolve_fact.canonical_id() == Some(canonical_id)
         }
-        FactVersionRef::RouteSurface(route_fact) => {
-            route_fact.canonical_id.as_str() == canonical_id
-        }
+        FactVersionRef::RouteSurface(route_fact) => *route_fact.canonical_id == *canonical_id,
         FactVersionRef::FileSourceEnv {
             canonical_id: c, ..
-        } => c.as_str() == canonical_id,
+        } => **c == *canonical_id,
         FactVersionRef::ProgramAnalysis(fact) => match fact {
             verter_session_query::facts::fact_cache::ProgramAnalysisFactRef::FlowBody {
                 function,
@@ -371,7 +369,7 @@ pub(crate) fn app_config_no_override_proof_get_or_compute<
         let whole_hash = ir.as_ref().map(|ir| ir.whole_hash).unwrap_or_default();
         ctx.observe(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: decl_canonical_for_compute.as_ref().to_string(),
+                canonical_id: Arc::clone(&decl_canonical_for_compute),
                 hash: whole_hash,
             },
         );

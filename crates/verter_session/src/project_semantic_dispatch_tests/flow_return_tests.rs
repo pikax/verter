@@ -5016,7 +5016,7 @@ fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseCl
         // Unpublished, as a member queued behind its machinery root is.
         dispatch.graph().evict_family_for_tests(&query);
         let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/ws/replayed.ts".to_string(),
+            canonical_id: "/ws/replayed.ts".into(),
             hash: [5; 16],
         };
         let root: verter_type_engine::semantic_query_memo::ObservedGraphSelfRoot =
@@ -12140,7 +12140,7 @@ fn conv_dead_file_fact_reads<R>(host: &VerterHost, f: impl FnOnce() -> R) -> (R,
         .filter(|fact| {
             matches!(
                 fact,
-                FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == CONV_DEAD
+                FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == CONV_DEAD
             )
         })
         .count();

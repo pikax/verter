@@ -105,7 +105,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 /// validate-before-bubble gate.
 fn injected_parse_fact() -> FactVersionRef {
     FactVersionRef::Parse(ParseFactRef {
-        canonical_id: "/w/types.ts".to_string(),
+        canonical_id: "/w/types.ts".into(),
         key: FactKey::Export {
             name: InternedName::from("InjectedExport"),
             space: SymbolSpace::Type,

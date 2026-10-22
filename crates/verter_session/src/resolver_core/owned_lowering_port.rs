@@ -890,7 +890,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 let expected_hash =
                     SourceInputProvider::observed_fact_hash(self, &normalized, observed_hash, &identity, &key, lane)?;
                 Some(verter_session_query::facts::fact_cache::ParseFactRef {
-                    canonical_id: canonical.to_owned(),
+                    canonical_id: canonical.into(),
                     key,
                     lane,
                     expected_hash,

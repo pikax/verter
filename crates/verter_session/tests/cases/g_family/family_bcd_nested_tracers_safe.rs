@@ -81,7 +81,7 @@ fn install_nests_safely_outer_observes_inner_cold_facts() {
                     f,
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                         canonical_id, ..
-                    } if canonical_id == canonical
+                    } if &**canonical_id == canonical
                 )),
                 "outer tracer must observe the inner producer's FileWholeHash fact \
                  (TLS-stack fan-out). Got: {outer_sig:?}",

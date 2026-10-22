@@ -135,7 +135,7 @@ fn live_route() -> RouteResult {
 
 fn live_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "live_dep.ts".to_string(),
+        canonical_id: "live_dep.ts".into(),
         hash: [0x44u8; 16],
     }
 }

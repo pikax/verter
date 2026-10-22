@@ -27,10 +27,10 @@
 //!   `replace`, both of which are non-panicking.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::AtomicBool;
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
 
 #[cfg(feature = "semantic-observe")]
@@ -454,6 +454,24 @@ fn store_request_sticky_partial() {
     }
 }
 
+fn store_request_reasons(reasons: PartialReasonSet) {
+    if DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.get() > 0) {
+        return;
+    }
+    if let Some(ctx) = current_request_context() {
+        ctx.request_result_reasons
+            .fetch_or(reasons.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// The named partial-reason classes recorded on the request so far.
+#[must_use]
+pub fn current_request_result_reasons() -> PartialReasonSet {
+    current_request_context()
+        .map(|ctx| PartialReasonSet::from_bits(ctx.request_result_reasons.load(Ordering::Relaxed)))
+        .unwrap_or_default()
+}
+
 /// Snapshot the request-result completeness signal as a boolean.
 ///
 /// This is the REQUEST-level (cross-thread) partiality accumulator. For
@@ -503,6 +521,11 @@ pub fn mark_request_result_partial() {
 /// answer — only the reason set — so nothing else observes the difference.
 pub fn mark_request_result_partial_from_read_with(reasons: PartialReasonSet) {
     store_request_sticky_partial();
+    store_request_reasons(if reasons.is_empty() {
+        PartialReasonSet::PROPAGATED
+    } else {
+        reasons
+    });
     if !reasons.is_empty() {
         fold_cold_compute_completeness(ResultCompleteness::partial(reasons));
         return;
@@ -529,6 +552,7 @@ pub(crate) fn mark_request_result_cancelled() {
 
 fn mark_request_result_partial_with(reasons: PartialReasonSet) {
     store_request_sticky_partial();
+    store_request_reasons(reasons);
     fold_cold_compute_completeness(ResultCompleteness::partial(reasons));
 }
 
@@ -549,6 +573,11 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
         return;
     }
     store_request_sticky_partial();
+    store_request_reasons(if joined.reasons().is_empty() {
+        PartialReasonSet::PROPAGATED
+    } else {
+        joined.reasons()
+    });
     fold_cold_compute_completeness(joined);
 }
 
@@ -1175,6 +1204,12 @@ pub struct RequestContext {
     /// `mark_request_result_partial`.
     pub request_result_is_partial: AtomicBool,
 
+    /// Named partial-reason classes accumulated beside
+    /// `request_result_is_partial` (bits of a `PartialReasonSet`), so final
+    /// component assembly keeps a budget refusal's class instead of
+    /// collapsing it to `PROPAGATED`.
+    pub request_result_reasons: AtomicU32,
+
     // ─────── Resolver / import-route hot-path counters ───────
     //
     // Populated by producer-side emits via
@@ -1744,6 +1779,7 @@ impl RequestContext {
             memo_insertions: Default::default(),
             memo_publish_suppressed: Default::default(),
             request_result_is_partial: AtomicBool::new(false),
+            request_result_reasons: AtomicU32::new(0),
             frontier_closure_invocations_total: Default::default(),
             frontier_closure_invocations_target_none: Default::default(),
             frontier_closure_redundant_target_none_pairs: Default::default(),
@@ -3034,6 +3070,23 @@ mod tests {
 
     fn make_ctx(id: u64, capture: bool) -> Arc<RequestContext> {
         RequestContext::new(id, Arc::from("/x.vue"), capture, None)
+    }
+
+    #[test]
+    fn read_and_join_causes_survive_a_later_budget_mark() {
+        let ctx = make_ctx(11, false);
+        let _g = RequestContextGuard::install(ctx);
+        mark_request_result_partial_from_read_with(PartialReasonSet::MISSING_DEPENDENCY);
+        mark_request_result_inference_budget_exceeded();
+        let reasons = current_request_result_reasons();
+        assert!(reasons.contains(PartialReasonSet::MISSING_DEPENDENCY));
+        assert!(reasons.contains(PartialReasonSet::BUDGET_EXCEEDED));
+
+        let ctx = make_ctx(12, false);
+        let _g = RequestContextGuard::install(ctx);
+        fold_result_completeness(ResultCompleteness::partial(PartialReasonSet::CANCELLED));
+        mark_request_result_inference_budget_exceeded();
+        assert!(current_request_result_reasons().contains(PartialReasonSet::CANCELLED));
     }
 
     #[cfg(feature = "semantic-observe")]

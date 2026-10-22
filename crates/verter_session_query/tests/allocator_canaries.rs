@@ -38,7 +38,7 @@ static ALLOCATOR: Counting = Counting;
 
 fn whole(canonical: String, byte: u8) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: canonical,
+        canonical_id: canonical.into(),
         hash: [byte; 16],
     }
 }

@@ -821,7 +821,7 @@ fn owner_whole_hash_facts(
         .iter()
         .filter(|fact| {
             matches!(fact, verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == owner)
+                if &**canonical_id == owner)
         })
         .cloned()
         .collect()

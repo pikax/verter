@@ -28,7 +28,7 @@ const GRANULE_SLACK: i64 = 2 * 4096;
 
 fn file(canonical: &str) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_owned(),
+        canonical_id: canonical.into(),
         hash: [3; 16],
     }
 }

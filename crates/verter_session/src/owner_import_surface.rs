@@ -470,7 +470,7 @@ mod tests {
         let owner_hash = [7u8; 16];
         let transitive_fact =
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: "/w/dependency.ts".to_string(),
+                canonical_id: "/w/dependency.ts".into(),
                 hash: [8u8; 16],
             };
 
@@ -560,7 +560,7 @@ mod tests {
         let owner_hash = [7u8; 16];
         let generation = host.project_type_store().current_project_generation();
         let leaf_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-            canonical_id: "/w/leaf.ts".to_string(),
+            canonical_id: "/w/leaf.ts".into(),
             hash: [9u8; 16],
         };
 
@@ -696,12 +696,12 @@ mod tests {
         assert!(owner_target_facts.iter().any(|f| matches!(
             f,
             FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == "/w/owner.ts" && *hash == [7u8; 16]
+                if &**canonical_id == "/w/owner.ts" && *hash == [7u8; 16]
         )));
         assert!(owner_target_facts.iter().any(|f| matches!(
             f,
             FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == "/w/foo.ts" && *hash == [1u8; 16]
+                if &**canonical_id == "/w/foo.ts" && *hash == [1u8; 16]
         )));
     }
 
@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(owner_target_facts.len(), 1);
         assert!(matches!(
             owner_target_facts[0],
-            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == "/w/o.ts"
+            FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == "/w/o.ts"
         ));
     }
 }

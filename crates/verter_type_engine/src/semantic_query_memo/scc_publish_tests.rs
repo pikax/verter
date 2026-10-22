@@ -25,7 +25,7 @@ fn unbounded_account() -> Arc<SemanticRetentionAccount> {
 fn oversized_carrier() -> (ReadSetSignature, Arc<[Arc<str>]>) {
     let canonical = format!("/ws/{}.ts", "c".repeat(CANONICAL_LEN));
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.clone(),
+        canonical_id: canonical.clone().into(),
         hash: [7; 16],
     }]));
     let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
