@@ -440,6 +440,24 @@ fn store_request_sticky_partial() {
     }
 }
 
+fn store_request_reasons(reasons: PartialReasonSet) {
+    if DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.get() > 0) {
+        return;
+    }
+    if let Some(ctx) = current_request_context() {
+        ctx.request_result_reasons
+            .fetch_or(reasons.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// The named partial-reason classes recorded on the request so far.
+#[must_use]
+pub fn current_request_result_reasons() -> PartialReasonSet {
+    current_request_context()
+        .map(|ctx| PartialReasonSet::from_bits(ctx.request_result_reasons.load(Ordering::Relaxed)))
+        .unwrap_or_default()
+}
+
 /// Snapshot the request-result completeness signal as a boolean.
 ///
 /// This is the REQUEST-level (cross-thread) partiality accumulator. For
@@ -515,6 +533,7 @@ pub(crate) fn mark_request_result_cancelled() {
 
 fn mark_request_result_partial_with(reasons: PartialReasonSet) {
     store_request_sticky_partial();
+    store_request_reasons(reasons);
     fold_cold_compute_completeness(ResultCompleteness::partial(reasons));
 }
 
@@ -1134,6 +1153,12 @@ pub struct RequestContext {
     /// `mark_request_result_partial`.
     pub request_result_is_partial: AtomicBool,
 
+    /// Named partial-reason classes accumulated beside
+    /// `request_result_is_partial` (bits of a `PartialReasonSet`), so final
+    /// component assembly keeps a budget refusal's class instead of
+    /// collapsing it to `PROPAGATED`.
+    pub request_result_reasons: AtomicU32,
+
     // ─────── Resolver / import-route hot-path counters ───────
     //
     // Populated by producer-side emits via
@@ -1625,6 +1650,7 @@ impl RequestContext {
             memo_insertions: AtomicU64::new(0),
             memo_publish_suppressed: AtomicU64::new(0),
             request_result_is_partial: AtomicBool::new(false),
+            request_result_reasons: AtomicU32::new(0),
             frontier_closure_invocations_total: AtomicU64::new(0),
             frontier_closure_invocations_target_none: AtomicU64::new(0),
             frontier_closure_redundant_target_none_pairs: AtomicU64::new(0),

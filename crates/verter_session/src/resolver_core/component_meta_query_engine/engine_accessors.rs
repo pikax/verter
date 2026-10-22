@@ -5,6 +5,7 @@
 //! a cache length, or a counter; none resolves types or touches the dispatch.
 
 use super::ComponentMetaQueryEngine;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use verter_type_engine::resolver_core::FuseTrip;
 
 impl<'a> ComponentMetaQueryEngine<'a> {
@@ -53,11 +54,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     /// Whether any fuse has tripped.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub fn has_fuse_tripped(&self) -> bool {
         self.fuse_state.has_tripped()
     }
 
     /// Get fuse trip details for provenance/tracing.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub fn fuse_trips(&self) -> &[FuseTrip] {
         &self.fuse_state.trips
     }

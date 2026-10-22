@@ -91,7 +91,9 @@ pub mod resolver_core {
     pub mod resolver_context;
     pub mod scope_shadowing;
 
-    pub use fuses::{FuseBudgets, FuseState, FuseTrip};
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    pub use fuses::FuseTrip;
+    pub use fuses::{FuseBudgets, FuseState};
     pub use resolver_context::{
         MaterializeScopeObservation, ProjectGenerationClock, RequestBoundResolverContext,
         RequestFlags, RequestSnapshot, ResolverCapabilities, ResolverContext,

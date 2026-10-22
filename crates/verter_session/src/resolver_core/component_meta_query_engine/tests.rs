@@ -3419,3 +3419,49 @@ fn projection_gate_reads_the_request_operation_account() {
     );
     assert_eq!(budget.projection_ops_executed_count(), 2);
 }
+
+/// A tripped imported-root or registry-deepening fan-out fuse leaves the
+/// request result partial with the named budget class; an in-budget call
+/// marks nothing.
+#[test]
+fn fanout_fuse_trips_mark_request_result_budget_partial() {
+    use verter_type_engine::request_context::{
+        current_request_result_is_partial, current_request_result_reasons, RequestContext,
+        RequestContextGuard,
+    };
+    use verter_type_engine::semantic_query::PartialReason;
+
+    for lane in ["imported_root", "registry_deepening"] {
+        let host = build_route_only_reexport_host();
+        let dispatch = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+            host.as_ref(),
+        );
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &dispatch);
+        engine.fuse_budgets.imported_root_fanout = 1;
+        engine.fuse_budgets.registry_deepening_fanout = 1;
+        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from("/m4_src/index.ts"),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            1,
+        );
+        let _guard = RequestContextGuard::install(ctx);
+        let allow = |e: &mut ComponentMetaQueryEngine<'_>| match lane {
+            "imported_root" => e.allow_imported_root(),
+            _ => e.allow_registry_deepening(),
+        };
+        assert!(allow(&mut engine), "{lane}: first call within budget");
+        assert!(!current_request_result_is_partial(), "{lane}");
+        assert!(!allow(&mut engine), "{lane}: second call trips");
+        assert!(current_request_result_is_partial(), "{lane}");
+        assert!(
+            current_request_result_reasons()
+                .iter()
+                .any(|r| r == PartialReason::BudgetExceeded),
+            "{lane}"
+        );
+    }
+}

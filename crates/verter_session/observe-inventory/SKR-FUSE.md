@@ -24,7 +24,7 @@ nothing).
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | `FuseBudgets` wildcard-route, imported-root and registry-deepening fan-out rails and their `FuseState` counters | Component-meta route and registry fan-out refusal | REQUIRED-budget | One engine (one request) | `resolver_core/fuses` | always |
-| `FuseState::trips` | The `fuse_tripped` component-meta trace and `has_fuse_tripped` (observation only; refusals come from the fan-out checks, which mark the request result budget-partial on a trip) | OPTIONAL | One engine (one request) | `resolver_core/fuses` | always |
+| `FuseState::trips` | The `fuse_tripped` component-meta trace and `has_fuse_tripped` (observation only; refusals come from the fan-out checks, which mark the request result budget-partial on a trip) | OPTIONAL | One engine (one request) | `resolver_core/fuses` | `semantic-observe` |
 
 ## verter_session
 

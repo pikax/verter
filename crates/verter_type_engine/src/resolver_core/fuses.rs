@@ -32,6 +32,7 @@ impl Default for FuseBudgets {
     }
 }
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 /// Provenance attached to fuse-tripped results.
 ///
 /// This stays request-local — never stored in shared DB layers.
@@ -42,6 +43,7 @@ pub struct FuseTrip {
     pub actual: usize,
 }
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 impl FuseTrip {
     pub fn new(fuse_name: &'static str, budget: usize, actual: usize) -> Self {
         Self {
@@ -62,6 +64,8 @@ pub struct FuseState {
     pub wildcard_sources_processed: usize,
     pub imported_roots_resolved: usize,
     pub registry_names_enqueued: usize,
+    /// Trip history, observation only: refusals come from the check booleans.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub trips: Vec<FuseTrip>,
 }
 
@@ -70,6 +74,7 @@ impl FuseState {
         Self::default()
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub fn has_tripped(&self) -> bool {
         !self.trips.is_empty()
     }
@@ -83,6 +88,7 @@ impl FuseState {
             obs.record_event(verter_audit::AuditEvent::RouteDbWildcardFanout);
         }
         if self.wildcard_sources_processed > budgets.wildcard_route_fanout {
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             self.trips.push(FuseTrip::new(
                 "wildcard_route_fanout",
                 budgets.wildcard_route_fanout,
@@ -96,6 +102,7 @@ impl FuseState {
     pub fn check_imported_root_fanout(&mut self, budgets: &FuseBudgets) -> bool {
         self.imported_roots_resolved += 1;
         if self.imported_roots_resolved > budgets.imported_root_fanout {
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             self.trips.push(FuseTrip::new(
                 "imported_root_fanout",
                 budgets.imported_root_fanout,
@@ -109,6 +116,7 @@ impl FuseState {
     pub fn check_registry_deepening_fanout(&mut self, budgets: &FuseBudgets) -> bool {
         self.registry_names_enqueued += 1;
         if self.registry_names_enqueued > budgets.registry_deepening_fanout {
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             self.trips.push(FuseTrip::new(
                 "registry_deepening_fanout",
                 budgets.registry_deepening_fanout,
