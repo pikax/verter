@@ -362,6 +362,7 @@ fn hash_node_rec<H: std::hash::Hasher, M: verter_audit::observe::ObserveExec>(
         }
         SemanticNodeData::EnumLiteral(literal) => {
             literal.enum_decl.hash(hasher);
+            literal.module_specifier.hash(hasher);
             literal.member.hash(hasher);
         }
         SemanticNodeData::Primitive(kind) => {

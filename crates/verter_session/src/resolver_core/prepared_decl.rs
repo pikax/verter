@@ -1201,6 +1201,7 @@ impl PreparedValueDeclCache {
         );
         prepared.type_annotation = lowered.type_annotation.clone();
         prepared.signatures = lowered.signatures.clone();
+        prepared.object_shape = lowered.object_shape.clone();
         prepared.enum_members = lowered.enum_members.clone();
         prepared.name_resolution = name_resolution;
         let hash_u64 =

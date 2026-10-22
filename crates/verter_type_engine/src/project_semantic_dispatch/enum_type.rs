@@ -39,6 +39,8 @@ pub(super) struct EnumDeclaration {
     /// across files, its first file's declaration, whichever file the
     /// reference reached.
     pub(super) decl: DeclIdentity,
+    /// The exact ambient module inventory, independent of same-named file declarations.
+    module_specifier: Option<verter_type_expr::OwnedStr>,
     /// The members, in declaration order.
     pub(super) members: Arc<[EnumMemberEntry]>,
     /// The files declaring the members, in the members' order: each file's
@@ -79,14 +81,29 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
     ) -> Option<EnumDeclaration> {
-        let (declaring_canonical, declaring_owner, declaring_symbol, prepared) =
-            self.effective_prepared_value_decl(canonical, owner, symbol)?;
-        Self::enum_declaration_of(
-            self,
+        self.enum_declaration_in_augmentation(canonical, owner, symbol, None)
+    }
+
+    pub(super) fn enum_declaration_in_augmentation(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Option<EnumDeclaration> {
+        let (declaring_canonical, declaring_owner, declaring_symbol, prepared) = self
+            .effective_prepared_value_decl_in_augmentation(
+                canonical,
+                owner,
+                symbol,
+                augmentation,
+            )?;
+        self.enum_declaration_of(
             declaring_canonical,
             declaring_owner,
             declaring_symbol,
             &prepared,
+            augmentation,
         )
     }
 
@@ -108,6 +125,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             owner,
             verter_type_expr::OwnedStr::from(symbol),
             &prepared,
+            None,
         )
     }
 
@@ -117,12 +135,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         declaring_owner: verter_type_expr::TopLevelOwnerId,
         declaring_symbol: verter_type_expr::OwnedStr,
         prepared: &verter_session_query::type_solver::PreparedValueDecl,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> Option<EnumDeclaration> {
         let enumeration = self.enum_blocks(
             declaring_canonical,
             declaring_owner,
             declaring_symbol,
             prepared,
+            augmentation,
         )?;
         if enumeration
             .members
@@ -574,7 +594,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             identity.owner,
             &identity.symbol_name,
         )?;
-        self.enum_blocks(canonical, owner, symbol, &prepared)
+        self.enum_blocks(canonical, owner, symbol, &prepared, None)
     }
 
     /// The enum the value declaration `prepared` (`symbol` in
@@ -612,6 +632,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         owner: verter_type_expr::TopLevelOwnerId,
         symbol: verter_type_expr::OwnedStr,
         prepared: &verter_session_query::type_solver::PreparedValueDecl,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> Option<EnumDeclaration> {
         use super::build::AugmentationContribution;
         use verter_session_query::declarations::{AugmentationScopeKind, ValueDeclKind};
@@ -634,7 +655,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let state = &indexed.shallow_state;
         // The declaration scope `prepared` was read from: the file's own,
         // else the ambient block its identity falls back to.
-        let own_scope = if state.headers.value_header_in(owner, &symbol).is_some() {
+        let own_scope = if let Some(augmentation) = augmentation {
+            Some(augmentation.clone())
+        } else if state.headers.value_header_in(owner, &symbol).is_some() {
             None
         } else {
             Some(state.value_fallback_augmentation_scope(owner, &symbol)?)
@@ -707,6 +730,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ENUM_ASSEMBLY_WORK.with(|count| count.set(count.get() + 1));
             let addressed = match &block.scope {
                 None => true,
+                Some(scope) if augmentation == Some(scope) => true,
                 Some(scope) => self
                     .ctx
                     .ensure_indexed_ready_serve(&block.canonical)
@@ -743,8 +767,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         let namespace_members =
             self.enum_namespace_members(&canonical, owner, &symbol, is_global, &members);
+        let module_specifier = match &first.scope {
+            Some(AugmentationScopeKind::Module(specifier)) => Some(specifier.as_str().into()),
+            None | Some(AugmentationScopeKind::Global) => None,
+        };
         Some(EnumDeclaration {
             decl,
+            module_specifier,
             members: Arc::from(members.into_boxed_slice()),
             blocks: Arc::from(blocks.into_boxed_slice()),
             namespace_members: Arc::from(namespace_members.into_boxed_slice()),
@@ -930,6 +959,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.graph().intern_node_with_scope(
             SemanticNodeData::EnumLiteral(EnumLiteralType {
                 enum_decl: enumeration.decl.clone(),
+                module_specifier: enumeration.module_specifier.clone(),
                 member: verter_type_expr::OwnedStr::from(entry.name.as_str()),
                 base,
                 member_count: u32::try_from(enumeration.members.len()).unwrap_or(u32::MAX),
@@ -1029,11 +1059,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         node: SemanticNodeId,
         literal: &EnumLiteralType,
     ) -> bool {
-        let Some(enumeration) = self.enum_declaration(
-            literal.enum_decl.canonical_id.as_ref(),
-            literal.enum_decl.owner,
-            literal.enum_decl.decl_name.as_ref(),
-        ) else {
+        let Some(enumeration) = self.enum_declaration_for_literal(literal) else {
             return false;
         };
         let object = self.enum_object(&enumeration);
@@ -1074,21 +1100,45 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             _ => return false,
         };
-        self.enum_declaration(
-            literal.enum_decl.canonical_id.as_ref(),
+        self.enum_declaration_for_literal(&literal)
+            .is_some_and(|enumeration| self.enum_object(&enumeration) == node)
+    }
+
+    fn enum_declaration_for_literal(&self, literal: &EnumLiteralType) -> Option<EnumDeclaration> {
+        let augmentation = literal.module_specifier.as_ref().map(|specifier| {
+            verter_session_query::declarations::AugmentationScopeKind::Module(specifier.to_string())
+        });
+        self.enum_declaration_in_augmentation(
+            &literal.enum_decl.canonical_id,
             literal.enum_decl.owner,
-            literal.enum_decl.decl_name.as_ref(),
+            &literal.enum_decl.decl_name,
+            augmentation.as_ref(),
         )
-        .is_some_and(|enumeration| self.enum_object(&enumeration) == node)
     }
 
     fn enum_scope(&self, enumeration: &EnumDeclaration) -> NodeScopeId {
-        NodeScopeId::File {
+        let scope = NodeScopeId::File {
             canonical_id: enumeration.decl.canonical_id.clone(),
             owner: enumeration.decl.owner,
             whole_hash: enumeration.decl.whole_hash,
             local_scope: None,
+        };
+        if let Some(specifier) = &enumeration.module_specifier {
+            if let Some(serve) = self
+                .ctx
+                .ensure_indexed_ready_serve(&enumeration.decl.canonical_id)
+            {
+                return Self::augmentation_body_scope(
+                    scope,
+                    &serve.indexed.shallow_state.headers,
+                    &verter_session_query::declarations::AugmentationScopeKind::Module(
+                        specifier.to_string(),
+                    ),
+                    &enumeration.decl.decl_name,
+                );
+            }
         }
+        scope
     }
 
     /// The type a FRESH literal widens to (the checker's widened literal
@@ -1118,11 +1168,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         literal: &EnumLiteralType,
     ) -> Option<SemanticNodeId> {
-        let enumeration = self.enum_declaration(
-            literal.enum_decl.canonical_id.as_ref(),
-            literal.enum_decl.owner,
-            literal.enum_decl.decl_name.as_ref(),
-        )?;
+        let enumeration = self.enum_declaration_for_literal(literal)?;
         Some(self.enum_type(&enumeration))
     }
 
