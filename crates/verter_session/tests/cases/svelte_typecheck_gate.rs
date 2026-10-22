@@ -346,7 +346,7 @@ fn render_body(code: &str) -> &str {
 fn skip_note(name: &str) {
     eprintln!(
         "SKIP {name}: no tsgo/tsc in node_modules/.bin (hermetic machine); \
-         run on a machine with the native-preview install to exercise the gate"
+         run on a machine with the pinned TypeScript installed to exercise the gate"
     );
 }
 
@@ -3219,20 +3219,14 @@ fn function_binding_on_value_intrinsic_type_checks_clean_for_a_correct_pair() {
 }
 
 #[test]
-#[ignore = "known tsgo native-preview limitation: under the \
-            @jsxImportSource pragma, tsgo does NOT fully type-check a generic \
-            checker call whose type argument is an indexed-access into an \
-            imported interface (`SvelteHTMLElements[\"input\"][\"value\"]`) when it \
-            is wrapped in a `{...(call(...), {})}` JSX spread, so a wrong-typed \
-            get/set is silently accepted. The PRODUCER emits the correct type \
-            (pinned by the projector test); an EXPLICIT type argument (e.g. \
-            `FileList | null` for `bind:files`) discriminates reliably. Red \
-            against current tsgo; flips green when the upstream bug is fixed."]
 fn function_binding_on_value_rejects_a_wrong_typed_pair_known_tsgo_gap() {
     // R10 ledger (DISCRIMINATING): a `set` whose param is NOT in the intrinsic
-    // value union (a `symbol`) SHOULD be REJECTED. Under tsgo native-preview the
-    // indexed-access type argument is not enforced inside the JSX spread, so it
-    // is silently accepted today.
+    // value union (a `symbol`) is REJECTED. Under the @jsxImportSource pragma
+    // the generic checker call's indexed-access type argument
+    // (`SvelteHTMLElements["input"]["value"]`) inside the
+    // `{...(call(...), {})}` JSX spread is enforced by the pinned engine
+    // (verified on 7.1.0-beta; the earlier tsgo dev builds silently accepted it,
+    // which is what this test's name records).
     let bad_src = project(
         "<script lang=\"ts\">\n\
          const getV = (): symbol => Symbol();\n\
@@ -3247,8 +3241,8 @@ fn function_binding_on_value_rejects_a_wrong_typed_pair_known_tsgo_gap() {
     };
     assert!(
         !b_ok,
-        "a `symbol` get/set for bind:value SHOULD be REJECTED via the intrinsic \
-         attribute type (currently a tsgo spread-context gap — see #[ignore]):\n{b_out}"
+        "a `symbol` get/set for bind:value must be REJECTED via the intrinsic \
+         attribute type:\n{b_out}"
     );
 }
 
@@ -3294,20 +3288,14 @@ fn function_binding_on_a_component_checks_against_instancetype_props() {
 }
 
 #[test]
-#[ignore = "known tsgo native-preview limitation: it silently accepts a wrong-typed \
-            value on a transition-param property NOT shared with TransitionConfig \
-            (e.g. fly's `y`) under the @jsxImportSource pragma. Red against \
-            current tsgo; flips green when the upstream tsgo bug is fixed. \
-            Upstream: contravariant optional-param inference loses the param \
-            discrimination for non-shared interface members."]
 fn transition_specific_param_wrong_type_is_rejected_known_tsgo_gap() {
     // R10 ledger (DISCRIMINATING): `transition:fly={{ y: "200" }}` — a
     // wrong-typed `y` (string where number is expected) on the `fly`-SPECIFIC
-    // param SHOULD be rejected. Under tsgo native-preview it is silently ACCEPTED
-    // (the `delay` fixture — a TransitionConfig-SHARED member — discriminates
-    // reliably and is the live gate; this `y` case characterizes the gap). When
-    // tsgo fixes the upstream bug this test (asserting REJECTION) flips to green
-    // and the `#[ignore]` is removed.
+    // param is rejected, like the `delay` fixture (a TransitionConfig-SHARED
+    // member). Verified on 7.1.0-beta; the earlier tsgo dev builds silently
+    // accepted it (contravariant optional-param inference lost the param
+    // discrimination for non-shared interface members), which is what this
+    // test's name records.
     let bad = project(
         "<script lang=\"ts\">import { fly } from \"svelte/transition\";</script>\n\
          <div transition:fly={{ y: \"200\" }}>x</div>",
@@ -3318,8 +3306,7 @@ fn transition_specific_param_wrong_type_is_rejected_known_tsgo_gap() {
     };
     assert!(
         !ok,
-        "a wrong-typed transition-specific param (`y: \"200\"`) SHOULD be REJECTED \
-         (currently a tsgo native-preview gap — see #[ignore]):\n{out}"
+        "a wrong-typed transition-specific param (`y: \"200\"`) must be REJECTED:\n{out}"
     );
 }
 
