@@ -5,7 +5,7 @@ Selected case IDs: `VSC1-AC1`, `VSC1-AC2`, `VSC1-AC3`, `VSC1-AC-OWNER`, `VSC1-AC
 Commands (run on the candidate; this file is not an execution transcript):
 
 - `pnpm --filter verter-vscode test` (unit: `vitest run --dir src`, the e2e lib and acceptance unit suites)
-- `pnpm --filter verter-vscode run prepare:e2e`, then `node out-test/e2e/runTests.js --fixture=single-project --only=lifecycle` from `packages/vue-vscode` (the real extension host; `lifecycle.test.ts` is a legacy suite and runs on every legacy fixture route)
+- `pnpm --filter verter-vscode run prepare:e2e`, then `node out-test/e2e/runTests.js --fixture=single-project --only=server-lifecycle` from `packages/vue-vscode` (the real extension host; `server-lifecycle.test.ts` is a legacy suite and runs on every legacy fixture route)
 
 Retired routes: the language client's own restart-on-close; failing the start attempt on a failed first start; the second `verter.typeProvider` restart listener; the start attempt without an owning lifetime.
 

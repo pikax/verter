@@ -5,7 +5,7 @@
   "products": [
     "DesktopLanguageLifecycle (packages/vue-vscode/src/desktopLanguageLifecycle.ts): one activation epoch per started client (the initial start and every restart). Exit, connection-failure, failed-start and silent-server reports carry their epoch; the current epoch enters recovery exactly once and a replaced client's reports (including its type-provider status) are stale",
     "Bounded crash-recovery policy and failure UX: the restart supervisor (packages/vue-vscode/src/restart.ts) is the single recovery authority. The language client's own restart-on-close is disabled through an errorHandler that reports the loss and returns DoNotRestart; three connection errors are tolerated and the fourth shuts the connection down and recovers it. A start that fails enters the same bounded recovery. The type-provider status bar item shows `restarting (n/max)` during recovery and `stopped` (click restarts) after the give-up or a failed manual restart (computeLifecycleStatusBarState in packages/vue-vscode/src/statusBar.ts)",
-    "Subscription/process disposal tests: packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts (start attempt, recovery and activation-on-demand cases), packages/vue-vscode/src/desktopLanguageLifecycle.spec.ts, and the real extension-host suite packages/vue-vscode/e2e/suite/lifecycle.test.ts (OS process table under the extension host plus the diagnostics VS Code holds)"
+    "Subscription/process disposal tests: packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts (start attempt, recovery and activation-on-demand cases), packages/vue-vscode/src/desktopLanguageLifecycle.spec.ts, and the real extension-host suite packages/vue-vscode/e2e/suite/server-lifecycle.test.ts (OS process table under the extension host plus the diagnostics VS Code holds)"
   ],
   "retiredRoutes": [
     "The language client's DefaultErrorHandler restart-on-close, which restarted the server behind the supervisor and forgot crashes older than three minutes, so a server that kept dying slowly was restarted forever",
@@ -26,7 +26,7 @@
   "cases": [
     {
       "id": "VSC1-AC1",
-      "binding": "e2e/suite/lifecycle.test.ts `restart loops replace the one server and never duplicate diagnostics` (three restarts in the real host: exactly one verter-lsp under the extension host, each replaced pid gone, the unsaved edit's diagnostic count unchanged) and `a crashed server is replaced once by the bounded recovery and keeps the unsaved edit`; src/extensionStartAttemptLifetime.spec.ts `restarts a running server exactly once when the type provider changes`, `restarts a crashed server through the supervisor once, never through the client`, and the existing ownership/disposal cases"
+      "binding": "e2e/suite/server-lifecycle.test.ts `restart loops replace the one server and never duplicate diagnostics` (three restarts in the real host: exactly one verter-lsp under the extension host, each replaced pid gone, the unsaved edit's diagnostic count unchanged) and `a crashed server is replaced once by the bounded recovery and keeps the unsaved edit`; src/extensionStartAttemptLifetime.spec.ts `restarts a running server exactly once when the type provider changes`, `restarts a crashed server through the supervisor once, never through the client`, and the existing ownership/disposal cases"
     },
     {
       "id": "VSC1-AC2",

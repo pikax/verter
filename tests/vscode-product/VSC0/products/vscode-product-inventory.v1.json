@@ -355,7 +355,7 @@
           "packages/vue-vscode/src/desktopLanguageLifecycle.ts",
           "packages/vue-vscode/src/statusBar.ts",
           "packages/vue-vscode/src/extensionStartAttemptLifetime.spec.ts",
-          "packages/vue-vscode/e2e/suite/lifecycle.test.ts"
+          "packages/vue-vscode/e2e/suite/server-lifecycle.test.ts"
         ]
       },
       {

@@ -12,7 +12,7 @@ const require = createRequire(import.meta.url);
 const { buildParityTestInventory } = require(
   join(packageRoot, "out-test", "e2e", "lib", "parityTestInventory.js"),
 );
-// 79 = 78 + `lifecycle.test.ts`, the real-host restart/crash/teardown
+// 79 = 78 + `server-lifecycle.test.ts`, the real-host restart/crash/teardown
 // characterisation of the language-server lifecycle.
 // 78 = 77 + `projectless-contract.test.ts`, the exact provider-off contract
 // for no-config/single-file routes. The previous 77th suite was

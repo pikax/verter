@@ -36,7 +36,6 @@ import {
   E2E_SERVER_PROFILE_SLUGS,
   serverProfileKeys,
   serverProfileSettings,
-  serverProfileForSuite,
   serverProfilesForSuites,
   type E2eServerProfile,
 } from "./lib/serverProfiles";
@@ -690,13 +689,11 @@ async function main() {
           }
           throw summaryError;
         }
-        // The teardown recording runs only in the launch whose profile owns it (the
-        // suite loader drops it from every other profile's launch). A launch that
-        // loads it and produced none verified nothing: the host died before its root
-        // teardown ran. One that recorded nothing owned was never observing a server.
-        const teardownLoadsHere =
-          suiteAllowedForFixture(fixture, "_teardown.test.js") &&
-          serverProfileForSuite("_teardown.test", baseServerProfile) === serverProfile;
+        // Every launch loads the teardown recording (the suite loader admits it under
+        // any profile), and each launch spawns its own server. A launch that loads it
+        // and produced none verified nothing: the host died before its root teardown
+        // ran. One that recorded nothing owned was never observing a server.
+        const teardownLoadsHere = suiteAllowedForFixture(fixture, "_teardown.test.js");
         if (teardownLoadsHere && reapedCount === undefined) {
           throw new Error(
             `Route ${label} wrote no owned-process recording, so teardown reaping was not verified.`,

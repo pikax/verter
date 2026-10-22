@@ -21,6 +21,16 @@ describe("DesktopLanguageLifecycle", () => {
     expect(lifecycle.reportLost(second, "the server process exited")).toBe(true);
   });
 
+  it("does not mark a server running once its loss was reported for the same epoch", () => {
+    const lifecycle = new DesktopLanguageLifecycle(5);
+    const epoch = lifecycle.beginEpoch();
+
+    expect(lifecycle.reportLost(epoch, "the server process exited")).toBe(true);
+    // The epoch's start resolving after its close must not erase the loss.
+    expect(lifecycle.markRunning(epoch)).toBe(false);
+    expect(lifecycle.snapshot().phase).toBe("recovering");
+  });
+
   it("keeps the restart attempt visible across the restart's own start, and clears it once running", () => {
     const lifecycle = new DesktopLanguageLifecycle(5);
     lifecycle.markRunning(lifecycle.beginEpoch());

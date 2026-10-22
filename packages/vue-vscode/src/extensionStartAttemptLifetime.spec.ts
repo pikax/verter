@@ -968,6 +968,32 @@ describe("one crash-recovery authority", () => {
     lifetime.dispose();
   });
 
+  it("stops a frozen server whose loss is detected after the restart budget is spent", async () => {
+    const lifetime = new StartAttemptScope();
+    await startAttempt(makeContext(), lifetime);
+    const latest = () => errorHandlerOf(mocks.state.createdClientOptions.length - 1);
+    const max = DEFAULT_RESTART_POLICY.maxAutomaticRestarts;
+
+    for (let attempt = 1; attempt <= max; attempt += 1) {
+      latest().closed();
+      await vi.advanceTimersByTimeAsync(
+        DEFAULT_RESTART_POLICY.initialBackoffMs * 2 ** (attempt - 1),
+      );
+    }
+    expect(mocks.state.startCalls).toBe(1 + max);
+    const stopsBeforeFreeze = mocks.state.stopCalls;
+
+    // The last replacement stays alive but never answers: only the heartbeat
+    // watchdog notices, with no `closed` to follow.
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    expect(liveStatusBarItem()?.text).toMatch(/stopped/);
+    expect(mocks.state.startCalls).toBe(1 + max);
+    expect(mocks.state.stopCalls).toBe(stopsBeforeFreeze + 1);
+
+    lifetime.dispose();
+  });
+
   it("shuts down a connection that keeps failing and recovers it", async () => {
     const lifetime = new StartAttemptScope();
     await startAttempt(makeContext(), lifetime);

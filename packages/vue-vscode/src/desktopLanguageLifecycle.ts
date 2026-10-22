@@ -67,9 +67,13 @@ export class DesktopLanguageLifecycle implements Disposable {
     return this.epoch;
   }
 
-  /** The epoch's client completed its start. False for a stale epoch. */
+  /**
+   * The epoch's client completed its start. False for a stale epoch, and for an
+   * epoch whose loss was already reported: that server is not running, and
+   * recovery for it has been (or is being) handed to the supervisor.
+   */
   markRunning(epoch: number): boolean {
-    if (!this.isCurrent(epoch)) {
+    if (!this.isCurrent(epoch) || this.lostEpoch === epoch) {
       return false;
     }
     this.phase = "running";

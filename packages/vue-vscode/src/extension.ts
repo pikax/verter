@@ -1642,6 +1642,19 @@ async function startVueLanguageServer(
     );
   }
 
+  /**
+   * Make "stopped" true of the process as well as the status bar. A server that
+   * froze (heartbeat lost) or whose start hung is still alive when recovery
+   * gives up, and no `closed` will ever fire for it; stopping its client
+   * reaps the child (the node client kills a survivor of a refused or timed-out
+   * shutdown). A server that already exited stops as a no-op.
+   */
+  function haltServer() {
+    stopHeartbeatTimer();
+    plainScriptSync.disconnect();
+    void stopClientQuietly(client);
+  }
+
   const restartSupervisor = createRestartSupervisor({
     restart: () =>
       restartLanguageServer({
@@ -1691,7 +1704,13 @@ async function startVueLanguageServer(
             await client.stop();
             return;
           }
-          lifecycle.markRunning(epoch);
+          if (!lifecycle.markRunning(epoch)) {
+            // The server was lost before its start resolved. Reporting this
+            // restart as successful would drop that loss (the supervisor
+            // answers it "in-progress"), so fail the attempt and let the
+            // recovery loop replace it.
+            throw new Error("the replacement server was lost while starting");
+          }
           // Only a server that is actually up gets a freeze watchdog.
           armHeartbeatWatchdog(epoch);
         },
@@ -1705,6 +1724,7 @@ async function startVueLanguageServer(
       }),
     onAutomaticAttempt: (attemptNumber, reason) => lifecycle.markRecovering(attemptNumber, reason),
     onGiveUp: (message) => {
+      haltServer();
       lifecycle.markStopped(
         `${DEFAULT_RESTART_POLICY.maxAutomaticRestarts} automatic restarts failed; last loss: ${lifecycle.snapshot().reason}`,
       );
@@ -1727,7 +1747,7 @@ async function startVueLanguageServer(
     if (outcome === "failed" && !attempt.isDisposed) {
       // A requested restart that did not come back is not retried behind the
       // user's back: the server stays visibly stopped until asked again.
-      stopHeartbeatTimer();
+      haltServer();
       lifecycle.markStopped("the requested restart failed");
       void window.showErrorMessage(
         "Verter language server could not be restarted. Check the Verter output channel for the failure.",
@@ -1772,9 +1792,12 @@ async function startVueLanguageServer(
       restart: restartLS,
     };
   }
-  lifecycle.markRunning(initialEpoch);
-  // Only a server that is actually up gets a freeze watchdog.
-  armHeartbeatWatchdog(initialEpoch);
+  // A server lost before its start resolved is already in recovery; arming a
+  // watchdog over it would only report the same loss again.
+  if (lifecycle.markRunning(initialEpoch)) {
+    // Only a server that is actually up gets a freeze watchdog.
+    armHeartbeatWatchdog(initialEpoch);
+  }
 
   return {
     getClient,
