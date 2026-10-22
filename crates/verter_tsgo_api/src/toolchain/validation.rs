@@ -346,7 +346,8 @@ impl ProcessValidator {
     /// The `--api` smoke: the full owned attach (LSP handshake + `--api`
     /// session mint) plus a minimal configured-project snapshot whose first
     /// handle must be a bare integer (the rail lives inside
-    /// `update_snapshot_open_project`).
+    /// `current_snapshot_for_project`). The smoke releases its snapshot before
+    /// the teardown.
     async fn api_smoke(
         &self,
         path: &Path,
@@ -372,8 +373,9 @@ impl ProcessValidator {
             });
         }
         let tsconfig = staged.tsconfig_string();
-        let result = match attach.update_snapshot(&tsconfig).await {
+        let result = match attach.current_snapshot(&tsconfig).await {
             Ok(snapshot) => {
+                let _ = attach.api().release(&snapshot.snapshot).await;
                 // The integer handle alone proves nothing: the snapshot must
                 // actually CONTAIN the staged configured project. A hollow
                 // `projects: []` (or a foreign project set) means the engine

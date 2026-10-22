@@ -352,11 +352,11 @@ impl<'a> CarrierInjectionChannel<'a> {
 
     /// Barrier: force the `--lsp` server to drain pending document
     /// notifications (`didOpen` / `didChange`) BEFORE an `--api`
-    /// `updateSnapshot` enumerates roots on the shared `project.Session`.
+    /// `getCurrentLanguageServerSnapshot` enumerates roots on the shared `project.Session`.
     ///
     /// The two surfaces ride DIFFERENT transports (the `--lsp` wire and the
     /// `--api` pipe), so a fire-and-forget `didOpen` notification can
-    /// otherwise race behind an `updateSnapshot` on the pipe and the
+    /// otherwise race behind an `getCurrentLanguageServerSnapshot` on the pipe and the
     /// just-opened overlay would not yet be a Program member. LSP processes
     /// messages in order ON ONE connection, so awaiting a `--lsp` REQUEST for
     /// `uri` after the `didOpen` guarantees the overlay is registered by the
@@ -414,7 +414,7 @@ impl<'a> CarrierInjectionChannel<'a> {
 
     /// Open an off-disk carrier overlay and synchronize it (the common path):
     /// [`Self::did_open`] followed by [`Self::sync_overlay`], so a subsequent
-    /// `--api` `updateSnapshot` sees the carrier as a Program member.
+    /// `--api` `getCurrentLanguageServerSnapshot` sees the carrier as a Program member.
     pub async fn did_open_synced(
         &self,
         uri: &str,

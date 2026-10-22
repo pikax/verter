@@ -1,7 +1,7 @@
 //! JS PARITY ORACLE — the primary automated wire-correctness rail.
 //!
 //! Runs the SAME `tsgo --api` operations through BOTH (a) this Rust client and
-//! (b) the official JS client (`<pkg>/unstable/sync`, via
+//! (b) the official JS client (`typescript/sync`, via
 //! `tests/js/parity-oracle.mjs`) against the SAME engine and the SAME fixture,
 //! then asserts the two result sets are IDENTICAL. Because the codec is
 //! hand-written, this catches a hand-coding error or a wire divergence
@@ -9,7 +9,7 @@
 //! agent.
 //!
 //! NON-VACUOUS: it actually executes both clients and compares. The engine
-//! binary is a PARAMETER (the rc `typescript@7.x` package) — never hardcoded.
+//! binary is a PARAMETER (the pinned `typescript` package) — never hardcoded.
 //! Under `VERTER_REQUIRE_TSGO` a missing engine or missing node is a hard
 //! failure (a skip there is a vacuous-pass FAILURE).
 
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use verter_tsgo_api::actor::spawn_actor;
-use verter_tsgo_api::proto::types::{method, Diagnostic, TypeResponse, UpdateSnapshotResponse};
+use verter_tsgo_api::proto::types::{method, Diagnostic, SnapshotResponse, TypeResponse};
 use verter_tsgo_api::snapshot::{AccessibleEntries, OverlaySnapshot, RealDirSource};
 use verter_tsgo_api::transport::pipe::StdioPipeTransport;
 use verter_tsgo_api::{ClientHandle, RequestOptions};
@@ -104,9 +104,9 @@ async fn rust_result(
     // initialize (handshake; not compared, but exercises the wire).
     let _: serde_json::Value = req(&handle, method::INITIALIZE, serde_json::Value::Null).await;
 
-    let snap: UpdateSnapshotResponse = req(
+    let snap: SnapshotResponse = req(
         &handle,
-        method::UPDATE_SNAPSHOT,
+        method::CREATE_SNAPSHOT,
         serde_json::json!({ "openProjects": [common::norm(tsconfig)] }),
     )
     .await;
@@ -114,11 +114,11 @@ async fn rust_result(
     let project = snap
         .projects
         .iter()
-        .find(|p| common::norm(Path::new(&p.config_file_name)) == common::norm(tsconfig));
+        .find(|p| p.config_matches(|c| common::norm(Path::new(c)) == common::norm(tsconfig)));
     let project_opened = project.is_some();
     let carrier_in_root_files = project
         .map(|p| {
-            p.root_files
+            p.root_files()
                 .iter()
                 .any(|f| common::norm(Path::new(f)) == carrier_norm)
         })
@@ -130,7 +130,7 @@ async fn rust_result(
         let diags: Vec<Diagnostic> = req(
             &handle,
             method::GET_SEMANTIC_DIAGNOSTICS,
-            serde_json::json!({ "snapshot": snap.snapshot, "project": project.id, "file": carrier_norm }),
+            serde_json::json!({ "snapshot": snap.snapshot, "project": project.id, "files": [carrier_norm] }),
         )
         .await;
         semantic_diagnostics = diags
@@ -168,6 +168,14 @@ async fn rust_result(
         }
     }
 
+    // The snapshot is released once nothing reads it (the JS oracle disposes
+    // its Snapshot the same way).
+    let _: serde_json::Value = req(
+        &handle,
+        method::RELEASE,
+        serde_json::json!({ "snapshot": snap.snapshot }),
+    )
+    .await;
     handle.close().await.ok();
 
     ParityResult {

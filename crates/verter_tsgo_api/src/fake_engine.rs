@@ -148,7 +148,7 @@ impl Scenario {
 
     /// Whether this scenario serves a WORKING `--api` attach pipe (the LSP
     /// handshake mints a real pipe and the fake speaks `initialize` /
-    /// `updateSnapshot` on it).
+    /// `getCurrentLanguageServerSnapshot` / `release` on it).
     fn serves_api_pipe(self) -> bool {
         matches!(
             self,
@@ -156,9 +156,10 @@ impl Scenario {
         )
     }
 
-    /// The `projects` array `updateSnapshot` returns for `config` (the tsconfig
-    /// the client leased via `openProjects`). `ApiHollow` returns a hollow
-    /// empty vector with a VALID integer snapshot handle.
+    /// The `projects` array a snapshot request returns for `config` (the
+    /// tsconfig the client opened via `openProjects`), in the 7.1
+    /// `ProjectResponse` shape. `ApiHollow` returns a hollow empty vector with
+    /// a VALID integer snapshot handle.
     fn snapshot_projects(self, config: &str) -> serde_json::Value {
         if self == Self::ApiHollow {
             return serde_json::json!([]);
@@ -166,8 +167,9 @@ impl Scenario {
         serde_json::json!([{
             "id": "p.fake",
             "configFileName": config,
-            "compilerOptions": {},
-            "rootFiles": [],
+            "currentDirectory": "/",
+            "dirty": false,
+            "parsedCommandLine": { "fileNames": [], "options": {}, "errors": [] },
         }])
     }
 }
@@ -298,7 +300,7 @@ fn record_mode_pid(mode: &str) {
     }
 }
 
-/// When set, the standalone `--api` surface answers `updateSnapshot` with a
+/// When set, the standalone `--api` surface answers `createSnapshot` with a
 /// hollow `projects: []`, whatever the `--lsp` surface does.
 const STANDALONE_HOLLOW_ENV: &str = "VERTER_TSGO_FAKE_STANDALONE_HOLLOW";
 
@@ -426,7 +428,7 @@ fn serve_lsp(scenario: Scenario) {
 
 /// Bind the `--api` attach pipe, spawn the thread serving it, and return the
 /// pipe path the client connects to. The server accepts ONE connection and
-/// answers `initialize` + `updateSnapshot` per the scenario.
+/// answers `initialize` + `getCurrentLanguageServerSnapshot` per the scenario.
 fn start_api_pipe_server(scenario: Scenario) -> String {
     let (pipe_path, listener) = bind_api_pipe();
     let thread_path = pipe_path.clone();
@@ -529,8 +531,9 @@ fn cleanup_api_pipe(_pipe_path: &str) {
     // Named pipes vanish when the last handle closes.
 }
 
-/// Serve ONE accepted `--api` pipe connection: `initialize` plus
-/// `updateSnapshot` per the scenario, until EOF.
+/// Serve ONE accepted `--api` pipe connection: `initialize`,
+/// `getCurrentLanguageServerSnapshot` per the scenario and `release`, until
+/// EOF.
 fn serve_api_connection(
     scenario: Scenario,
     reader: Box<dyn Read + Send>,
@@ -551,14 +554,15 @@ fn serve_api_connection(
                     &serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "result": { "useCaseSensitiveFileNames": true, "currentDirectory": "/" }
+                        "result": { "caseSensitivity": 1, "currentDirectory": "/" }
                     }),
                 );
             }
-            "updateSnapshot" => {
+            "getCurrentLanguageServerSnapshot" => {
                 let config = message
                     .get("params")
-                    .and_then(|p| p.get("openProjects"))
+                    .and_then(|p| p.get("changes"))
+                    .and_then(|c| c.get("openProjects"))
                     .and_then(|o| o.as_array())
                     .and_then(|a| a.first())
                     .and_then(|c| c.as_str())
@@ -570,8 +574,14 @@ fn serve_api_connection(
                     &serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "result": { "snapshot": 1, "projects": projects }
+                        "result": { "snapshot": 1, "projects": projects, "operation": {} }
                     }),
+                );
+            }
+            "release" => {
+                write_frame(
+                    &mut writer,
+                    &serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": true }),
                 );
             }
             _ => {
@@ -633,7 +643,8 @@ const MSGPACK_UINT8: u8 = 0xcc;
 const MSG_RESPONSE: u8 = 4;
 
 /// Serve the standalone `--api` MessagePack tuple wire on stdio until EOF:
-/// `initialize`, `updateSnapshot` (integer handle + the scenario's projects),
+/// `initialize`, `createSnapshot` (integer handle + the scenario's projects),
+/// `updateSnapshot` (a fresh integer handle, no changed projects), `release`,
 /// empty diagnostics for the diagnostics getters, `null` for everything else.
 fn serve_api_stdio(scenario: Scenario) {
     let stdin = std::io::stdin();
@@ -643,10 +654,10 @@ fn serve_api_stdio(scenario: Scenario) {
         let method = String::from_utf8_lossy(&name).into_owned();
         let body: Vec<u8> = match method.as_str() {
             "initialize" => serde_json::to_vec(
-                &serde_json::json!({ "useCaseSensitiveFileNames": true, "currentDirectory": "/" }),
+                &serde_json::json!({ "caseSensitivity": 1, "currentDirectory": "/" }),
             )
             .unwrap(),
-            "updateSnapshot" => {
+            "createSnapshot" => {
                 let params: serde_json::Value =
                     serde_json::from_slice(&payload).unwrap_or(serde_json::Value::Null);
                 let config = params
@@ -661,9 +672,16 @@ fn serve_api_stdio(scenario: Scenario) {
                 } else {
                     scenario.snapshot_projects(&config)
                 };
-                serde_json::to_vec(&serde_json::json!({ "snapshot": 1, "projects": projects }))
-                    .unwrap()
+                serde_json::to_vec(
+                    &serde_json::json!({ "snapshot": 1, "projects": projects, "operation": {} }),
+                )
+                .unwrap()
             }
+            "updateSnapshot" => serde_json::to_vec(
+                &serde_json::json!({ "snapshot": 2, "projects": [], "operation": {} }),
+            )
+            .unwrap(),
+            "release" => b"true".to_vec(),
             "getSemanticDiagnostics" => {
                 if let Some(dir) = pid_dir() {
                     let pid = std::process::id();
@@ -672,8 +690,8 @@ fn serve_api_stdio(scenario: Scenario) {
                 b"[]".to_vec()
             }
             "getSyntacticDiagnostics" | "getConfigFileParsingDiagnostics" => b"[]".to_vec(),
-            // `release` and anything else: an empty (null-ish) payload resolves
-            // the fire-and-forget callers without a wire error.
+            // Anything else: an empty (null-ish) payload resolves the caller
+            // without a wire error.
             _ => Vec::new(),
         };
         write_tuple(&mut stdout.lock(), MSG_RESPONSE, &name, &body);
