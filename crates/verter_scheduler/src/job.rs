@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
+use verter_execution::wake::{WakeRegistration, WakerSet};
 
 use crate::dag::{DepKey, WorkNodeIdentity};
 use crate::stage::TargetStage;
@@ -260,11 +261,9 @@ pub(crate) enum CompletionTarget {
 /// A handle's terminal state and the wakers of the subscriptions polling it.
 struct CompletionSlot<T: Clone> {
     state: Option<CompletionState<T>>,
-    /// Each pending subscription's waker, under the registration id it
-    /// withdraws by; taken by the completion that resolves the slot.
-    wakers: Vec<(u64, std::task::Waker)>,
-    /// The id the next registration takes.
-    next_registration: u64,
+    /// Each pending subscription's registration; taken by the completion
+    /// that resolves the slot.
+    wakers: WakerSet,
 }
 
 /// Internal shared state between handle and sender.
@@ -295,8 +294,7 @@ pub fn completion_pair<T: Clone>() -> (CompletionHandle<T>, CompletionSender<T>)
     let inner = Arc::new(CompletionInner {
         slot: Mutex::new(CompletionSlot {
             state: None,
-            wakers: Vec::new(),
-            next_registration: 0,
+            wakers: WakerSet::default(),
         }),
         condvar: Condvar::new(),
         target: Mutex::new(None),
@@ -324,12 +322,10 @@ impl<T: Clone> CompletionSender<T> {
                 return false; // already signaled — enforce exactly-once
             }
             slot.state = Some(state);
-            std::mem::take(&mut slot.wakers)
+            slot.wakers.take()
         };
         self.inner.condvar.notify_all();
-        for (_, waker) in wakers {
-            waker.wake();
-        }
+        wakers.wake();
         true
     }
 
@@ -401,7 +397,7 @@ impl<T: Clone> CompletionHandle<T> {
     pub fn subscribe(&self) -> CompletionSubscription<T> {
         CompletionSubscription {
             inner: Arc::clone(&self.inner),
-            registration: None,
+            registration: WakeRegistration::default(),
         }
     }
 
@@ -433,7 +429,7 @@ impl<T: Clone> CompletionHandle<T> {
 pub struct CompletionSubscription<T: Clone> {
     inner: Arc<CompletionInner<T>>,
     /// This subscription's registration while it is pending.
-    registration: Option<u64>,
+    registration: WakeRegistration,
 }
 
 impl<T: Clone> CompletionSubscription<T> {
@@ -443,35 +439,21 @@ impl<T: Clone> CompletionSubscription<T> {
         let mut slot = self.inner.slot.lock();
         if let Some(state) = &slot.state {
             // The completion took every registration when it resolved.
-            self.registration = None;
             return std::task::Poll::Ready(state.clone());
         }
-        let registered = self.registration.is_some_and(|id| {
-            slot.wakers
-                .iter()
-                .any(|(registered, existing)| *registered == id && existing.will_wake(waker))
-        });
-        if !registered {
-            if let Some(previous) = self.registration.take() {
-                slot.wakers.retain(|(id, _)| *id != previous);
-            }
-            let id = slot.next_registration;
-            slot.next_registration += 1;
-            slot.wakers.push((id, waker.clone()));
-            self.registration = Some(id);
-        }
+        slot.wakers.register(&mut self.registration, waker);
         std::task::Poll::Pending
     }
 }
 
 impl<T: Clone> Drop for CompletionSubscription<T> {
     fn drop(&mut self) {
-        if let Some(id) = self.registration.take() {
+        if self.registration.is_registered() {
             self.inner
                 .slot
                 .lock()
                 .wakers
-                .retain(|(registered, _)| *registered != id);
+                .withdraw(&mut self.registration);
         }
     }
 }
