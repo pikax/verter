@@ -657,13 +657,24 @@ async function main() {
         const allowedProductGapCanaries = parity
           ? knownProductGapCanariesForRoute(fixture, typeProvider)
           : undefined;
-        const requiredLoadedFiles = contract
+        // Every launch loads the teardown recording (the suite loader admits it under
+        // any profile), and each launch spawns its own server. A launch that loads it
+        // and produced none verified nothing: the host died before its root teardown
+        // ran. One that recorded nothing owned was never observing a server.
+        const teardownLoadsHere = suiteAllowedForFixture(fixture, "_teardown.test.js");
+        const routeLoadedFiles = contract
           ? [`frameworks/${contract.framework}/contract.test.js`]
           : projectlessContract
             ? PROJECTLESS_CONTRACT_LOADED_FILES
             : barrelRegression
               ? BARREL_REGRESSION_LOADED_FILES
               : parity?.loadedFiles;
+        // The teardown recording is loaded beside the route's own suites, so the exact
+        // loaded inventory names it too.
+        const requiredLoadedFiles =
+          routeLoadedFiles && teardownLoadsHere
+            ? [...routeLoadedFiles, "_teardown.test.js"]
+            : routeLoadedFiles;
         try {
           await enforceRunSummary(logFile, label, {
             expectedFixture: fixture,
@@ -689,11 +700,6 @@ async function main() {
           }
           throw summaryError;
         }
-        // Every launch loads the teardown recording (the suite loader admits it under
-        // any profile), and each launch spawns its own server. A launch that loads it
-        // and produced none verified nothing: the host died before its root teardown
-        // ran. One that recorded nothing owned was never observing a server.
-        const teardownLoadsHere = suiteAllowedForFixture(fixture, "_teardown.test.js");
         if (teardownLoadsHere && reapedCount === undefined) {
           throw new Error(
             `Route ${label} wrote no owned-process recording, so teardown reaping was not verified.`,
