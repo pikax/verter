@@ -371,7 +371,7 @@ pub(crate) fn clip_checker_text(printed: String) -> String {
 
 /// The running length the checker's node builder counts while it prints one
 /// type (`approximateLength`), and whether it has started abbreviating
-/// (`checkTruncationLength`'s latch). TypeScript 7.0.2 counts in UTF-8
+/// (`checkTruncationLength`'s latch). The checker counts in UTF-8
 /// bytes, per node kind, as the node is built rather than as its text
 /// prints; a list or member set past
 /// [`MAXIMUM_TRUNCATION_LENGTH`](super::checker_policy::MAXIMUM_TRUNCATION_LENGTH)
@@ -1516,7 +1516,8 @@ fn type_argument_list(
 /// (`createTypeNodesFromResolvedType`): the signatures first, then each
 /// property, and once the count passes the truncation length the remaining
 /// properties elide as `... N more ...` before the last, or the whole
-/// surface as `{ ...; }` when it begins past it.
+/// surface as `...` when it begins past it (TypeScript 7.1.0-beta; the
+/// checker no longer prints an elided type literal as `{ ...; }`).
 fn render_object_surface(
     store: &SemanticGraphStore,
     surface: &crate::semantic_query::SurfaceView,
@@ -1542,8 +1543,8 @@ fn render_object_surface(
         }
     }
     if visited.check_truncation() {
-        visited.add_length(2);
-        return "{ ...; }".to_string();
+        visited.add_length(3);
+        return "...".to_string();
     }
     let mut signatures: Vec<String> = Vec::new();
     for sig in surface.call_signatures.iter() {
@@ -1562,9 +1563,11 @@ fn render_object_surface(
             s.push_str("readonly ");
         }
         // The node builder builds the key type, then the value type, then
-        // counts the parameter name and seven more; `readonly` counts as on
-        // a property. The checker prints a signature no declaration wrote
-        // with the parameter `x`.
+        // counts the parameter name and four more (TypeScript 7.1.0-beta:
+        // `{ t: { [k: string]: "<141 x>" }; b: Wrapper<string> }` prints
+        // whole, 142 abbreviates `Wrapper<...>`); `readonly` counts as on a
+        // property. The checker prints a signature no declaration wrote with
+        // the parameter `x`.
         let key = display_type_node(store, index.key_type, needs, depth, visited).0;
         let value = display_type_node(store, index.value_type, needs, depth, visited).0;
         let name = match (&index.key_name, checker) {
@@ -1572,7 +1575,7 @@ fn render_object_surface(
             (None, true) => "x",
             (_, false) => "key",
         };
-        visited.add_length(name.len() + 7);
+        visited.add_length(name.len() + 4);
         if index.readonly {
             visited.add_length(9);
         }

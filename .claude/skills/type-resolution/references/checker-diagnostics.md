@@ -74,10 +74,10 @@ Types print as the checker's `typeToString` prints them (`print_diagnostic_type`
 `DisplayContext::for_checker`): the display walk keeps the node builder's running `approximateLength`
 (UTF-8 bytes, per node kind as the node is built: a named reference counts its name twice after its
 type arguments, a property its name and colon before its type, an index signature its key and value
-types then its parameter name and seven, a tuple element its type alone (a label adds nothing), an
+types then its parameter name and four, a tuple element its type alone (a label adds nothing), an
 object its braces after its members, each list entry two bytes before it) and its truncation latch past `checker_policy::MAXIMUM_TRUNCATION_LENGTH` (160) — a union's
 or an intersection's remaining members then print as `... N more ...` before the last, an object's
-remaining properties likewise, a member it begins past the length as `{ ...; }`, a type-argument or
+remaining properties likewise, an object type it begins past the length as `...`, a type-argument or
 tuple list as `...` — and the whole text is clipped to its first 317 bytes and `...` at 320. An object
 with no property or index signature and exactly one call (or one construct) signature prints as that
 signature's function (or constructor) type (`createTypeNodeFromObjectType`): a `typeof` of a declared
@@ -183,7 +183,7 @@ the checker's first failure and records no diagnostic.
 - `ProjectSemanticDispatch::checker_message(&ShallowDiagnostic)`: TS2859 naming both types; the
   component-meta expansion diagnostic's context carries it.
 
-Coverage: `call_diagnostics_carry_the_checkers_code_message_position_and_order` (TypeScript 7.0.2
+Coverage: `call_diagnostics_carry_the_checkers_code_message_position_and_order` (TypeScript 7.1.0-beta
 lines with their chains, cold and warm, two call sites),
 `long_messages_print_as_the_checker_abbreviates_them` (a wide union, a wide object, a 70-level
 property path, reference arguments, index signatures and a long tuple label at their abbreviation

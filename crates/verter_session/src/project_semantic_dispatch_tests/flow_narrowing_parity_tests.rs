@@ -1173,8 +1173,8 @@ fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
 /// audited flow-return boundary, printed as `tsc --pretty false` prints
 /// each — `(line,col): error TS<code>: <message>`, then its message chain
 /// indented two spaces per level — in its order. Every expected line is
-/// TypeScript 7.0.2's on this fixture, identical with `strictNullChecks`
-/// off.
+/// TypeScript 7.1.0-beta's on this fixture, identical with
+/// `strictNullChecks` off.
 ///
 /// The positions are the checker's: an argument's start for TS2345 (a
 /// spread's `...` for every argument it expands to), the first argument
@@ -1356,7 +1356,7 @@ export function differing_return() { return gd<string>(1); }
 /// candidate's return, beside the fitting one's TS2345. A union is related
 /// and printed in the checker's own order, and `strictNullChecks: false`
 /// leaves `null` and `undefined` out of every message. Measured on
-/// TypeScript 7.0.2.
+/// TypeScript 7.1.0-beta.
 #[test]
 fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability() {
     const ARG: &str = "is not assignable to parameter of type";
@@ -1574,7 +1574,7 @@ export function f4() { return g(s); }
 /// A literal keeps its spelling against `never`, an eagerly rejected
 /// argument ahead of a callback is reported against the declared parameter
 /// type without the optionality's `undefined`, and a numeric key and its
-/// string spelling are one property. Measured on TypeScript 7.0.2.
+/// string spelling are one property. Measured on TypeScript 7.1.0-beta.
 #[test]
 fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
     let host = host_with(CALL_REPORT_IDENTITY);
@@ -1604,7 +1604,7 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
 
 /// A long message prints as the checker prints it. Past its node builder's
 /// truncation length a union's remaining members elide as `... N more ...`
-/// before its last, a member it begins past that length as `{ ...; }`, and
+/// before its last, an object type it begins past that length as `...`, and
 /// an object's remaining properties as `... N more ...;` before its last; a
 /// printed type of twice that length is clipped to its first 317 bytes and
 /// `...`; and a failure through a property path of 70 nested object types
@@ -1614,7 +1614,7 @@ fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
 /// not generic counts as the object type it resolves to, so each is elided exactly
 /// where the checker elides it, and never withheld. Each is reported at its own
 /// call, two calls of one body in source order, cold and warm. Every
-/// expected line is TypeScript 7.0.2's on this fixture, identical with
+/// expected line is TypeScript 7.1.0-beta's on this fixture, identical with
 /// `strictNullChecks` off.
 #[test]
 fn long_messages_print_as_the_checker_abbreviates_them() {
@@ -1661,14 +1661,14 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
         properties.join("; "),
         near = "x".repeat(150),
         past = "x".repeat(155),
-        index_near = "x".repeat(138),
-        index_past = "x".repeat(139),
+        index_near = "x".repeat(141),
+        index_past = "x".repeat(142),
         label = "a".repeat(90),
         indexed = properties[..20].join("; "),
     );
     const ARG: &str = "is not assignable to parameter of type 'string'.";
     let union = format!(
-        "Argument of type '{} | {{ ...; }} | ... 26 more ... | {{ ...; }}' {ARG}\n  \
+        "Argument of type '{} | ... | ... 26 more ... | ...' {ARG}\n  \
          Type '{{ member0: 0; }}' is not assignable to type 'string'.",
         (0..12)
             .map(|ordinal| format!("{{ member{ordinal}: {ordinal}; }}"))
@@ -1725,14 +1725,14 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
                     "(20,46)",
                     &format!(
                         "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<string>; }}' {ARG}",
-                        "x".repeat(138)
+                        "x".repeat(141)
                     ),
                 ),
                 at(
                     "(20,63)",
                     &format!(
                         "Argument of type '{{ t: {{ [k: string]: \"{}\"; }}; b: Wrapper<...>; }}' {ARG}",
-                        "x".repeat(139)
+                        "x".repeat(142)
                     ),
                 ),
             ],
@@ -1888,7 +1888,7 @@ fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abb
 /// declaration wrote; and a mapped type that is not generic, at the top or
 /// nested, as the object type it resolves to, `undefined` printed last; and
 /// an optional `never` element or property as `undefined`.
-/// Every expected line is TypeScript 7.0.2's on this fixture.
+/// Every expected line is TypeScript 7.1.0-beta's on this fixture.
 #[test]
 fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
     let source = format!(
@@ -2122,7 +2122,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
 }
 
 /// A diagnostic whose position the call's route cannot establish is not
-/// reported, never moved to another position. TypeScript 7.0.2 reports
+/// reported, never moved to another position. TypeScript 7.1.0-beta reports
 /// TS2345 for `un1`'s argument, which the route cannot type, while the
 /// call still answers its lone signature's declared `number`.
 #[test]
