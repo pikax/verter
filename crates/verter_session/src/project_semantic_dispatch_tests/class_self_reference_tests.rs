@@ -310,6 +310,85 @@ export function obj() { return { shadow: { n: 4 as const }, m() { return this.sh
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// With no library declaring `ThisType`, the global marker may be declared
+/// ONLY by modules that also declare a module-scope namesake: each one's
+/// `declare global` contribution is still a declaration of the global, and
+/// a reader in another module names the marker through it, cold and warm.
+/// The same holds for any global so declared: the reader's `Box` merges
+/// every module's `declare global` members, each naming types in its own
+/// module's scope. An importer of a namesake reads an ordinary type.
+/// TypeScript answers the receiver `3`, `Box['first']` `2` and
+/// `Box['loc']` `5` (`Box['second']` `3`) for the global reader, and the
+/// receiver `4` and `LocalBox['local']` `1` for the importer, in every row.
+#[test]
+fn a_global_declared_only_beside_module_local_namesakes_keeps_the_marker() {
+    use super::checker_probe_lane_tests::{mismatches_on_host, probe_host, ProbeProject};
+    let shadowing = "export interface ThisType<T> { shadow: T }
+declare global { interface ThisType<T> {} }
+export interface Box { local: 1 }
+type Local = 5;
+declare global { interface Box { first: 2; loc: Local } }";
+    let second = "export interface ThisType<T> { other: T }
+declare global { interface ThisType<T> {} }
+export interface Box { other: 1 }
+declare global { interface Box { second: 3 } }";
+    let reader = "type Methods<T> = ThisType<T>;
+export function obj() { return { m() { return this.n; } } satisfies Methods<{ n: 3 }>; }
+export type First = Box['first'];";
+    let importer = "import type { ThisType as Local, Box as LocalBox } from './a';
+export function obj() { return { shadow: { n: 4 as const }, m() { return this.shadow.n; } } satisfies Local<{ n: 4 }> & { m(): 4 }; }
+export type First = LocalBox['local'];";
+    let probe = "ReturnType<ReturnType<typeof obj>['m']>";
+    // Each row is read twice on one host: cold, then warm. The global
+    // reader's `Box` is the merged global every `declare global` block
+    // contributes to; the importer's is the module-scope one.
+    let local_rows = [(probe, "4"), ("First", "1"), (probe, "4"), ("First", "1")];
+    let mut failures = Vec::new();
+    let one = [
+        (probe, "3"),
+        ("First", "2"),
+        ("Box['loc']", "5"),
+        (probe, "3"),
+        ("First", "2"),
+        ("Box['loc']", "5"),
+    ];
+    let two = [
+        (probe, "3"),
+        ("First", "2"),
+        ("Box['loc']", "5"),
+        ("Box['second']", "3"),
+        (probe, "3"),
+        ("First", "2"),
+        ("Box['loc']", "5"),
+        ("Box['second']", "3"),
+    ];
+    for (label, files, global_rows) in [
+        ("one shadowing module", &[("a.ts", shadowing)][..], &one[..]),
+        (
+            "two shadowing modules",
+            &[("a.ts", shadowing), ("c.ts", second)][..],
+            &two[..],
+        ),
+    ] {
+        let project = ProbeProject {
+            files,
+            ..Default::default()
+        };
+        for (role, source, rows) in [
+            ("global reader", reader, global_rows),
+            ("importer", importer, &local_rows[..]),
+        ] {
+            let host = probe_host(project);
+            failures.extend(
+                mismatches_on_host(&host, project, source, rows)
+                    .into_iter()
+                    .map(|failure| format!("{label}, {role}: {failure}")),
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A module's OWN `interface ThisType` — not in `declare global`, beside a
 /// global one in one library or in two, or beside its own `declare global`
 /// one — is a different symbol from the global marker: the literal's

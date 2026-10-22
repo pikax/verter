@@ -858,6 +858,24 @@ impl ShallowInputAssembly {
             .cloned()
     }
 
+    /// Whether the type the identity `(canonical, owner, name)` names in
+    /// `owner`'s global-augmentation scope
+    /// ([`TopLevelOwnerId::global_augmentation`]) exists: a MODULE whose
+    /// `declare global { … }` block declares `name` in `owner`. A script's
+    /// `declare global` binds nothing.
+    pub fn declares_global_augmentation_type_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
+        crate::inputs::contributors::classify_shallow_module_kind(self)
+            == crate::inputs::contributors::FileModuleKind::Module
+            && self
+                .headers
+                .augmentation_type_header_in(
+                    &crate::declarations::AugmentationScopeKind::Global,
+                    owner.lexical(),
+                    name,
+                )
+                .is_some()
+    }
+
     pub fn classify_dependency_paths(
         &self,
         declaration_owner: TopLevelOwnerId,

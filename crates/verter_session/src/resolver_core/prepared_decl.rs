@@ -296,6 +296,30 @@ fn prepare_local_type_decl_outcome_with_base(
     interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
     use verter_session_query::declarations::AugmentationScopeKind;
+    // An owner's global-augmentation scope addresses the owner's own
+    // `declare global { … }` contribution, whatever its file surface
+    // declares of the name; the prepared declaration carries that identity.
+    if owner.is_global_augmentation() {
+        if !state.declares_global_augmentation_type_in(owner, symbol_name) {
+            return PreparedDeclOutcome::Ready(None);
+        }
+        return match prepare_augmentation_type_decl_outcome_in(
+            canonical_id,
+            state,
+            &AugmentationScopeKind::Global,
+            owner.lexical(),
+            symbol_name,
+            dep_edges,
+            import_canonicalization,
+            interner,
+        ) {
+            PreparedDeclOutcome::Ready(Some(mut prepared)) => {
+                prepared.root_identity.owner = owner;
+                PreparedDeclOutcome::Ready(Some(prepared))
+            }
+            outcome => outcome,
+        };
+    }
     // A name absent from the file surface but present in the file's own
     // `declare global { ... }` inventory resolves to the merged global
     // declaration. Global augmentations are visible from any scope, so a bare
@@ -1012,13 +1036,13 @@ impl PreparedTypeDeclCache {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base_cell = self
             .name_resolution_bases
-            .get(&owner)
+            .get(&owner.lexical())
             .expect("every prepared slot owner has a name-resolution base");
         let name_resolution_base = name_resolution_base(base_cell, &self.account, || {
             build_type_name_resolution_base(
                 &self.canonical_id,
                 self.state.as_ref(),
-                owner,
+                owner.lexical(),
                 (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
                 &self.import_canonicalization,
                 &self.interner,
@@ -1694,7 +1718,8 @@ pub fn build_prepared_type_decl_cache(
     // are resolvable by bare name through `prepare_local_type_decl`'s global
     // fallback, so they need a prepared-decl slot even though they never enter
     // the file surface. (A name that IS a file symbol already has a slot and
-    // takes precedence.)
+    // takes precedence; the global member it shadows takes the owner's
+    // global-augmentation slot.)
     // A `declare module "…"` block's type prepares through the same
     // fallback when it is the one block declaring the name.
     for (scope, key) in state.augmentation_type_decl_keys() {
@@ -1705,16 +1730,27 @@ pub fn build_prepared_type_decl_cache(
                     == Some(scope.clone())
             }
         };
-        if addressable
-            && !slots.contains_key(key)
-            && !state.is_import_local_in(key.owner, key.name.as_ref())
-        {
-            slots.insert(key.clone(), Arc::new(PreparedDeclSlot::new()));
+        if !addressable || state.is_import_local_in(key.owner, key.name.as_ref()) {
+            continue;
         }
+        let key = if state.has_type_symbol_in(key.owner, key.name.as_ref()) {
+            if !matches!(
+                scope,
+                verter_session_query::declarations::AugmentationScopeKind::Global
+            ) {
+                continue;
+            }
+            verter_type_expr::DeclBindingKey::new(key.owner.global_augmentation(), key.name.clone())
+        } else {
+            key.clone()
+        };
+        slots
+            .entry(key)
+            .or_insert_with(|| Arc::new(PreparedDeclSlot::new()));
     }
     let name_resolution_bases = slots
         .keys()
-        .map(|key| key.owner)
+        .map(|key| key.owner.lexical())
         .collect::<FxHashSet<_>>()
         .into_iter()
         .map(|owner| (owner, Arc::new(OnceLock::new())))
