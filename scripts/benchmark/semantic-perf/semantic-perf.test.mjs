@@ -32,6 +32,7 @@ import {
   ROOT,
   TIER_DEFAULTS,
   materialize,
+  main,
   parseArgs,
 } from "./run.mjs";
 import {
@@ -205,9 +206,22 @@ test("the canonical form fails closed on syntax it does not know", () => {
 
 // ---------------------------------------------------------------- catalog and schedule
 
+test("a selected reference is checked before building probes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-reference-"));
+  const reference = join(dir, "missing.json");
+  try {
+    for (const flag of ["--reference", "--expected"]) {
+      await assert.rejects(main([flag, reference]), (error) => error.message.includes(reference));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a run can select a fresh measured reference without changing the committed table", () => {
   const path = join("local-evidence", "reference.json");
   assert.equal(parseArgs(["--expected", path]).expected, resolve(path));
+  assert.equal(parseArgs(["--reference", path]).expected, resolve(path));
 });
 
 test("the array literal normalization reproduction is selectable", () => {

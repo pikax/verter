@@ -185,6 +185,14 @@ impl super::SemanticGraphStore {
                 nodes.push(node);
             }
         });
+        // A relation identity's interned key already roots its operands in
+        // this arena for as long as the identity holds it: a second root set
+        // over the same nodes would only duplicate that ownership.
+        if let super::family::FamilyKey::Relate { key } = prepared.family() {
+            if key.roots_all_in(&self.arena.core, &nodes) {
+                return Ok(());
+            }
+        }
         let roots = self.root_nodes(nodes)?;
         Arc::get_mut(&mut prepared.0)
             .expect("a probe identity is unshared until its claim")

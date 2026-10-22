@@ -1296,10 +1296,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (relation_members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )

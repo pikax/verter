@@ -2021,17 +2021,44 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
-                // A name an enclosing namespace declares heads the path at
-                // that namespace's member.
-                let (root_name, rest) = match self.namespace_scoped_value_root(
-                    ctx.name_resolution,
-                    ctx.scope_payload,
-                    root_scope.canonical_id.as_ref(),
-                    root_scope.owner,
-                    &value_ref.path,
+                // A path written inside a `declare module` namespace block
+                // heads at the innermost enclosing ambient namespace member
+                // it names; otherwise a name an enclosing namespace declares
+                // heads the path at that namespace's member.
+                let (root_scope, root_name, rest) = match self.ambient_namespace_target(
+                    scope,
+                    root,
+                    super::build::GlobalSpace::Value,
                 ) {
-                    Some((qualified, consumed)) => (qualified, &value_ref.path[consumed..]),
-                    None => (verter_type_expr::OwnedStr::from(root.as_str()), rest),
+                    Some((specifier, qualified)) => {
+                        let mut root_scope = root_scope;
+                        root_scope.binder_scope_id =
+                            crate::semantic_query::BinderScopeId::augmentation_module_scope(
+                                root_scope.owner,
+                                verter_type_expr::OwnedStr::from(specifier.as_str()),
+                            );
+                        (
+                            root_scope,
+                            verter_type_expr::OwnedStr::from(qualified),
+                            rest,
+                        )
+                    }
+                    None => match self.namespace_scoped_value_root(
+                        ctx.name_resolution,
+                        ctx.scope_payload,
+                        root_scope.canonical_id.as_ref(),
+                        root_scope.owner,
+                        &value_ref.path,
+                    ) {
+                        Some((qualified, consumed)) => {
+                            (root_scope, qualified, &value_ref.path[consumed..])
+                        }
+                        None => (
+                            root_scope,
+                            verter_type_expr::OwnedStr::from(root.as_str()),
+                            rest,
+                        ),
+                    },
                 };
                 let value_root = ValueRootKey {
                     scope: root_scope,
@@ -2633,6 +2660,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return LocatorRefPlan::Ready(self.opaque(QueryError::Miss))
             }
             None => {}
+        }
+
+        // A module namespace's sibling has an augmentation-scoped identity,
+        // not a file slot. Keep its scope on the carrier for the shared fold.
+        if self.ambient_namespace_type_target(scope, name).is_some() {
+            return LocatorRefPlan::Carrier(
+                crate::project_semantic_dispatch::carrier::RefHeadResolution::Unresolved,
+            );
         }
 
         // A script-setup generic parameter is NOT a declaration: its bare
