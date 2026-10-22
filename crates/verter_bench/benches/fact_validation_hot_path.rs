@@ -36,7 +36,7 @@ fn make_view() -> impl verter_session_query::facts::store_view::StoreView {
 
 fn dummy_fact(canonical: &str, name: &str, expected_hash: HashValue) -> FactVersionRef {
     FactVersionRef::Parse(ParseFactRef {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         key: FactKey::Export {
             name: name.into(),
             space: SymbolSpace::Type,

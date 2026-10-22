@@ -11,7 +11,10 @@
 //! - Resolves export routing: direct named > aliased > wildcard (declared order)
 //! - Runs local closure per file, never crossing import boundaries in-place
 //! - Collects external refs into the next frontier level
-//! - Tracks counters against the frontier budget
+//! - Counts the `(canonical_id, exported_name)` visits it performs
+//!
+//! The walk carries no visit cap: the request-wide `seen` set visits each
+//! pair at most once, so a finite import graph terminates on its own merits.
 //!
 //! The engine does NOT perform type evaluation or expansion.  It produces
 //! `ResolvedSymbol` entries with post-local-closure symbolic bodies that later
@@ -24,7 +27,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::shallow_file_state::{
     LocalClosureStatus, ResolutionBudgets, ResolutionCounters, ShallowFileState,
 };
-use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 use verter_session_query::inputs::shallow::{ExportTarget, ExternalSymbolRef};
 use verter_type_expr::facts::{NarrowFrontierBody, NarrowTypeParam};
 use verter_type_expr::locators::{
@@ -202,8 +204,6 @@ pub struct ExternalTypeFrontier {
     pub counters: ResolutionCounters,
     /// Budget limits.
     budgets: ResolutionBudgets,
-    /// If a budget was exceeded, the failure details.
-    pub budget_failure: Option<BudgetExceededFailure>,
 }
 
 /// Trait for the host to provide file state to the frontier engine.
@@ -248,7 +248,6 @@ impl ExternalTypeFrontier {
             seen: FxHashSet::default(),
             counters: ResolutionCounters::default(),
             budgets,
-            budget_failure: None,
         }
     }
 
@@ -262,28 +261,21 @@ impl ExternalTypeFrontier {
         }
     }
 
-    /// Run the frontier to completion.
-    ///
-    /// Returns `Ok(())` if all reachable symbols were processed (or budget
-    /// was exceeded), `Err` for host-level failures.
-    pub fn run<H: FrontierHost>(&mut self, host: &H) -> Result<(), BudgetExceededFailure> {
-        while self.run_one_level(host)? {}
-        Ok(())
+    /// Run the frontier until every reachable symbol is processed.
+    pub fn run<H: FrontierHost>(&mut self, host: &H) {
+        while self.run_one_level(host) {}
     }
 
     /// Process one BFS level and report whether another level remains.
-    pub fn run_one_level<H: FrontierHost>(
-        &mut self,
-        host: &H,
-    ) -> Result<bool, BudgetExceededFailure> {
+    pub fn run_one_level<H: FrontierHost>(&mut self, host: &H) -> bool {
         if self.current_level.is_empty() {
-            return Ok(false);
+            return false;
         }
 
-        self.process_level(host)?;
+        self.process_level(host);
         self.current_level.clear();
         std::mem::swap(&mut self.current_level, &mut self.next_level);
-        Ok(!self.current_level.is_empty())
+        !self.current_level.is_empty()
     }
 
     /// Drop any queued-but-unprocessed frontier work.
@@ -293,7 +285,7 @@ impl ExternalTypeFrontier {
     }
 
     /// Process one level of the frontier.
-    fn process_level<H: FrontierHost>(&mut self, host: &H) -> Result<(), BudgetExceededFailure> {
+    fn process_level<H: FrontierHost>(&mut self, host: &H) {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             self.process_level_in::<H, M>(host, &verter_type_engine::request_observers::CaptureTargets::installed::<M>())
         })
@@ -303,23 +295,15 @@ impl ExternalTypeFrontier {
         &mut self,
         host: &H,
         observation: &verter_type_engine::request_observers::CaptureTargets,
-    ) -> Result<(), BudgetExceededFailure> {
+    ) {
         let _ = observation;
         // Take ownership of current level to avoid borrow issues
         let level: Vec<_> = self.current_level.drain(..).collect();
 
         for pending in level {
-            // Budget check
-            self.counters.frontier_symbol_visits += 1;
-            if self.counters.frontier_symbol_visits >= self.budgets.frontier_symbol_visits as u64 {
-                let failure = BudgetExceededFailure {
-                    domain: BudgetDomain::Frontier,
-                    limit: self.budgets.frontier_symbol_visits,
-                    actual: self.counters.frontier_symbol_visits,
-                    context: format!("{}::{}", pending.canonical_id, pending.exported_name).into(),
-                };
-                self.budget_failure = Some(failure.clone());
-                return Err(failure);
+            #[cfg(test)]
+            {
+                self.counters.frontier_symbol_visits += 1;
             }
 
             let resolved = self.resolve_one(host, &pending);
@@ -361,8 +345,6 @@ impl ExternalTypeFrontier {
                 resolved,
             );
         }
-
-        Ok(())
     }
 
     /// Resolve one `(canonical_id, exported_name)` pair.
@@ -883,7 +865,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         assert_eq!(frontier.resolved_count(), 1);
         let resolved = frontier.get_resolved("/src/types.ts", "Props").unwrap();
@@ -917,7 +899,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         // Should have resolved both the barrel re-export and the inner definition
         assert!(
@@ -954,7 +936,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         assert!(
             frontier.get_resolved("/src/inner.ts", "Props").is_some(),
@@ -987,7 +969,7 @@ mod tests {
         }]);
 
         assert!(
-            frontier.run_one_level(&host).unwrap(),
+            frontier.run_one_level(&host),
             "the first level should enqueue the barrel children"
         );
         assert_eq!(
@@ -998,7 +980,7 @@ mod tests {
 
         host.reset_ensure_log();
         assert!(
-            !frontier.run_one_level(&host).unwrap(),
+            !frontier.run_one_level(&host),
             "the second level should resolve the queued children"
         );
         assert_eq!(
@@ -1042,13 +1024,13 @@ mod tests {
         }]);
 
         assert!(
-            frontier.run_one_level(&host).unwrap(),
+            frontier.run_one_level(&host),
             "the barrel level should enqueue the same-layer children"
         );
         host.reset_ensure_log();
 
         assert!(
-            frontier.run_one_level(&host).unwrap(),
+            frontier.run_one_level(&host),
             "processing the child layer should leave the deeper grandchild queued"
         );
         assert_eq!(
@@ -1064,7 +1046,7 @@ mod tests {
 
         host.reset_ensure_log();
         assert!(
-            !frontier.run_one_level(&host).unwrap(),
+            !frontier.run_one_level(&host),
             "the queued grandchild should remain for the following level"
         );
         assert_eq!(
@@ -1110,7 +1092,7 @@ mod tests {
         );
 
         assert!(
-            frontier.run_one_level(&host).unwrap(),
+            frontier.run_one_level(&host),
             "the root barrel should enqueue the same-layer children"
         );
         assert_eq!(
@@ -1120,7 +1102,7 @@ mod tests {
         );
 
         assert!(
-            frontier.run_one_level(&host).unwrap(),
+            frontier.run_one_level(&host),
             "the child layer should leave the grandchild queued"
         );
         assert_eq!(
@@ -1153,7 +1135,7 @@ mod tests {
             },
         ]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         // Should only visit once
         assert_eq!(
@@ -1162,36 +1144,45 @@ mod tests {
         );
     }
 
+    /// The walk has no visit cap: a finite fan-out wider than any former
+    /// request step ceiling visits and resolves every distinct pair once.
     #[test]
-    fn budget_exceeded_returns_structured_failure() {
+    fn wide_finite_fan_out_resolves_every_symbol() {
+        const SYMBOLS: usize = 2_048;
+        let source: String = (0..SYMBOLS)
+            .map(|index| {
+                format!(
+                    "export interface T{index} {{ p{index}: string }}
+"
+                )
+            })
+            .collect();
         let mut host = MockHost::new();
-        host.add_file(
-            "/src/types.ts",
-            make_state("export interface A { a: string }\nexport interface B { b: number }"),
-        );
+        host.add_file("/src/types.ts", make_state(&source));
 
-        let mut frontier = ExternalTypeFrontier::with_budgets(ResolutionBudgets {
-            frontier_symbol_visits: 1,
-            ..ResolutionBudgets::default()
-        });
-        frontier.seed(vec![
-            PendingExternalSymbol {
-                canonical_id: "/src/types.ts".to_string(),
-                exported_name: "A".to_string(),
-                route: None,
-            },
-            PendingExternalSymbol {
-                canonical_id: "/src/types.ts".to_string(),
-                exported_name: "B".to_string(),
-                route: None,
-            },
-        ]);
+        let mut frontier = ExternalTypeFrontier::new();
+        frontier.seed((0..SYMBOLS).map(|index| PendingExternalSymbol {
+            canonical_id: "/src/types.ts".to_string(),
+            exported_name: format!("T{index}"),
+            route: None,
+        }));
+        frontier.run(&host);
 
-        let result = frontier.run(&host);
-        assert!(result.is_err(), "should fail with budget exceeded");
-        let failure = result.unwrap_err();
-        assert_eq!(failure.domain, BudgetDomain::Frontier);
-        assert!(frontier.budget_failure.is_some());
+        assert_eq!(frontier.counters.frontier_symbol_visits, SYMBOLS as u64);
+        assert_eq!(frontier.resolved_count(), SYMBOLS);
+        for index in 0..SYMBOLS {
+            let resolved = frontier
+                .get_resolved("/src/types.ts", &format!("T{index}"))
+                .expect("every seeded symbol is resolved");
+            assert!(
+                matches!(
+                    resolved.status,
+                    ResolvedSymbolStatus::Resolved | ResolvedSymbolStatus::InvalidDeclaration
+                ),
+                "T{index} must reach its declaration: {:?}",
+                resolved.status
+            );
+        }
     }
 
     #[test]
@@ -1205,7 +1196,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         let resolved = frontier.get_resolved("/src/missing.ts", "Props").unwrap();
         assert_eq!(resolved.status, ResolvedSymbolStatus::RouteNotFound);
@@ -1234,7 +1225,7 @@ mod tests {
         }]);
 
         // Must not hang
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         // Should have visited a bounded number of symbols
         assert!(
@@ -1268,7 +1259,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         // Props should resolve through first.ts (declared order wins)
         let resolved = frontier.get_resolved("/src/first.ts", "Props");
@@ -1302,7 +1293,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         // Props should ultimately be found in c.ts
         assert!(
@@ -1336,7 +1327,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         let final_target = frontier
             .final_target_for(&host, "/src/root.ts", "RootProps")
@@ -1369,7 +1360,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         let final_target = frontier
             .final_target_for(&host, "/src/types.ts", "Props")
@@ -1399,7 +1390,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         let final_target = frontier
             .final_target_for(&host, "/src/a.ts", "Props")
@@ -1432,7 +1423,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         let final_target = frontier
             .final_target_for(&host, "/src/index.ts", "Bar")
@@ -1465,7 +1456,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         let final_target = frontier
             .final_target_for(&host, "/src/index.ts", "Props")
@@ -1501,7 +1492,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         assert_eq!(
             frontier.final_target_for(&host, "/src/index.ts", "Props"),
@@ -1541,7 +1532,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         // The barrel entry should be resolved (as a reexport hop)
         let barrel_resolved = frontier
@@ -1594,7 +1585,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         let resolved = frontier
             .get_resolved("/src/types.ts", "Props")
@@ -1671,7 +1662,7 @@ mod tests {
             exported_name: "default".to_string(),
             route: None,
         }]);
-        default_frontier.run(&default_host).unwrap();
+        default_frontier.run(&default_host);
 
         let default_resolved = default_frontier
             .get_resolved("/src/defaults.ts", "default")
@@ -1735,7 +1726,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         assert_eq!(
             frontier.final_target_for(&host, "/src/index.ts", "Props"),
@@ -1759,7 +1750,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         let resolved = frontier.get_resolved("/src/barrel.ts", "Props").unwrap();
         assert_eq!(
@@ -1797,7 +1788,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         // barrel should resolve as a reexport (alias route), not wildcard
         let barrel_resolved = frontier.get_resolved("/src/barrel.ts", "Props").unwrap();
@@ -1833,7 +1824,7 @@ mod tests {
             route: None,
         }]);
 
-        frontier.run(&host).unwrap();
+        frontier.run(&host);
 
         let resolved = frontier.get_resolved("/src/types.ts", "Props").unwrap();
         // Without eval_env, symbols are empty so local closure returns

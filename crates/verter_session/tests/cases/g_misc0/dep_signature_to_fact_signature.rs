@@ -31,7 +31,7 @@ fn whole_hash_converts_to_file_whole_hash() {
     assert_eq!(
         result[0],
         FactVersionRef::FileWholeHash {
-            canonical_id: "src/foo.ts".to_string(),
+            canonical_id: "src/foo.ts".into(),
             hash,
         },
         "converted fact must carry the canonical_id and hash from the DepSignature entry"
@@ -55,7 +55,7 @@ fn route_generation_is_dropped() {
     match &result[0] {
         FactVersionRef::FileWholeHash { canonical_id, .. } => {
             assert_eq!(
-                canonical_id, "b.ts",
+                &**canonical_id, "b.ts",
                 "must keep the WholeHash entry for b.ts"
             );
         }

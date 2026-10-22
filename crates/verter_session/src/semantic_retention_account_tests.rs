@@ -613,7 +613,7 @@ fn the_result_entry_footprint_scales_with_the_entry() {
         let facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> = (0..facts)
             .map(
                 |i| verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: format!("/src/dep{i}.ts"),
+                    canonical_id: format!("/src/dep{i}.ts").into(),
                     hash: [1u8; 16],
                 },
             )
@@ -653,7 +653,7 @@ fn a_result_cache_under_pressure_stores_nothing_and_disturbs_nothing() {
             read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
                 Arc::from(vec![
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                        canonical_id: "/src/Owner.vue".to_string(),
+                        canonical_id: "/src/Owner.vue".into(),
                         hash: [1u8; 16],
                     },
                 ]),

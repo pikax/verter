@@ -49,7 +49,7 @@ mod file_source_env_observation_tests {
             || observe_file_source_env_from_artifact_key(&host, Some(&key)),
         );
         let expected = FactVersionRef::FileSourceEnv {
-            canonical_id: "/dep.ts".to_string(),
+            canonical_id: "/dep.ts".into(),
             parse_env_hash: live_parse_env,
             parse_key: key.parse_key.clone(),
             file_language_id: FileArtifactKey::synthetic_file_language_for_test("/dep.vue"),
@@ -111,7 +111,7 @@ mod tracer_cacheability_tests {
         for index in 0..count {
             verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                 FactVersionRef::FileWholeHash {
-                    canonical_id: format!("/wide/{index:05}.ts"),
+                    canonical_id: format!("/wide/{index:05}.ts").into(),
                     hash: [(index & 0xff) as u8; 16],
                 },
             );

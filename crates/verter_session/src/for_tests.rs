@@ -447,6 +447,16 @@ pub fn relate_named_types_for_tests(
     }
 }
 
+/// Run `run` with relation checks on this thread recording against
+/// `allowance` structured comparisons instead of the checker's, through the
+/// same code path: a relation past it is refused with TS2859 at a size a test
+/// reaches quickly.
+pub fn with_relation_comparisons_for_tests<R>(allowance: u32, run: impl FnOnce() -> R) -> R {
+    verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests(
+        allowance, run,
+    )
+}
+
 /// How a relation demand ended, as the relation reported it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelationDemandOutcome {

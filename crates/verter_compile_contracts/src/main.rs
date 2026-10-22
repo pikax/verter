@@ -161,6 +161,8 @@ fn main() {
                     | Some("flight_rendezvous_opt_in_through_soak_support.rs")
                     | Some("active_occupancy_window_opt_in_through_soak_support.rs")
                     | Some("host_release_completion_through_soak_support.rs")
+                    | Some("flow_return_root_positive_through_soak_support.rs")
+                    | Some("held_charge_witness_through_soak_support.rs")
             )
         });
     }

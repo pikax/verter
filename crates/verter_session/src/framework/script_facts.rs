@@ -1211,7 +1211,7 @@ fn resolve_script_facts_inner<
             // a content edit to any of them misses the warm entry.
             verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.to_string(),
+                    canonical_id: canonical.into(),
                     hash: whole_hash,
                 },
             );
@@ -1227,7 +1227,7 @@ fn resolve_script_facts_inner<
                     if let Some(h) = host.get_whole_hash_in::<M>(observation, import_canonical) {
                         verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                                canonical_id: import_canonical.clone(),
+                                canonical_id: Arc::from(import_canonical.as_str()),
                                 hash: h,
                             },
                         );

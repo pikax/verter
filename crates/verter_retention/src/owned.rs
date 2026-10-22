@@ -63,6 +63,16 @@ pub trait Measured: Send + Sync + 'static {
     /// offered to `aliases` ([`Owned::offer`]), and each distinct `Arc`
     /// allocation is counted once per `aliases`.
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize;
+
+    /// [`Self::heap_bytes`] of every item of a list, summed. A type whose
+    /// items share allocations among themselves measures the list as one
+    /// value, so an allocation several items share is counted once.
+    fn slice_heap_bytes(items: &[Self], aliases: &mut AliasSet) -> usize
+    where
+        Self: Sized,
+    {
+        items.iter().map(|item| item.heap_bytes(aliases)).sum()
+    }
 }
 
 impl Measured for Box<str> {
@@ -73,11 +83,7 @@ impl Measured for Box<str> {
 
 impl<T: Measured> Measured for Box<[T]> {
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        heap_block_bytes(std::mem::size_of_val::<[T]>(self))
-            + self
-                .iter()
-                .map(|item| item.heap_bytes(aliases))
-                .sum::<usize>()
+        heap_block_bytes(std::mem::size_of_val::<[T]>(self)) + T::slice_heap_bytes(self, aliases)
     }
 }
 
@@ -491,6 +497,13 @@ impl OwnedHandles {
         self.0.into_boxed_slice()
     }
 
+    /// The allocations these handles name, for an observation that reads
+    /// their charges without keeping them.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn nodes(&self) -> &[Arc<dyn Node>] {
+        &self.0
+    }
+
     /// The handles a carrier `measure` reaches. The carrier is delivered
     /// whole: it reaches no raw `Arc` and keeps no heap outside its
     /// handles, which a debug build checks.
@@ -610,6 +623,54 @@ impl BlockShare {
 impl std::fmt::Debug for BlockShare {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("BlockShare").field(&self.bytes()).finish()
+    }
+}
+
+/// What an observation reads off one owned cell: its own charge, the charge
+/// its measurement says it must carry, the pinned share on its block when weak
+/// views keep one, and the children it answers for — the registration its
+/// first charge recorded, or, for a cell no owner has charged yet, the children
+/// a first charge would record. Reading takes the cell's lock only to copy its
+/// charge state; nothing is charged, adopted or released.
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+pub(crate) struct NodeReading {
+    pub(crate) class: Option<ChargeClass>,
+    pub(crate) charged_bytes: usize,
+    pub(crate) measured_bytes: usize,
+    /// `(charged, measured)` bytes of the cell's shared block charge.
+    pub(crate) shared_block: Option<(usize, usize)>,
+    pub(crate) children: Box<[Arc<dyn Node>]>,
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+pub(crate) fn read_node(node: &dyn Node) -> NodeReading {
+    let (charge, block_share, registered) = {
+        let slot = node.slot().lock();
+        (
+            slot.charge
+                .as_ref()
+                .map(|charge| (charge.class(), charge.bytes())),
+            slot.block_share.as_ref().map(BlockShare::bytes),
+            slot.charge
+                .is_some()
+                .then(|| slot.children().to_vec().into_boxed_slice()),
+        )
+    };
+    // The same measurement a first charge takes: the figure a charge on this
+    // cell must equal, read from the value itself, never from a holder or a
+    // transfer of the charge.
+    let (measured_bytes, measured_children) = measure(node, block_share.is_some());
+    NodeReading {
+        class: charge.map(|(class, _)| class),
+        charged_bytes: charge.map_or(0, |(_, bytes)| bytes),
+        measured_bytes,
+        shared_block: block_share.map(|charged| {
+            (
+                charged,
+                node.block_bytes() + arc_block_bytes(std::mem::size_of::<RetentionCharge>()),
+            )
+        }),
+        children: registered.unwrap_or_else(|| measured_children.into_boxed_slice()),
     }
 }
 
@@ -741,6 +802,12 @@ impl<T: Measured> Owned<T> {
     #[must_use]
     pub fn addr(this: &Self) -> usize {
         Arc::as_ptr(&this.0).cast::<()>() as usize
+    }
+
+    /// The allocation as the charge lifecycle sees it, for an observation.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn node(&self) -> Arc<dyn Node> {
+        Arc::clone(&self.0) as Arc<dyn Node>
     }
 
     /// A weak view that keeps the cell's block — not its value — allocated,

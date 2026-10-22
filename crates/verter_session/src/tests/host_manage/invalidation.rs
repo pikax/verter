@@ -2433,7 +2433,7 @@ fn current_dependency_fact_versions_keeps_imported_barrel_route_facts_shallow() 
         facts.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
-                if parse.canonical_id == "/src/types/index.ts"
+                if &*parse.canonical_id == "/src/types/index.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "captured fact-version lookup should reuse the snapshotted parse-owned route interface for a shallow imported barrel without live wildcard replay",

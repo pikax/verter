@@ -785,6 +785,7 @@ default = [{audit_default}]
 semantic-observe = ["capture-table"]
 capture-table = []
 test-support = []
+soak-support = []
 "#
             ),
         );
@@ -934,6 +935,12 @@ edition = "2021"
     }
 
     fn violations(&self, include_dev: bool) -> Vec<String> {
+        self.violations_of(include_dev, &[("verter_audit", "semantic-observe")])
+    }
+
+    /// The production closure's violations of the rule that keeps `seeds`
+    /// features out of it.
+    fn violations_of(&self, include_dev: bool, seeds: &[(&str, &str)]) -> Vec<String> {
         let target = host_target(Path::new(env!("CARGO_MANIFEST_DIR")));
         let metadata = self.metadata.get().expect("fixture metadata prepared");
         let enabled = closure(
@@ -949,7 +956,10 @@ edition = "2021"
             &self.root,
             &target,
             metadata,
-            &BTreeSet::from([("verter_audit".to_owned(), "semantic-observe".to_owned())]),
+            &seeds
+                .iter()
+                .map(|(package, feature)| ((*package).to_owned(), (*feature).to_owned()))
+                .collect(),
             &self.config,
             &enabled,
             &mut BTreeMap::new(),
@@ -982,6 +992,30 @@ fn observe_feature_closure_rejects_direct_and_implied_manifest_enablement() {
     let control = Fixture::new("", Some("\"test-support\""));
     assert!(control.violations(false).is_empty());
     assert!(control.violations(true).is_empty());
+}
+
+// The soak/tooling seams (the held-answer charge witness among them) are
+// optional state: a planted production edge that enables one ships it, so
+// the shipped closure rejects it, while the same seam on a dev edge stays out
+// of the production build.
+#[test]
+fn support_feature_closure_rejects_a_planted_production_soak_support_edge() {
+    let seeds = [
+        ("verter_audit", "soak-support"),
+        ("verter_audit", "test-support"),
+    ];
+    let planted = Fixture::new("\"soak-support\"", None);
+    assert_eq!(
+        planted.violations_of(false, &seeds),
+        ["verter_audit v0.0.0/soak-support"]
+    );
+    let control = Fixture::new("", Some("\"soak-support\""));
+    assert!(control.violations_of(false, &seeds).is_empty());
+    assert_eq!(
+        control.violations_of(true, &seeds),
+        ["verter_audit v0.0.0/soak-support"],
+        "the dev edge is seen once dev unification is in the closure"
+    );
 }
 
 #[test]

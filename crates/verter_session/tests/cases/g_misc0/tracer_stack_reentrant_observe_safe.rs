@@ -44,7 +44,7 @@ fn make_fact(label: &str) -> FactVersionRef {
         h
     };
     FactVersionRef::FileWholeHash {
-        canonical_id: format!("{label}.ts"),
+        canonical_id: format!("{label}.ts").into(),
         hash,
     }
 }

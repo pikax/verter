@@ -502,7 +502,7 @@ fn cancelled_producer_handoff_refuses_the_consumer_rooting() {
 fn non_cacheable_footprint_replays_facts_and_the_refusal() {
     let host = make_host();
     let fact = FactVersionRef::FileWholeHash {
-        canonical_id: INNER.to_string(),
+        canonical_id: INNER.into(),
         hash: [3u8; 16],
     };
     let (canonicals, footprint) =
@@ -539,7 +539,7 @@ fn non_cacheable_footprint_replays_facts_and_the_refusal() {
 fn rooted_footprint_replays_facts_without_refusing() {
     let host = make_host();
     let fact = FactVersionRef::FileWholeHash {
-        canonical_id: PROPS.to_string(),
+        canonical_id: PROPS.into(),
         hash: [5u8; 16],
     };
     let (canonicals, footprint) =

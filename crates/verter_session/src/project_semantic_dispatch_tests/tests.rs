@@ -1618,7 +1618,7 @@ fn scc_root_and_members_share_complete_self_root_union_and_invalidation() {
         .iter()
         .map(|(canonical_id, hash)| {
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.to_string(),
+                canonical_id: canonical_id.into(),
                 hash: *hash,
             }
         })
@@ -7538,7 +7538,7 @@ fn distributed_conditional_dependencies_follow_member_selections() {
                     .iter()
                     .filter_map(|fact| {
                         if let FactVersionRef::FileWholeHash { canonical_id, .. } = fact {
-                            Some(canonical_id.as_str())
+                            Some(&**canonical_id)
                         } else {
                             None
                         }
@@ -23567,7 +23567,7 @@ fn resolve_macro_payload_non_file_owner_has_no_filewholehash_self_root() {
         matches!(
             f,
             FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "<synthetic>"
+                if &**canonical_id == "<synthetic>"
         )
     });
     assert!(

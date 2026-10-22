@@ -4823,7 +4823,7 @@ import Child from './Child.vue'
         leaves.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/Child.vue"
+                if &**canonical_id == "/Child.vue"
         )),
         "cached fallthrough facts should include the child component file"
     );
@@ -4831,7 +4831,7 @@ import Child from './Child.vue'
         leaves.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/types.ts"
+                if &**canonical_id == "/types.ts"
         )),
         "cached fallthrough facts should include transitive child component-meta deps"
     );
@@ -4897,7 +4897,7 @@ import Mid from './Mid.vue'
         evidence_leaves(&held.fact_versions).iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
-                if canonical_id == "/Leaf.vue"
+                if &**canonical_id == "/Leaf.vue"
         )),
         "the owner's evidence reaches the leaf two hops down"
     );

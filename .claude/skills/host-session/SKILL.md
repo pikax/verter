@@ -801,6 +801,8 @@ A document CLOSE is the moment its edited versions become unreachable, and the c
 
 **ACTIVE-occupancy witness.** `VerterHost::mint_active_occupancy_owner()` mints an explicit workload owner on the aggregate account, and `open_active_occupancy_window(&owner)` (both only under `test`, `test-support` or the default-off `verter_session/soak-support`) opens a measurement window on the same account `retention_snapshot()` reads and the host's semantic stores charge; the workload reserves through `reserve_as(&owner, ..)`. `finish().attributed()` gives the owner's own peak ACTIVE bytes: other identified owners are excluded, and untagged or mixed-provenance ACTIVE transitions inside the interval reject the witness. Build the soak/tooling runner with `--features verter_session/soak-support`; semantics: `/type-cache-architecture` → Aggregate retention account → ACTIVE-occupancy windows.
 
+**Held-answer charge witness.** Under the same `test`, `test-support` or default-off `verter_session/soak-support` profile (capture and `semantic-observe` off), `HeldChargeWitness::of_flow_return(&result)` observes what a flow return delivered by `get_flow_return_type_with_audit` keeps charged, allocation by allocation: its shared payload (`Retained` while a cache candidate holds it, `Pinned` with the same bytes once `close()` retires the cache, released by the last reader), and its delivery bookkeeping, pinned and charged apart. Each entry carries the bytes the allocation measures, so a consumer checks an exact transfer against the allocation itself rather than another transfer or the shared account totals. Reading it changes no charge or lifetime. Contract: `/type-resolution` → `references/counted-node-ownership.md` → Held-answer charge witness.
+
 ### Freeze Prevention (Fast Typing)
 
 Three layers prevent tokio runtime starvation during rapid typing:
@@ -1321,6 +1323,11 @@ materialized shape values, macro mirror products and delivered flow-return
 results retain their node operands. Counted ownership is the sole lifetime
 authority: a node is destroyed by its last owner's release, and a close never
 revokes a held one. There is no canonical sweep, watermark or activity gate.
+
+A consumer observes a delivered flow return through `FlowReturnResult::return_root()`: an owning `NodeRoot` of the return node taken from the
+result's own lease (never from a raw ordinal), fed to the host's bounded `project_node_to_type_expr_json_bytes`. It reuses the delivered
+value and lease, so it runs no second evaluation and keeps no separate accounting; `degradation()` still distinguishes exact from degraded, an
+undelivered result yields `ForeignSemanticOperand`, and another host's graph projects nothing.
 
 `HostRetentionSnapshot::semantic_node_ownership` reports current live nodes,
 root acquisitions, retained child occurrences and permanent nodes. Statistics

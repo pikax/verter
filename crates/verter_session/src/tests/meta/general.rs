@@ -27,7 +27,7 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
 
     assert!(project.host().fact_versions_match(&[
         verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
+            canonical_id: "/index.ts".into(),
             kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
             hash: route_hash,
         },
@@ -35,7 +35,7 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
 
     assert!(!project.host().fact_versions_match(&[
         verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
+            canonical_id: "/index.ts".into(),
             kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
             hash: [9; 16],
         },
@@ -56,7 +56,7 @@ fn snapshot_view_is_stale_but_coherent_after_host_changes() {
     let before_view = project.host().snapshot_view();
     let before_epoch = before_view.mutation_epoch();
     let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-        canonical_id: "/types.ts".to_string(),
+        canonical_id: "/types.ts".into(),
         hash: before_hash,
     };
 

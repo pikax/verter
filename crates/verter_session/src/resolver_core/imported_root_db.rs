@@ -377,7 +377,7 @@ mod tests {
             let db = charged_to(&account);
             let facts = if admitted {
                 vec![FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.clone(),
+                    canonical_id: canonical.clone().into(),
                     hash: [1u8; 16],
                 }]
             } else {
@@ -480,7 +480,7 @@ mod tests {
         let call_count = std::sync::atomic::AtomicU32::new(0);
 
         let dummy_fact = FactVersionRef::FileWholeHash {
-            canonical_id: "bar.ts".to_owned(),
+            canonical_id: "bar.ts".into(),
             hash: [0u8; 16],
         };
         let r1 = db.get_or_resolve_with_facts_probe_for_test("index.ts", "Bar", &view, || {
@@ -622,7 +622,7 @@ mod tests {
                                     resolved_symbol: "Coalesce".to_owned(),
                                 },
                                 vec![FactVersionRef::FileWholeHash {
-                                    canonical_id: "c.ts".to_owned(),
+                                    canonical_id: "c.ts".into(),
                                     hash: [0x77u8; 16],
                                 }],
                             ))
@@ -670,7 +670,7 @@ mod tests {
 
         let resolves = AtomicU32::new(0);
         let live_fact = FactVersionRef::FileWholeHash {
-            canonical_id: "live_dep.ts".to_owned(),
+            canonical_id: "live_dep.ts".into(),
             hash: [7u8; 16],
         };
 
@@ -847,7 +847,7 @@ mod tests {
                             resolved_symbol: "Burst".to_owned(),
                         },
                         vec![FactVersionRef::FileWholeHash {
-                            canonical_id: "live_dep.ts".to_owned(),
+                            canonical_id: "live_dep.ts".into(),
                             hash: [0x44u8; 16],
                         }],
                     ))

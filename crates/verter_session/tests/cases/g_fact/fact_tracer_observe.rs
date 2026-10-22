@@ -36,7 +36,7 @@ fn fact(canonical: &str, lo_byte: u8) -> FactVersionRef {
     let mut hash = [0u8; 16];
     hash[0] = lo_byte;
     FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash,
     }
 }
@@ -77,7 +77,7 @@ fn cold_compute_observes_each_dep() {
             let names: Vec<_> = arc
                 .iter()
                 .map(|f| match f {
-                    FactVersionRef::FileWholeHash { canonical_id, .. } => canonical_id.clone(),
+                    FactVersionRef::FileWholeHash { canonical_id, .. } => canonical_id.to_string(),
                     other => panic!("expected FileWholeHash, got {other:?}"),
                 })
                 .collect();
@@ -147,7 +147,7 @@ fn observe_borrowed_signature_appends() {
             let names: Vec<_> = arc
                 .iter()
                 .map(|f| match f {
-                    FactVersionRef::FileWholeHash { canonical_id, .. } => canonical_id.clone(),
+                    FactVersionRef::FileWholeHash { canonical_id, .. } => canonical_id.to_string(),
                     other => panic!("expected FileWholeHash, got {other:?}"),
                 })
                 .collect();
@@ -254,7 +254,7 @@ fn finalise_sorts_and_dedups() {
             let names: Vec<_> = arc
                 .iter()
                 .map(|f| match f {
-                    FactVersionRef::FileWholeHash { canonical_id, .. } => canonical_id.clone(),
+                    FactVersionRef::FileWholeHash { canonical_id, .. } => canonical_id.to_string(),
                     other => panic!("expected FileWholeHash, got {other:?}"),
                 })
                 .collect();

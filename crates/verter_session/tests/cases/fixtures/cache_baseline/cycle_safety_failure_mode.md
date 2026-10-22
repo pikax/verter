@@ -80,13 +80,11 @@ The relevant code paths the investigation walked:
      the guard is wrongly keyed and the policy walker chases an
      infinite chain, the 256 KiB stack catches it quickly.
 
-4. `crates/verter_type_engine/src/resolver_core/fuses.rs:8`
-   - `FuseBudgets` carries the architecture rules for related
-     traversal layers: `member_surface_recursion_depth: 10`,
-     `projection_op_count: 2000`, `union_member_explosion: 100`. These
-     are tier-2 backstops; the policy-walker's `active_refs` guard is
-     tier-1 and fires first on the recursive type aliases tested
-     above.
+4. `crates/verter_type_engine/src/request_budget.rs`
+   - The request's operation account (`RequestBudget`, the checker's
+     instantiation allowance) is the tier-2 backstop for projection
+     work; the policy-walker's `active_refs` guard is tier-1 and fires
+     first on the recursive type aliases tested above.
 
 ## Layered cycle-guard topology (current tree)
 

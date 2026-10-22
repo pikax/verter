@@ -24,7 +24,7 @@ fn import_route_fact() -> FactVersionRef {
 fn negative_resolved_import_fact() -> FactVersionRef {
     use verter_session_query::facts::registry::InternedSpecifier;
     FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-        canonical_id: "/importer.ts".to_string(),
+        canonical_id: "/importer.ts".into(),
         key: FactKey::ResolvedImportClause {
             specifier: InternedSpecifier::from("./missing"),
             binding: InternedName::from("X"),
@@ -55,7 +55,7 @@ fn missing_dependency_warm_only_with_import_route_fact() {
         admit_decision(
             ResultTaint::Partial(BrokenInputClass::MissingDependency),
             &sig_from(vec![FactVersionRef::FileWholeHash {
-                canonical_id: "/x.ts".to_string(),
+                canonical_id: "/x.ts".into(),
                 hash: [1u8; 16],
             }]),
         ),

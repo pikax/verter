@@ -62,7 +62,7 @@ fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey
 /// below matches against this exact ref.
 fn route_fact() -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: "cold_dep.ts".to_string(),
+        canonical_id: "cold_dep.ts".into(),
         hash: [0x22u8; 16],
     }
 }

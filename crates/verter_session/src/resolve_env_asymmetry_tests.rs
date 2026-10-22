@@ -327,7 +327,7 @@ fn production_validator_accepts_a_fact_for_a_non_default_project_owner() {
 
     // Exactly the fact shape a consumer records after reading this bundle.
     let fact = FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
-        canonical_id: "/ws/a/one.ts".to_string(),
+        canonical_id: "/ws/a/one.ts".into(),
         key: FactKey::ResolvedImportClause {
             specifier: InternedSpecifier::from(entry.specifier.as_ref()),
             binding: InternedName::from(entry.binding.as_ref()),

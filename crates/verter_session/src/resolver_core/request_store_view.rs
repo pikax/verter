@@ -1591,7 +1591,7 @@ impl<'a> RequestStoreView<'a> {
         self.leaf_validations.fetch_add(1, Ordering::Relaxed);
         match fact {
             FactVersionRef::FileWholeHash { canonical_id, hash }
-                if self_root_canonicals.contains(&canonical_id.as_str()) =>
+                if self_root_canonicals.contains(&&**canonical_id) =>
             {
                 LeafCheck::of(self.validates_self_root_at_completion_state(canonical_id, hash))
             }
@@ -1711,7 +1711,7 @@ impl<'a> RequestStoreView<'a> {
         if !self.base_is_current {
             return LeafCheck::Invalid;
         }
-        match self.overlay.lookup_file_facts(fact.canonical_id.as_str()) {
+        match self.overlay.lookup_file_facts(&fact.canonical_id) {
             // Shadowing: overlay `FileFacts` are authoritative for the
             // canonical. A registered fact must match; an absent fact
             // matches only the zero-sentinel observation.

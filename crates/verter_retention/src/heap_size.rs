@@ -87,6 +87,17 @@ impl<'h, 't> HeapMeter<'h, 't> {
         self.handles
     }
 
+    /// Bytes a raw `Arc<str>` of the tree keeps alive: its block the first
+    /// time the measurement reaches it, nothing after, and nothing for the
+    /// shared empty text ([`crate::allocation::is_shared_empty_str`]).
+    pub fn arc_str_bytes(&mut self, value: &Arc<str>) -> usize {
+        if crate::allocation::is_shared_empty_str(value) || !self.first(value) {
+            0
+        } else {
+            arc_block_bytes(value.len())
+        }
+    }
+
     /// Measure `node` from the work-list: inside a walk it is queued and
     /// counted when popped; otherwise it starts the walk and drains it.
     pub fn iterate(&mut self, node: &'t dyn IterativeNode) -> usize {
@@ -261,11 +272,7 @@ impl<A: HeapSize, B: HeapSize, C: HeapSize> HeapSize for (A, B, C) {
 
 impl HeapSize for Arc<str> {
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        if meter.first(self) {
-            arc_block_bytes(self.len())
-        } else {
-            0
-        }
+        meter.arc_str_bytes(self)
     }
 }
 

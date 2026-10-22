@@ -155,7 +155,7 @@ fn is_member_fact(fact: &FactVersionRef, class: &str, member: &str) -> bool {
     matches!(
         fact,
         FactVersionRef::Parse(parse)
-            if parse.canonical_id == CLASS
+            if &*parse.canonical_id == CLASS
                 && parse.key == FactKey::Member {
                     exporter: crate::file_artifact_store::InternedName::from(class),
                     name: FactPropertyKey::identifier(member),
@@ -405,7 +405,7 @@ fn member_reads_without_equivalent_proof_keep_content_evidence() {
         // node provenance alone does not enumerate all dependency facts.
         let has_content_fact = if receiver == "B<string>" {
             read.facts.iter().any(|fact| {
-                matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == CLASS)
+                matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. } if &**canonical_id == CLASS)
             })
         } else {
             read.self_roots.iter().any(|root| root.as_ref() == CLASS)

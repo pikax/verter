@@ -491,7 +491,7 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
     );
 
     let winner_fact = FactVersionRef::FileWholeHash {
-        canonical_id: keyed_canonical.to_string(),
+        canonical_id: keyed_canonical.into(),
         hash: base_hash,
     };
     let base_value = store.intern_node(

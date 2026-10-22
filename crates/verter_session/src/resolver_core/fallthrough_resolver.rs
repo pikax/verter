@@ -691,7 +691,7 @@ mod tests {
         FallthroughNodeResult {
             value: FallthroughNodeValue::RootFollow(RootFollowResult::default()),
             facts: vec![FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_string(),
+                canonical_id: canonical.into(),
                 hash: [hash; 16],
             }],
             diagnostics: Vec::new(),

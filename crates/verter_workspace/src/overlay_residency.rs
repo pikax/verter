@@ -530,7 +530,7 @@ mod tests {
         let facts = seal_canonical_signature(
             (0..2051)
                 .map(|index| FactVersionRef::FileWholeHash {
-                    canonical_id: format!("/wide/{index}.ts"),
+                    canonical_id: format!("/wide/{index}.ts").into(),
                     hash: [1; 16],
                 })
                 .collect(),

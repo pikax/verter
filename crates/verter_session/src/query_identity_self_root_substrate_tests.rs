@@ -202,7 +202,7 @@ fn has_self_root(signature: &[FactVersionRef], canonical: &str, expected: [u8; 1
         matches!(
             fact,
             FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == canonical && *hash == expected
+                if &**canonical_id == canonical && *hash == expected
         )
     })
 }
@@ -464,7 +464,7 @@ fn strict_self_root_validation_rejects_untracked_whole_hash() {
     // A one-entry signature whose sole fact is a FileWholeHash for the
     // untracked probe canonical.
     let signature: Vec<FactVersionRef> = vec![FactVersionRef::FileWholeHash {
-        canonical_id: never_loaded.to_string(),
+        canonical_id: never_loaded.into(),
         hash: STALE_HASH,
     }];
 
@@ -514,7 +514,7 @@ fn strict_self_root_validation_accepts_tracked_matching_whole_hash() {
     );
 
     let signature: Vec<FactVersionRef> = vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: real_hash,
     }];
 
@@ -532,7 +532,7 @@ fn strict_self_root_validation_accepts_tracked_matching_whole_hash() {
     // A self-root whose hash does NOT match the current content fails
     // strict validation (the same-canonical content-edit detection).
     let stale_signature: Vec<FactVersionRef> = vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         hash: STALE_HASH,
     }];
     assert!(

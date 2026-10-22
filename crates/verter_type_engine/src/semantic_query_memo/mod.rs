@@ -51,6 +51,8 @@ use crate::semantic_query::{
 
 pub mod arena;
 mod binder_dependencies;
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+pub mod charge_witness;
 pub mod construction_copy;
 pub mod delivery_lease;
 pub mod derivation;
@@ -975,7 +977,7 @@ pub fn semantic_operand_evidence(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id,
                 hash,
-            } if canonical_id == canonical.as_ref() => {
+            } if **canonical_id == **canonical => {
                 Some((verter_type_expr::OwnedStr::from(canonical), *hash))
             }
             _ => None,
@@ -3017,13 +3019,14 @@ pub fn semantic_graph_carrier(
     let mut facts = traced_facts;
     let mut self_root_canonicals: Vec<Arc<str>> = Vec::with_capacity(self_root_hashes.len());
     for (index, (canonical, observed_hash)) in self_root_hashes.iter().enumerate() {
+        let canonical = Arc::<str>::from(*canonical);
         if !named[index] {
             facts.push(FactVersionRef::FileWholeHash {
-                canonical_id: canonical.as_ref().to_string(),
+                canonical_id: Arc::clone(&canonical),
                 hash: *observed_hash,
             });
         }
-        self_root_canonicals.push(Arc::<str>::from(*canonical));
+        self_root_canonicals.push(canonical);
     }
     crate::fact_signature_helpers::bound_completed_structural_carrier(
         view,

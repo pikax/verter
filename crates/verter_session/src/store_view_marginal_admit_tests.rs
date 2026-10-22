@@ -464,7 +464,7 @@ fn unrelated_edit_keeps_both_route_facts_warm() {
     let route_hash = StoreView::derived_hash_for(&view_before, &owner, DerivedFactKind::Route)
         .expect("precondition: a current owner must publish its Route fact");
     let mut facts: Vec<FactVersionRef> = vec![FactVersionRef::DerivedFactHash {
-        canonical_id: owner.clone(),
+        canonical_id: owner.as_str().into(),
         kind: DerivedFactKind::Route,
         hash: route_hash,
     }];

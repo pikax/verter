@@ -84,7 +84,7 @@ fn member_fact(canonical: &str, exporter: &str, member: &str, byte: u8) -> FactV
     let mut h = [0u8; 16];
     h[0] = byte;
     FactVersionRef::Parse(ParseFactRef {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         key: FactKey::Member {
             exporter: exporter.into(),
             name: member.into(),
@@ -99,7 +99,7 @@ fn member_presence(canonical: &str, exporter: &str, member: &str, byte: u8) -> F
     let mut h = [0u8; 16];
     h[0] = byte;
     FactVersionRef::Parse(ParseFactRef {
-        canonical_id: canonical.to_string(),
+        canonical_id: canonical.into(),
         key: FactKey::MemberPresence {
             exporter: exporter.into(),
             name: member.into(),

@@ -48,7 +48,7 @@ fn path_key(path: &'static str) -> InputKey {
 
 fn retained_fact(byte: u8) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
-        canonical_id: format!("/retained/{byte}.ts"),
+        canonical_id: format!("/retained/{byte}.ts").into(),
         hash: [byte; 16],
     }
 }

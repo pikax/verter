@@ -153,7 +153,7 @@ pub trait StoreView {
     /// [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`].
     fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
         self.validates(&FactVersionRef::FileWholeHash {
-            canonical_id: canonical_id.to_string(),
+            canonical_id: canonical_id.into(),
             hash: *hash,
         })
     }
@@ -280,7 +280,7 @@ pub trait StoreView {
                 crate::facts::fact_cache::validates_through_receipts(fact, &mut walk, |leaf| {
                     match leaf {
                         FactVersionRef::FileWholeHash { canonical_id, hash }
-                            if self_root_canonicals.contains(&canonical_id.as_str()) =>
+                            if self_root_canonicals.contains(&&**canonical_id) =>
                         {
                             self.validates_self_root_whole_hash(canonical_id, hash)
                         }

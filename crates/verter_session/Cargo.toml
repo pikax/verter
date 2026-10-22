@@ -69,7 +69,8 @@ test-support = [
   "verter_workspace/test-support",
 ]
 # Default-off forwarding of the soak/tooling runner's seams — the engine's
-# flight rendezvous and the retention account's ACTIVE-occupancy window —
+# flight rendezvous, the retention account's ACTIVE-occupancy window and a held
+# answer's allocation charge witness —
 # without the rest of `test-support`. No production edge enables it.
 soak-support = ["verter_type_engine/soak-support", "verter_session_query/soak-support"]
 # Exposes test-only constructors (e.g. `ProjectBinding::new_for_test`) for
