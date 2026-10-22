@@ -75,7 +75,7 @@ impl SemanticGraphStore {
             parameter_node: SemanticNodeId,
             arg: SemanticNodeId,
         ) -> Option<SemanticNodeId> {
-            self.substitute_memo_get_priced(value_expr, parameter_node, arg)
+            self.substitute_memo_get_priced::<verter_audit::observe::Uncaptured>(value_expr, parameter_node, arg)
                 .map(|(result, _)| result)
         }
     }
@@ -85,7 +85,7 @@ impl SemanticGraphStore {
     /// recomputes rather than serve an unpriced node. A hit roots the
     /// result in the active scope and bumps `substitute_memo_hits`; a miss
     /// bumps `substitute_memo_misses`.
-    pub(crate) fn substitute_memo_get_priced(
+    pub(crate) fn substitute_memo_get_priced<M: verter_audit::observe::ObserveExec>(
         &self,
         node: SemanticNodeId,
         parameter: SemanticNodeId,
@@ -109,12 +109,14 @@ impl SemanticGraphStore {
                     );
                     (*result, Arc::clone(receipt))
                 });
-        let counter = if hit.is_some() {
-            &self.stats.substitute_memo_hits
-        } else {
-            &self.stats.substitute_memo_misses
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
+        if super::records_telemetry::<M>() {
+            let counter = if hit.is_some() {
+                &self.stats.substitute_memo_hits
+            } else {
+                &self.stats.substitute_memo_misses
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
         hit
     }
 
@@ -218,14 +220,14 @@ impl SemanticGraphStore {
     /// A deferred operator can read declarations and export routes. Its
     /// interned input is immutable, but its evaluated answer needs the
     /// complete read proof to validate against this request's view.
-    pub(crate) fn evaluate_deferred_memo_get(
+    pub(crate) fn evaluate_deferred_memo_get<M: verter_audit::observe::ObserveExec>(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         demand: DeferredEvaluationDemand,
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
     ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
-        self.read_deferred_evaluation(node, context, demand, |entry| {
+        self.read_deferred_evaluation::<M>(node, context, demand, |entry| {
             verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
                 &entry.evidence.0,
             ))
@@ -233,7 +235,7 @@ impl SemanticGraphStore {
         })
     }
 
-    fn read_deferred_evaluation(
+    fn read_deferred_evaluation<M: verter_audit::observe::ObserveExec>(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -268,14 +270,16 @@ impl SemanticGraphStore {
                     receipt: crate::semantic_query::ReadReceipt::Priced(Arc::clone(&entry.receipt)),
                 }
             });
-        if hit.is_some() {
-            self.stats
-                .evaluate_deferred_memo_hits
-                .fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.stats
-                .evaluate_deferred_memo_misses
-                .fetch_add(1, Ordering::Relaxed);
+        if super::records_telemetry::<M>() {
+            if hit.is_some() {
+                self.stats
+                    .evaluate_deferred_memo_hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.stats
+                    .evaluate_deferred_memo_misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
         hit
     }
@@ -381,15 +385,15 @@ impl SemanticGraphStore {
             .then_some(())
     }
 
-    /// Inspect admission of a selected value, independently of its shell.
+    /// Inspect mapped-member admission, independently of shell and whole-value demands.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn peek_selected_value_memo_for_tests(
+    pub fn peek_mapped_member_value_memo_for_tests(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> Option<()> {
         self.evaluate_deferred_memo
-            .contains_key(&(node, context, DeferredEvaluationDemand::SelectedValue))
+            .contains_key(&(node, context, DeferredEvaluationDemand::MappedMemberValue))
             .then_some(())
     }
 

@@ -194,7 +194,7 @@ fn identity_audit_four_discriminators() {
     let n = prim(&graph, PrimitiveKind::Number);
     let members: Arc<[SemanticNodeId]> = Arc::from([n, n]);
     let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
+        crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
         &members,
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -331,7 +331,9 @@ impl DeepPair {
         });
         let arm = |deep| {
             crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
-                &graph,
+                crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+                    &graph,
+                ),
                 &[tag, deep],
             )
             .node
@@ -383,12 +385,16 @@ impl DeepPair {
         sort_union_members_by_stable_key(&self.graph, &mut sorted);
         let canonical = canonicalize_union_members(&self.graph, &input(self.a, self.b));
         let union = intern_ordered_union(
-            &self.graph,
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+                &self.graph,
+            ),
             &input(self.a, self.b),
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
         let arm_union = intern_ordered_union(
-            &self.graph,
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+                &self.graph,
+            ),
             &input(self.a_arm, self.b_arm),
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -1047,7 +1053,7 @@ fn structural_identity(
 /// The arm count of the union reducer's answer over `a | b`.
 fn reduced_union_arms(graph: &SemanticGraphStore, a: SemanticNodeId, b: SemanticNodeId) -> usize {
     let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        graph,
+        crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
         &[a, b],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     );
@@ -1423,6 +1429,7 @@ fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
                 name_remap: None,
                 kind: MapperKind::Computed,
                 over_type_variable,
+                modifiers_type: None,
             },
         })
     };
@@ -1447,7 +1454,9 @@ fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
             let mut members = pair.to_vec();
             members.extend_from_slice(extra);
             let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-                &graph,
+                crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+                    &graph,
+                ),
                 &members,
                 verter_session_query::flow::policy::NullabilityPolicy::Strict,
             );
@@ -1715,7 +1724,7 @@ fn nested_union_chain(graph: &SemanticGraphStore, depth: usize) -> Vec<SemanticN
             index as f64,
         )));
         node = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-            graph,
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
             &[wrapped, literal],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         )

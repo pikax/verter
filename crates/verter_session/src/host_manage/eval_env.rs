@@ -473,10 +473,12 @@ impl VerterHost {
     /// load-bearing: a barrel or alias surface edited in the session must be
     /// read through the session's view, not the base host's, or the walk
     /// resolves against a file the requester cannot see.
-    pub(crate) fn resolve_value_export_route_identity_with_context(
+    pub(crate) fn resolve_value_export_route_identity_with_context<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dep_canonical_id: &str,
         imported_name: &str,
@@ -695,16 +697,38 @@ impl VerterHost {
         }
     }
 
+    /// [`Self::finalize_analysis_snapshot_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub(in crate::host_manage) fn finalize_analysis_snapshot(
         &self,
+        canonical: &str,
+        snapshot: FileAnalysisSnapshot,
+        needs_template_analysis: bool,
+        template_inputs: Option<crate::types::VueTemplateInputs>,
+        analysis_started: Option<Instant>,
+    ) -> FileAnalysisSnapshot {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.finalize_analysis_snapshot_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical, snapshot, needs_template_analysis, template_inputs, analysis_started)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub(in crate::host_manage) fn finalize_analysis_snapshot_in<
+        M: verter_audit::observe::ObserveExec,
+    >(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical: &str,
         mut snapshot: FileAnalysisSnapshot,
         needs_template_analysis: bool,
         template_inputs: Option<crate::types::VueTemplateInputs>,
         analysis_started: Option<Instant>,
     ) -> FileAnalysisSnapshot {
+        let _ = observation;
         verter_session_query::probe_scope!(FINALIZE_SNAPSHOT);
-        self.resolve_snapshot_imports(canonical, &mut snapshot);
+        self.resolve_snapshot_imports::<M>(observation, canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
         if needs_template_analysis {
             // No coherent inputs (torn generation join, non-SFC) →
@@ -743,6 +767,8 @@ impl VerterHost {
         self.current_eval_state_uncached(normalized_canonical_id.as_ref())
     }
 
+    /// [`Self::current_eval_state_uncached_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     fn current_eval_state_uncached(
         &self,
         canonical_id: &str,
@@ -751,7 +777,25 @@ impl VerterHost {
         Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         Hash16,
     )> {
-        component_meta_trace_custom!("current_eval_state", format!("owner={}", canonical_id),);
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.current_eval_state_uncached_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    fn current_eval_state_uncached_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) -> Option<(
+        Arc<str>,
+        Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
+        Hash16,
+    )> {
+        let _ = observation;
+        component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"current_eval_state", format!("owner={}", canonical_id),);
 
         // FileArtifactStore fast path — **current-content-pinned** (no
         // `get_any`). `current_eval_state` returns the canonical's source
@@ -766,8 +810,8 @@ impl VerterHost {
         // canonical. A stale candidate for a live scope misses both — the
         // scheduler source path below is the authoritative current content.
         let cached_facts = self
-            .current_content_pinned_indexed(canonical_id)
-            .or_else(|| self.artifact_current_indexed(canonical_id));
+            .current_content_pinned_indexed_in::<M>(observation, canonical_id)
+            .or_else(|| self.artifact_current_indexed::<M>(observation, canonical_id));
         if let Some(facts) = cached_facts {
             return Some((
                 Arc::clone(&facts.raw_source),
@@ -869,6 +913,7 @@ impl VerterHost {
         // consumer normalizing it again in the request shares that run.
         let normalization = self.request_normalized_canonical(canonical_id, || {
             let mut refused = false;
+            let mut unretained = false;
             let resolved = resolve_eval_dependency_canonical_with(canonical_id, |candidate| {
                 if refused {
                     return false;
@@ -884,6 +929,12 @@ impl VerterHost {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
                         admitted.result().is_some()
                     }
+                    // The complete answer normalizes; the resolution entry
+                    // already refused every enclosing scope's admission.
+                    verter_workspace::ResolutionPublication::Unretained(unretained_answer) => {
+                        unretained = true;
+                        unretained_answer.result().is_some()
+                    }
                     verter_workspace::ResolutionPublication::Refused(_) => {
                         refused = true;
                         false
@@ -898,12 +949,12 @@ impl VerterHost {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
-                return (None, true);
+                return (None, true, unretained);
             }
             let normalized = resolved
                 .filter(|resolved| resolved != canonical_id)
                 .map(|resolved| std::sync::Arc::<str>::from(resolved.as_str()));
-            (normalized, false)
+            (normalized, false, unretained)
         });
         match normalization.normalized.as_deref() {
             Some(normalized) => std::borrow::Cow::Owned(normalized.to_string()),
@@ -980,9 +1031,9 @@ impl VerterHost {
     /// Clone the owner's stored eval-source Arc. A captured handle is
     /// reused as-is; uncaptured compute clones `IndexedReady.eval_source`.
     /// Catalog lookup stays on the IndexedReady producer.
-    pub(crate) fn clone_owner_eval_source_arc(
+    pub(crate) fn clone_owner_eval_source_arc<M: verter_audit::observe::ObserveExec>(
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical: &str,
         captured: Option<&Arc<str>>,
@@ -999,14 +1050,16 @@ impl VerterHost {
     /// lowering, prepared-decl bundle) through the supplied
     /// `ResolverContext` so overlay-bearing sessions observe overlay
     /// candidates for cross-file macro-argument-type expansion.
-    pub(crate) fn compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
+    pub(crate) fn compute_evaluated_types_with_tracking_from_owner_context_with_ctx<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
@@ -1041,10 +1094,10 @@ impl VerterHost {
     /// `Option`-shaped [`verter_type_engine::resolver_core::resolver_context::ResolverContext::prepared_value_decl_return_only`]
     /// so the caller can publish a typed `Failed` result instead of silently
     /// dropping the binding.
-    fn component_meta_binding_type_entries(
+    fn component_meta_binding_type_entries<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical: &str,
         requested_bindings: &std::collections::BTreeSet<verter_type_expr::DeclBindingKey>,
@@ -1146,22 +1199,26 @@ impl VerterHost {
     /// `ctx` for the query-engine and dispatch construction so the
     /// cross-file type lookups observe overlay candidates when the
     /// session view carries them.
-    pub(crate) fn compute_evaluated_types_from_owner_context_with_ctx(
+    pub(crate) fn compute_evaluated_types_from_owner_context_with_ctx<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         eval_source: &str,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
     ) -> Option<ComputedEvaluatedTypes> {
+        let observation = verter_type_engine::resolver_core::resolver_context::capture_targets(ctx);
+        let _ = observation;
         {
-            component_meta_trace_custom!(
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>
                 "compute_evaluated_types_seed_owner_cache",
                 format!("owner={} store_view={}", canonical, false),
             );
@@ -1192,7 +1249,7 @@ impl VerterHost {
                 std::collections::BTreeSet::new()
             };
         let mut binding_entries = {
-            component_meta_trace_custom!(
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>
                 "compute_evaluated_types_binding_entries",
                 format!(
                     "owner={} requested_bindings={} store_view={}",
@@ -1239,7 +1296,7 @@ impl VerterHost {
             Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
         > = std::cell::RefCell::new(Vec::new());
         let mut result = {
-            component_meta_trace_custom!(
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>
                 "compute_evaluated_types_expand_macros",
                 format!(
                     "owner={} macros={} bindings={} store_view={}",
@@ -1569,8 +1626,7 @@ impl VerterHost {
                             } else {
                                 match (ctx.output_path.is_empty(), macro_type_arg.as_ref()) {
                                     (true, _) | (_, None) => {
-                                        component_meta_trace_custom!(
-                                    "macro_projection_failover",
+                                        component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                     format!(
                                         "macro_index={} field_kind={:?} reason=no_parsed_type_argument",
                                         ctx.macro_index, ctx.kind,
@@ -1694,8 +1750,7 @@ impl VerterHost {
                                                             produced_node_id: id,
                                                         } => {
                                                             produced_node_id = Some(id);
-                                                            component_meta_trace_custom!(
-                                                                "macro_projection_failover",
+                                                            component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                                 format!(
                                                                     "macro_index={} field_kind={:?} reason=slot_binding_raise_miss",
                                                                     ctx.macro_index, ctx.kind,
@@ -1704,8 +1759,7 @@ impl VerterHost {
                                                             preserve_authored_symbolically()
                                                         }
                                                         MacroPathOutputExpansion::ProjectionMiss => {
-                                                            component_meta_trace_custom!(
-                                                                "macro_projection_failover",
+                                                            component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                                 format!(
                                                                     "macro_index={} field_kind={:?} reason=slot_binding_projection_miss",
                                                                     ctx.macro_index, ctx.kind,
@@ -1714,8 +1768,7 @@ impl VerterHost {
                                                             preserve_authored_symbolically()
                                                         }
                                                         MacroPathOutputExpansion::CarrierMiss => {
-                                                            component_meta_trace_custom!(
-                                                                "macro_projection_failover",
+                                                            component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                                 format!(
                                                                     "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
                                                                     ctx.macro_index, ctx.kind,
@@ -1739,8 +1792,7 @@ impl VerterHost {
                                                     // path) only on input the emitter
                                                     // cannot produce, so the trace
                                                     // ordering is unobservable.
-                                                    component_meta_trace_custom!(
-                                                        "macro_projection_failover",
+                                                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=slot_binding_unexpected_path",
                                                             ctx.macro_index, ctx.kind,
@@ -1799,8 +1851,7 @@ impl VerterHost {
                                                     produced_node_id: id,
                                                 } => {
                                                     produced_node_id = Some(id);
-                                                    component_meta_trace_custom!(
-                                                        "macro_projection_failover",
+                                                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=raise_failed",
                                                             ctx.macro_index, ctx.kind,
@@ -1809,8 +1860,7 @@ impl VerterHost {
                                                     preserve_authored_symbolically()
                                                 }
                                                 MacroPathOutputExpansion::ProjectionMiss => {
-                                                    component_meta_trace_custom!(
-                                                        "macro_projection_failover",
+                                                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=projection_unknown",
                                                             ctx.macro_index, ctx.kind,
@@ -1819,8 +1869,7 @@ impl VerterHost {
                                                     preserve_authored_symbolically()
                                                 }
                                                 MacroPathOutputExpansion::CarrierMiss => {
-                                                    component_meta_trace_custom!(
-                                                        "macro_projection_failover",
+                                                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
                                                             ctx.macro_index, ctx.kind,
@@ -2027,10 +2076,10 @@ impl crate::VerterHost {
     /// in a base-bound alias reader, reintroducing the very overlay hole this
     /// threading closes. The shared raise resolves any remaining alias through
     /// its own already-view-correct path.
-    fn resolve_binding_import_origin(
+    fn resolve_binding_import_origin<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,

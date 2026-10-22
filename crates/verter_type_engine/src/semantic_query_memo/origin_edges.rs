@@ -7,6 +7,78 @@
 
 use super::*;
 
+/// Record a derivation/origin edge through the execution unit's
+/// [`GraphIn`] handle, building its arguments only where the derivation layer
+/// records them: `record_origin_edge!(graph, result, kind, sources, meta,
+/// fence)`.
+///
+/// Origin edges are optional provenance. In a shipped build (no `test`,
+/// `test-support` or `semantic-observe`) the arguments are type-checked inside
+/// a closure that is never built or called, so a derivation site allocates no
+/// source slice, interns no placeholder and clones no fence for an edge that
+/// would be discarded. In a build with `semantic-observe` the arguments are
+/// built only when the unit's capture mode records edges
+/// ([`GraphIn::records_origin_edges`]): an uncaptured execution tests a
+/// constant and builds nothing. Build every edge-only value inside the
+/// macro's arguments, never before it.
+macro_rules! record_origin_edge {
+    ($graph:expr, $result:expr, $kind:expr, $sources:expr, $meta:expr, $fence:expr $(,)?) => {{
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        {
+            let graph = $graph;
+            if graph.records_origin_edges() {
+                graph.record_origin_edge($result, $kind, $sources, $meta, $fence);
+            }
+        }
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+        #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
+        if false {
+            let _ = || $graph.record_origin_edge($result, $kind, $sources, $meta, $fence);
+        }
+    }};
+}
+pub(crate) use record_origin_edge;
+
+#[cfg(all(test, feature = "semantic-observe"))]
+#[test]
+fn captured_origin_edges_keep_the_bound_accumulator_after_ambient_changes() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::request_footprint::RequestFootprintAccumulator;
+    use crate::request_observers::CaptureTargets;
+    use verter_audit::observe::Captured;
+
+    let bound = Arc::new(RequestFootprintAccumulator::new());
+    let nested = Arc::new(RequestFootprintAccumulator::new());
+    let observation = CaptureTargets {
+        accumulator: Some(Arc::clone(&bound)),
+        ..CaptureTargets::default()
+    };
+    let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
+    let graph = GraphIn::<Captured>::observed(&store, &observation);
+    let source = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let result = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+    let _nested = RequestContextGuard::install(RequestContext::new(
+        2,
+        Arc::from("/nested.ts"),
+        true,
+        Some(Arc::clone(&nested)),
+    ));
+    graph.record_origin_edge(
+        result,
+        OriginEdgeKind::Normalize,
+        Arc::from([source]),
+        crate::semantic_query::OriginMeta::None,
+        DepSignature::new(Vec::new()),
+    );
+    assert_eq!(bound.drain().derivation_edges_raw.len(), 1);
+    assert!(nested.drain().derivation_edges_raw.is_empty());
+}
+
 impl SemanticGraphStore {
     construction_ordinal_seam! {
         /// Record a derivation/origin edge for `result`. Builders call this
@@ -36,17 +108,19 @@ impl SemanticGraphStore {
         /// present is skipped, so repeated walks through the same
         /// intermediate hop do not inflate the bucket or the per-request
         /// audit cost. The audit-mining contract is preserved: the
-        /// [`request_context::current_accumulator`] push remains
+        /// request-bound accumulator push remains
         /// unconditional so the footprint miner observes every derivation hop
         /// the production hot path would have emitted.
-        fn record_origin_edge(
+        fn record_origin_edge_in<M: verter_audit::observe::ObserveExec>(
             &self,
+            observation: &crate::request_observers::CaptureTargets,
             result: SemanticNodeId,
             kind: OriginEdgeKind,
             sources: Arc<[SemanticNodeId]>,
             meta: crate::semantic_query::OriginMeta,
             builder_fence: DepSignature,
         ) {
+            let _ = observation;
             verter_audit::attribute_n!(OriginEdgeRecord, sources.len());
             // Origin edges feed only the audit origin graph, which exists in
             // a capture build, and the derivation-layer tests. A production
@@ -55,6 +129,7 @@ impl SemanticGraphStore {
             #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
             {
                 let _ = (result, kind, sources, meta, builder_fence);
+                let _ = std::marker::PhantomData::<M>;
             }
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             {
@@ -148,8 +223,10 @@ impl SemanticGraphStore {
                 // intentionally unconditional — it runs even on the dedup path
                 // so dropped ledger writes still surface in the audit trace.
                 #[cfg(feature = "semantic-observe")]
-                if let Some(acc) = crate::request_context::current_accumulator() {
-                    acc.push_derivation_edge(result, kind, edge.clone());
+                if M::CAPTURED {
+                    if let Some(acc) = observation.accumulator.as_ref() {
+                        acc.push_derivation_edge(result, kind, edge.clone());
+                    }
                 }
                 // Test harness hook: when a CaptureToken is bound on the current
                 // thread, record the edge identity tuple in the per-request
@@ -189,6 +266,27 @@ impl SemanticGraphStore {
                 });
             }
         }
+    }
+
+    /// [`Self::record_origin_edge_in`] for an uncaptured fixture; the
+    /// derivation-layer tests record edges directly.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_origin_edge(
+        &self,
+        result: SemanticNodeId,
+        kind: OriginEdgeKind,
+        sources: Arc<[SemanticNodeId]>,
+        meta: crate::semantic_query::OriginMeta,
+        builder_fence: DepSignature,
+    ) {
+        self.record_origin_edge_in::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            result,
+            kind,
+            sources,
+            meta,
+            builder_fence,
+        );
     }
 
     /// Read-only origin walk for a result node — yields every edge

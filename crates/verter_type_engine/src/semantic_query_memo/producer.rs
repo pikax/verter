@@ -51,8 +51,9 @@ use super::{
 };
 use crate::semantic_query::checker_policy::TupleSplicePosition;
 
-type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
-type BuildOutput = crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>;
+pub(crate) type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
+pub(crate) type BuildOutput =
+    crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>;
 
 /// Why a claim answers with the recursion carrier instead of a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,7 +271,7 @@ struct Parked {
     /// When a polled subscriber began waiting, for the `waits_ms` stat.
     /// Observation only: a default build keeps no timer across `Pending`.
     #[cfg(feature = "semantic-observe")]
-    since: Instant,
+    since: Option<Instant>,
     /// The subscription's own waker registration on the flight.
     waker: Option<super::inflight::WakeRegistration>,
     /// The subscriber registration an armed rendezvous of this flight took,
@@ -313,7 +314,7 @@ pub struct ProducerLease<'s> {
     /// Build clock for the held-time measurements; read only where they
     /// are kept.
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-    started: Instant,
+    started: Option<Instant>,
 }
 
 /// A settled producer: its result, ready for the retention decision and the
@@ -391,6 +392,18 @@ impl SemanticGraphStore {
     ) -> bool {
         ExecutionScope::current(&self.task_registry)
             .is_some_and(|task| task.produces_key(key, prepared::hash_key(key), site))
+    }
+
+    /// Whether a producer of the key `attempt` claims is in flight at its
+    /// checking site, so the claim would join it rather than produce. A
+    /// read-only preflight: the claim stays the sole authority that joins.
+    /// An independent claim never joins another producer.
+    pub(crate) fn has_flight(&self, attempt: &ClaimAttempt) -> bool {
+        !attempt.independent
+            && self
+                .site_inflight(attempt.site)
+                .lock()
+                .contains_key(&attempt.prepared)
     }
 
     /// The recursion carrier for `recursion`, with `sentinel` as its value.
@@ -491,7 +504,7 @@ impl SemanticGraphStore {
             capture: &mut ReadCapture<'_>,
         ) -> Result<ClaimAttempt, ValueRead> {
             // Count every logical entry, warm and cold alike.
-            self.note_lookup_entry();
+            self.note_lookup_entry::<C::Observe>();
 
             // Request cancellation is a typed ReturnOnly terminal and must be
             // observed before even a warm probe: canceled requests do not consume
@@ -541,7 +554,7 @@ impl SemanticGraphStore {
             // One logical miss per claim. A producer that publishes between
             // this lookup and the claim's own warm re-read is credited as a
             // hit there; that race is benign.
-            self.note_lookup_miss(prepared.key());
+            self.note_lookup_miss::<C::Observe>(prepared.key());
             Ok(ClaimAttempt {
                 site: capture.site,
                 prepared,
@@ -602,14 +615,14 @@ impl SemanticGraphStore {
                 self.get_validated_value_prepared(prepared, ctx, capture)
             };
             if let Some(hit) = warm {
-                self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                crate::request_observers::record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
+                if super::records_telemetry::<C::Observe>() { self.stats.hits.fetch_add(1, Ordering::Relaxed); }
+                crate::request_observers::record_cache_event::<C::Observe>(crate::resolver_core::resolver_context::capture_targets(ctx), verter_execution::request_context::CacheEventKind::Hit);
                 return Claim::Read(hit);
             }
             if !attempt.miss_recorded {
                 // One miss per logical claim, however many attempts it takes.
-                self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                crate::request_observers::record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
+                if super::records_telemetry::<C::Observe>() { self.stats.misses.fetch_add(1, Ordering::Relaxed); }
+                crate::request_observers::record_cache_event::<C::Observe>(crate::resolver_core::resolver_context::capture_targets(ctx), verter_execution::request_context::CacheEventKind::Miss);
                 attempt.miss_recorded = true;
             }
 
@@ -618,10 +631,8 @@ impl SemanticGraphStore {
             //    answering it would wait on itself. The task's producer of the
             //    key at the other site is a different computation.
             if task.produces(prepared, attempt.site) {
-                self.stats
-                    .same_path_sentinel_returns
-                    .fetch_add(1, Ordering::Relaxed);
-                crate::request_observers::record_cache_event(verter_execution::request_context::CacheEventKind::Sentinel);
+                if super::records_telemetry::<C::Observe>() { self.stats.same_path_sentinel_returns.fetch_add(1, Ordering::Relaxed); }
+                crate::request_observers::record_cache_event::<C::Observe>(crate::resolver_core::resolver_context::capture_targets(ctx), verter_execution::request_context::CacheEventKind::Sentinel);
                 return Claim::Recursive(Recursion::SamePath);
             }
 
@@ -640,7 +651,7 @@ impl SemanticGraphStore {
                     .entry(prepared.clone())
                     .or_default()
                     .push(Arc::clone(&inflight));
-                return Claim::Produce(self.open_producer(prepared.clone(), inflight, true, task));
+                return Claim::Produce(self.open_producer::<C::Observe>(prepared.clone(), inflight, true, task));
             }
             let inflight = {
                 let mut table = self.site_inflight(attempt.site).lock();
@@ -667,11 +678,11 @@ impl SemanticGraphStore {
                 state.claimed = true;
                 state.owner = Some(task.id());
             }
-            Claim::Produce(self.open_producer(prepared.clone(), inflight, false, task))
+            Claim::Produce(self.open_producer::<C::Observe>(prepared.clone(), inflight, false, task))
         }
     }
 
-    fn open_producer<'s>(
+    fn open_producer<'s, M: verter_audit::observe::ObserveExec>(
         &'s self,
         prepared: PreparedKeyHandle,
         inflight: Arc<FlightCell>,
@@ -680,11 +691,12 @@ impl SemanticGraphStore {
     ) -> ProducerLease<'s> {
         // Record the in-flight presence for peak tracking; the guard
         // decrements it on drop, panics included.
-        self.stats.record_in_flight_enter();
-        let stats = InFlightStatsGuard { stats: &self.stats };
-        if let Some(prov) = self.provenance.as_ref() {
-            prov.execute_cooperative_owner_path
-                .fetch_add(1, Ordering::Relaxed);
+        let stats = InFlightStatsGuard::new::<M>(&self.stats);
+        if super::records_telemetry::<M>() {
+            if let Some(prov) = self.provenance.as_ref() {
+                prov.execute_cooperative_owner_path
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
         // The producer registration and the in-flight admission are both
         // RAII guards sharing the prepared key, so a producer abandoned
@@ -713,7 +725,7 @@ impl SemanticGraphStore {
             open,
             stats,
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-            started: Instant::now(),
+            started: super::records_telemetry::<M>().then(Instant::now),
         }
     }
 }
@@ -733,11 +745,11 @@ impl Subscription<'_> {
         // The wait time is a measurement-only counter; without the
         // observation gate the clock is never read.
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        let wait_start = Some(Instant::now());
+        let wait_start = super::records_telemetry::<C::Observe>().then(Instant::now);
         #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
         let wait_start = None;
         if !flight_resolved(&state, flags) {
-            if let Err(WaitCycle) = self.park(&state, attempt.prepared.key()) {
+            if let Err(WaitCycle) = self.park::<C::Observe>(&state, attempt.prepared.key()) {
                 return Joined::Recursive(Recursion::WaitCycle);
             }
             // Cooperative wait on the flight's condvar until it completes,
@@ -777,11 +789,14 @@ impl Subscription<'_> {
             // A polled wait is timed only in an observing build, from when
             // its subscriber parked.
             #[cfg(feature = "semantic-observe")]
-            let wait_start = Some(
+            let wait_start = if super::records_telemetry::<C::Observe>() {
                 self.parked
                     .as_ref()
-                    .map_or_else(Instant::now, |parked| parked.since),
-            );
+                    .and_then(|parked| parked.since)
+                    .or_else(|| Some(Instant::now()))
+            } else {
+                None
+            };
             #[cfg(not(feature = "semantic-observe"))]
             let wait_start = None;
             return std::task::Poll::Ready(
@@ -789,7 +804,7 @@ impl Subscription<'_> {
             );
         }
         if self.parked.is_none() {
-            if let Err(WaitCycle) = self.park(&state, attempt.prepared.key()) {
+            if let Err(WaitCycle) = self.park::<C::Observe>(&state, attempt.prepared.key()) {
                 return std::task::Poll::Ready(Joined::Recursive(Recursion::WaitCycle));
             }
         }
@@ -810,7 +825,7 @@ impl Subscription<'_> {
     }
 
     /// Register this subscriber's wait-for edge to the flight's producer.
-    fn park(
+    fn park<M: verter_audit::observe::ObserveExec>(
         &mut self,
         state: &super::inflight::InflightState,
         #[cfg_attr(
@@ -819,6 +834,7 @@ impl Subscription<'_> {
         )]
         key: &crate::semantic_query::SemanticQueryKey,
     ) -> Result<(), WaitCycle> {
+        let _ = std::marker::PhantomData::<M>;
         let producer = state.owner.unwrap_or(self.waiter);
         let edge = self
             .store
@@ -846,7 +862,7 @@ impl Subscription<'_> {
         self.parked = Some(Parked {
             _edge: edge,
             #[cfg(feature = "semantic-observe")]
-            since: Instant::now(),
+            since: super::records_telemetry::<M>().then(Instant::now),
             waker: None,
             #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
             rendezvous,
@@ -895,8 +911,11 @@ impl Subscription<'_> {
                 .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
         }
         // Every cooperative wait return counts; a retry may count again.
-        store.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
-        crate::request_observers::record_cache_event(
+        if super::records_telemetry::<C::Observe>() {
+            store.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
+        }
+        crate::request_observers::record_cache_event::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(ctx),
             verter_execution::request_context::CacheEventKind::JoinedWait,
         );
         if flags.is_cancelled() {
@@ -929,7 +948,10 @@ impl Subscription<'_> {
             // fast subscriber could rejoin the same aborted flight until its
             // retry budget is gone.
             attempt.retries += 1;
-            record_inflight_aborted_retry(&store.stats);
+            record_inflight_aborted_retry::<C::Observe>(
+                &store.stats,
+                crate::resolver_core::resolver_context::capture_targets(ctx),
+            );
             drop(state);
             store.retire_inflight(prepared, &inflight, attempt.independent);
             return Joined::Retry;
@@ -1018,10 +1040,12 @@ impl Subscription<'_> {
                 let lacks_view_discriminating_self_root =
                     !carrier.has_view_discriminating_self_root(&producer_self_roots);
                 if !view_validates || lacks_view_discriminating_self_root {
-                    store
-                        .stats
-                        .joiner_view_mismatch_forks
-                        .fetch_add(1, Ordering::Relaxed);
+                    if super::records_telemetry::<C::Observe>() {
+                        store
+                            .stats
+                            .joiner_view_mismatch_forks
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     let mut table = store.site_inflight(inflight.site).lock();
                     if table
                         .get(prepared)
@@ -1044,9 +1068,11 @@ impl Subscription<'_> {
                 *slot = semantic_operand_evidence(carrier, &producer_self_roots, &dep_signature);
             }
         }
-        if let Some(prov) = store.provenance.as_ref() {
-            prov.execute_cooperative_joiner_path
-                .fetch_add(1, Ordering::Relaxed);
+        if super::records_telemetry::<C::Observe>() {
+            if let Some(prov) = store.provenance.as_ref() {
+                prov.execute_cooperative_joiner_path
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
         Joined::Read(CacheRead {
             lease: delivery_lease,
@@ -1222,10 +1248,11 @@ impl SemanticGraphStore {
     /// its carrier is delivered through `capture`, and the read
     /// carries the receipt its recording sealed. The returned carrier is
     /// `Some` when the result is complete, cacheable and priced — what the
-    /// dispatcher may keep and serve again — and `None` otherwise. A
+    /// request may keep and serve again — and `None` otherwise. A
     /// cancelled request answers with the cancellation read.
-    pub(crate) fn complete_request_local(
+    pub(crate) fn complete_request_local_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &crate::request_observers::CaptureTargets,
         attempt: ClaimAttempt,
         flags: &crate::resolver_core::resolver_context::RequestFlags,
         output: BuildOutput,
@@ -1237,10 +1264,14 @@ impl SemanticGraphStore {
         ValueRead,
         Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
     ) {
+        let _ = observation;
         if !attempt.miss_recorded {
             // The one miss a claim of the key records.
-            self.stats.misses.fetch_add(1, Ordering::Relaxed);
-            crate::request_observers::record_cache_event(
+            if super::records_telemetry::<M>() {
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+            }
+            crate::request_observers::record_cache_event::<M>(
+                observation,
                 verter_execution::request_context::CacheEventKind::Miss,
             );
         }
@@ -1265,6 +1296,34 @@ impl SemanticGraphStore {
             receipt: cost_receipt.into(),
         };
         (read, settled.admissible.then_some(settled.carrier))
+    }
+
+    /// The read a member of a component completed for the request is kept
+    /// with: its decided value on a delivery lease of its own, complete,
+    /// carrying the receipt of the component's root — every member of a
+    /// component shares its root's cost, as a published member does. `Err`
+    /// when the value names a node that is no longer live.
+    pub(crate) fn completed_member_read(
+        &self,
+        value: SemanticQueryValue,
+        receipt: crate::semantic_query::ReadReceipt,
+    ) -> Result<ValueRead, QueryError> {
+        let value = QueryResult::Value(value);
+        let walker_diagnostics = super::empty_diagnostics();
+        let dep_signature = empty_signature();
+        Ok(CacheRead {
+            lease: self.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                &value,
+                &walker_diagnostics,
+                &dep_signature,
+            ))?,
+            value,
+            dep_signature,
+            walker_diagnostics,
+            cache_suppress: false,
+            fact_status: crate::semantic_query::FactStatus::Complete,
+            receipt,
+        })
     }
 }
 
@@ -1336,21 +1395,25 @@ impl<'s> ProducerLease<'s> {
             started,
         } = self;
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        let build_held_ns = started.elapsed().as_nanos() as u64;
+        let build_held_ns = started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or(0);
         panic_guard.mark_finished();
         drop(panic_guard);
         drop(open);
-        #[cfg(feature = "semantic-observe")]
-        if let Some(prov) = store.provenance.as_ref() {
-            prov.execute_cooperative_held_ns
+        if super::records_telemetry::<C::Observe>() {
+            #[cfg(feature = "semantic-observe")]
+            if let Some(prov) = store.provenance.as_ref() {
+                prov.execute_cooperative_held_ns
+                    .fetch_add(build_held_ns, Ordering::Relaxed);
+            }
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            crate::loop5_instrumentation::EXECUTE_COOPERATIVE_COLD_BUILDS
+                .fetch_add(1, Ordering::Relaxed);
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            crate::loop5_instrumentation::EXECUTE_COOPERATIVE_BUILD_NS_TOTAL
                 .fetch_add(build_held_ns, Ordering::Relaxed);
         }
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_COLD_BUILDS
-            .fetch_add(1, Ordering::Relaxed);
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_BUILD_NS_TOTAL
-            .fetch_add(build_held_ns, Ordering::Relaxed);
 
         if flags.is_cancelled() {
             store.abort_inflight_for_cancellation(&prepared, &inflight, independent);
@@ -1520,12 +1583,12 @@ impl SettledProducer<'_> {
                 }
             }
         } else {
-            tracing::debug!(
-                target: "verter::memo::suppress",
-                key = ?self.prepared.key(),
-                "cache_suppress=true; refusing memo insertion (build-output suppression)"
-            );
-            crate::observe_request!(|ctx| {
+            // A chronological operation trace: optional observation.
+            #[cfg(feature = "semantic-observe")]
+            if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                tracing::debug!(target: "verter::memo::suppress", key = ?self.prepared.key(), "cache_suppress=true; refusing memo insertion (build-output suppression)");
+            }
+            crate::observe_request!(C::Observe => on crate::resolver_core::resolver_context::capture_targets(ctx).request.as_deref() => |ctx| {
                 ctx.memo_publish_suppressed.fetch_add(1, Ordering::Relaxed);
             });
         }

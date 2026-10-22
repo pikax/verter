@@ -2462,8 +2462,21 @@ impl WasmMetaSession {
             let (outcome, record) = session
                 .get_component_meta_with_audit(canonical_or_alias)
                 .into_parts();
+            // A genuine request fault (a closed session, say) outranks the
+            // build's missing capture; only the capture refusal itself
+            // reports unavailable capture.
             if record.capture_state == verter_audit::AuditCaptureState::Unavailable {
-                return Err(audit::capture_unavailable_error());
+                return Err(match outcome {
+                    Err(error)
+                        if !matches!(
+                            error,
+                            verter_session::component_meta_host::ComponentMetaHostError::AuditNotEnabled
+                        ) =>
+                    {
+                        ffi_err(error)
+                    }
+                    _ => audit::capture_unavailable_error(),
+                });
             }
             let Some(output) = outcome.map_err(ffi_err)? else {
                 return Ok(JsValue::NULL);

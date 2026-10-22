@@ -30,8 +30,8 @@ use super::publication_authority::{
     resolve_payload_surface,
 };
 
-pub(crate) fn project_slots(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+pub(crate) fn project_slots<M: verter_audit::observe::ObserveExec>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -48,7 +48,7 @@ pub(crate) fn project_slots(
         return Vec::new();
     }
 
-    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> = query_engine.ctx;
     // See `project_props` for the PublishedField origin-edge rationale —
     // recorded uniformly inside `admit_published_member`.
     let admitted = {

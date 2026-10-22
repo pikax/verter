@@ -44,7 +44,7 @@ fn captured_component_publication_fence_refuses_stale_and_unproven_bases() {
         let owner_hash = host.ensure_indexed_ready(owner).unwrap().whole_hash;
         let dep_hash = host.ensure_indexed_ready(dep).unwrap().whole_hash;
         let captured = host.resolver_store_view_read().into_owned_view();
-        let ctx = HostResolverContext::from_fixed_view(
+        let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_fixed_view(
             &host,
             &captured,
             Arc::new(CanonicalCompletionOverlay::new()),
@@ -140,7 +140,7 @@ fn warm_native_component_read_replays_dependencies_and_rejected_read_replays_not
         .any(|canonical| canonical.as_ref() == dep));
 
     let current = host.resolver_store_view_read().current().unwrap();
-    let ctx = HostResolverContext::from_current(
+    let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(
         host,
         &current,
         Arc::new(CanonicalCompletionOverlay::new()),
@@ -170,7 +170,7 @@ fn warm_native_component_read_replays_dependencies_and_rejected_read_replays_not
     mh.upsert_base(dep, "export interface Props { a: number; }")
         .unwrap();
     let current = host.resolver_store_view_read().current().unwrap();
-    let ctx = HostResolverContext::from_current(
+    let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(
         host,
         &current,
         Arc::new(CanonicalCompletionOverlay::new()),

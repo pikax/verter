@@ -330,6 +330,7 @@ impl VerterHost {
             .resolve_import_outcome_in(overlay, parent_canonical_id, import_source, ctx)
             .into_publication();
         crate::host_manage::import_route_witness::record_resolution_witness(&publication);
+        crate::host_manage::import_route_witness::note_unretained_resolution(&publication);
         publication
     }
 

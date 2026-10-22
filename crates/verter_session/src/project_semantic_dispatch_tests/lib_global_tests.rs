@@ -124,6 +124,41 @@ fn a_program_augmentation_merges_with_the_library_declaration() {
 const PROJECT_ROOT: &str = "/lg";
 const LIB_CANONICAL: &str = "lib.probe.d.ts";
 
+#[test]
+fn library_lookup_selects_the_requested_namespace_across_files() {
+    use verter_type_expr::LiteralValue;
+    let host = VerterHost::new_standalone_with_tsconfig_projects(
+        HostConfig::default(),
+        &[(
+            PROJECT_ROOT,
+            r#"{"compilerOptions":{"strict":true,"lib":["es5","es2015.symbol"]}}"#,
+        )],
+    );
+    let first = "interface Twin { typeSide: 1 }\ndeclare var Other: { valueSide: 3 };\ninterface Keys { readonly a: unique symbol; readonly b: unique symbol }\n";
+    let canonical = format!("{PROJECT_ROOT}/namespaces.ts");
+    for (name, source) in [
+        ("lib.es5.d.ts", first),
+        ("lib.es2015.symbol.d.ts", "declare var Twin: { valueSide: 2 };\ninterface Other { typeSide: 4 }\ninterface Keys { plain: number }\ndeclare const keys: Keys;\n"),
+    ] {
+        crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::register_lib_environment(&host, &canonical, name, source);
+    }
+    upsert(&host, &canonical, "type TypeTwin = Twin['typeSide'];\ntype ValueTwin = typeof Twin.valueSide;\ntype TypeOther = Other['typeSide'];\ntype ValueOther = typeof Other.valueSide;\ntype UniqueResult = typeof keys.a extends typeof keys.b ? 1 : 2;\nexport {};\n");
+    for (source, value, unique) in [
+        (first, 2.0, 2.0),
+        ("interface Twin { typeSide: 1 }\ndeclare var Twin: { valueSide: 5 };\ndeclare var Other: { valueSide: 3 };\ninterface Keys { readonly a: symbol; readonly b: symbol }\n", 5.0, 1.0),
+        (first, 2.0, 2.0),
+    ] {
+        crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::register_lib_environment(&host, &canonical, "lib.es5.d.ts", source);
+        for request in ["cold", "warm"] {
+        for (name, expected) in [("TypeTwin", 1.0), ("ValueTwin", value), ("TypeOther", 4.0), ("ValueOther", 3.0), ("UniqueResult", unique)] {
+            let node = host.resolve_named_symbol(&canonical, name, None).expect("the alias resolves");
+            let data = host.project_type_store().semantic_graph().node_data(node.id());
+            assert!(matches!(data.as_deref(), Some(SemanticNodeData::Literal(LiteralValue::Number(value))) if *value == expected), "the {request} {name} reads its own namespace: {data:?}");
+        }
+        }
+    }
+}
+
 fn library_host(lib: &str) -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone_with_tsconfig_projects(
         HostConfig::default(),
@@ -196,7 +231,12 @@ fn with_dispatch<R>(
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     read(&ProjectSemanticDispatch::new(&host_ctx))
 }
 

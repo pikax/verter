@@ -728,54 +728,10 @@ mod tests {
                 ),
                 FinalComponentRetention::NotAdmitted
             ),
-            "a recursion bit without a certificate is not retained"
-        );
-        let certified = match classify_final_component_retention(
-            divergence,
-            FinalComponentAdmissionProof::certified(),
-        ) {
-            FinalComponentRetention::Retain(class) => class,
-            other => panic!("a certified recurrence must be retained, got {other:?}"),
-        };
-        let certified_key = mk_result_key(canonical, [2u8; 16]);
-        publish.compute_and_admit(
-            canonical,
-            "certified",
-            || {
-                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
-                    owner_fact.clone(),
-                );
-                8u32
-            },
-            |_, _evidence| {
-                ComponentMetaPublishDecision::retain_refusal(
-                    certified_key.clone(),
-                    owner_hash,
-                    refusal_identity_for(certified, &query),
-                    final_component_refusal_status(divergence.reasons()).unwrap(),
-                    divergence,
-                    Arc::new(8u32),
-                    generation,
-                )
-            },
+            "a same-path recursion is not retained"
         );
         drop(_low_again);
         let _high_again = install(80, 4);
-        let high_query = dispatch.component_meta_refusal_query(canonical);
-        assert_eq!(
-            *read
-                .replay_refusal(&certified_key, owner_hash, &high_query)
-                .expect("certified divergence ignores the profile")
-                .recovery,
-            8
-        );
-        let mut certified_other_allowance = high_query.clone();
-        certified_other_allowance.entry_allowance = 3;
-        assert!(
-            read.replay_refusal(&certified_key, owner_hash, &certified_other_allowance)
-                .is_none(),
-            "certified divergence keeps the entry allowance"
-        );
 
         let depth = ResultCompleteness::partial(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
         let isolated = match classify_final_component_retention(
@@ -1992,10 +1948,8 @@ mod tests {
     }
 
     #[test]
-    fn a_producer_certificate_retains_and_an_uncertified_recursion_does_not() {
-        use verter_type_engine::project_semantic_dispatch::connected_demand::{
-            note_component_meta_divergence_for_test, note_component_meta_schedule_cut_for_test,
-        };
+    fn a_same_path_recursion_is_never_a_retained_refusal() {
+        use verter_type_engine::project_semantic_dispatch::connected_demand::note_component_meta_schedule_cut_for_test;
         use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
         use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
 
@@ -2011,10 +1965,7 @@ mod tests {
             &db,
             host.provenance().as_ref(),
         );
-        let generation = dispatch.current_project_generation();
         let recursion = ResultCompleteness::partial(PartialReasonSet::SAME_PATH_RECURSION);
-        let status = final_component_refusal_status(recursion.reasons()).unwrap();
-        let certified_key = mk_result_key(canonical, [5u8; 16]);
         let plain_key = mk_result_key(canonical, [6u8; 16]);
         let cut_key = mk_result_key(canonical, [7u8; 16]);
         let install = |id: u64| {
@@ -2028,53 +1979,6 @@ mod tests {
                 8,
             ))
         };
-        let runs = Arc::new(AtomicU64::new(0));
-
-        let _certified = install(1);
-        let query = dispatch.component_meta_refusal_query(canonical);
-        let runs_c = Arc::clone(&runs);
-        publish.compute_and_admit(
-            canonical,
-            "certified",
-            || {
-                runs_c.fetch_add(1, Ordering::SeqCst);
-                note_component_meta_divergence_for_test();
-                observe_owner(canonical, owner_hash);
-                11u32
-            },
-            |_, evidence| {
-                let proof = dispatch.component_meta_admission_proof(&query, evidence);
-                assert!(proof.divergence_certificate);
-                assert!(!proof.schedule_cut);
-                let class = match classify_final_component_retention(recursion, proof) {
-                    FinalComponentRetention::Retain(class) => class,
-                    other => panic!("certificate must retain, got {other:?}"),
-                };
-                assert_eq!(class, ComponentMetaRefusalClass::CertifiedDivergence);
-                ComponentMetaPublishDecision::retain_refusal(
-                    certified_key.clone(),
-                    owner_hash,
-                    refusal_identity_for(class, &query),
-                    status,
-                    recursion,
-                    Arc::new(11u32),
-                    generation,
-                )
-            },
-        );
-        drop(_certified);
-        let _replay = install(2);
-        let replayed = read
-            .replay_refusal(&certified_key, owner_hash, &query)
-            .expect("certified refusal replays");
-        assert_eq!(*replayed.recovery, 11);
-        assert_eq!(replayed.status, status);
-        assert_eq!(
-            runs.load(Ordering::SeqCst),
-            1,
-            "replay does not run the producer"
-        );
-        drop(_replay);
 
         let _plain = install(3);
         let plain_query = dispatch.component_meta_refusal_query(canonical);
@@ -2082,7 +1986,7 @@ mod tests {
         let plain_flag = Arc::clone(&plain_runs);
         publish.compute_and_admit(
             canonical,
-            "uncertified",
+            "same-path",
             || {
                 plain_flag.fetch_add(1, Ordering::SeqCst);
                 observe_owner(canonical, owner_hash);
@@ -2090,7 +1994,6 @@ mod tests {
             },
             |_, evidence| {
                 let proof = dispatch.component_meta_admission_proof(&plain_query, evidence);
-                assert!(!proof.divergence_certificate);
                 assert_eq!(
                     classify_final_component_retention(recursion, proof),
                     FinalComponentRetention::NotAdmitted
@@ -2104,7 +2007,7 @@ mod tests {
         let plain_again = Arc::clone(&plain_runs);
         publish.compute_and_admit(
             canonical,
-            "uncertified-again",
+            "same-path-again",
             || {
                 plain_again.fetch_add(1, Ordering::SeqCst);
                 observe_owner(canonical, owner_hash);
@@ -2121,14 +2024,12 @@ mod tests {
             canonical,
             "schedule-cut",
             || {
-                note_component_meta_divergence_for_test();
                 note_component_meta_schedule_cut_for_test();
                 observe_owner(canonical, owner_hash);
                 14u32
             },
             |_, evidence| {
                 let proof = dispatch.component_meta_admission_proof(&cut_query, evidence);
-                assert!(proof.divergence_certificate);
                 assert!(proof.schedule_cut);
                 assert_eq!(
                     classify_final_component_retention(recursion, proof),

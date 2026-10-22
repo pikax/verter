@@ -98,22 +98,28 @@ fn make_seal_host() -> Arc<VerterHost> {
     host
 }
 
+/// These tests read the request's flow counters, which only captured
+/// execution records.
+type CapturedCaps = crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>;
+
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, CapturedCaps>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Captured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
 }
 
-fn key_for(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    name: &str,
-) -> FlowReturnKey {
+fn key_for(dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>, name: &str) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             verter_type_expr::OwnedStr::from(SEAL_CANONICAL),
@@ -159,7 +165,7 @@ fn evaluate(host: &Arc<VerterHost>, name: &str) -> Option<Outcome> {
 
 #[track_caller]
 fn member(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
@@ -177,7 +183,7 @@ fn member(
 
 #[track_caller]
 fn assert_marker(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     what: &str,
 ) {
@@ -199,11 +205,11 @@ fn assert_marker(
 /// positional marker.
 #[track_caller]
 fn assert_string_or_marker_array(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     what: &str,
 ) {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let element = match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Array { element, .. }) => *element,
         other => panic!("{what}: the array survives, got {other:?}"),
@@ -235,7 +241,7 @@ fn assert_string_or_marker_array(
 
 #[track_caller]
 fn assert_string_label(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     what: &str,
 ) {
@@ -566,10 +572,7 @@ fn make_product_host() -> Arc<VerterHost> {
 }
 
 #[cfg(feature = "semantic-observe")]
-fn product_key(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    name: &str,
-) -> FlowReturnKey {
+fn product_key(dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>, name: &str) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             verter_type_expr::OwnedStr::from(PRODUCT_CANONICAL),
@@ -595,7 +598,7 @@ use verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_f
 /// Project a recorded observation onto arena-free structural text so two
 /// hosts are comparable.
 fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalProductObservation {
-    use super::flow_products::WideningMembership;
+    use super::flow_products::{FlowNarrowed, WideningMembership};
     fn structural_type(ty: &verter_type_expr::TypeExpr) -> String {
         use verter_type_expr::TypeExpr;
         match ty {
@@ -650,12 +653,17 @@ fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalPro
                         .facts()
                         .iter()
                         .map(|fact| {
-                            format!(
-                                "{:?}/{:?}/{}",
-                                fact.binding,
-                                fact.path,
-                                node(fact.narrowed_to)
-                            )
+                            // A remainder is the union of the arms it keeps.
+                            let narrowed = match &fact.narrowed_to {
+                                FlowNarrowed::Node(narrowed) => node(*narrowed),
+                                FlowNarrowed::Remainder(remainder) => {
+                                    match remainder.remaining_arms().as_slice() {
+                                        [arm] => node(*arm),
+                                        arms => format!("union:{:?}", set(arms)),
+                                    }
+                                }
+                            };
+                            format!("{:?}/{:?}/{narrowed}", fact.binding, fact.path)
                         })
                         .collect();
                     facts.sort();

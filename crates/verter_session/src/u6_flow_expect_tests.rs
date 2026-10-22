@@ -533,18 +533,20 @@ pub(crate) fn render_node(
         }
         SemanticNodeData::ObjectSpreadProgram(_) => "ObjectSpreadProgram".to_owned(),
         SemanticNodeData::Union(members) => {
-            let parts: Vec<String> =
-                verter_type_engine::semantic_query::printed_union_arms(dispatch.graph(), members)
-                    .into_iter()
-                    .map(|arm| match arm {
-                        verter_type_engine::semantic_query::PrintedUnionArm::Node(member) => {
-                            render_node(dispatch, member, depth + 1)
-                        }
-                        verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl) => {
-                            format!("Enum({})", decl.decl_name)
-                        }
-                    })
-                    .collect();
+            let parts: Vec<String> = verter_type_engine::semantic_query::printed_union_arms(
+                dispatch.graph().store(),
+                members,
+            )
+            .into_iter()
+            .map(|arm| match arm {
+                verter_type_engine::semantic_query::PrintedUnionArm::Node(member) => {
+                    render_node(dispatch, member, depth + 1)
+                }
+                verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl) => {
+                    format!("Enum({})", decl.decl_name)
+                }
+            })
+            .collect();
             format!("Union({})", parts.join(" | "))
         }
         SemanticNodeData::Intersection(members) => {
@@ -649,7 +651,7 @@ pub(crate) fn render_node(
                 .iter()
                 .map(|arg| render_node(dispatch, *arg, depth + 1))
                 .collect();
-            let name = identity.printed_name_in(dispatch.graph(), type_arguments);
+            let name = identity.printed_name_in(dispatch.graph().store(), type_arguments);
             if own.is_empty() {
                 format!("ClassExpressionInstance({name})")
             } else {
@@ -940,7 +942,10 @@ pub(crate) fn drive_expect_boundary_with_lib(
     let (expect_failures, rendered) = {
         let store_view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         match node {
             Some(node) => (
@@ -1109,7 +1114,12 @@ pub(crate) fn with_live_flow_node_with_lib<R>(
     let node = carrier.as_result().ok().map(|result| result.return_type());
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     f(&dispatch, node)
 }
@@ -2075,9 +2085,10 @@ pub(crate) mod checker_syntax {
     /// One live object member, unified across the two carriers the
     /// comparer reads: a closed `Object` surface member and a
     /// spread-projection positive fact. Facets that a fact carries only
-    /// as `Indeterminate` make the member unmatchable.
+    /// as `Indeterminate` make the member unmatchable. A numeric key is
+    /// named by its canonical spelling, as the checker prints it (`{ 0: … }`).
     struct LiveMember<'a> {
-        name: Option<&'a str>,
+        name: Option<std::borrow::Cow<'a, str>>,
         optional: bool,
         readonly: bool,
         method_kind: Option<verter_type_expr::ObjectMethodKind>,
@@ -2089,7 +2100,12 @@ pub(crate) mod checker_syntax {
             member: &'a verter_type_engine::semantic_query::SurfaceMember,
         ) -> LiveMember<'a> {
             LiveMember {
-                name: member.key.as_string(),
+                name: match &member.key {
+                    verter_type_expr::AuthoredPropertyKey::Number(number) => {
+                        Some(std::borrow::Cow::Owned(number.get().to_string()))
+                    }
+                    key => key.as_string().map(std::borrow::Cow::Borrowed),
+                },
                 optional: member.optional,
                 readonly: member.readonly,
                 method_kind: member.method_kind,
@@ -2115,7 +2131,12 @@ pub(crate) mod checker_syntax {
                     _ => (false, false, None, None),
                 };
             LiveMember {
-                name: fact.key().as_string(),
+                name: match fact.key() {
+                    verter_type_expr::PropertyKey::Number(number) => {
+                        Some(std::borrow::Cow::Owned(number.get().to_string()))
+                    }
+                    key => key.as_string().map(std::borrow::Cow::Borrowed),
+                },
                 optional,
                 readonly,
                 method_kind,
@@ -2196,6 +2217,17 @@ pub(crate) mod checker_syntax {
             (CheckerType::Ref(name), SemanticNodeData::DeclRef { identity }) => {
                 &*identity.decl_name == name.as_str()
             }
+            // A resolved declaration can remain unmaterialized at this
+            // observation altitude. Its identity still denotes the bare name.
+            (
+                CheckerType::Ref(name),
+                SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
+                        name: declared,
+                        ..
+                    },
+                ),
+            ) => declared.as_ref() == name.as_str(),
             // A declaration body's reference to the declaration itself
             // lowers to the self-reference sentinel, which stands for that
             // declaration (`R[]` inside `type R = R[] | 1`): it matches the
@@ -2224,7 +2256,7 @@ pub(crate) mod checker_syntax {
                 },
             ) => {
                 identity.own_arity == 0
-                    && identity.printed_name_in(dispatch.graph(), type_arguments) == *name
+                    && identity.printed_name_in(dispatch.graph().store(), type_arguments) == *name
             }
             (
                 CheckerType::GenericRef { name, args },
@@ -2235,7 +2267,7 @@ pub(crate) mod checker_syntax {
                 },
             ) => {
                 let own = identity.own_type_arguments(type_arguments);
-                identity.printed_name_in(dispatch.graph(), type_arguments) == *name
+                identity.printed_name_in(dispatch.graph().store(), type_arguments) == *name
                     && own.len() == args.len()
                     && own
                         .iter()
@@ -2275,7 +2307,7 @@ pub(crate) mod checker_syntax {
             }
             // A union holding every member of one enum prints as the enum.
             (CheckerType::Ref(name), SemanticNodeData::Union(members)) => matches!(
-                verter_type_engine::semantic_query::printed_union_arms(dispatch.graph(), members).as_slice(),
+                verter_type_engine::semantic_query::printed_union_arms(dispatch.graph().store(), members).as_slice(),
                 [verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl)]
                     if &*decl.decl_name == name.as_str()
             ),
@@ -2284,7 +2316,7 @@ pub(crate) mod checker_syntax {
                 // checker prints it, backtracking so duplicate constituents
                 // are handled exactly.
                 let members = verter_type_engine::semantic_query::printed_union_arms(
-                    dispatch.graph(),
+                    dispatch.graph().store(),
                     members,
                 );
                 if members.len() != exp.len() {
@@ -2559,7 +2591,7 @@ pub(crate) mod checker_syntax {
                     }
                     _ => None,
                 };
-                member.name == Some(name.as_str())
+                member.name.as_deref() == Some(name.as_str())
                     && member.optional == *optional
                     && member.readonly == *readonly
                     && member.method_kind.is_none()
@@ -2580,7 +2612,7 @@ pub(crate) mod checker_syntax {
                 // signature equals the printed function. The method print
                 // carries no predicate, so a live predicate method never
                 // satisfies it.
-                member.name == Some(name.as_str())
+                member.name.as_deref() == Some(name.as_str())
                     && member.optional == *optional
                     && member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
                     && member.value.is_some_and(|value| {
@@ -4705,6 +4737,22 @@ mod expectation_controls {
              ...base(), m() { return 1 } } }",
             "makeProps",
             |dispatch, node| {
+                let _construction = dispatch.enter_construction_scope();
+                let declaration = dispatch.graph().intern_node(SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
+                        canonical_id: "/checker/decl.ts".into(),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        name: "Face".into(),
+                        whole_hash: [0; 16],
+                    },
+                ));
+                assert!(accepts(dispatch, declaration, "Face"));
+                assert!(!accepts(dispatch, declaration, "Other"));
+                let missing = dispatch.graph().intern_node(SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::Miss,
+                ));
+                assert!(!accepts(dispatch, missing, "Face"));
+
                 assert!(
                     accepts(dispatch, node, "{ label: string; m(): number; }"),
                     "precondition: the composed spread surface accepts its own checker print \
@@ -6398,7 +6446,12 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
     }
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(

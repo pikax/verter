@@ -921,19 +921,11 @@ async fn sync_non_carrier_file_to_provider(
     if !prepared.resolved_dependencies.is_empty() {
         host.as_ref().set_import_dependencies(
             canonical_id,
-            prepared
-                .resolved_dependencies
-                .iter()
-                .map(|entry| verter_session::DependencyResolution {
-                    specifier: entry.provider_specifier.clone(),
-                    resolved_canonical_id: Some(entry.source_id.clone()),
-                    possible_canonical_ids: Vec::new(),
-                })
-                .collect(),
+            prepared.resolved_dependencies.route_snapshot(),
         );
     }
 
-    prepared.resolved_dependencies
+    prepared.resolved_dependencies.into_results()
 }
 
 /// Follow node_modules dependencies transitively via BFS.

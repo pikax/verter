@@ -26,7 +26,7 @@ use super::is_valid_binding_identifier;
 pub(super) fn apply_event_handler_param_inference(
     source: &str,
     parsed: &ParsedSvelte,
-    out: &mut CodeTransform<'_>,
+    out: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
 ) {
     let Some(content) = parsed.instance_content() else {
         return;
@@ -155,7 +155,7 @@ fn annotate_function(
     hints: &FxHashMap<String, Vec<String>>,
     source: &str,
     content_start: u32,
-    out: &mut CodeTransform<'_>,
+    out: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
 ) {
     let Some(identifier) = &function.id else {
         return;

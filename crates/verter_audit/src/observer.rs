@@ -492,9 +492,19 @@ impl Drop for ObserverGuard {
 
 /// Emit to the current request's audit observer.
 ///
-/// `observe!(|obs| obs.record_event(AuditEvent::X))` runs the body with
-/// the installed observer when the binary is built with
-/// `semantic-observe` and the running request selected captured
+/// Two forms:
+///
+/// - `observe!(M => on receiver => |obs| body)` emits from execution compiled for the mode
+///   type `M` ([`crate::observe::ObserveExec`]). The uncaptured expansion is
+///   a constant-false branch: it reads no observer slot and builds no
+///   payload. Hot paths — anything an execution unit runs per operation —
+///   use this form.
+/// - `observe!(|obs| body)` reads the observer slot directly. It belongs only
+///   at once-per-request or once-per-phase boundaries (a root entry's
+///   record, a compile phase timing), never inside a per-operation path.
+///
+/// Both run the body with the installed observer when the binary is built
+/// with `semantic-observe` and the running request selected captured
 /// execution at its root entry.
 ///
 /// Without `semantic-observe` the body is type-checked inside a closure
@@ -502,13 +512,30 @@ impl Drop for ObserverGuard {
 /// argument or payload is built and no code is emitted. The body
 /// therefore stays valid in default builds, and values it borrows count
 /// as used.
+///
+/// The body is a callback in either build: `return` exits only that callback.
+/// Its payload locals stay outside the emitting caller's debug stack frame.
 #[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! observe {
+    ($M:ty => on $receiver:expr => |$obs:ident| $body:expr) => {{
+        if <$M as $crate::observe::ObserveExec>::CAPTURED {
+            if let ::core::option::Option::Some(observer) = $receiver {
+                // Keep callback returns local and payload temporaries out of
+                // recursive callers' debug stack frames.
+                #[allow(clippy::redundant_closure_call)]
+                (|$obs: &dyn $crate::AuditObserver| {
+                    $body;
+                })(observer);
+            }
+        }
+    }};
     (|$obs:ident| $body:expr) => {{
         if let ::core::option::Option::Some(observer) = $crate::observer::current_observer() {
-            let $obs: &dyn $crate::AuditObserver = &*observer;
-            $body;
+            #[allow(clippy::redundant_closure_call)]
+            (|$obs: &dyn $crate::AuditObserver| {
+                $body;
+            })(&*observer);
         }
     }};
 }
@@ -520,6 +547,10 @@ macro_rules! observe {
 #[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! observe {
+    ($M:ty => on $receiver:expr => |$obs:ident| $body:expr) => {{
+        let _ = ::core::marker::PhantomData::<$M>;
+        $crate::observe!(|$obs| $body)
+    }};
     (|$obs:ident| $body:expr) => {{
         #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
         if false {

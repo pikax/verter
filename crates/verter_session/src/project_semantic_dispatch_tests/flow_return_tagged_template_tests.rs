@@ -142,7 +142,12 @@ struct Outcome {
 fn eval(host: &Arc<VerterHost>, canonical: &str, name: &str) -> Outcome {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = FlowReturnKey {
         function: dispatch.flow_function_slot_for(
@@ -429,7 +434,12 @@ fn a_module_const_bound_to_a_tagged_template_is_the_tag_return() {
     let host = host_with(&[(LIB, LIB_SRC), (TAGS, TAGS_SRC)]);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let env = host.host_view_env_hashes_for(TAGS);
     let project_identity = host.host_view_project_identity_for(TAGS).fold_u32();

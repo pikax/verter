@@ -13,9 +13,8 @@
 //! `EntriesLockGuard` wraps the entries mutex with wait/hold timing for
 //! the diagnosis benchmark.
 
-use std::sync::atomic::Ordering;
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use parking_lot::Mutex;
@@ -39,28 +38,10 @@ use crate::semantic_query::{SemanticGraphStats, SemanticNodeId};
 /// zero-size value whose `fetch_add` compiles to nothing and which has no
 /// reader at all, so an unobserved build carries no counter and cannot
 /// substitute zero for one it never kept.
-#[derive(Default)]
-pub(crate) struct Tally {
-    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-    value: AtomicU64,
-}
-
-impl Tally {
-    /// Add `amount` to the counter. A no-op without the observation gate.
-    #[inline(always)]
-    pub(crate) fn fetch_add(&self, amount: u64, order: Ordering) {
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        self.value.fetch_add(amount, order);
-        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
-        let _ = (amount, order);
-    }
-
-    /// Read the counter. Exists only where the counter is kept.
-    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-    pub(crate) fn load(&self, order: Ordering) -> u64 {
-        self.value.load(order)
-    }
-}
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+pub(crate) type Tally = verter_audit::observe::Counter<std::sync::atomic::AtomicU64>;
+#[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+pub(crate) type Tally = verter_audit::observe::Counter<()>;
 
 /// Bounded sample reservoir for histogram-style metrics (path length /
 /// projection depth). Cap = 8192 samples per metric; once full, new
@@ -271,13 +252,9 @@ impl AtomicSemanticGraphStats {
         }
     }
 
-    #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
-    #[inline(always)]
-    pub(super) fn record_in_flight_enter(&self) {}
-
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     #[inline(always)]
     pub(super) fn record_in_flight_exit(&self) {
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         self.in_flight_current.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -288,12 +265,50 @@ impl AtomicSemanticGraphStats {
 /// in-flight counter, biasing `in_flight_peak` upward across the
 /// remaining lifetime of the store.
 pub(super) struct InFlightStatsGuard<'a> {
-    pub(super) stats: &'a AtomicSemanticGraphStats,
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    stats: Option<&'a AtomicSemanticGraphStats>,
+    #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+    lifetime: std::marker::PhantomData<&'a AtomicSemanticGraphStats>,
 }
 
+impl<'a> InFlightStatsGuard<'a> {
+    #[inline(always)]
+    pub(super) fn new<M: verter_audit::observe::ObserveExec>(
+        stats: &'a AtomicSemanticGraphStats,
+    ) -> Self {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        {
+            let stats = if super::records_telemetry::<M>() {
+                stats.record_in_flight_enter();
+                Some(stats)
+            } else {
+                None
+            };
+            Self { stats }
+        }
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+        {
+            let _ = (stats, std::marker::PhantomData::<M>);
+            Self {
+                lifetime: std::marker::PhantomData,
+            }
+        }
+    }
+}
+
+// The shipped guard carries no optional state, including its lifetime marker.
+#[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+const _: () = assert!(std::mem::size_of::<InFlightStatsGuard<'static>>() == 0);
+
+#[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+const _: () = assert!(!std::mem::needs_drop::<InFlightStatsGuard<'static>>());
+
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 impl Drop for InFlightStatsGuard<'_> {
     fn drop(&mut self) {
-        self.stats.record_in_flight_exit();
+        if let Some(stats) = self.stats {
+            stats.record_in_flight_exit();
+        }
     }
 }
 

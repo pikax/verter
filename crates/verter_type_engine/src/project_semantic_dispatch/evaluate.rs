@@ -376,6 +376,11 @@ pub fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
     Restore(FORCE_PARTIAL_CLOSED_EVALUATION.replace(true))
 }
 
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static COMPOSITE_ARM_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Shell evaluation follows only operator operands. A selected result also
 /// reads value composition, and whole publication reads surface interiors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -385,6 +390,10 @@ pub(crate) enum DeferredEvaluationDemand {
     /// A mapped index consumes the instantiated value, rather than retaining
     /// a named application for a later member demand or call-return display.
     MappedIndexValue,
+    /// Select a mapped helper result while leaving its interiors addressable.
+    MappedMemberValue,
+    /// Resolve a closed mapped source without visiting its member interiors.
+    MappedSource,
 }
 
 /// Heap-owned continuation for one deferred-operator evaluation entry. A
@@ -394,6 +403,14 @@ pub(crate) enum DeferredEvaluationDemand {
 enum DeferredEvaluationStage {
     EvaluateCurrent,
     AwaitKeyOfBase,
+    AwaitMappedSource {
+        source: SemanticNodeId,
+        mapper: crate::semantic_query::MapperKey,
+    },
+    AwaitMappedKeySpace {
+        source: SemanticNodeId,
+        mapper: crate::semantic_query::MapperKey,
+    },
     AwaitIndexedObject {
         index: IndexKey,
     },
@@ -696,6 +713,31 @@ struct CompositeReduction {
     read_past_gap: bool,
 }
 
+/// The unions one operation proved its composite reduction leaves as
+/// written — every arm a literal, a primitive or an enum member, and the
+/// canonical union over the arms keeping every one — each with the file
+/// roots the proving canonicalization inspected. Such a canonicalization
+/// charges the connected demand nothing, so replaying its roots prices a
+/// demand exactly as reducing again would. The proof reads only immutable node data, so
+/// a later demand on the same union replays its roots instead of reducing
+/// it again: a distributive conditional demands its `extends` operand once
+/// per member. The outermost dispatch operation releases the table.
+pub(super) type CompositeFixedPoints = std::cell::RefCell<
+    rustc_hash::FxHashMap<SemanticNodeId, Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>>,
+>;
+
+/// Whether `members` holds every one of `arms`: a direct scan for a few
+/// members, else one hashed index of them, so comparing a wide union with
+/// the union it reduced to stays linear.
+pub(super) fn holds_every(members: &[SemanticNodeId], arms: &[SemanticNodeId]) -> bool {
+    const DIRECT_SCAN_MAX: usize = 8;
+    if members.len() <= DIRECT_SCAN_MAX {
+        return arms.iter().all(|arm| members.contains(arm));
+    }
+    let index: rustc_hash::FxHashSet<SemanticNodeId> = members.iter().copied().collect();
+    arms.iter().all(|arm| index.contains(arm))
+}
+
 /// What a suspended composite reduction waits for.
 enum ArmWait {
     /// The demand of this named arm.
@@ -796,6 +838,15 @@ impl StructuralFactDemandOutcome {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// Arms the composite reductions read on this thread
+    /// ([`Self::composite_over_resolved_arms`] and the structural-fact
+    /// demand that reduces a resolved union); test-only. Memoized queries
+    /// can hide a reduction that re-reads a wide union per consumer.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn composite_arm_reads_for_tests() -> usize {
+        COMPOSITE_ARM_READS.with(std::cell::Cell::get)
+    }
+
     /// A mapped object's values belong to the consuming index. A `typeof`
     /// operand shares the keys-only transit context used by `keyof`, so the
     /// two operands of `T[keyof T]` read one source surface.
@@ -845,6 +896,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// be a stable cycle/carrier stop, so it remains a `TypeNode` instead of
     /// recursively re-entering the evaluator.
     fn normalized_index_key_from_evaluated_node(&self, resolved: SemanticNodeId) -> IndexKey {
+        // An enum member's literal type indexes the property its value
+        // names (`Record<E, X>[E.A]` reads key `0`), by the rule a mapped
+        // type's enum domain keys its members with.
+        let enum_value = match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(member)) => {
+                self.enum_member_key(resolved, member).map(|_| member.base)
+            }
+            _ => None,
+        };
+        if let Some(value) = enum_value {
+            return self.normalized_index_key_from_evaluated_node(value);
+        }
         match self.graph().node_data(resolved).as_deref() {
             Some(data @ SemanticNodeData::TypeOfNominal(_)) => IndexKey::UniqueSymbol(
                 data.typeof_nominal_identity()
@@ -1098,7 +1161,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the read kept only when it is a declaration or class reference.
     /// `None` for any other access (a computed index, a partial read, a
     /// terminal that is not a named reference).
-    fn named_indexed_access(
+    pub(super) fn named_indexed_access(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -2442,7 +2505,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 cache_suppress |= outcome.cache_suppress;
                 let canonical = self.canonical_argument_carrier(outcome.node);
                 if canonical != arg {
-                    self.graph().record_origin_edge(
+                    crate::semantic_query_memo::record_origin_edge!(
+                        self.graph(),
                         canonical,
                         crate::semantic_query::OriginEdgeKind::Normalize,
                         Arc::from([arg]),
@@ -2495,7 +2559,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
-        let evaluated = self.evaluate_selected_value_outcome(node, context);
+        let evaluated = self.evaluate_deferred_demand(
+            node,
+            context,
+            DeferredEvaluationDemand::MappedMemberValue,
+        );
         if evaluated.completeness.is_partial() {
             return evaluated;
         }
@@ -2533,7 +2601,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let QueryResult::Value(instantiated) = read.value else {
             return evaluated;
         };
-        let body = self.evaluate_deferred_outcome(instantiated, context);
+        let body = self.evaluate_deferred_demand(
+            instantiated,
+            context,
+            DeferredEvaluationDemand::MappedMemberValue,
+        );
         EvaluateDeferredOutcome {
             node: if matches!(
                 self.graph().node_data(body.node).as_deref(),
@@ -2648,7 +2720,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // evaluated here, at a demand for its value: its
                         // keys where they settle, as the checker prints
                         // them.
-                        if frame.demand == DeferredEvaluationDemand::Shell {
+                        if matches!(
+                            frame.demand,
+                            DeferredEvaluationDemand::Shell
+                                | DeferredEvaluationDemand::MappedSource
+                        ) {
                             if let QueryResult::Value(keys) = read.value {
                                 if let Some(settled) =
                                     self.settled_key_of_carrier(keys, frame.context)
@@ -2657,6 +2733,55 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 }
                             }
                         }
+                        self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
+                    }
+                    DeferredEvaluationStage::AwaitMappedSource { source, mut mapper } => {
+                        // The source is demanded before its domain, as in locator
+                        // projection. Keep the binder's value and remap untouched
+                        // until the existing per-key materializer binds it.
+                        let keyof_source = matches!(self.graph().node_data(mapper.key_space).as_deref(),
+                            Some(SemanticNodeData::KeyOf { base }) if *base == source);
+                        let key_space = if keyof_source {
+                            self.graph().intern_preserving_scope(
+                                mapper.key_space,
+                                SemanticNodeData::KeyOf { base: child.node },
+                            )
+                        } else if mapper.key_space == source {
+                            child.node
+                        } else {
+                            mapper.key_space
+                        };
+                        if keyof_source
+                            && matches!(
+                                self.graph().node_data(child.node).as_deref(),
+                                Some(SemanticNodeData::Infer { .. })
+                            )
+                        {
+                            mapper.key_space = key_space;
+                            let read = self.execute_read(SemanticQueryKey::MappedType {
+                                source: child.node,
+                                mapper,
+                                context: frame.context,
+                            });
+                            self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
+                        } else {
+                            frame.stage = DeferredEvaluationStage::AwaitMappedKeySpace {
+                                source: child.node,
+                                mapper,
+                            };
+                            DeferredEvaluationAction::Push {
+                                node: key_space,
+                                context: frame.context,
+                            }
+                        }
+                    }
+                    DeferredEvaluationStage::AwaitMappedKeySpace { source, mut mapper } => {
+                        mapper.key_space = child.node;
+                        let read = self.execute_read(SemanticQueryKey::MappedType {
+                            source,
+                            mapper,
+                            context: frame.context,
+                        });
                         self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
                     }
                     DeferredEvaluationStage::AwaitIndexedObject { index } => match index {
@@ -2768,11 +2893,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         match data.as_ref() {
                             _ if demand != DeferredEvaluationDemand::Shell
                                 && self
-                                    .selected_value_children(data.as_ref(), context)
+                                    .selected_value_children(data.as_ref(), context, demand)
                                     .is_some() =>
                             {
                                 let children = self
-                                    .selected_value_children(data.as_ref(), context)
+                                    .selected_value_children(data.as_ref(), context, demand)
                                     .expect("selected child topology");
                                 if let Some(&first) = children.first() {
                                     let frame = frames.last_mut().expect("active evaluator frame");
@@ -2816,6 +2941,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                             SemanticNodeData::Mapped { source, mapper } => {
                                 let frame = frames.last_mut().expect("active evaluator frame");
+                                if frame.demand != DeferredEvaluationDemand::Shell
+                                    && crate::semantic_query::may_reduce_operator(frame.context)
+                                {
+                                    frame.stage = DeferredEvaluationStage::AwaitMappedSource {
+                                        source: *source,
+                                        mapper: mapper.clone(),
+                                    };
+                                    DeferredEvaluationAction::Push {
+                                        node: *source,
+                                        context: frame.context,
+                                    }
+                                } else {
                                 let read = self.execute_read(SemanticQueryKey::MappedType {
                                     source: *source,
                                     mapper: mapper.clone(),
@@ -2824,6 +2961,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 self.deferred_read_action(frame, read, || {
                                     self.opaque(QueryError::Miss)
                                 })
+                                }
                             }
                             // A NOMINAL (`unique symbol`) carrier is
                             // TERMINAL: resolving its head would project the
@@ -2903,7 +3041,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 self.deferred_read_action(frame, read, || current)
                             }
                             SemanticNodeData::InstantiationRef { base, args }
-                                if demand == DeferredEvaluationDemand::MappedIndexValue
+                                if (demand == DeferredEvaluationDemand::MappedIndexValue
+                                    || (demand == DeferredEvaluationDemand::MappedSource
+                                        && !self.type_is_generic(current))
+                                    || (matches!(demand, DeferredEvaluationDemand::SelectedValue | DeferredEvaluationDemand::MappedMemberValue)
+                                        && self.selected_value_has_closed_conditional_body(current, base)))
                                     && !matches!(
                                         self.prepared_decl_kind(base),
                                         Some(
@@ -2922,6 +3064,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         slot,
                                         Arc::clone(args.as_arc()),
                                         self.instantiate_context_for(&base.canonical_id, context),
+                                    ),
+                                ));
+                                let frame = frames.last_mut().expect("active evaluator frame");
+                                self.deferred_read_action(frame, read, || current)
+                            }
+                            SemanticNodeData::DeclRef { identity }
+                                if demand == DeferredEvaluationDemand::MappedSource
+                                    && self.prepared_decl_kind(identity) == Some(verter_session_query::declarations::TypeDeclKind::Alias) =>
+                            {
+                                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                                    crate::semantic_query::InstantiateKey::new(
+                                        self.type_slot_for(identity.canonical_id.clone(), identity.owner, identity.decl_name.clone()),
+                                        Arc::from([]),
+                                        self.instantiate_context_for(&identity.canonical_id, context),
                                     ),
                                 ));
                                 let frame = frames.last_mut().expect("active evaluator frame");
@@ -2992,9 +3148,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let parent = frames.last().expect("a child has a parent demand");
                     // Key enumeration consumes the source's domain,
                     // without demanding all of its member values.
-                    let demand = if matches!(parent.stage, DeferredEvaluationStage::AwaitKeyOfBase)
-                    {
+                    let demand = if matches!(
+                        parent.stage,
+                        DeferredEvaluationStage::AwaitMappedSource { .. }
+                            | DeferredEvaluationStage::AwaitMappedKeySpace { .. }
+                    ) {
+                        DeferredEvaluationDemand::MappedSource
+                    } else if matches!(parent.stage, DeferredEvaluationStage::AwaitKeyOfBase) {
                         DeferredEvaluationDemand::Shell
+                    } else if parent.demand == DeferredEvaluationDemand::MappedMemberValue
+                        && matches!(
+                            &parent.stage,
+                            DeferredEvaluationStage::AwaitValueChildren { data, .. }
+                                if matches!(data.as_ref(), SemanticNodeData::Signature { .. })
+                        )
+                    {
+                        // Declared signature type positions publish their selected
+                        // values, even when the enclosing mapped member keeps its
+                        // object surface addressable.
+                        DeferredEvaluationDemand::SelectedValue
                     } else {
                         parent.demand
                     };
@@ -3145,32 +3317,66 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
             | SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_) => true,
-            // The mapped-index-value arm reads the declaration's kind.
-            SemanticNodeData::InstantiationRef { .. } => {
-                demand == DeferredEvaluationDemand::MappedIndexValue
-            }
+            // Selected values also read the declaration's body classification.
+            // Keep that read inside a frame so its dependency proof is retained.
+            SemanticNodeData::InstantiationRef { .. } => demand != DeferredEvaluationDemand::Shell,
+            SemanticNodeData::DeclRef { .. } => demand == DeferredEvaluationDemand::MappedSource,
             data => {
                 demand != DeferredEvaluationDemand::Shell
-                    && self.selected_value_children(data, context).is_some()
+                    && self
+                        .selected_value_children(data, context, demand)
+                        .is_some()
             }
         };
         !rewritten
+    }
+
+    /// A substituted conditional alias is evaluated at a selected call result.
+    /// Ordinary named surfaces and genuinely open applications stay addressable.
+    fn selected_value_has_closed_conditional_body(
+        &self,
+        node: SemanticNodeId,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
+        let mut identity = identity.clone();
+        let mut seen = rustc_hash::FxHashSet::default();
+        while self.prepared_decl_kind(&identity)
+            == Some(verter_session_query::declarations::TypeDeclKind::Alias)
+            && seen.insert(identity.clone())
+        {
+            let Some(Some(body)) = self.declared_alias_body(&identity) else {
+                return false;
+            };
+            match self.graph().node_data(body).as_deref() {
+                Some(SemanticNodeData::Conditional { .. }) => return !self.type_is_generic(node),
+                Some(SemanticNodeData::DeclRef { identity: next })
+                | Some(SemanticNodeData::InstantiationRef { base: next, .. }) => {
+                    identity = next.clone();
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     fn selected_value_children(
         &self,
         data: &SemanticNodeData,
         context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
     ) -> Option<Vec<SemanticNodeId>> {
         let whole = crate::semantic_query::may_reduce_operator(context)
-            && context.mode == ProjectionMode::Expanded;
+            && context.mode == ProjectionMode::Expanded
+            && demand != DeferredEvaluationDemand::MappedSource;
         match data {
             SemanticNodeData::Union(arms) => Some(arms.iter().copied().collect()),
             SemanticNodeData::Array { element, .. } if whole => Some(vec![*element]),
             SemanticNodeData::Tuple { elements, .. } if whole => {
                 Some(elements.iter().map(|e| e.value).collect())
             }
-            SemanticNodeData::Object(surface) if whole => {
+            SemanticNodeData::Object(surface)
+                if whole && demand != DeferredEvaluationDemand::MappedMemberValue =>
+            {
                 Some(surface.positive_members().iter().map(|m| m.value).collect())
             }
             SemanticNodeData::Signature {
@@ -3361,9 +3567,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let started = if settled.exit_reasons.is_none() {
                             let started =
                                 self.begin_composite(settled.n, !settled.resolve_declaration_refs);
-                            if started.is_none()
-                                && self.carrier_normalizing.borrow().contains(&settled.n)
-                            {
+                            if started.is_none() && self.carrier_normalizing_holds(settled.n) {
                                 *reentered = true;
                             }
                             started
@@ -3485,6 +3689,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
+    /// Whether `arm` is a literal, a primitive or an enum member: a union of
+    /// these alone canonicalizes without a metered construction.
+    fn is_unmetered_scalar(&self, arm: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(arm).as_deref(),
+            Some(
+                SemanticNodeData::Literal(_)
+                    | SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::EnumLiteral(_)
+            )
+        )
+    }
+
     /// Whether a resolved type is a literal, a primitive or an enum member
     /// — the types the composite reductions act on.
     fn is_composite_scalar(&self, view: SemanticNodeId) -> bool {
@@ -3537,7 +3754,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !(is_union && re_decidable) && !arms.iter().any(|arm| self.is_composite_name(*arm)) {
             return None;
         }
-        if self.carrier_normalizing.borrow().contains(&node) {
+        if self.carrier_normalizing_holds(node) {
+            return None;
+        }
+        // A union this operation already proved stays as written: the
+        // reduction would read the same arms and reach the same proof.
+        let proven = self.composite_fixed_points.borrow().get(&node).cloned();
+        if let Some(roots) = proven {
+            self.deposit_reused_canonical_roots(&roots);
             return None;
         }
         self.carrier_normalizing.borrow_mut().push(node);
@@ -3680,6 +3904,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         while reduction.next < reduction.arms.len() {
             let arm = reduction.arms[reduction.next];
             reduction.next += 1;
+            #[cfg(any(test, feature = "test-support"))]
+            COMPOSITE_ARM_READS.with(|count| count.set(count.get() + 1));
             if !self.is_composite_name(arm) {
                 reduction.views.push(arm);
                 continue;
@@ -3733,6 +3959,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A template literal arm is the type its construction builds
         // (`${string}${string}` is `string`), as the checker holds it
         // before the union reduces.
+        let mut read_template = false;
         let views: Vec<SemanticNodeId> = views
             .iter()
             .map(|view| match graph.node_data(*view).as_deref() {
@@ -3740,6 +3967,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     quasis,
                     expressions,
                 }) => {
+                    read_template = true;
                     let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
                         pattern: (*quasis).clone(),
                         args: Arc::clone(expressions.as_arc()),
@@ -3754,17 +3982,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
             .collect();
         let views = views.as_slice();
-        let reduced = self.intern_normalized_union_or_intersection(views, true);
+        let composite = super::canonical_algebra::intern_ordered_union_charged(
+            graph,
+            views,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            self.construction_meter(),
+        );
+        let proof = composite
+            .evidence
+            .is_complete_proof()
+            .then(|| composite.evidence.inspected_file_roots.clone());
+        self.deposit_canonical_evidence(composite.evidence);
+        let reduced = composite.node;
         // Arms read as written whose every member the union's reduction
         // keeps: the union stays as written, in its written order.
         if views == arms {
             let kept = match graph.node_data(reduced).as_deref() {
                 Some(SemanticNodeData::Union(members)) => {
-                    members.len() == arms.len() && arms.iter().all(|arm| members.contains(arm))
+                    members.len() == arms.len() && holds_every(members, arms)
                 }
                 _ => false,
             };
             if kept {
+                // Arms that are literals, primitives and enum members alone
+                // leave no name to demand, no template to build and no
+                // intersection to distribute: the proof read nothing but the
+                // arms and charged the connected demand nothing (its meter
+                // pays only for distributions), so a replay that charges
+                // nothing prices it exactly as a cold run does.
+                if let Some(roots) = proof.filter(|_| {
+                    !read_template
+                        && matches!(reduction.completeness, ResultCompleteness::Complete)
+                        && arms.iter().all(|arm| self.is_unmetered_scalar(*arm))
+                }) {
+                    self.composite_fixed_points
+                        .borrow_mut()
+                        .insert(node, Arc::from(roots));
+                }
                 return None;
             }
         }
@@ -3780,15 +4034,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         // The checker's union origin: the named unions, when they do not
         // overlap and the reduction kept every member they name.
-        let in_named = |member: &SemanticNodeId| {
-            named_unions
-                .iter()
-                .any(|(_, members)| members.contains(member))
-        };
+        // Every member a named union names, looked up by hash: a named
+        // union of thousands of members is read once, not once per member.
+        let named_members: rustc_hash::FxHashSet<SemanticNodeId> = named_unions
+            .iter()
+            .flat_map(|(_, members)| members.iter().copied())
+            .collect();
         let remaining: Vec<SemanticNodeId> = type_set
             .iter()
             .copied()
-            .filter(|member| !in_named(member))
+            .filter(|member| !named_members.contains(member))
             .collect();
         let named_count: usize = named_unions.iter().map(|(_, members)| members.len()).sum();
         let result = match named_unions.as_slice() {
@@ -3800,7 +4055,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .chain(named_unions.iter().map(|(named, _)| *named))
                     .collect();
                 // The written arms ARE the origin: the union stays as written.
-                if origin.len() == arms.len() && origin.iter().all(|arm| arms.contains(arm)) {
+                if origin.len() == arms.len() && holds_every(arms, &origin) {
                     return None;
                 }
                 self.intern_normalized_union_or_intersection(&origin, true)

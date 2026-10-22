@@ -208,13 +208,14 @@ impl VerterHost {
                 import.source.as_str(),
                 verter_session_query::resolution::ResolveRequestKind::EsmImport,
             ) {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    let Some(dep_canonical) = admitted.into_result() else {
+                verter_workspace::ResolutionPublication::Refused(_) => return None,
+                // The reference answers this read and retains nothing.
+                publication => {
+                    let Some(dep_canonical) = publication.into_delivered().flatten() else {
                         continue;
                     };
                     dep_canonical
                 }
-                verter_workspace::ResolutionPublication::Refused(_) => return None,
             };
             for binding in import.bindings.iter() {
                 if binding.is_type_only || matches!(binding.kind, ImportBindingKind::Namespace) {
@@ -458,15 +459,15 @@ impl VerterHost {
         result.value
     }
 
-    pub(super) fn compute_fallthrough_surface_uncached(
+    pub(super) fn compute_fallthrough_surface_uncached<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        ctx: &dyn crate::resolver_core::HostRequestContext,
+        ctx: &dyn crate::resolver_core::HostRequestContext<M>,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
     ) -> Option<crate::types::FallthroughResolution> {
         // Try to reuse an already-cached Expanded resolved state before recomputing.
@@ -509,16 +510,18 @@ impl VerterHost {
     /// completeness covers the whole surface — and a stale partial from a
     /// DISCARDED completion-fence retry cannot taint a later complete attempt,
     /// because the completeness travels with the resolution it describes.
-    pub(crate) fn compute_fallthrough_outcome_from_resolved_state(
+    pub(crate) fn compute_fallthrough_outcome_from_resolved_state<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         canonical_id: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        ctx: &dyn crate::resolver_core::HostRequestContext,
+        ctx: &dyn crate::resolver_core::HostRequestContext<M>,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
     ) -> FallthroughComputeOutcome {
         let _completeness_scope =
@@ -538,16 +541,18 @@ impl VerterHost {
         }
     }
 
-    pub(crate) fn compute_fallthrough_surface_from_resolved_state(
+    pub(crate) fn compute_fallthrough_surface_from_resolved_state<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         canonical_id: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        ctx: &dyn crate::resolver_core::HostRequestContext,
+        ctx: &dyn crate::resolver_core::HostRequestContext<M>,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
     ) -> Option<crate::types::FallthroughResolution> {
         // INTERNAL backstop (install-if-none, NEVER install-always): a direct
@@ -925,18 +930,18 @@ impl VerterHost {
         materialized
     }
 
-    pub(super) fn build_generic_child_prop_overrides(
+    pub(super) fn build_generic_child_prop_overrides<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         overrides_in: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Option<crate::resolver_core::FallthroughPropOverrideSet> {
@@ -994,7 +999,7 @@ impl VerterHost {
         }
     }
 
-    pub(super) fn resolve_root_consumption(
+    pub(super) fn resolve_root_consumption<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
@@ -1003,11 +1008,11 @@ impl VerterHost {
         has_unknown_spread: bool,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> ResolvedConsumedBindings {
@@ -1117,18 +1122,18 @@ impl VerterHost {
         resolved
     }
 
-    pub(super) fn resolve_dynamic_root_candidates(
+    pub(super) fn resolve_dynamic_root_candidates<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Vec<DynamicRootCandidate> {

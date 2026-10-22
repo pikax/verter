@@ -19,7 +19,7 @@ use super::super::store_scan::{
 };
 use super::TemplateProjector;
 
-impl TemplateProjector<'_, '_> {
+impl<M: verter_audit::observe::ObserveExec> TemplateProjector<'_, '_, M> {
     /// Rewrite every markup-expression construct that the projector lowers
     /// IN-PLACE within an expression `span` (a markup expression that stays an
     /// Original chunk — a markup interpolation, a plain attribute value, a
@@ -81,7 +81,7 @@ impl TemplateProjector<'_, '_> {
             return pattern_text.to_string();
         }
         let allocator = oxc_allocator::Allocator::default();
-        let mut ct = CodeTransform::new(pattern_text, &allocator);
+        let mut ct = CodeTransform::<M>::new_in(pattern_text, &allocator);
         // F6 await-EXPRESSIONS first, then F11 store-subs — disjoint ranges, so
         // order does not affect correctness.
         let rewrote_await = rewrite_pattern_default_awaits_on(&mut ct, pattern_text);
@@ -157,12 +157,13 @@ impl TemplateProjector<'_, '_> {
 /// in a re-emitted markup expression would be INVALID TSX — every text entry now
 /// routes the await rewrite, so no markup await position leaks a raw keyword.
 fn rewrite_store_subs_text_with_scan(text: &str, subs: Vec<StoreSub>) -> String {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let has_await = text.contains("await");
     if subs.is_empty() && !has_await {
         return text.to_string();
     }
     let allocator = oxc_allocator::Allocator::default();
-    let mut ct = CodeTransform::new(text, &allocator);
+    let mut ct = CodeTransform::<M>::new_in(text, &allocator);
     // F6 await-EXPRESSIONS first (overwrites the `await ` keyword run); then F11
     // store-subs (overwrites the `$` / operator bytes). The two ranges are
     // disjoint, so order does not affect correctness.
@@ -173,6 +174,8 @@ fn rewrite_store_subs_text_with_scan(text: &str, subs: Vec<StoreSub>) -> String 
         rewrite_store_sub(&mut ct, 0, sub);
     }
     ct.build_string()
+
+    })
 }
 
 /// Rewrite ONE classified store auto-subscription (F11) through the F11 prelude
@@ -192,7 +195,11 @@ fn rewrite_store_subs_text_with_scan(text: &str, subs: Vec<StoreSub>) -> String 
 /// occurrence is unmapped text (it is generated read machinery, not a user
 /// token, so it carries no source position — the primary occurrence is the one
 /// hover/go-to resolves).
-pub(super) fn rewrite_store_sub(ct: &mut CodeTransform, base: u32, sub: &StoreSub) {
+pub(super) fn rewrite_store_sub(
+    ct: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
+    base: u32,
+    sub: &StoreSub,
+) {
     let dollar = base + sub.dollar;
     let ident_end = base + sub.ident_end;
     let name = sub.name.as_str();

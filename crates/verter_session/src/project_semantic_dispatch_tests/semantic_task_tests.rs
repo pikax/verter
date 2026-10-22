@@ -369,7 +369,7 @@ fn primitive_conditional_key(
     check: verter_type_engine::semantic_query::SemanticNodeId,
     extends: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> SemanticQueryKey {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     SemanticQueryKey::Conditional {
@@ -392,7 +392,7 @@ fn primitive_conditional_key(
 fn a_semantic_task_inherits_and_returns_the_free_type_variable_summaries() {
     let host = chain_host();
     let dispatch = ProjectSemanticDispatch::new(&*host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let read = dispatch.execute_read(primitive_conditional_key(&dispatch, number, string));

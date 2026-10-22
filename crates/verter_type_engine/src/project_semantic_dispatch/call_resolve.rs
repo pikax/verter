@@ -303,6 +303,22 @@ impl CallSuspension {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// The resolution the request kept for `key` — a member of a relation
+    /// component the request completed for itself — read where the family
+    /// memo's warm entry would be. Its receipt is not admitted yet.
+    pub(super) fn kept_call_result(
+        &self,
+        key: &ResolveCallKey,
+    ) -> Option<crate::semantic_query::CacheRead<crate::semantic_query::ResolvedCallResult>> {
+        self.kept_value_read(
+            &SemanticQueryKey::ResolveCall(Box::new(key.clone())),
+            |value| match value {
+                SemanticQueryValue::ResolveCall(result) => Some(result.as_ref().clone()),
+                _ => None,
+            },
+        )
+    }
+
     /// `value` with its polymorphic `this` bound to the call's `receiver`,
     /// when the call has one.
     fn receiver_bound_return(
@@ -333,7 +349,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // beneath a `FlowReturn` root leaves no trace of the family that decided
         // its overload, and the audit record under-reports the query families the
         // resolution actually touched.
-        crate::observe_request!(|ctx| {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
             ctx.record_dispatched_query_tag(
                 crate::semantic_query::SemanticQueryKeyTag::ResolveCall,
             );
@@ -352,7 +368,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return (ResolveCallStep::Complete(result.clone()), None);
             }
         }
-        if let Some(served) = self.graph().get_resolve_call_result(self.ctx, &key) {
+        if let Some(served) = self
+            .graph()
+            .get_resolve_call_result(self.ctx, &key)
+            .or_else(|| self.kept_call_result(&key))
+        {
             if self.admits_served(&served.receipt) {
                 self.fold_cache_read_rails(
                     served.result_is_partial(),
@@ -1185,7 +1205,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         inline_flight: root.inline_flight,
                         self_roots: root.self_roots,
                     }
-                    .held(self.graph());
+                    .held(self.graph().store());
                     self.dispatch_txn
                         .borrow_mut()
                         .call
@@ -1276,10 +1296,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (relation_members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
@@ -2235,7 +2252,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|completed| (completed.fixed.clone(), completed.diagnostic))
             .unwrap_or_default();
         let contextual_substitution = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             contextual_fixed.iter().map(|(&p, &b)| (p, b)).collect(),
         );
         let (params, visible_type_params) = match graph.node_data(candidate.node).as_deref() {
@@ -2368,7 +2385,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
 
         let setup = InferenceSessionSetup::new(
-            self.graph(),
+            self.graph().store(),
             self.call_inference_infos(&visible_type_params),
             VariancePhase::Covariant,
             InferencePassKind::CallApplicability,
@@ -2405,7 +2422,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None => (
                 self.dispatch_txn
                     .borrow_mut()
-                    .push_collecting_session(setup, None),
+                    .push_collecting_session(setup),
                 None,
                 None,
             ),
@@ -2564,6 +2581,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 arguments.len(),
                 argument.clone(),
                 graph,
+                self.construction_meter(),
                 &mut canonical_evidence,
             );
             // An argument relation whose operands need a demand its frame has
@@ -2629,7 +2647,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         argument.literal_mode,
                         argument.literal_provenance.as_deref(),
                         &visible_type_params,
-                        true,
+                        Some(argument.node),
                     );
                     if !budget.charge_accepted_deposits(
                         self.accepted_inference_deposits() - deposits_before,
@@ -2657,7 +2675,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 literal_mode,
                 argument.literal_provenance.as_deref(),
                 &visible_type_params,
-                false,
+                None,
             );
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
@@ -2721,26 +2739,53 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // instantiated in the context of its parameter's signature, the
         // callee's type parameters read with what the arguments inferred
         // so far (the checker's fixing mapper), and related as that
-        // instantiation.
+        // instantiation — or, for a callee returning one non-generic
+        // signature, related with its own type parameters kept, which the
+        // returned signature then declares.
+        let mut propagated_type_parameters: Vec<crate::semantic_query::TypeParamDecl> = Vec::new();
+        // The generic function arguments related with their own type
+        // parameters kept, and the clause-free signature each related as —
+        // what the applicability check below relates in their place.
+        let mut propagated_arguments: Vec<(usize, SemanticNodeId)> = Vec::new();
         for (index, signature, target) in generic_function_arguments {
             let argument = &arguments[index];
             let return_structure = match &candidate.return_carrier {
                 SignatureReturnCarrier::Declared(declared) => Some(*declared),
                 _ => None,
             };
-            let source = match self.generic_function_in_context(
-                session_id,
-                &raw_type_params,
-                (signature, target),
-                return_structure,
-                budget,
-                own_return_function.as_ref(),
-            ) {
-                Ok(Some(instantiated)) => instantiated,
-                Ok(None) => argument.node,
-                Err(failure) => {
-                    self.abandon_session(session_id);
-                    return CandidateVerdict::Degraded(failure);
+            let propagation = return_structure.and_then(|returned| {
+                self.generic_function_propagation(
+                    session_id,
+                    &raw_type_params,
+                    returned,
+                    signature,
+                    target,
+                )
+            });
+            let source = if let Some((own, type_parameters)) = propagation {
+                let (own, type_parameters) = self.unique_propagated_type_parameters(
+                    own,
+                    type_parameters,
+                    &propagated_type_parameters,
+                );
+                propagated_type_parameters.extend(type_parameters);
+                propagated_arguments.push((index, own));
+                own
+            } else {
+                match self.generic_function_in_context(
+                    session_id,
+                    &raw_type_params,
+                    (signature, target),
+                    return_structure,
+                    budget,
+                    own_return_function.as_ref(),
+                ) {
+                    Ok(Some(instantiated)) => instantiated,
+                    Ok(None) => argument.node,
+                    Err(failure) => {
+                        self.abandon_session(session_id);
+                        return CandidateVerdict::Degraded(failure);
+                    }
                 }
             };
             let deposits_before = self.accepted_inference_deposits();
@@ -2752,7 +2797,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 argument.literal_mode,
                 argument.literal_provenance.as_deref(),
                 &visible_type_params,
-                false,
+                None,
             );
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
@@ -2880,7 +2925,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.abandon_session(session_id);
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                 };
-                let prefix = CanonicalTypeSubstitution::new(self.graph(), substitution.clone());
+                let prefix =
+                    CanonicalTypeSubstitution::new(self.graph().store(), substitution.clone());
                 substitution.push((decl.param, self.substitute_canonical(default, &prefix)));
             }
         }
@@ -2889,9 +2935,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .iter()
                 .map(|binding| (binding.param, binding.bound)),
         );
-        let substitution = CanonicalTypeSubstitution::new(self.graph(), substitution);
+        let substitution = CanonicalTypeSubstitution::new(self.graph().store(), substitution);
         let substitution = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             substitution
                 .bindings()
                 .iter()
@@ -2957,7 +3003,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitution
         } else {
             let rebound = CanonicalTypeSubstitution::new(
-                self.graph(),
+                self.graph().store(),
                 substitution
                     .bindings()
                     .iter()
@@ -2975,7 +3021,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .collect(),
             );
             let substitution = CanonicalTypeSubstitution::new(
-                self.graph(),
+                self.graph().store(),
                 rebound
                     .bindings()
                     .iter()
@@ -3051,6 +3097,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 arguments.len(),
                 argument.clone(),
                 graph,
+                self.construction_meter(),
                 &mut canonical_evidence,
             );
             self.deposit_canonical_evidence(canonical_evidence);
@@ -3078,6 +3125,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             let (source, freshness_origin, _) = argument_source(argument, target);
+            let source = propagated_arguments
+                .iter()
+                .find(|(position, _)| *position == index)
+                .map_or(source, |(_, own)| *own);
             let target = self.substitute_canonical(target, &substitution);
             match decided_call_relation(
                 self.call_relation(source, target, freshness_origin, budget, false, true),
@@ -3162,8 +3213,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // An uninferred parameter reads as itself, its constraint on it,
             // the way the checker reads a literal context through a type
             // parameter's constraint.
-            let inferred = CanonicalTypeSubstitution::new(
+            let inferences = CanonicalTypeSubstitution::new(
                 self.graph(),
+                substitution
+                    .bindings()
+                    .iter()
+                    .copied()
+                    .filter(|(param, _)| !uninferred_params.contains(param))
+                    .collect(),
+            );
+            let inferred = CanonicalTypeSubstitution::new(
+                self.graph().store(),
                 substitution
                     .bindings()
                     .iter()
@@ -3176,6 +3236,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.contextual_uninferred_parameter(
                                 *param,
                                 constraints.get(param).copied().flatten(),
+                                &inferences,
                             ),
                         )
                     })
@@ -3271,6 +3332,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let instantiated =
                     self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution));
+                let instantiated = self.declaring_propagated_type_parameters(
+                    instantiated,
+                    &propagated_type_parameters,
+                );
                 concrete_seeds.push(self.evaluate_selected_value_with_context(
                     instantiated,
                     crate::semantic_query::ProjectionReductionContext::published(
@@ -3397,7 +3462,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                             _ => vec![*bound],
                                         };
                                     candidates.into_iter().any(|candidate| {
-                                        super::enum_type::is_literal_type(graph, candidate)
+                                        super::enum_type::is_literal_type(graph.store(), candidate)
                                             && self.binding_is_fresh_literal_deposit(
                                                 session_id, *param, candidate,
                                             )
@@ -3728,6 +3793,224 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         generic(signature).then_some(signature)
     }
 
+    /// The checker's higher-order function type inference
+    /// (`instantiateTypeWithSingleGenericCallSignature` under an inference
+    /// context whose signature returns one non-generic signature): the
+    /// generic function argument `signature` relates to `target` with its
+    /// own type parameters left free, and the call's returned signature
+    /// declares them — `wrap(id)` over `wrap<A extends unknown[], R>(fn:
+    /// (...args: A) => R): (...args: A) => R` and `id<T extends string>(x:
+    /// { v: T }): { v: T }` is `<T extends string>(x: { v: T }) => { v: T
+    /// }`. The argument's signature without its clause and the clause;
+    /// `None` when `returned`, the callee's declared return, is not one
+    /// non-generic signature, when every type parameter of the callee's
+    /// `type_params` has inferences already, when inferring from the
+    /// argument's parameter types to `target`'s infers none of them
+    /// (`memo(idf)` over `memo<R>(fn: (x: string) => R): () => R` reads
+    /// `idf` in its parameter's context), or when what the parameter and
+    /// return types infer overlaps an inference already made
+    /// (`hasOverlappingInferences`).
+    fn generic_function_propagation(
+        &self,
+        session_id: super::dispatch_txn::SessionId,
+        type_params: &[crate::semantic_query::TypeParamDecl],
+        returned: SemanticNodeId,
+        signature: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(SemanticNodeId, Vec<crate::semantic_query::TypeParamDecl>)> {
+        let single =
+            |node: SemanticNodeId| match self.shared_signature_nodes(node, SignatureKind::Call) {
+                super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                    match nodes.as_slice() {
+                        [one] => Some(*one),
+                        _ => None,
+                    }
+                }
+                super::signature_discovery::SharedSignatureNodes::Incomplete(_) => None,
+            };
+        let returned = single(returned)?;
+        if !matches!(
+            self.graph().node_data(returned).as_deref(),
+            Some(SemanticNodeData::Signature { type_parameters, .. }) if type_parameters.is_empty()
+        ) {
+            return None;
+        }
+        let inputs = {
+            let txn = self.dispatch_txn.borrow();
+            txn.relation
+                .session(session_id)
+                .and_then(|session| session.fixation_inputs())
+        }?;
+        if inputs.iter().all(|input| !input.candidates.is_empty()) {
+            return None;
+        }
+        let type_parameters: Vec<crate::semantic_query::TypeParamDecl> =
+            match self.graph().node_data(signature).as_deref() {
+                Some(SemanticNodeData::Signature {
+                    type_parameters, ..
+                }) => type_parameters
+                    .iter()
+                    .map(crate::semantic_query::TypeParamDecl::copy)
+                    .collect(),
+                _ => return None,
+            };
+        let own = self.signature_without_type_parameters(signature);
+        let contextual = single(target)?;
+        // Inference from the argument's parameter types into the contextual
+        // signature's, from a fresh set of inferences.
+        let plan = self
+            .signature_comparison_plan(own, contextual, SignatureKind::Call, false)
+            .ok()?;
+        let from_parameters = self.signature_inference_inputs(type_params, &plan.positions)?;
+        if from_parameters
+            .iter()
+            .all(|input| input.candidates.is_empty())
+        {
+            return None;
+        }
+        let returns = |node: SemanticNodeId| match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
+            _ => None,
+        };
+        let from_return =
+            self.signature_inference_inputs(type_params, &[(returns(own)?, returns(contextual)?)])?;
+        let inferred =
+            |param: SemanticNodeId, inputs: &[super::inference::session::FixationInput]| {
+                inputs
+                    .iter()
+                    .any(|input| input.param == param && !input.candidates.is_empty())
+            };
+        if type_params.iter().any(|decl| {
+            inferred(decl.param, &inputs)
+                && (inferred(decl.param, &from_parameters) || inferred(decl.param, &from_return))
+        }) {
+            return None;
+        }
+        Some((own, type_parameters))
+    }
+
+    /// The type parameters a generic function argument keeps
+    /// ([`Self::generic_function_propagation`]) made distinct from those the
+    /// call's earlier arguments kept, and `own`, its clause-free signature,
+    /// reading them (the checker's `getUniqueTypeParameters`): one whose
+    /// name an earlier kept parameter, or an earlier one of this clause,
+    /// already holds is a fresh binder named past every such name — its
+    /// trailing digits dropped, then the least index appended that none
+    /// holds — so `pair(idf, idf)` declares `<T, T1>`, two binders, not
+    /// one `T` twice. A renamed binder's constraint and default read the
+    /// renames made before it.
+    fn unique_propagated_type_parameters(
+        &self,
+        own: SemanticNodeId,
+        type_parameters: Vec<crate::semantic_query::TypeParamDecl>,
+        kept: &[crate::semantic_query::TypeParamDecl],
+    ) -> (SemanticNodeId, Vec<crate::semantic_query::TypeParamDecl>) {
+        let holds = |declared: &[crate::semantic_query::TypeParamDecl], name: &str| {
+            declared.iter().any(|decl| decl.name.as_ref() == name)
+        };
+        let mut unique: Vec<crate::semantic_query::TypeParamDecl> =
+            Vec::with_capacity(type_parameters.len());
+        let mut renames: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        for decl in type_parameters {
+            let name = decl.name.as_ref();
+            if !holds(kept, name) && !holds(&unique, name) {
+                unique.push(decl);
+                continue;
+            }
+            let digits = name.bytes().rev().take_while(u8::is_ascii_digit).count();
+            let base = &name[..(name.len() - digits).max(name.len().min(1))];
+            // bounded-loop: at most one index per name already held.
+            let fresh = (1..=kept.len() + unique.len() + 1)
+                .map(|index| format!("{base}{index}"))
+                .find(|candidate| !holds(kept, candidate) && !holds(&unique, candidate))
+                .expect("fewer held names than candidate indices");
+            let renamed = CanonicalTypeSubstitution::new(self.graph(), renames.clone());
+            let constraint = decl
+                .constraint
+                .map(|constraint| self.substitute_canonical(constraint, &renamed));
+            let default = decl
+                .default
+                .map(|default| self.substitute_canonical(default, &renamed));
+            let Some(param) = self.renamed_type_parameter(decl.param, &fresh, constraint, default)
+            else {
+                unique.push(decl);
+                continue;
+            };
+            renames.push((decl.param, param));
+            unique.push(crate::semantic_query::TypeParamDecl {
+                name: verter_type_expr::OwnedStr::from(fresh.as_str()),
+                param,
+                constraint,
+                default,
+                is_const: decl.is_const,
+            });
+        }
+        if renames.is_empty() {
+            return (own, unique);
+        }
+        let renamed = CanonicalTypeSubstitution::new(self.graph(), renames);
+        (self.substitute_canonical(own, &renamed), unique)
+    }
+
+    /// A binder distinct from the type parameter `param`, named `name`,
+    /// bounded by `constraint` and defaulting to `default`: `param`'s
+    /// declaration identity with `name` joined to its declaration name by a
+    /// separator no identifier holds, so neither an authored binder nor
+    /// another rename of `param` to a different name shares it. `None`
+    /// when `param` is no type parameter.
+    fn renamed_type_parameter(
+        &self,
+        param: SemanticNodeId,
+        name: &str,
+        constraint: Option<SemanticNodeId>,
+        default: Option<SemanticNodeId>,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let data = graph.node_data(param)?;
+        let SemanticNodeData::TypeParam {
+            decl, param_index, ..
+        } = data.as_ref()
+        else {
+            return None;
+        };
+        let mut decl = decl.clone();
+        decl.decl_name = verter_type_expr::OwnedStr::from(format!("{}\u{1}{name}", decl.decl_name));
+        Some(graph.intern_node(SemanticNodeData::TypeParam {
+            decl,
+            param_index: *param_index,
+            constraint,
+            default,
+            display_name: verter_type_expr::OwnedStr::from(name),
+        }))
+    }
+
+    /// `returned`, a call's instantiated non-generic return signature,
+    /// declaring the type parameters its generic function arguments kept
+    /// ([`Self::generic_function_propagation`]); `returned` itself when
+    /// none were kept or it is no such signature.
+    fn declaring_propagated_type_parameters(
+        &self,
+        returned: SemanticNodeId,
+        propagated: &[crate::semantic_query::TypeParamDecl],
+    ) -> SemanticNodeId {
+        if propagated.is_empty()
+            || !matches!(
+                self.graph().node_data(returned).as_deref(),
+                Some(SemanticNodeData::Signature { type_parameters, .. })
+                    if type_parameters.is_empty()
+            )
+        {
+            return returned;
+        }
+        self.signature_with_type_parameters(
+            returned,
+            propagated
+                .iter()
+                .map(crate::semantic_query::TypeParamDecl::copy)
+                .collect(),
+        )
+    }
+
     /// `signature`, a generic function argument's, instantiated in the
     /// context of `target`'s one call signature with the callee's type
     /// parameters read as the session has inferred them so far (the
@@ -3767,7 +4050,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|(_, binding)| binding)
             .collect();
         let inferred = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             inferred
                 .iter()
                 .map(|binding| (binding.param, binding.bound))
@@ -3805,9 +4088,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         literal_mode: ArgumentLiteralMode,
         literal_provenance: Option<&crate::semantic_query::ArgumentLiteralProvenance>,
         declared: &[crate::semantic_query::TypeParamDecl],
-        first_pass: bool,
+        first_pass_of: Option<SemanticNodeId>,
     ) -> RelationStep {
         let top_level = self.top_level_type_param_targets(target);
+        let withheld = first_pass_of
+            .map(|argument| self.first_pass_withheld_targets(source, argument, target));
         let (source, context_keeps) = if literal_mode == ArgumentLiteralMode::Widened {
             self.checked_literal_argument(source, target, declared, literal_provenance)
         } else {
@@ -3818,7 +4103,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             top_level,
             Some(source),
             context_keeps,
-            first_pass,
+            withheld,
         );
         let step = self.call_relation(source, target, freshness_origin, budget, true, true);
         self.dispatch_txn.borrow_mut().end_call_argument();
@@ -3905,7 +4190,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             ),
-            readonly: policy == Some(ConstParamPolicy::Const),
+            readonly: policy == Some(ConstParamPolicy::Const)
+                && !self.const_context_is_mutable_array_like(target),
         });
         if !binding_enabled {
             return self.call_relation(source, target, source, budget, false, false);
@@ -3915,7 +4201,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Vec::new(),
             None,
             Vec::new(),
-            false,
+            None,
         );
         let step = self.call_relation(source, target, source, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
@@ -3971,7 +4257,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Vec::new(),
             None,
             Vec::new(),
-            false,
+            None,
         );
         let step = self.call_relation(source, target, freshness_origin, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
@@ -4328,7 +4614,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let fresh: Vec<SemanticNodeId> = candidates
                 .into_iter()
                 .filter(|candidate| {
-                    super::enum_type::is_literal_type(graph, *candidate)
+                    super::enum_type::is_literal_type(graph.store(), *candidate)
                         && self.binding_is_fresh_literal_deposit(session_id, *param, *candidate)
                 })
                 .collect();
@@ -4389,7 +4675,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Result<CanonicalTypeSubstitution, ResolveCallFailure> {
         let mut bindings = widened.bindings().to_vec();
         for defaulted in defaulted {
-            let current = CanonicalTypeSubstitution::new(self.graph(), bindings.clone());
+            let current = CanonicalTypeSubstitution::new(self.graph().store(), bindings.clone());
             let mut bound = self.substitute_canonical(defaulted.default, &current);
             if let Some(constraint) = defaulted.constraint {
                 let constraint = self.substitute_canonical(constraint, &current);
@@ -4409,7 +4695,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 None => bindings.push((defaulted.param, bound)),
             }
         }
-        Ok(CanonicalTypeSubstitution::new(self.graph(), bindings))
+        Ok(CanonicalTypeSubstitution::new(
+            self.graph().store(),
+            bindings,
+        ))
     }
 
     /// The widened substitution described above; a fresh deposit whose
@@ -4428,7 +4717,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for (param, bound) in substitution.bindings() {
             // Whether one candidate is a fresh literal deposit.
             let is_fresh = |candidate: SemanticNodeId| {
-                super::enum_type::is_literal_type(graph, candidate)
+                super::enum_type::is_literal_type(graph.store(), candidate)
                     && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
             };
             // One candidate widens when it is a fresh literal deposit.
@@ -4487,7 +4776,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             any_widened |= widened != *bound;
             widened_bindings.push((*param, widened));
         }
-        Ok(any_widened.then(|| CanonicalTypeSubstitution::new(self.graph(), widened_bindings)))
+        Ok(any_widened
+            .then(|| CanonicalTypeSubstitution::new(self.graph().store(), widened_bindings)))
     }
 
     pub(super) fn call_inference_candidate(
@@ -5088,13 +5378,14 @@ fn call_candidate_arity(
     }
 }
 
-fn mapped_parameter_type(
+fn mapped_parameter_type<M: verter_audit::observe::ObserveExec>(
     params: &[FunctionParam],
     rest: Option<&RestParam<'_>>,
     index: usize,
     argument_count: usize,
     argument: CallArgument,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<SemanticNodeId> {
     // An INDEFINITE spread supplies an unknown-length tail, so it never
@@ -5103,7 +5394,7 @@ fn mapped_parameter_type(
     if !argument.indefinite_spread {
         if let Some(param) = params.get(index) {
             if !param.rest {
-                return Some(optional_parameter_target(param, graph, evidence));
+                return Some(optional_parameter_target(param, graph, meter, evidence));
             }
         }
     }
@@ -5163,9 +5454,10 @@ fn mapped_parameter_type(
 /// position's check type is `T | undefined` (a defaulted parameter takes
 /// its default there). A declared type already carrying the `undefined`
 /// arm keeps its own node.
-fn optional_parameter_target(
+fn optional_parameter_target<M: verter_audit::observe::ObserveExec>(
     param: &FunctionParam,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> SemanticNodeId {
     if !param.optional {
@@ -5179,11 +5471,13 @@ fn optional_parameter_target(
     // (`T | undefined`) routes through the one authority (which also
     // flattens a union-typed `T`); the evidence threads to the caller's
     // disposition boundary.
-    let composite = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        graph,
-        &[param.ty, undefined],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let composite =
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_charged(
+            graph,
+            &[param.ty, undefined],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            meter,
+        );
     evidence.absorb(composite.evidence);
     composite.node
 }
@@ -5195,11 +5489,11 @@ fn optional_parameter_target(
 /// that is exactly the trailing rest element is that element's own array
 /// type, which an indefinite spread relates against directly. Any other
 /// suffix re-interns the remaining elements as their own tuple.
-fn tuple_suffix_target(
+fn tuple_suffix_target<M: verter_audit::observe::ObserveExec>(
     elements: &Arc<[crate::semantic_query::TupleElement]>,
     offset: usize,
     declared: SemanticNodeId,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
 ) -> Option<SemanticNodeId> {
     if offset == 0 {
         return Some(declared);

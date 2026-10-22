@@ -1842,7 +1842,12 @@ fn with_dispatch<R>(
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
@@ -2108,11 +2113,13 @@ fn flow_return_destructured_param_element_binds_the_annotation_member() {
 fn flow_return_local_binding_never_resolves_to_a_cross_file_import() {
     let host = make_r5_host();
     let constructor = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![verter_type_expr::ObjectMember::ConstructSignature(
             verter_type_expr::FunctionExpr::synthetic(
                 Vec::new(),
                 Some(Arc::new(TypeExpr::Object(Arc::new(
                     verter_type_expr::ObjectExpr {
+                        empty_literal: false,
                         properties: Vec::new(),
                     },
                 )))),

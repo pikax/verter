@@ -280,7 +280,7 @@ impl ProjectionEmission {
     /// always [`MappingProduct::of`] the current record. Authored origins
     /// require [`Self::from_plan`].
     pub fn from_operation(
-        transform: &CodeTransform<'_>,
+        transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
         observations: Vec<RoleQualifiedObservation>,
     ) -> Result<Self, EmissionRefusal> {
         let checking_text = transform.build_string();
@@ -292,7 +292,7 @@ impl ProjectionEmission {
     /// the lineage the plan was observed against; transform original bytes
     /// must mint that same snapshot.
     pub fn from_plan(
-        transform: &CodeTransform<'_>,
+        transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
         plan: &ProjectionPlan,
         canonical_id: &str,
         observations: Vec<RoleQualifiedObservation>,
@@ -321,7 +321,7 @@ impl ProjectionEmission {
     /// text and geometry cannot keep a stale source identity.
     pub fn reuse_mapping(
         previous: &Self,
-        transform: &CodeTransform<'_>,
+        transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
         current: Option<(&ProjectionPlan, &str)>,
         observations: Vec<RoleQualifiedObservation>,
     ) -> Result<Self, EmissionRefusal> {
@@ -489,7 +489,7 @@ impl ProjectionEmission {
 #[must_use]
 pub fn projected_class_for_emit_op(
     op: &EmitOp<'_>,
-    transform: &CodeTransform<'_>,
+    transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
 ) -> Vec<(MappingSpan, ProjectedClass)> {
     projected_class_for_emit_op_with(op, &MappingProduct::of(transform))
 }
@@ -565,7 +565,7 @@ fn mapped_insertion_classes(len: u32, content_offset: u32) -> Vec<(MappingSpan, 
 /// Compose an upstream preprocessor/external map through the transform that
 /// owns the current bytes. No independent map generator.
 pub fn compose_source_chain(
-    transform: &CodeTransform<'_>,
+    transform: &CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
     upstream: &oxc_sourcemap::SourceMap<'_>,
 ) -> Result<oxc_sourcemap::SourceMap<'static>, SourceMapChainError> {
     transform.chain_source_map(upstream)
@@ -1790,7 +1790,7 @@ mod tests {
         source: &'a str,
         preamble: &str,
         carrier_anchor: u32,
-    ) -> CodeTransform<'a> {
+    ) -> CodeTransform<'a, impl verter_audit::observe::ObserveExec> {
         let mut ct = CodeTransform::new(source, allocator);
         let allocated = ct.alloc_str(preamble);
         ct.batch_prepend_left_static(&[(0, allocated)]);

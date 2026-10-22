@@ -34,6 +34,13 @@ use crate::semantic_query_memo::ObservedGraphSelfRoot;
 /// declarations chose its properties.
 pub(super) type ModuleObject = (SemanticNodeId, Vec<ObservedGraphSelfRoot>);
 
+/// A selected imported value, or the namespace left when every qualifier
+/// selected a namespace re-export.
+pub(super) enum ImportValueTarget {
+    Query(Box<SemanticQueryKey>),
+    Namespace(verter_type_expr::OwnedStr),
+}
+
 fn file_root(
     canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
@@ -57,6 +64,58 @@ fn push_root(roots: &mut Vec<ObservedGraphSelfRoot>, root: ObservedGraphSelfRoot
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// A qualified import reads its selected value directly. Keeping the
+    /// query as a plan lets a projection suspend on it, and leaves unrelated
+    /// exports cold. Whole module objects retain their namespace builder.
+    pub(super) fn import_value_target(
+        &self,
+        module: &str,
+        qualifier: &[verter_type_expr::OwnedStr],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<ImportValueTarget> {
+        let mut module = verter_type_expr::OwnedStr::from(module);
+        let mut path = qualifier;
+        // bounded-loop: each namespace consumes a qualifier segment; work
+        // exhaustion folds a typed partial into the enclosing build.
+        let (root, path) = loop {
+            if let Some(root) = self.export_assignment_root(&module) {
+                break (root, path);
+            }
+            let Some((first, rest)) = path.split_first() else {
+                return Some(ImportValueTarget::Namespace(module));
+            };
+            let table = self.ctx.module_export_table(&module)?;
+            self.ctx.observe_borrowed_signature(&table.facts);
+            match table.bindings.get(first.as_ref())?.as_ref()? {
+                ModuleExportBinding::Value(identity) => {
+                    break (
+                        file_root(
+                            &identity.canonical_id,
+                            identity.owner,
+                            &identity.symbol_name,
+                        ),
+                        rest,
+                    );
+                }
+                ModuleExportBinding::Namespace(dependency) => {
+                    if let Err(reasons) = self.connected_demand().charge_units(1) {
+                        self.fold_local_partial_completeness(reasons);
+                        return None;
+                    }
+                    module = dependency.clone();
+                    path = rest;
+                }
+            }
+        };
+        Some(ImportValueTarget::Query(Box::new(
+            self.typeof_key_with_path(
+                root,
+                verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice()),
+                context,
+            ),
+        )))
+    }
+
     /// The module object the value root names when read whole, if it names
     /// one: a namespace import (or an import assignment of a module without
     /// `export =`), or a namespace this file declares — in its own scope or
@@ -200,16 +259,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         identity.owner,
                         identity.symbol_name.as_ref(),
                     );
-                    match self.execute_read(self.typeof_key_for(root, context)).value {
-                        QueryResult::Value(node)
-                            if !matches!(
-                                self.graph().node_data(node).as_deref(),
-                                Some(SemanticNodeData::Opaque(_)) | None
-                            ) =>
-                        {
-                            node
+                    if context.mode == crate::semantic_query::ProjectionMode::Navigate {
+                        // The export table already proves value membership. Navigation
+                        // needs the namespace's keys, not every export's type; the
+                        // selected member's TypeOf is resolved by its consumer.
+                        match self.scoped_typeof_carrier(root) {
+                            Some(node) => node,
+                            None => continue,
                         }
-                        _ => continue,
+                    } else {
+                        match self.execute_read(self.typeof_key_for(root, context)).value {
+                            QueryResult::Value(node)
+                                if !matches!(
+                                    self.graph().node_data(node).as_deref(),
+                                    Some(SemanticNodeData::Opaque(_)) | None
+                                ) =>
+                            {
+                                node
+                            }
+                            _ => continue,
+                        }
                     }
                 }
                 Some(ModuleExportBinding::Namespace(dependency)) => {
@@ -321,9 +390,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
+        let (object, roots) =
+            self.global_namespace_object_observed(demand_canonical, name, context);
+        object.map(|object| (object, roots))
+    }
+
+    /// [`Self::global_namespace_object`] with the file of every script
+    /// declaring a namespace of the name it read, its object or not: an
+    /// edit making a type-only namespace declare a value misses a read
+    /// that found none.
+    fn global_namespace_object_observed(
+        &self,
+        demand_canonical: &str,
+        name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> (Option<SemanticNodeId>, Vec<ObservedGraphSelfRoot>) {
         use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if name.contains('.') {
-            return None;
+            return (None, Vec::new());
         }
         let population = self.global_contributors_in(
             demand_canonical,
@@ -346,7 +430,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             |entry| entry.artifact_key.canonical.as_ref(),
             |_, _| std::cmp::Ordering::Equal,
         );
-        let first = declarations.first()?;
+        let Some(first) = declarations.first() else {
+            return (None, Vec::new());
+        };
         let mut roots: Vec<ObservedGraphSelfRoot> = Vec::new();
         let mut members: Vec<(Arc<str>, ValueRootKey)> = Vec::new();
         let mut seen: FxHashSet<String> = FxHashSet::default();
@@ -380,25 +466,85 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         if !instantiated {
-            return None;
+            return (None, roots);
         }
         members.sort_by(|left, right| left.0.cmp(&right.0));
         let first_canonical: Arc<str> = Arc::clone(&first.artifact_key.canonical);
-        let hash = self
+        let Some(hash) = self
             .ctx
-            .ensure_indexed_ready_serve(first_canonical.as_ref())?
-            .indexed
-            .whole_hash;
+            .ensure_indexed_ready_serve(first_canonical.as_ref())
+            .map(|serve| serve.indexed.whole_hash)
+        else {
+            return (None, roots);
+        };
         let scope = NodeScopeId::File {
             canonical_id: verter_type_expr::OwnedStr::from(first_canonical.clone()),
             owner: first.owner,
             whole_hash: hash,
             local_scope: None,
         };
-        Some((
-            self.value_object(members, scope, first_canonical.as_ref(), context),
+        (
+            Some(self.value_object(members, scope, first_canonical.as_ref(), context)),
             roots,
-        ))
+        )
+    }
+
+    /// The object of the namespace a function or a class named `name` in
+    /// `canonical` merges with, when that namespace exports a value: the
+    /// namespace its own declaration scope declares (the file's, or the
+    /// ambient block's whose member the value is), or for a script's global
+    /// every script's namespace of that name. `None` when no such namespace
+    /// exports a value, so the value stays a single declaration. The roots
+    /// are every file whose namespace of the name was read, whether or not it
+    /// merges: a read that merged nothing still depends on those namespaces
+    /// exporting no value.
+    pub(super) fn namespace_merged_into_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> (Option<SemanticNodeId>, Vec<ObservedGraphSelfRoot>) {
+        // The declaration scope the value was read from: the file's own,
+        // else the ambient block its identity falls back to.
+        let own_scope = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .and_then(|serve| {
+                let state = &serve.indexed.shallow_state;
+                if state.headers.value_header_in(owner, name).is_some() {
+                    None
+                } else {
+                    state.value_fallback_augmentation_scope(owner, name)
+                }
+            });
+        let (object, roots) =
+            if own_scope.is_none() && !name.contains('.') && !self.canonical_is_module(canonical) {
+                self.global_namespace_object_observed(canonical, name, context)
+            } else {
+                match self.namespace_object(canonical, owner, own_scope.as_ref(), name, context) {
+                    Some((object, roots)) => (Some(object), roots),
+                    None => (
+                        None,
+                        self.ctx
+                            .ensure_indexed_ready_serve(canonical)
+                            .map(|serve| {
+                                vec![(
+                                    verter_type_expr::OwnedStr::from(canonical),
+                                    serve.indexed.whole_hash,
+                                )]
+                            })
+                            .unwrap_or_default(),
+                    ),
+                }
+            };
+        let object = object.filter(|object| {
+            matches!(
+                self.graph().node_data(*object).as_deref(),
+                Some(SemanticNodeData::Object(surface)) if !surface.positive_members().is_empty()
+            )
+        });
+        (object, roots)
     }
 
     /// The object of the namespace `name` declared in `canonical` (in its
@@ -564,6 +710,29 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some(false)
     }
 
+    /// A namespace inventory already proves this root is a value. Keep its
+    /// scoped TypeOf until a consumer selects it, without evaluating siblings.
+    fn scoped_typeof_carrier(&self, root: ValueRootKey) -> Option<SemanticNodeId> {
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(root.scope.canonical_id.as_ref())?
+            .indexed;
+        let scope = NodeScopeId::File {
+            canonical_id: root.scope.canonical_id.clone(),
+            owner: root.scope.owner,
+            whole_hash: indexed.whole_hash,
+            local_scope: root.scope.local_scope,
+        };
+        Some(self.graph().intern_node_with_scope(
+            SemanticNodeData::new_typeof(
+                root,
+                verter_type_expr::OwnedSlice::from([]),
+                Arc::from([]),
+            ),
+            scope,
+        ))
+    }
+
     /// Each named root's `typeof`; a root with no value (a type-only
     /// export) is no member.
     pub(super) fn typeof_members(
@@ -593,6 +762,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     })
                 {
                     return None;
+                }
+                if context.mode == crate::semantic_query::ProjectionMode::Navigate {
+                    return self.scoped_typeof_carrier(root).map(|node| (name, node));
                 }
                 let node = match self.execute_read(self.typeof_key_for(root, context)).value {
                     QueryResult::Value(node) => node,

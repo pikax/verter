@@ -973,8 +973,11 @@ pub(super) fn registration_footprint(
 /// once for all of its slots. A candidate with no direct edge registers
 /// nothing. Called under the `entries` lock by the publish itself, before
 /// it unregisters the candidates it displaced, so evidence the newcomer
-/// shares with them stays indexed.
-pub(super) fn register_published(
+/// shares with them stays indexed. `_mode` is the publishing unit's capture
+/// execution: only a captured one records the index lock acquisition.
+pub(super) fn register_published<M: verter_audit::observe::ObserveExec>(
+    _mode: M,
+    observation: &crate::request_observers::CaptureTargets,
     canonical_to_entries: &CanonicalToEntries,
     family: &FamilyKey,
     populated: &[ModeSlot],
@@ -982,12 +985,16 @@ pub(super) fn register_published(
     read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     dispatch_dep_signature: &DepSignature,
 ) {
+    let _ = observation;
     if populated.is_empty() || direct_edge_count(read_set_signature, dispatch_dep_signature) == 0 {
         return;
     }
     // The index's lock acquisition, as request audit contention.
     #[cfg(feature = "semantic-observe")]
-    crate::request_observers::record_family_map_lock_acquisition(std::time::Duration::ZERO);
+    crate::request_observers::record_family_map_lock_acquisition::<M>(
+        observation,
+        std::time::Duration::ZERO,
+    );
     canonical_to_entries.register_fenced(
         admission_seq,
         MemoRegistration {

@@ -753,9 +753,9 @@ fn scope_kind_sort_key(kind: &verter_type_engine::semantic_query::BinderScopeKin
 /// absent from every ordinary production build (the
 /// `AppConfigNoOverrideProofDb` producer precedent).
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn produce_binder_identity_facts(
+pub(crate) fn produce_binder_identity_facts<M: verter_audit::observe::ObserveExec>(
     ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     store: &BinderIdentityFactsStore,
     canonical: &str,

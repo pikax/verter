@@ -959,7 +959,8 @@ impl FamilyKey {
                 visit(mapper.parameter_node);
                 visit(mapper.key_space);
                 visit(mapper.value_expr);
-                mapper.name_remap.into_iter().for_each(visit);
+                mapper.name_remap.into_iter().for_each(&mut visit);
+                mapper.modifiers_type.into_iter().for_each(visit);
             }
             FamilyKey::Conditional {
                 check,
@@ -1040,6 +1041,13 @@ impl FamilyKey {
                                 .flat_map(|l| l.iter())
                                 .copied()
                                 .for_each(&mut visit);
+                        }
+                        for read in literal_provenance.iter().flat_map(|p| p.fresh_reads.iter()) {
+                            for step in read.iter() {
+                                if let crate::semantic_query::ArgumentPathStep::Member(key) = step {
+                                    visit(*key);
+                                }
+                            }
                         }
                         if let Some(const_view) = const_view {
                             visit(*const_view);

@@ -36,7 +36,7 @@ use verter_type_engine::semantic_query::{
 pub(super) struct Setting {
     pub(super) root: &'static str,
     pub(super) label: &'static str,
-    options: &'static str,
+    pub(super) options: &'static str,
 }
 
 /// `strict`.
@@ -62,6 +62,13 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
     root: "/loose-implicit",
     label: "both off",
     options: r#"{ "strict": true, "strictNullChecks": false, "noImplicitAny": false }"#,
+};
+
+/// `strict` with `strictFunctionTypes` off.
+pub(super) const STRICT_FUNCTION_TYPES_OFF: Setting = Setting {
+    root: "/strict-loose-function-types",
+    label: "strictFunctionTypes off",
+    options: r#"{ "strict": true, "strictFunctionTypes": false }"#,
 };
 
 /// The four settings, in the order a four-answer row lists them.
@@ -142,6 +149,7 @@ pub(super) struct Matrix<'a> {
     /// `node_modules` — or the dependency directory the named chain of
     /// installed packages reaches — so the probe imports real packages.
     installed_packages: Option<&'a [&'a str]>,
+    installed_typescript_libs: Option<&'a [&'a str]>,
 }
 
 impl<'a> Matrix<'a> {
@@ -155,6 +163,7 @@ impl<'a> Matrix<'a> {
             files: &[],
             file_per_setting: None,
             installed_packages: None,
+            installed_typescript_libs: None,
         }
     }
 
@@ -164,6 +173,13 @@ impl<'a> Matrix<'a> {
     /// augmentations.
     pub(super) fn installed_packages(mut self) -> Self {
         self.installed_packages = Some(&[]);
+        self
+    }
+
+    /// Register the selected installed SDK libraries and their reference closure.
+    pub(super) fn installed_typescript_libs(mut self, libs: &'a [&'a str]) -> Self {
+        assert!(self.installed_packages.is_some());
+        self.installed_typescript_libs = Some(libs);
         self
     }
 
@@ -364,10 +380,18 @@ impl<'a> Matrix<'a> {
                 .trim_end()
                 .strip_suffix('}')
                 .expect("a setting's options are a JSON object");
+            let libs = self
+                .installed_typescript_libs
+                .map_or_else(String::new, |libs| {
+                    format!(
+                        ", \"lib\": {}",
+                        serde_json::to_string(libs).expect("SDK lib names")
+                    )
+                });
             std::fs::write(
                 dir.join("tsconfig.json"),
                 format!(
-                    r#"{{ "compilerOptions": {options}, "module": "esnext", "moduleResolution": "bundler", "target": "es2020", "skipLibCheck": true }} }}"#
+                    r#"{{ "compilerOptions": {options}, "module": "esnext", "moduleResolution": "bundler", "target": "es2020", "skipLibCheck": true{libs} }} }}"#
                 ),
             )
             .expect("write the project's tsconfig");
@@ -392,6 +416,85 @@ impl<'a> Matrix<'a> {
             workspace,
         ));
         host.configure_projects(configs);
+        if self.installed_typescript_libs.is_some() {
+            use verter_workspace::IntrinsicLibraryAccess;
+            let sdk = verter_workspace::NativeIntrinsicLibrary::discover(std::path::Path::new(
+                &workspace_root,
+            ));
+            assert!(
+                !sdk.list_intrinsic_libs().is_empty(),
+                "an SDK matrix needs the installed TypeScript libraries (run pnpm install)"
+            );
+            for root in &roots {
+                let project = host
+                    .resolve_project_for_canonical(&format!("{root}/probe.ts"))
+                    .expect("the probe belongs to its SDK project");
+                let workspace = host.workspace();
+                let key = workspace
+                    .project_stable_key(project)
+                    .expect("the SDK project has a stable key");
+                let options = workspace
+                    .semantic_compiler_options_for_project(project)
+                    .expect("the SDK project has compiler options");
+                let mut pending: Vec<String> = options
+                    .effective_lib_file_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                let mut seen = rustc_hash::FxHashSet::default();
+                while let Some(name) = pending.pop() {
+                    if !seen.insert(name.clone()) {
+                        continue;
+                    }
+                    let source = sdk
+                        .read_intrinsic_lib(&name)
+                        .expect("read a selected SDK library");
+                    // Registration supplies bytes and global names. The shared
+                    // program loader indexes only the configured lib closure;
+                    // eagerly upserting every SDK file also analyzes unselected
+                    // libraries and repeats that work for each project.
+                    workspace
+                        .register_ambient_lib(verter_workspace::AmbientLibSpec {
+                            project_id: Some(project),
+                            canonical_id: Arc::from(name.as_str()),
+                            source: Arc::from(source),
+                        })
+                        .expect("the SDK library registers against its project");
+                    let canonical = verter_workspace::ambient_virtual_canonical_id(key, &name);
+                    let serve = host
+                        .ensure_indexed_ready_serve_unobserved(&canonical)
+                        .expect("the selected SDK library indexes through the shared loader");
+                    pending.extend(
+                        serve
+                            .indexed
+                            .route_inventory
+                            .program_references
+                            .libs
+                            .iter()
+                            .map(|lib| {
+                                verter_session_query::inputs::program_order::library_file_name(lib)
+                                    .expect("the SDK reference names a known library")
+                                    .to_owned()
+                            }),
+                    );
+                }
+                for symbol in ["Object", "StringConstructor", "Symbol"] {
+                    assert!(
+                        workspace.lookup_ambient_symbol(key, symbol).is_some(),
+                        "the installed SDK provides {symbol} to {root}"
+                    );
+                    let space = if symbol == "Symbol" {
+                        verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace::Value
+                    } else {
+                        verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace::Type
+                    };
+                    assert!(
+                        host.program_ambient_symbol(key, symbol, space).is_some(),
+                        "the program loads SDK symbol {symbol} for {root}"
+                    );
+                }
+            }
+        }
         self.upsert_projects(&host, rows, &roots);
         (host, roots, workspace_dir)
     }
@@ -407,8 +510,10 @@ impl<'a> Matrix<'a> {
             for function in functions {
                 let store_view = host.resolver_store_view_read().into_owned_view();
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let host_ctx =
-                    crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+                let host_ctx = crate::resolver_core::HostResolverContext::<
+                    '_,
+                    verter_audit::observe::Uncaptured,
+                >::new(&host, &store_view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&host_ctx);
                 let key = verter_type_engine::semantic_query::FlowReturnKey {
                     function: dispatch.flow_function_slot_for(
@@ -446,7 +551,10 @@ impl<'a> Matrix<'a> {
         let canonical = format!("{}/probe.ts", self.settings[0].root);
         let store_view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let key = verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
@@ -678,10 +786,7 @@ fn link_dir(target: &std::path::Path, link: &std::path::Path) {
 
 /// `path` slash-separated, without a verbatim prefix.
 fn slash_path(path: &std::path::Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    text.strip_prefix("//?/")
-        .map(str::to_string)
-        .unwrap_or(text)
+    verter_span::path::canonicalize_path(&path.to_string_lossy())
 }
 
 /// One host carrying a tsconfig-backed project per setting.
@@ -782,24 +887,29 @@ fn observe_with_deadline(
     let thread_host = Arc::clone(host);
     let canonical = canonical.to_owned();
     let symbol = symbol.to_owned();
-    let thread = std::thread::spawn(move || {
-        let observed = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            observe(&thread_host, &canonical, &symbol, scoped)
-        }))
-        .unwrap_or_else(|payload| {
-            let message = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| {
-                    payload
-                        .downcast_ref::<&str>()
-                        .map(|text| (*text).to_owned())
-                })
-                .unwrap_or_default();
-            (Observed::Panicked(message), Vec::new())
-        });
-        let _ = sender.send(observed);
-    });
+    // Match the host CPU workers' stack: debug signature relations must
+    // reach their logical depth guard before the platform's stack guard.
+    let thread = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let observed = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                observe(&thread_host, &canonical, &symbol, scoped)
+            }))
+            .unwrap_or_else(|payload| {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|text| (*text).to_owned())
+                    })
+                    .unwrap_or_default();
+                (Observed::Panicked(message), Vec::new())
+            });
+            let _ = sender.send(observed);
+        })
+        .expect("start semantic observation worker");
     match await_row(&thread, &receiver, ROW_CPU_BUDGET, ROW_NO_PROGRESS_BACKSTOP) {
         Ok(observed) => observed,
         Err(RowOverdue::Disconnected) => (
@@ -994,7 +1104,12 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (O
     let _request = verter_type_engine::request_context::install_test_request_for(canonical);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     let _demand_scope = scoped.then(|| {
@@ -1039,7 +1154,7 @@ fn print(
     if depth > 64 {
         return "<unrendered deep>".to_owned();
     }
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let Some(data) = graph.node_data(node) else {
         return "<evicted>".to_owned();
     };
@@ -1202,6 +1317,9 @@ fn print(
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
         SemanticNodeData::DeclRef { identity } => identity.decl_name.to_string(),
         SemanticNodeData::InstantiationRef { base, args } => {
+            if args.is_empty() {
+                return base.decl_name.to_string();
+            }
             let args: Vec<String> = args.iter().map(|arg| at(*arg)).collect();
             format!("{}<{}>", base.decl_name, args.join(", "))
         }
@@ -1334,8 +1452,11 @@ fn operand(
         // A union the checker prints as one enum name needs none.
         Some(SemanticNodeData::Union(members)) => {
             !in_union
-                && verter_type_engine::semantic_query::printed_union_arms(dispatch.graph(), members)
-                    .len()
+                && verter_type_engine::semantic_query::printed_union_arms(
+                    dispatch.graph().store(),
+                    members,
+                )
+                .len()
                     > 1
         }
         Some(SemanticNodeData::Intersection(_)) => !in_union,
@@ -1357,7 +1478,7 @@ fn signature_text(
     depth: usize,
     arrow: &str,
 ) -> String {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let Some(data) = graph.node_data(node) else {
         return "<evicted>".to_owned();
     };

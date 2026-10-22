@@ -601,7 +601,7 @@ fn completed_receipts_release_when_the_callers_builder_closes() {
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_graph_fixture(
             &host, harness,
         );
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     let builder = d.enter_construction_scope();
     let operand = d.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
@@ -648,7 +648,7 @@ fn construction_carriers_own_new_and_reused_results_past_every_builder() {
             &host,
             zero_headroom_harness(),
         );
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
         ProjectionMode::Navigate,
@@ -718,7 +718,7 @@ fn a_construction_handed_to_a_builder_lives_until_the_builder_closes() {
             &host,
             zero_headroom_harness(),
         );
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     // Built with no owner open, so only the carrier holds it.
     let carrier = d
@@ -742,10 +742,8 @@ fn a_construction_handed_to_a_builder_lives_until_the_builder_closes() {
     );
 }
 
-#[cfg(not(feature = "semantic-observe"))]
 const DELIVERY_FILE: &str = "/public/deliveries.ts";
 
-#[cfg(not(feature = "semantic-observe"))]
 fn delivery_decl_key(name: &str) -> ResolveDeclKey {
     ResolveDeclKey {
         scope: ScopeId {
@@ -760,7 +758,6 @@ fn delivery_decl_key(name: &str) -> ResolveDeclKey {
     }
 }
 
-#[cfg(not(feature = "semantic-observe"))]
 /// The expanded body of the fixture's declaration `name`.
 fn delivery_body_key<C: verter_type_engine::resolver_core::ResolverCapabilities>(
     d: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
@@ -812,11 +809,10 @@ fn delivered_shape(
 /// query delivery, and every clone of it, outlives the dispatcher and drains
 /// when its final holder drops.
 ///
-/// A build with `semantic-observe` also records relation explanations, whose
-/// leases root their operands for the dispatcher's lifetime by design; the
-/// "keeps nothing while the dispatcher lives" premise holds only without
-/// them, so this runs in the default build.
-#[cfg(not(feature = "semantic-observe"))]
+/// The dispatcher runs under no captured request, so even a build with
+/// `semantic-observe` records no relation explanation (whose leases would
+/// root their operands for the dispatcher's lifetime): an uncaptured
+/// request's lifetime is the shipped one in both builds.
 #[test]
 fn a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it() {
     use verter_type_engine::semantic_query::{SemanticQueryApi, SemanticQueryValue};
@@ -849,7 +845,7 @@ fn a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it()
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_graph_fixture(
             &host, harness,
         );
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     for name in ["First", "Second"] {
         let QueryResult::Value(discarded) = d.execute_type_node(delivery_body_key(&d, name)) else {
@@ -953,7 +949,7 @@ fn public_hot_handle_adapters_deliver_owners_without_an_ambient_builder() {
             &host,
             zero_headroom_harness(),
         );
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
         ProjectionMode::Expanded,
@@ -1106,7 +1102,7 @@ fn public_callable_adapters_own_their_parameters_past_dispatcher_teardown() {
             &host,
             zero_headroom_harness(),
         );
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
         ProjectionMode::Expanded,

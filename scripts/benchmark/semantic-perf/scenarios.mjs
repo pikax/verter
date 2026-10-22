@@ -50,11 +50,76 @@ export function allScenarios() {
 
   out.push(
     scenario(
+      "edge-array-literal-normalization",
+      "literal-union",
+      "fresh object literal siblings gain optional undefined properties for absent keys",
+      "type Exclude<T, U> = T extends U ? never : T;\n" +
+        "type Extract<T, U> = T extends U ? T : never;\n" +
+        "type Uppercase<S extends string> = intrinsic;\n" +
+        "type Lowercase<S extends string> = intrinsic;\n" +
+        "type Capitalize<S extends string> = intrinsic;\n" +
+        "type Uncapitalize<S extends string> = intrinsic;\n" +
+        'const arr = [{ a: 1 }, { b: "x" }];\n',
+      "typeof arr",
+    ),
+    scenario(
+      "edge-equal-identity-idiom",
+      "conditional",
+      "generic signatures with identical deferred conditional returns",
+      "type Exclude<T, U> = T extends U ? never : T;\n" +
+        "type Extract<T, U> = T extends U ? T : never;\n" +
+        "type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;\n",
+      "Eq<{ a: 1 }, { a: 1 }>",
+    ),
+    scenario(
+      "edge-any-infer-pattern",
+      "conditional",
+      "any checked against a tuple infer pattern",
+      "",
+      "any extends [infer A] ? A : 0",
+    ),
+  );
+
+  out.push(
+    scenario(
       "baseline-empty",
       "baseline",
       "fixed cost: a trivial module and a trivial probe (reported alone, never subtracted)",
       "",
       "1",
+    ),
+  );
+
+  // Finite member paths and imported value annotations past native query depth.
+  for (const depth of [22, 23, 200]) {
+    out.push(
+      scenario(
+        `scale-path-depth-${depth}`,
+        "path-depth",
+        `project an indexed path ${depth} members deep`,
+        range(depth)
+          .map((i) => `interface L${i} { k0: ${i + 1 === depth ? "'leaf'" : `L${i + 1}`} }\n`)
+          .join(""),
+        `L0${"['k0']".repeat(depth)}`,
+      ),
+    );
+  }
+  out.push(
+    scenario(
+      "scale-typeof-import-chain-50",
+      "typeof-import-chain",
+      "read a value through 50 imported typeof annotations",
+      "",
+      'typeof import("./m50").value',
+      {
+        files: Object.fromEntries([
+          ["m0.ts", "export declare const value: { deep: 1 };\n"],
+          ...range(50).map((i) => [
+            `m${i + 1}.ts`,
+            `export declare const value: typeof import("./m${i}").value;\n`,
+          ]),
+        ]),
+      },
     ),
   );
 
@@ -719,6 +784,43 @@ export function allScenarios() {
     );
   }
 
+  // Literal widening: the declared type of a location that holds a widening
+  // literal. These three sources are reconstructions, not the original
+  // catalog's bytes: the `let` copy is the reported minimal repro; the
+  // `satisfies` and object-arrow sources are written to the answers the
+  // original scenarios reported for tsc 7.0.2, and their references are
+  // measured on these sources, not carried over.
+  out.push(
+    scenario(
+      "edge-let-widens-const-literal",
+      "literal-widening",
+      "a `let` copy of an unannotated const string literal widens to `string` (reconstructed: the reported repro)",
+      "type Exclude<T, U> = T extends U ? never : T;\n" +
+        "type Extract<T, U> = T extends U ? T : never;\n" +
+        'const c1 = "a";\n' +
+        "let x = c1;\n",
+      "typeof x",
+    ),
+  );
+  out.push(
+    scenario(
+      "core-satisfies-widen",
+      "literal-widening",
+      "a `satisfies` object keeps its widened initializer type where the constraint keeps no literal (reconstructed)",
+      'const v = { a: 1, b: "x", c: [true] } satisfies { [k: string]: unknown };\n',
+      "typeof v",
+    ),
+  );
+  out.push(
+    scenario(
+      "vue-return-literal-widening",
+      "literal-widening",
+      "object-literal arrow members widen a lone literal return; an annotated return keeps it (reconstructed)",
+      'const o = { f: () => true, g: (n: number) => n > 0, h: () => "s", i: (): 1 => 1 };\n',
+      "typeof o",
+    ),
+  );
+
   return out;
 }
 
@@ -760,6 +862,11 @@ export const UNCOVERED = [
  * Tiers nest: standard includes quick, stress includes both.
  */
 export const SCENARIO_TIERS = {
+  "edge-array-literal-normalization": "quick",
+  "scale-path-depth-22": "standard",
+  "scale-path-depth-23": "quick",
+  "scale-path-depth-200": "standard",
+  "scale-typeof-import-chain-50": "quick",
   "vue-setup-store-remap-5": "quick",
   "vue-setup-store-remap-10": "standard",
   "vue-setup-store-remap-20": "standard",
@@ -767,6 +874,8 @@ export const SCENARIO_TIERS = {
   "mapped-index-tags-1000": "quick",
   "mapped-index-tags-3000": "standard",
   "mapped-index-tags-10000": "stress",
+  "edge-equal-identity-idiom": "quick",
+  "edge-any-infer-pattern": "quick",
   "mapped-expand-mixins-10": "quick",
   "mapped-expand-mixins-25": "standard",
   "mapped-expand-mixins-40": "standard",
@@ -819,6 +928,9 @@ export const SCENARIO_TIERS = {
   "library-promise-then": "quick",
   "library-map-entries": "quick",
   "library-generic-call": "quick",
+  "edge-let-widens-const-literal": "quick",
+  "core-satisfies-widen": "quick",
+  "vue-return-literal-widening": "quick",
   "relation-aligned-600": "standard",
   "relation-aligned-1800": "standard",
   "relation-aligned-3200": "standard",

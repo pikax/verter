@@ -1134,7 +1134,9 @@ async fn contract_slot_prop_binding_navigates_to_child_slot_binding() {
 
 // @ai-generated - Records the known boundary: an imported defineSlots catalog is not
 // available to the analyzer-backed hover lookup yet, so the resolved child remains silent.
-#[tokio::test]
+// The hover request can run the sync coordinator's provider sync, which blocks in place:
+// that needs the multi-threaded runtime.
+#[tokio::test(flavor = "multi_thread")]
 async fn contract_imported_define_slots_slot_name_without_analyzer_fields_remains_silent() {
     const CHILD_WITH_UNRESOLVED_SLOTS: &str = "<script setup lang=\"ts\">\n\
 import type { ImportedSlots } from './slot-types'\n\

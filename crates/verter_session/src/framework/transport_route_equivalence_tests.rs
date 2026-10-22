@@ -1549,8 +1549,11 @@ fn every_exported_wasm_spelling_is_executed_or_classified_out_of_scope() {
 }
 
 /// Audited compile on both transports: returns the audit record, not the
-/// product (audit disabled → `null`). Vue stores a record; Svelte does not.
-/// Characterization: fails if capture starts or stops for either carrier.
+/// product (audit disabled → `null`). On an artifact built with capture,
+/// Vue stores a record and Svelte does not; on an artifact built without it
+/// (capture reported `Unavailable`) the compile still runs and neither
+/// carrier returns a record. Characterization: fails if capture starts or
+/// stops for either carrier, or if an uncaptured artifact returns a record.
 #[test]
 fn the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_transports() {
     for (transport, script, build, vue_canonical) in [
@@ -1568,6 +1571,11 @@ fn the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_tran
         ),
     ] {
         let record = probe(transport, script, build);
+        let captured = match record["captureAvailability"].as_str() {
+            Some("Available") => true,
+            Some("Unavailable") => false,
+            other => panic!("{transport}: the artifact reports no capture availability: {other:?}"),
+        };
         let cases = &record["cases"];
 
         let vue = &cases["auditedCompileVue"];
@@ -1578,8 +1586,8 @@ fn the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_tran
         );
         assert_eq!(
             vue["canonicalId"].as_str(),
-            Some(vue_canonical),
-            "{transport}: the audited record names a different canonical"
+            captured.then_some(vue_canonical),
+            "{transport}: the audited record does not match the artifact's capture              availability (captured: {captured})"
         );
 
         let svelte = &cases["auditedCompileSvelte"];

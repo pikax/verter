@@ -1710,6 +1710,9 @@ impl SchedulerDag {
             identity: identity.clone(),
             kind,
             base_priority: priority,
+            // The queue-dwell clock also feeds the process-wide work
+            // attribution table (`TaskWait`), which the instrumented build
+            // selects as a whole, so it runs for every job of such a build.
             enqueue_time: verter_audit::observe::Stopwatch::start(),
             request_context,
             cancellation: CancellationToken::aggregate(),

@@ -170,7 +170,7 @@ fn host_with_svelte(
 fn runes_props_surface(canonical: &str, source: &str) -> ResolvedMacroPayload {
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
     resolve_svelte_surface(
         &ctx,
         &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
@@ -353,7 +353,7 @@ fn an_unresolvable_callback_event_source_publishes_partial_not_supported_empty()
         "<script lang=\"ts\">\n  import type { P } from './missing';\n  let { onsave }: P = $props();\n</script>\n\n<p>ok</p>\n",
     );
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
     let outcome = resolve_svelte_surface(
         &ctx,
         &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
@@ -375,7 +375,7 @@ fn a_resolved_props_type_with_no_callbacks_publishes_supported_empty_events() {
         "<script lang=\"ts\">\n  let { label }: { label: string } = $props();\n</script>\n\n<p>{label}</p>\n",
     );
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
     let outcome = resolve_svelte_surface(
         &ctx,
         &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
@@ -398,7 +398,7 @@ fn unavailable_script_facts_surface_is_partial_not_missing() {
                   </script>";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -441,7 +441,7 @@ fn recovered_script_syntax_taints_every_syntax_owned_surface() {
                   </script>";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     for source in [
         SvelteSurfaceSource::RunesProps,
@@ -468,11 +468,10 @@ fn recovered_script_syntax_taints_every_syntax_owned_surface() {
                          </script>";
     let (legacy_host, legacy_view) = host_with_svelte(legacy_canonical, legacy_source);
     let legacy_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let legacy_ctx = crate::resolver_core::HostResolverContext::from_current(
-        &legacy_host,
-        &legacy_view,
-        legacy_overlay,
-    );
+    let legacy_ctx = crate::resolver_core::HostResolverContext::<
+        '_,
+        verter_audit::observe::Uncaptured,
+    >::from_current(&legacy_host, &legacy_view, legacy_overlay);
     let outcome = resolve_svelte_surface(
         &legacy_ctx,
         &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&legacy_ctx),
@@ -497,7 +496,7 @@ fn instance_export_type_resolution_uses_the_exact_binding_owner() {
              <div />";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, canonical)
@@ -757,7 +756,7 @@ fn an_unresolvable_dispatcher_event_map_publishes_partial_not_supported_empty() 
             .expect("load the component");
         let view = crate::typeinfo::current_store_view_for_query(&host).unwrap_or(view);
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+        let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
         resolve_svelte_surface(
             &ctx,
             &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
@@ -819,7 +818,7 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
         )],
     );
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     // Resolve the props surface, find the `row` member, realize its value to
     // the callable through the SAME shared substrate the normalizer uses.
@@ -1348,7 +1347,7 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
     // PROVABLY disjoint at tag level, so the canonical intersection reduces
     // it to `never` (checker-confirmed: `IsNever<string & number>` is
     // `true`) — never a first-arm override.
-    match node_data_for(dispatch.graph(), params[0].ty).as_deref() {
+    match node_data_for(dispatch.graph().store(), params[0].ty).as_deref() {
         Some(verter_type_engine::semantic_query::SemanticNodeData::Primitive(
             verter_type_engine::semantic_query::PrimitiveKind::Never,
         )) => {}
@@ -1413,7 +1412,7 @@ fn userland_snippet_lookalike_is_not_published_as_a_slot() {
         )],
     );
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -1446,7 +1445,7 @@ fn inline_local_props_carry_a_local_member_declaration_origin() {
              <div />";
     let (host, view) = workspace_host_with_svelte(component, source, &[]);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -1500,7 +1499,7 @@ fn prop_defaults_sidecar_carries_default_values_on_the_resolved_bundle() {
              <div />";
     let (host, view) = workspace_host_with_svelte(component, source, &[]);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -1585,7 +1584,7 @@ fn imported_props_members_carry_an_import_member_declaration_origin() {
         )],
     );
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -1730,7 +1729,7 @@ fn callback_event_payload_named_ref_resolves_on_the_component_meta_surface() {
              <button onclick={() => onselect({ id: 1 })} />";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -1791,7 +1790,7 @@ fn optional_callback_prop_classifies_as_event_with_precise_payload() {
              <div />";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -1859,7 +1858,7 @@ fn union_with_no_callable_arm_is_not_an_event() {
              <div />";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -1904,7 +1903,7 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
              <div />";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -1977,7 +1976,7 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
              <div />";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -2049,7 +2048,7 @@ fn explicit_union_with_two_distinct_callable_arms_refuses() {
              <div />";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -2103,7 +2102,7 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
              <div />";
     let (host, view) = host_with_svelte(canonical, source);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let outcome = resolve_svelte_surface(
         &ctx,
@@ -2179,7 +2178,7 @@ fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
         )],
     );
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
@@ -2254,7 +2253,7 @@ fn snippet_declref_tuple_params_resolve_to_ordered_dto_bindings() {
         ],
     );
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
@@ -2340,7 +2339,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         )],
     );
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
 
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
@@ -2516,11 +2515,10 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     let recovered_view =
         crate::typeinfo::current_store_view_for_query(&host).expect("post-upsert store view");
     let recovered_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let recovered_ctx = crate::resolver_core::HostResolverContext::from_current(
-        &host,
-        &recovered_view,
-        recovered_overlay,
-    );
+    let recovered_ctx = crate::resolver_core::HostResolverContext::<
+        '_,
+        verter_audit::observe::Uncaptured,
+    >::from_current(&host, &recovered_view, recovered_overlay);
     // The fresh resolution reads through the post-upsert view: a dispatch
     // bound to the earlier view keeps validating against that earlier world.
     let recovered_dispatch =
@@ -2592,7 +2590,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
         ],
     );
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_current(&host, &view, overlay);
     let props_owner = verter_type_expr::TopLevelOwnerId::instance(0);
 
     let preparation =

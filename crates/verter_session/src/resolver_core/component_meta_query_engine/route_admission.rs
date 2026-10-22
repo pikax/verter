@@ -167,7 +167,7 @@ mod tests {
                 "route".into(),
             )));
             let witness = node_raised_shape_facts_with_dispatch(&dispatch, node).unwrap();
-            admit_materialized(graph, &witness).unwrap()
+            admit_materialized(graph.store(), &witness).unwrap()
         };
         graph.invalidate_all();
         let node = admitted.node();

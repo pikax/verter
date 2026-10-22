@@ -523,20 +523,68 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return None,
         };
         let root = prepared.name_resolution.get(alias_name)?;
-        self.ctx
-            .prepared_type_decl_return_only(
+        let head = self.ctx.prepared_type_decl_return_only(
+            root.canonical_id.as_ref(),
+            root.owner,
+            root.symbol_name.as_ref(),
+        )?;
+        if head.unique_symbol_members.iter().any(|name| name == member) {
+            return Some(UniqueSymbolMemberCertification::NamedType(
+                root.canonical_id.clone(),
+                root.owner,
+                root.symbol_name.clone(),
+            ));
+        }
+        let key = verter_type_expr::TypePropertyKey::String(OwnedStr::from(member));
+        if head.member_index.contains_key(&key)
+            || !self.is_global_type_declaration(
+                root.canonical_id.as_ref(),
                 root.canonical_id.as_ref(),
                 root.owner,
                 root.symbol_name.as_ref(),
             )
-            .is_some_and(|ty| ty.unique_symbol_members.iter().any(|name| name == member))
-            .then(|| {
-                UniqueSymbolMemberCertification::NamedType(
-                    root.canonical_id.clone(),
-                    root.owner,
-                    root.symbol_name.clone(),
-                )
-            })
+        {
+            return None;
+        }
+        // A named global interface can declare this member in another file
+        // (SymbolConstructor's well-known symbols do). Certify from the
+        // declaring contributor's facts, retaining its nominal identity and
+        // the ordinary preparation/read-set proof. No interface body is opened.
+        let contributors = self.global_contributors_in(
+            root.canonical_id.as_ref(),
+            root.symbol_name.as_ref(),
+            verter_session_query::facts::SymbolSpace::Type,
+        );
+        for entry in contributors.entries.iter() {
+            crate::resolver_core::resolver_context::observe_fan_out(
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: entry.artifact_key.canonical.to_string(),
+                    hash: entry.artifact_key.content_hash,
+                },
+            );
+            let identity = DeclIdentity {
+                canonical_id: entry.artifact_key.canonical.clone().into(),
+                owner: entry.owner,
+                whole_hash: entry.artifact_key.content_hash,
+                decl_name: root.symbol_name.clone(),
+            };
+            let declaration = self.prepared_type_decl(&identity)?;
+            if declaration
+                .unique_symbol_members
+                .iter()
+                .any(|name| name == member)
+            {
+                return Some(UniqueSymbolMemberCertification::NamedType(
+                    identity.canonical_id,
+                    identity.owner,
+                    identity.decl_name,
+                ));
+            }
+            if declaration.member_index.contains_key(&key) {
+                return None;
+            }
+        }
+        None
     }
 
     /// Whether a value declaration's OWN static surface declares a property
@@ -1162,16 +1210,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut Vec<LowerFrame<'e>>,
     ) -> LowerStep<'e> {
-        // Watchdog hooks for hang investigation. Both calls are inert
-        // when the watchdog has not been spawned (single relaxed atomic
-        // load + early return). When active, they advance a heartbeat
-        // counter and respond to the watchdog's stall signal by
-        // printing a self-backtrace from inside this lowering.
+        // Captured execution can participate in hang investigation:
+        // advance its heartbeat and answer a stall signal with a
+        // self-backtrace. Uncaptured execution reads no watchdog state.
         // See `loop5_instrumentation.rs` watchdog module.
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::watchdog_beat();
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::watchdog_check_and_dump("shallow_lower_type_expr");
+        if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+            crate::loop5_instrumentation::watchdog_beat();
+            crate::loop5_instrumentation::watchdog_check_and_dump("shallow_lower_type_expr");
+        }
         let graph = self.graph();
         graph.record_decl_subexpression_lowering();
         match expr {
@@ -1742,6 +1789,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut Vec<LowerFrame<'e>>,
     ) -> LowerStep<'e> {
+        if object.empty_literal && object.properties.is_empty() {
+            return LowerStep::Value(self.graph().intern_node_with_scope(
+                SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
+                    effects: crate::semantic_query::PayloadArray::from(
+                        Vec::new().into_boxed_slice(),
+                    ),
+                }),
+                lowering.scope.clone(),
+            ));
+        }
         while let Some(member) = object.properties.get(next) {
             match member {
                 ObjectMember::Property(prop) => {
@@ -2217,7 +2275,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // distinct fingerprints. See
                 // [`crate::mapper_binder_registry`].
                 let mapper_decl_name = crate::mapper_binder_registry::mapper_binder_decl_name(
-                    graph,
+                    graph.store(),
                     source,
                     value,
                     *optional,
@@ -2308,7 +2366,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // 258K-collision count tracks 258K cold MappedType
                 // dispatches, indicating (b) — the registry is
                 // doing what it can.
-                crate::observe_request!(|ctx| {
+                crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
                     let hb = mapper_decl.whole_hash;
                     let hash_u64 = u64::from_le_bytes([
                         hb[0], hb[1], hb[2], hb[3], hb[4], hb[5], hb[6], hb[7],
@@ -2498,7 +2556,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // binder node id directly, avoiding display-name
                 // conflation.
                 let kind = crate::semantic_query::MapperKind::classify_value_expr(
-                    graph,
+                    graph.store(),
                     value_sem,
                     source_sem,
                     parameter_id,
@@ -2518,8 +2576,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     over_type_variable: over_type_variable
                         || (matches!(source.as_ref(), TypeExpr::KeyOf(_))
                             && crate::semantic_query::keyof_operand_is_type_variable(
-                                graph, source_sem,
+                                graph.store(),
+                                source_sem,
                             )),
+                    modifiers_type: match source.as_ref() {
+                        TypeExpr::KeyOf(_) => None,
+                        _ => crate::semantic_query::modifiers_type_of_key_parameter(
+                            graph.store(),
+                            source_sem,
+                        ),
+                    },
                 };
 
                 // Route/mode-INDEPENDENT L1 carrier-stop (LOWERING
@@ -2629,23 +2695,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         extends,
                         &extends_path,
                     );
+                // A declared constraint is read where the conditional is
+                // written, and the false branch outside the pattern: no
+                // `infer` of the pattern is in scope there (`[infer A, infer
+                // B extends A]` reports TS2304 for `A`).
+                let out_of_scope_env = (!infer_sites.is_empty()).then(|| {
+                    let recovery = crate::semantic_query::checker_policy::checker_recovery(
+                        graph,
+                        crate::semantic_query::checker_policy::unresolved_type_name(),
+                    );
+                    let mut out_of_scope = env.clone();
+                    for site in &infer_sites {
+                        out_of_scope.insert(
+                            super::carrier::out_of_scope_infer_env_key(site.name.as_ref()),
+                            recovery,
+                        );
+                    }
+                    out_of_scope
+                });
                 let mut extends_env_owned;
                 let mut declarations = Vec::with_capacity(infer_sites.len());
                 let extends_env = if infer_sites.is_empty() {
                     env
                 } else {
                     extends_env_owned = env.clone();
+                    let constraint_env = out_of_scope_env.as_ref().unwrap_or(env);
                     for site in infer_sites {
                         let binder = infer_binders.binder_at(&site.path);
-                        // A declared constraint is read where the
-                        // conditional is written: no `infer` of the
-                        // pattern is in scope there (`[infer A, infer B
-                        // extends A]` reports TS2304 for `A`).
                         let constraint = site.constraint.map(|constraint| {
                             self.lower_type_expr_with_infer_factory(
                                 infer_binders,
                                 constraint,
-                                env,
+                                constraint_env,
                                 scope,
                                 name_resolution,
                                 scope_payload,
@@ -2717,8 +2798,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 true_env.insert(name.to_string(), reference);
                             }
                             &true_env
-                        } else {
+                        } else if take_true {
                             env
+                        } else {
+                            out_of_scope_env.as_ref().unwrap_or(env)
                         };
                         let node = self.lower_type_expr_with_infer_factory(
                             infer_binders,
@@ -2756,9 +2839,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 else {
                     return self.opaque(QueryError::Miss);
                 };
-                let Some(key) =
-                    self.typeof_reference_key(canonical_id, *owner, value_ref, reduction_context)
-                else {
+                let Some(key) = self.typeof_reference_key_in_scope(
+                    canonical_id,
+                    *owner,
+                    Some(name_resolution),
+                    scope_payload,
+                    value_ref,
+                    reduction_context,
+                ) else {
                     return self.opaque(QueryError::Miss);
                 };
                 let mut result = match self.execute_type_node(key) {

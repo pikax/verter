@@ -55,6 +55,8 @@ pub(super) enum SpecialKind {
     Unknown,
     /// The error type (`Opaque(QueryError)`, excluding `DeclPlaceholder`).
     Error,
+    /// The known internal type used by permissive instantiation.
+    Wildcard,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
@@ -70,7 +72,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // (`absorbed_output`) and make no canonical claim (an undecided peek
         // simply skips the fast-reject), so the peek runs evidence-free —
         // no per-call allocation, lock traffic, or root recording.
-        super::canonical_algebra::peek_special_via_graph(self.graph(), id, None)
+        super::canonical_algebra::peek_special_via_graph(self.graph().store(), id, None)
     }
 
     /// Intern a bare primitive node.
@@ -166,7 +168,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 (SpecialKind::Unknown, _) => {
                     Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), [base]))
                 }
-                (SpecialKind::Error, err) => Some(self.absorbed_output(err, [base])),
+                (SpecialKind::Error | SpecialKind::Wildcard, err) => Some(self.absorbed_output(err, [base])),
             }
         }
     }
@@ -192,7 +194,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     )));
                     Some(self.absorbed_output(err, [object]))
                 }
-                (SpecialKind::Error, err) => Some(self.absorbed_output(err, [object])),
+                (SpecialKind::Error | SpecialKind::Wildcard, err) => Some(self.absorbed_output(err, [object])),
             }
         }
     }
@@ -232,7 +234,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     )));
                     Some(self.absorbed_output(err, [source]))
                 }
-                (SpecialKind::Error, err) => Some(self.absorbed_output(err, [source])),
+                (SpecialKind::Error | SpecialKind::Wildcard, err) => Some(self.absorbed_output(err, [source])),
             }
         }
     }
@@ -268,6 +270,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         /// Everything else (distributive `Union` distribution, the `infer`-binding
         /// paths, ordinary relation selection) is handled below the fast-reject in
         /// `build_conditional`.
+        /// An internal permissive wildcard operand also absorbs the whole
+        /// conditional, after errors and before any generic deferral; neither
+        /// branch is read.
         ///
         /// Rows (1) and (3) read neither branch, so they root only on the
         /// decision inputs; row (2) publishes both branches and roots on them.
@@ -279,16 +284,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             mut force_branch: impl FnMut(bool) -> SemanticNodeId,
         ) -> Option<QueryBuildOutput> {
             let decision_roots = [check, extends];
+            let check_special = self.peek_special(check);
+            // Error operands precede the permissive wildcard, as in the
+            // checker's conditional construction.
+            if let Some((SpecialKind::Error, err)) = check_special {
+                return Some(self.absorbed_output(err, decision_roots));
+            }
             // (0) An error EXTENDS type is the conditional's answer too: the
             //     checker returns its error type when either operand is it.
             if let Some((SpecialKind::Error, err)) = self.peek_special(extends) {
-                if !matches!(self.peek_special(check), Some((SpecialKind::Error, _))) {
-                    return Some(self.absorbed_output(err, decision_roots));
+                return Some(self.absorbed_output(err, decision_roots));
+            }
+            // Permissive instantiation of either operand makes the whole
+            // conditional the wildcard (`getConditionalType`), before a
+            // still-generic check can defer it. Neither branch is demanded.
+            for operand in decision_roots {
+                if let Some((SpecialKind::Wildcard, wildcard)) = self.peek_special(operand) {
+                    return Some(self.absorbed_output(wildcard, decision_roots));
                 }
             }
-            match self.peek_special(check)? {
-                // (1) error dominates any/never and both branches.
-                (SpecialKind::Error, err) => Some(self.absorbed_output(err, decision_roots)),
+            match check_special? {
                 // (2) `any extends T ? X : Y` ⇒ `X | Y`, unless an infer binding
                 //     would be involved (then fall through to the infer path).
                 // A conditional the checker defers over a generic operand
@@ -365,8 +380,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .filter(|operand| named(*operand))
             .find_map(|operand| {
                 let resolved = self.resolved_conditional_operand(operand)?;
-                matches!(self.peek_special(resolved), Some((SpecialKind::Error, _)))
-                    .then_some(resolved)
+                matches!(
+                    self.peek_special(resolved),
+                    Some((SpecialKind::Error | SpecialKind::Wildcard, _))
+                )
+                .then_some(resolved)
             })
             .map(|error| self.absorbed_output(error, [check, extends]))
     }
@@ -552,6 +570,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     stack.push(mapper.key_space);
                     stack.push(mapper.value_expr);
                     stack.extend(mapper.name_remap);
+                    stack.extend(mapper.modifiers_type);
                 }
                 SemanticNodeData::TypeParam {
                     constraint,

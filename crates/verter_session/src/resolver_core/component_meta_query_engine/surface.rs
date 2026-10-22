@@ -52,10 +52,10 @@ crate::output_sinks::define_output_capability! {
 /// surface sink. MODULE-PRIVATE: the bare `TypeExpr` is produced here and
 /// handed back to the demand-bound adapters below as the accepted publication
 /// value — a raw node is never accepted from outside the adapters.
-fn materialize_published_node(
+fn materialize_published_node<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
 ) -> Option<TypeExpr> {
@@ -77,10 +77,12 @@ fn materialize_published_node(
 /// confinement is COMPILER-enforced — no out-of-subtree site can reach the
 /// node→`TypeExpr` materialisation except through the engine's sink-local
 /// publication methods.
-pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_projection_node(
+pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_projection_node<
+    M: verter_audit::observe::ObserveExec,
+>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: &AdmittedRouteProjectionNode,
 ) -> Option<TypeExpr> {
@@ -94,10 +96,10 @@ pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_p
 /// (`!raised_shape_eq_node_type_expr_with_dispatch(result, expr)`), and
 /// materialise the accepted result node ONCE at this sink. `None` on
 /// lower-miss, dispatch error/recursive, gate-reject, or raise-miss.
-pub(crate) fn lower_and_project_to_expanded_node(
+pub(crate) fn lower_and_project_to_expanded_node<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
@@ -135,7 +137,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
     // where `changed = !shape.eq_to_expr` is the node-domain shape inequality
     // against `expr`) is encoded in `admit_expanded_surface_changed`.
     let shape = node_raised_shape_for_eq_with_dispatch(dispatch, result_node, expr)?;
-    admit_expanded_surface_changed(dispatch.graph(), &shape)
+    admit_expanded_surface_changed(dispatch.graph().store(), &shape)
 }
 
 /// Demand-bound NODE adapter for the Class-A path-precise projection (the
@@ -147,10 +149,10 @@ pub(crate) fn lower_and_project_to_expanded_node(
 /// the admitted node — NO materialisation. The lowering happens here so no raw
 /// node crosses in; the `*_published` wrapper materialises the accepted node
 /// ONCE at the surface sink.
-pub(crate) fn project_class_a_terminal_node(
+pub(crate) fn project_class_a_terminal_node<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
@@ -215,7 +217,7 @@ pub(crate) fn project_class_a_terminal_node(
     }
     // Facts-only gate — reuses the dispatch above; no structural key interned.
     let witness = node_raised_shape_facts_with_dispatch(dispatch, result_node)?;
-    admit_expanded_surface(dispatch.graph(), &witness)
+    admit_expanded_surface(dispatch.graph().store(), &witness)
 }
 
 /// Publication wrapper over the FULL node-domain Class-A projection
@@ -230,11 +232,11 @@ pub(crate) fn project_class_a_terminal_node(
 /// node→`TypeExpr` materialisation stays owner-confined. The engine is NOT
 /// threaded (a transient engine is created internally), matching the engine-less
 /// `project_expr_class_a_via_dispatch` callers.
-pub(crate) fn project_class_a_published(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(crate) fn project_class_a_published<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     scope_canonical_id: &str,
     expr: &TypeExpr,
@@ -260,10 +262,10 @@ pub(crate) fn project_class_a_published(
 /// (`dispatch_projected_surface_with_node`) composes the compound root via
 /// [`compound_root_surface_view_via_dispatch`] driven from the decl anchor
 /// (carrier intact).
-pub(super) fn surface_view_from_semantic_node(
+pub(super) fn surface_view_from_semantic_node<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
 ) -> Option<SurfaceLease> {
@@ -271,10 +273,10 @@ pub(super) fn surface_view_from_semantic_node(
     surface_view_from_semantic_node_inner(dispatch, node, &mut active)
 }
 
-fn surface_view_from_semantic_node_inner(
+fn surface_view_from_semantic_node_inner<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
@@ -315,10 +317,10 @@ fn surface_view_from_semantic_node_inner(
 /// THAT node — never over the carrier-intact `node` decl anchor, whose own
 /// raise keeps heritage / import carriers unresolved (materialized) and would
 /// admit a partial composed surface the surface-materialization filter rejects.
-pub(super) fn compound_root_surface_view_via_dispatch(
+pub(super) fn compound_root_surface_view_via_dispatch<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
 ) -> Option<(SurfaceLease, SemanticNodeId)> {

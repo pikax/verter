@@ -1680,7 +1680,7 @@ pub fn project_root_summary<C: crate::resolver_core::ResolverCapabilities>(
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<RootOnlySummary> {
-    let data = node_data_for(dispatch.graph(), node)?;
+    let data = node_data_for(dispatch.graph().store(), node)?;
     Some(match data.as_ref() {
         SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
@@ -1830,13 +1830,18 @@ pub fn project_root_summary<C: crate::resolver_core::ResolverCapabilities>(
             // `fold_node`'s Intersection arm, but each arm classified root-only,
             // and a DANGLING arm is dropped here while the full fold fails the
             // whole composite (the DOCUMENTED ASYMMETRY).
+            let keeps_empty_object =
+                crate::project_semantic_dispatch::canonical_algebra::is_kept_primitive_over_empty_object(
+                    dispatch.graph().store(),
+                    members.as_ref(),
+                );
             let mut arms: Vec<RootOnlySummary> = members
                 .iter()
                 .filter_map(|member| project_root_summary(dispatch, *member, active))
                 .collect();
             arms.retain(|arm| {
                 arm.tag != FactShapeTag::ObjectSurfaceSentinel
-                    && arm.tag != FactShapeTag::EmptyObject
+                    && (keeps_empty_object || arm.tag != FactShapeTag::EmptyObject)
             });
             if arms.is_empty() {
                 RootOnlySummary::from_summary(summary::empty_object())
@@ -1953,7 +1958,7 @@ pub(in crate::project_semantic_dispatch) fn node_is_unknown_materializing_failur
     // Derived from the SINGLE `QueryError` disposition authority — never a
     // local re-listing of which arms are publishable.
     matches!(
-        node_data_for(dispatch.graph(), node).as_deref(),
+        node_data_for(dispatch.graph().store(), node).as_deref(),
         Some(SemanticNodeData::Opaque(err))
             if crate::project_semantic_dispatch::query_error_disposition::query_error_disposition(
                 err,

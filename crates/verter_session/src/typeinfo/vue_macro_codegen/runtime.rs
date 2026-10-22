@@ -12,8 +12,8 @@ use verter_type_engine::semantic_query::{root_narrowing_fact, FactResult};
 /// shell. The semantic analyzer is the authority for which imported heads are
 /// MEMBER-tier dependencies; this walk only follows the transparent shapes
 /// that participate in broad constructor inference.
-pub(super) fn direct_member_dependency_is_missing(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn direct_member_dependency_is_missing<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     subject: verter_type_engine::semantic_query::SemanticNodeId,
     dependency_names: &FxHashSet<&str>,
 ) -> bool {
@@ -223,8 +223,8 @@ pub(super) fn direct_member_dependency_is_missing(
     false
 }
 
-fn is_definitely_non_object_root(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn is_definitely_non_object_root<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     mut subject: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
     let mut visited = FxHashSet::default();
@@ -361,8 +361,8 @@ fn is_definitely_non_object_root(
 /// complete and the terminal is non-object. An incomplete walk is not that
 /// claim. Its partiality is discarded here; the following surface demand
 /// re-observes it and does not inherit a definitive negative.
-pub(super) fn probe_definitely_non_object_root(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn probe_definitely_non_object_root<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     subject: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
     let probe_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
@@ -381,8 +381,8 @@ pub(super) struct RuntimeClassification {
     pub(super) skip_check: bool,
 }
 
-pub(super) fn classify_runtime(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn classify_runtime<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     subject: BroadRuntimeSubjectLocator,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<RuntimeClassification, ProjectionFailure> {
@@ -460,8 +460,8 @@ fn runtime_constructor(kind: BroadRuntimeKind) -> RuntimeConstructor {
 /// retain the existing conservative emit-name projection, while concrete
 /// scalar/object/array payloads cannot satisfy Vue's tuple/function payload
 /// contract and invalidate the enclosing macro.
-pub(super) fn emits_surface_has_invalid_member(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn emits_surface_has_invalid_member<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     surface: &TypeInfoSurface,
     context: ProjectionReductionContext,
 ) -> bool {
@@ -562,8 +562,8 @@ pub(super) fn observe_local<R>(body: impl FnOnce() -> R) -> (R, ResultCompletene
 
 /// The carrier subject `node` resolves to, handed to `builder`, which keeps
 /// it live while the caller's walk continues from it.
-fn resolve_member_carrier(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn resolve_member_carrier<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     tracked_dependency: bool,

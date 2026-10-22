@@ -2723,7 +2723,7 @@ fn resolvability_db_producer_overlay_discrimination() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let overlay_ctx = SessionResolverContext::new(
+    let overlay_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &overlay_store_view,
@@ -2798,7 +2798,7 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let overlay_ctx = SessionResolverContext::new(
+    let overlay_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &overlay_store_view,
@@ -2892,7 +2892,7 @@ fn observe_materialize_scope_is_overlay_view_correct() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let overlay_ctx = SessionResolverContext::new(
+    let overlay_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &overlay_store_view,
@@ -3307,7 +3307,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,
@@ -3452,7 +3452,7 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(&host, &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             &host,
             &view,
             &session_store_view,
@@ -4395,8 +4395,10 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
         {
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let ctx =
-                crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+            let ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::from_current(&host, &view, overlay);
             crate::component_meta_result_admission::ComponentMetaResultRead::new(
                 &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
                 db,
@@ -4435,11 +4437,10 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
         {
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let ctx = crate::resolver_core::HostResolverContext::from_current(
-                &host,
-                &view_after,
-                overlay,
-            );
+            let ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::from_current(&host, &view_after, overlay);
             crate::component_meta_result_admission::ComponentMetaResultRead::new(
                 &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
                 db,
@@ -5183,7 +5184,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let overlay_ctx = SessionResolverContext::new(
+    let overlay_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &overlay_store_view,
@@ -5852,20 +5853,27 @@ fn owner_resolution_set_published_only_by_owner_import_surface_db() {
     let surface = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(
         host.project_type_store().owner_import_surfaces(),
     )
-    .get_or_compute(&host, owner, owner_whole_hash, &view, || {
-        ComputeAdmission::Cacheable(build_owner_import_surface(
-            Arc::from(owner),
-            owner_whole_hash,
-            Vec::<(
-                Arc<str>,
-                Arc<str>,
-                Arc<str>,
-                Option<verter_session_query::analysis::types::Hash16>,
-            )>::new(),
-            Vec::new(),
-            host.project_type_store().current_project_generation(),
-        ))
-    })
+    .get_or_compute::<_, _, verter_audit::observe::Uncaptured>(
+        &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+        &host,
+        owner,
+        owner_whole_hash,
+        &view,
+        || {
+            ComputeAdmission::Cacheable(build_owner_import_surface(
+                Arc::from(owner),
+                owner_whole_hash,
+                Vec::<(
+                    Arc<str>,
+                    Arc<str>,
+                    Arc<str>,
+                    Option<verter_session_query::analysis::types::Hash16>,
+                )>::new(),
+                Vec::new(),
+                host.project_type_store().current_project_generation(),
+            ))
+        },
+    )
     .expect("the owner surface admits");
 
     assert_eq!(

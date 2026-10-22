@@ -460,6 +460,7 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
     }
     fn empty_object(&mut self) -> MaterializedTypeExpr {
         MaterializedTypeExpr::exact(TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+            empty_literal: false,
             properties: Vec::new(),
         })))
     }
@@ -979,6 +980,7 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
         }
         MaterializedTypeExpr {
             expr: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                empty_literal: false,
                 properties: raw_members,
             })),
             degraded_leaves,

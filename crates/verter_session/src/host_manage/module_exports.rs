@@ -27,7 +27,7 @@ use crate::resolver_core::route_db::{BarrelSurfaceKey, ExportTableFlight};
 use crate::resolver_core::{HostCapabilities, SingleflightRole};
 use crate::VerterHost;
 
-type Context<'a> = &'a dyn ResolverContext<HostCapabilities>;
+type Context<'a, M> = &'a dyn ResolverContext<HostCapabilities<M>>;
 type Bindings = ModuleExportBindings;
 
 #[derive(Default)]
@@ -100,7 +100,10 @@ fn export_components(
     components
 }
 
-fn table_key(ctx: Context<'_>, canonical: &str) -> BarrelSurfaceKey {
+fn table_key<M: verter_audit::observe::ObserveExec>(
+    ctx: Context<'_, M>,
+    canonical: &str,
+) -> BarrelSurfaceKey {
     let env = ctx.host_view_env_hashes_for(canonical);
     BarrelSurfaceKey::new(
         canonical,
@@ -111,9 +114,9 @@ fn table_key(ctx: Context<'_>, canonical: &str) -> BarrelSurfaceKey {
 }
 
 impl VerterHost {
-    pub(crate) fn module_export_table_with_context(
+    pub(crate) fn module_export_table_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
-        ctx: Context<'_>,
+        ctx: Context<'_, M>,
         view: &dyn StoreView,
         canonical: &str,
     ) -> Option<crate::resolver_core::CachedValue<ModuleExportTable>> {
@@ -181,7 +184,11 @@ impl VerterHost {
         .0
     }
 
-    fn read_module_export_inputs(&self, ctx: Context<'_>, canonical: &str) -> Option<ModuleInputs> {
+    fn read_module_export_inputs<M: verter_audit::observe::ObserveExec>(
+        &self,
+        ctx: Context<'_, M>,
+        canonical: &str,
+    ) -> Option<ModuleInputs> {
         let source = FactTracerBasisSource::from_ctx(ctx);
         let (inputs, signature) = install_fact_tracer(&source, || {
             let indexed = ctx.ensure_indexed_ready_serve(canonical)?.indexed;
@@ -357,9 +364,9 @@ impl VerterHost {
         Some(inputs)
     }
 
-    fn build_module_export_tables(
+    fn build_module_export_tables<M: verter_audit::observe::ObserveExec>(
         &self,
-        ctx: Context<'_>,
+        ctx: Context<'_, M>,
         view: &dyn StoreView,
         canonical: &str,
         can_admit: impl Fn() -> Result<(), NonAdmissionReason>,

@@ -1636,7 +1636,25 @@ fn a_message_beyond_the_printers_reach_is_not_reported() {
 fn a_diagnostic_the_route_cannot_place_is_not_reported() {
     let host = host_with(CALL_RECOVERY);
     for root in [STRICT_ROOT, LOOSE_ROOT] {
-        assert_prints(&host, root, "un1", "number");
+        // The declared return stands, but the call's applicability went
+        // unchecked: the answer is a recorded gap, never a complete one.
+        super::signature_predicate_inference_tests::observe(
+            &host,
+            root,
+            "un1",
+            |dispatch, degradation, node| {
+                assert!(
+                    degradation.is_some(),
+                    "`un1` in {root} answers its declared return as a recorded gap"
+                );
+                assert_eq!(
+                    crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                        dispatch, node, 0
+                    ),
+                    "number"
+                );
+            },
+        );
         assert_eq!(
             super::signature_predicate_inference_tests::checker_report(
                 &host,
@@ -1647,6 +1665,50 @@ fn a_diagnostic_the_route_cannot_place_is_not_reported() {
             Vec::<String>::new(),
             "`un1` in {root}"
         );
+    }
+}
+
+const RECOVERY_AND_PREDICATE_REPORTS: &str = r#"type G<T> = G<[T]>;
+declare function mk(x: number): G<string>;
+export function circular() { return mk(1); }
+export function circular_bad_argument() { return mk("x"); }
+declare const guards: { isStr(x: string): x is "a" };
+export function predicate(x: number | string) { if (guards.isStr(x)) return x; throw 0; }
+"#;
+
+/// A lazy declared return that is the checker's parameterized recovery
+/// (TS2456, naming its alias) is reported with its bound argument at the
+/// alias's authored name, and a lone predicate signature is checked for
+/// applicability before it narrows. Measured on TypeScript 7.0.2.
+#[test]
+fn parameterized_recoveries_and_lone_predicates_report_like_the_checker() {
+    const TS2456: &str = "(1,6): error TS2456: Type alias 'G' circularly references itself.";
+    let host = host_with(RECOVERY_AND_PREDICATE_REPORTS);
+    let checker_report = super::signature_predicate_inference_tests::checker_report;
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for pass in ["cold", "warm"] {
+            let source = RECOVERY_AND_PREDICATE_REPORTS;
+            assert_eq!(
+                checker_report(&host, root, "circular", source),
+                vec![TS2456],
+                "{pass} `circular` in {root}"
+            );
+            assert_eq!(
+                checker_report(&host, root, "circular_bad_argument", source),
+                vec![
+                    TS2456,
+                    "(4,53): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."
+                ],
+                "{pass} `circular_bad_argument` in {root}"
+            );
+            assert_eq!(
+                checker_report(&host, root, "predicate", source),
+                vec![
+                    "(6,66): error TS2345: Argument of type 'string | number' is not assignable to parameter of type 'string'.\n  Type 'number' is not assignable to type 'string'."
+                ],
+                "{pass} `predicate` in {root}"
+            );
+        }
     }
 }
 

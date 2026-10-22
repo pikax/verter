@@ -1365,7 +1365,7 @@ fn surface_member_field_consults_member_shape_cache_before_round_trip() {
 
     // Extract the surface_member_to_expanded_field body via brace
     // matching from the signature marker through the function close.
-    let fn_marker = "pub(crate) fn surface_member_to_expanded_field(";
+    let fn_marker = "pub(crate) fn surface_member_to_expanded_field<";
     let fn_start = source
         .find(fn_marker)
         .expect("surface_member_to_expanded_field must exist in projectors/output_sink.rs");

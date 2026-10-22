@@ -385,7 +385,7 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &store_view,

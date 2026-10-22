@@ -221,8 +221,8 @@ fn merge_projected_fields_by_name(
 /// into `analysis.macro_expansion_diagnostics`. A projector must never
 /// silently return an empty surface on `QueryResult::Error` — that
 /// would be indistinguishable from a successful empty result.
-pub(crate) fn project_evaluated_types(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+pub(crate) fn project_evaluated_types<M: verter_audit::observe::ObserveExec>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     file: &str,
     snapshot: &FileAnalysisSnapshot,
     evaluated_types: &mut verter_session_query::analysis::type_expand::ExpandedComponentTypes,
@@ -364,8 +364,8 @@ pub(crate) const SFC_SCRIPT_SETUP_DECL_NAME: &str = "<sfc-script-setup>";
 /// dispatch keys produced by projectors collide with the existing
 /// graph-native synthesis layer (path-independent caching per
 /// `CLAUDE.md` Build Philosophy).
-pub(crate) fn build_owner_decl_identity(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(crate) fn build_owner_decl_identity<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
 ) -> DeclIdentity {
@@ -507,8 +507,8 @@ pub(crate) fn macro_payload_surface_provenance(
 /// type expression cannot be lowered to a `SemanticNodeId` — e.g. an
 /// unresolved import to a non-existent module), a diagnostic is
 /// pushed before returning `None`.
-pub(crate) fn resolve_macro_payload(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn resolve_macro_payload<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -759,8 +759,8 @@ pub(crate) fn resolve_macro_payload(
     dispatch.graph().root_in_scope(payload_node).ok()
 }
 
-pub(crate) fn resolve_payload_surface(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn resolve_payload_surface<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     payload_node: SemanticNodeId,
     macro_index: usize,
     expansion_kind: MacroExpansionKind,

@@ -47,7 +47,12 @@ pub(super) fn with_dispatch<R>(
     let host = host_with(source);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
@@ -185,7 +190,7 @@ fn constructor_and_instance(
     verter_type_engine::semantic_query::SurfaceView,
     SemanticNodeId,
 ) {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let Some(SemanticNodeData::Object(view)) = graph
         .node_data(constructor)
         .as_deref()
@@ -215,7 +220,7 @@ fn instance_surface(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     instance: SemanticNodeId,
 ) -> verter_type_engine::semantic_query::SurfaceView {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let Some(SemanticNodeData::ClassExpressionInstance { surface, .. }) = graph
         .node_data(instance)
         .as_deref()
@@ -249,7 +254,7 @@ fn printed_name(
             identity,
             type_arguments,
             ..
-        }) => identity.printed_name_in(dispatch.graph(), type_arguments),
+        }) => identity.printed_name_in(dispatch.graph().store(), type_arguments),
         _ => panic!(
             "expected a class-expression instance, got `{}`",
             render_node(dispatch, node, 0)
@@ -977,7 +982,7 @@ fn class_expression_reference_in_its_own_body_prints_unqualified() {
 #[test]
 fn class_member_clauses_print_class_then_member() {
     with_dispatch(NAMES, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let instance_of = |ordinal: u32| {

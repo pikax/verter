@@ -112,7 +112,7 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
     let string = dispatch
         .graph()
         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let object = super::tests::simple_object(dispatch.graph(), &[("x", number)]);
+    let object = super::tests::simple_object(dispatch.graph_arc(), &[("x", number)]);
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let keys = [
         SemanticQueryKey::ProjectPath {
@@ -210,6 +210,7 @@ fn finite_mapped_batch_stops_at_its_first_refusal_and_warms_when_complete() {
             source: domain,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: binder,
                 key_space: domain,
                 value_expr: binder,

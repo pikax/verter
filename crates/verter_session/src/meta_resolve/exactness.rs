@@ -6,8 +6,8 @@ use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
 
 /// Classify a synthesized value node as concrete or symbolic.
-pub(crate) fn classify_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(crate) fn classify_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
 ) -> ExpansionExactness {
     let unwrapped = match dispatch.graph().read_in_scope(node).as_deref() {
@@ -29,10 +29,10 @@ pub(crate) fn classify_node(
 }
 
 /// Whether a registry-symbol body's root must remain symbolic.
-pub(crate) fn node_root_should_stay_symbolic(
+pub(crate) fn node_root_should_stay_symbolic<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: SemanticNodeId,
 ) -> bool {
@@ -55,8 +55,8 @@ pub(crate) fn node_root_should_stay_symbolic(
 }
 
 /// An object is closed only when every member value is already concrete.
-fn object_is_closed_node(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn object_is_closed_node<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     node: SemanticNodeId,
 ) -> bool {
     let Some(data) = dispatch.graph().read_in_scope(node) else {

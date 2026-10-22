@@ -116,10 +116,16 @@ enum ResolutionLane {
     Workspace,
     /// An overlay-lane candidate, with its admission sequence number.
     RequestOverlay(u64),
-    /// A complete workspace answer its producer could not retain (the
-    /// retention account refused it): no slot holds it and no decision node
-    /// speaks for it, so a subscriber that adopts it restates its witness.
+    /// A complete answer — workspace or overlay — its producer could not
+    /// retain (the retention account refused it): no slot holds it and no
+    /// decision node speaks for it, so a subscriber that adopts it restates
+    /// its witness and delivers it unretained.
     Unretained,
+    /// An admitted answer for an importer the world already records as
+    /// gone: valid under its own witness, yet no slot or decision node may
+    /// hold it, so a subscriber that adopts it restates that witness and
+    /// stays admitted — nothing refused to retain it.
+    RetiredImporter,
 }
 
 /// The overlay lane: overlay answers held by the overlay authorities that
@@ -4078,6 +4084,9 @@ impl Engine {
 
             let mut reused = false;
             let mut restated_witness = false;
+            // Whether the reused candidate is an answer its producer could
+            // not retain: adopting it delivers that answer, unretained.
+            let mut reused_unretained = false;
             let mut publish_candidate = false;
             // The query of a reused workspace-lane candidate whose decision
             // node this demand roots on: re-checked under the final fence,
@@ -4223,7 +4232,9 @@ impl Engine {
                 let node = ResolutionFactKey::decision(entry.query.clone());
                 if matches!(
                     lane,
-                    ResolutionLane::RequestOverlay(_) | ResolutionLane::Unretained
+                    ResolutionLane::RequestOverlay(_)
+                        | ResolutionLane::Unretained
+                        | ResolutionLane::RetiredImporter
                 ) || captured.world.request_overlay_reaches(&node)
                 {
                     transaction.adopt_witness(&entry.signature);
@@ -4231,6 +4242,7 @@ impl Engine {
                 } else {
                     reused_decision = Some(entry.query.clone());
                 }
+                reused_unretained = matches!(lane, ResolutionLane::Unretained);
                 reused = true;
                 entry.result.clone()
             } else {
@@ -4520,6 +4532,22 @@ impl Engine {
             let complete_answer = cacheable_signature.is_some();
 
             let mut published = false;
+            // The witness of a complete answer the retention account
+            // refused: it is delivered unretained, never withheld.
+            let mut unretained_witness = None;
+            // An adopted unretained answer stays unretained: no slot holds
+            // it, so nothing derived from it may be kept either. Its
+            // restated witness, validated against this world above, is the
+            // answer's witness; any untrustworthy non-admission already
+            // withheld it.
+            if reused_unretained {
+                if let Some(signature) = cacheable_signature.as_ref() {
+                    admission = SignatureAdmission::NonCacheable(
+                        verter_audit::NonAdmissionReason::RetentionPressure,
+                    );
+                    unretained_witness = Some(signature.clone());
+                }
+            }
             if reused {
                 self.vfs_provenance
                     .import_resolution_cache_hit_count
@@ -4558,10 +4586,20 @@ impl Engine {
                         overlay.authority(),
                     );
                     published = seq.is_some();
-                    delivery = Some(FlightDelivery {
-                        lane: ResolutionLane::RequestOverlay(seq.unwrap_or(0)),
-                        entry,
-                    });
+                    // A refused charge is retention pressure: the complete
+                    // answer is served, and delivered to the flight's
+                    // subscribers, unretained.
+                    let lane = match seq {
+                        Some(seq) => ResolutionLane::RequestOverlay(seq),
+                        None => {
+                            admission = SignatureAdmission::NonCacheable(
+                                verter_audit::NonAdmissionReason::RetentionPressure,
+                            );
+                            unretained_witness = Some(entry.signature.clone());
+                            ResolutionLane::Unretained
+                        }
+                    };
+                    delivery = Some(FlightDelivery { lane, entry });
                 }
             } else if publish_candidate {
                 if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {
@@ -4626,14 +4664,18 @@ impl Engine {
                         // as an unretained answer, whose witness each
                         // restates rather than rooting on a node that was
                         // never published.
+                        // A retired importer's answer stays admitted under
+                        // its own witness, and so does every subscriber's.
                         Err(refusal) => {
-                            if let Some(reason) = refusal {
-                                admission = SignatureAdmission::NonCacheable(reason);
-                            }
-                            delivery = Some(FlightDelivery {
-                                lane: ResolutionLane::Unretained,
-                                entry,
-                            });
+                            let lane = match refusal {
+                                Some(reason) => {
+                                    admission = SignatureAdmission::NonCacheable(reason);
+                                    unretained_witness = Some(entry.signature.clone());
+                                    ResolutionLane::Unretained
+                                }
+                                None => ResolutionLane::RetiredImporter,
+                            };
+                            delivery = Some(FlightDelivery { lane, entry });
                         }
                     }
                 }
@@ -4725,6 +4767,15 @@ impl Engine {
             );
             input_ledger.release_applied_outputs();
 
+            if let Some(witness) = unretained_witness {
+                return ResolutionOutcome::unretained(
+                    result,
+                    witness,
+                    rejected_exact_targets,
+                    !reused,
+                    reused,
+                );
+            }
             return ResolutionOutcome::new(
                 result,
                 admission,
@@ -5641,12 +5692,17 @@ impl Engine {
                         captured_world,
                         input_ledger,
                     );
-                    match outcome.into_publication() {
-                        crate::ResolutionPublication::Admitted(admitted)
-                            if admitted.result().is_some() =>
-                        {
-                            let result =
-                                admitted.into_result().expect("guarded admitted resolution");
+                    // Import-graph bookkeeping takes every complete answer,
+                    // retained or not.
+                    let answer = match outcome.into_publication() {
+                        crate::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+                        crate::ResolutionPublication::Unretained(unretained) => {
+                            unretained.into_result()
+                        }
+                        crate::ResolutionPublication::Refused(refusal) => return Err(refusal),
+                    };
+                    match answer {
+                        Some(result) => {
                             if let (Some(key), Some(results)) =
                                 (batch_key, relative_results.as_deref_mut())
                             {
@@ -5654,7 +5710,7 @@ impl Engine {
                             }
                             parsed_resolved.insert(result.source_id);
                         }
-                        crate::ResolutionPublication::Admitted(_) if specifier.starts_with('.') => {
+                        None if specifier.starts_with('.') => {
                             if let (Some(key), Some(results)) =
                                 (batch_key, relative_results.as_deref_mut())
                             {
@@ -5664,8 +5720,7 @@ impl Engine {
                                 .expect("relative specifiers have a relative candidate");
                             unresolved_pairs.push(((normalized, *kind), joined_stem));
                         }
-                        crate::ResolutionPublication::Admitted(_) => {}
-                        crate::ResolutionPublication::Refused(refusal) => return Err(refusal),
+                        None => {}
                     }
                 }
                 crate::types::ParsedEdge::ExternalSrc {
@@ -5692,6 +5747,12 @@ impl Engine {
                                 };
                                 parsed_resolved.insert(result.source_id);
                             }
+                            crate::ResolutionPublication::Unretained(unretained) => {
+                                let Some(result) = unretained.into_result() else {
+                                    continue;
+                                };
+                                parsed_resolved.insert(result.source_id);
+                            }
                             crate::ResolutionPublication::Refused(refusal) => {
                                 return Err(refusal);
                             }
@@ -5712,6 +5773,12 @@ impl Engine {
                         match outcome.into_publication() {
                             crate::ResolutionPublication::Admitted(admitted) => {
                                 let Some(result) = admitted.into_result() else {
+                                    continue;
+                                };
+                                parsed_resolved.insert(result.source_id);
+                            }
+                            crate::ResolutionPublication::Unretained(unretained) => {
+                                let Some(result) = unretained.into_result() else {
                                     continue;
                                 };
                                 parsed_resolved.insert(result.source_id);

@@ -351,7 +351,7 @@ fn flow_superseded_evaluation_cannot_deliver_a_value() {
     with_dispatch(&host, |dispatch| {
         let key = dispatch.flow_return_key_for(&identity);
         {
-            let _sweep = dispatch.graph().test_force_cold_abort_sweep();
+            let _sweep = dispatch.graph().store().test_force_cold_abort_sweep();
             assert!(matches!(
                 dispatch.execute_flow_return(key.clone()),
                 FlowReturnStep::Aborted(ExecutionAbort::Superseded)
@@ -364,7 +364,7 @@ fn flow_superseded_evaluation_cannot_deliver_a_value() {
             0
         );
         {
-            let _sweep = dispatch.graph().test_force_cold_abort_sweep();
+            let _sweep = dispatch.graph().store().test_force_cold_abort_sweep();
             let public = host
                 .get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
             assert!(matches!(
@@ -534,9 +534,10 @@ fn assert_exhausted_follower_abort(
                             .recv_timeout(std::time::Duration::from_secs(10));
                     }
                 })));
-            let hook = ProduceHookGuard(dispatch.graph());
+            let hook = ProduceHookGuard(dispatch.graph().store());
             let fault = dispatch
                 .graph()
+                .store()
                 .test_exhausted_join_abort(inner_key.clone(), completion);
             std::thread::scope(|threads| {
                 let producer = threads.spawn(|| {
@@ -864,7 +865,37 @@ fn with_dispatch<R>(
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
+    f(&dispatch)
+}
+
+/// [`with_dispatch`] compiled for captured execution, for the tests that
+/// read the request's flow counters: only captured execution records them.
+#[cfg(feature = "semantic-observe")]
+fn with_captured_dispatch<R>(
+    host: &Arc<VerterHost>,
+    f: impl FnOnce(
+        &ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+        >,
+    ) -> R,
+) -> R {
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Captured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
@@ -893,8 +924,8 @@ fn flow_result_for_file(
     flow_result(dispatch, host, key)
 }
 
-fn flow_key(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn flow_key<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     name: &str,
     part: FunctionPartIdentity,
     overload_ordinal: u32,
@@ -915,8 +946,8 @@ fn flow_key(
     }
 }
 
-fn execute_flow(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn execute_flow<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     key: FlowReturnKey,
 ) -> QueryResult<SemanticQueryOutput<SemanticQueryValue>> {
     dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
@@ -1389,7 +1420,7 @@ fn flow_return_key_carries_no_value_environment() {
         let mut typed = key.clone();
         typed.context.type_substitution =
             verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
-                dispatch.graph(),
+                dispatch.graph().store(),
                 vec![(
                     verter_type_engine::semantic_query::SemanticNodeId(7),
                     verter_type_engine::semantic_query::SemanticNodeId(8),
@@ -1794,12 +1825,12 @@ fn inline_no_value_close_folds_the_no_surface_rails() {
     });
 }
 
-/// A mixed relation <-> flow component's batched member publish rides the
-/// UNION carrier: the published flow member's family entry self-roots on
-/// every component file — its own file AND the files of the relation
-/// members' nodes. Mutation recipe: publishing the member with the root's
-/// relation-only self-root set (the pre-union behavior) drops its own
-/// file from the carrier.
+/// A mixed relation <-> flow component's members ride the UNION carrier:
+/// the flow member's carrier covers every component file — its own file AND
+/// the files of the relation members' nodes. The decision reads its
+/// relation nested in its own evaluation, so the relation completes for the
+/// request with its whole component, which the request keeps on the root's
+/// carrier.
 ///
 /// The conditional relates object types holding the classes: a decision
 /// instantiates operands that name declarations before it relates them,
@@ -1844,28 +1875,34 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let (expr, _) = host
-        .evaluate_type_expression_with_audit(
-            crate::typeinfo::types::EvaluateTypeExpressionRequest {
-                scope: "/ws/root.ts".to_string(),
-                expression: "RootAssign".to_string(),
-                extra_imports: Vec::new(),
-                mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                cacheable: false,
-            },
-        )
-        .into_parts();
-    let node = expr.ok().flatten().expect("RootAssign resolves");
-    let projected = host
-        .project_node_to_type_expr_for_test(node.id())
-        .expect("RootAssign projects");
-    assert_eq!(
-        projected,
-        verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
-            "yes".to_string()
-        ))
-    );
     with_dispatch(&host, |dispatch| {
+        let root =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    "/ws/root.ts",
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    "RootAssign",
+                ),
+                Arc::from(Vec::new().into_boxed_slice()),
+                dispatch.instantiate_context_for(
+                    "/ws/root.ts",
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                    ),
+                ),
+            ));
+        let verter_type_engine::semantic_query::QueryResult::Value(node) =
+            dispatch.execute_read(root).value().clone()
+        else {
+            panic!("RootAssign resolves");
+        };
+        assert_eq!(
+            host.project_node_to_type_expr_for_test(node)
+                .expect("RootAssign projects"),
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                "yes".to_string()
+            ))
+        );
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
                 verter_type_expr::OwnedStr::from("/ws/mixed_c.ts"),
@@ -1882,10 +1919,15 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
+        let key = SemanticQueryKey::FlowReturn(Box::new(key));
+        assert_eq!(
+            dispatch.graph().slot_candidate_count_for_tests(&key),
+            0,
+            "a member of a component the request completed never enters the family memo"
+        );
         let roots = dispatch
-            .graph()
-            .entry_self_root_canonicals_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
-            .expect("the batched flow member's family entry is published");
+            .request_kept_canonicals_for_tests(&key)
+            .expect("the request keeps the component's flow member");
         // The member's own file AND every relation member's node file
         // (the relation root's own demanding file is not a relation input
         // and is not part of the component's roots).
@@ -2651,8 +2693,8 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
 // layer, the sole warm rail (SCC-9), and the recorded materialised point.
 // ────────────────────────────────────────────────────────────────────────
 
-fn flow_result_value(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn flow_result_value<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     key: FlowReturnKey,
 ) -> verter_type_engine::semantic_query::FlowReturnResult {
     let QueryResult::Value(SemanticQueryOutput {
@@ -3724,7 +3766,7 @@ fn static_return_keys_are_exact_beside_an_unfinished_member_value() {
     use verter_type_engine::semantic_query::{FactStatus, ScopeId, ValueRootKey};
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let callee = graph.intern_node(SemanticNodeData::new_typeof(
             ValueRootKey {
                 scope: ScopeId::file(
@@ -4811,8 +4853,8 @@ fn make_scc_host() -> Arc<VerterHost> {
     host
 }
 
-fn scc_key(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn scc_key<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     name: &str,
 ) -> FlowReturnKey {
     FlowReturnKey {
@@ -5375,7 +5417,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
         assert_eq!(root_candidates, 1, "the root must warm before the drain");
 
         with_dispatch(&host, |dispatch| {
-            let graph = dispatch.graph();
+            let graph = dispatch.graph_arc();
             let root_key = scc_key(dispatch, "scRingX");
             let root_query = SemanticQueryKey::FlowReturn(Box::new(root_key.clone()));
             let carrier = graph
@@ -6919,9 +6961,10 @@ fn production_missing_obligation_returns_only_and_recomputes() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = make_host();
-    with_dispatch(&host, |dispatch| {
-        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
-        let _guard = RequestContextGuard::install(ctx);
+    // Bind the request before the captured resolver snapshots its receivers.
+    let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+    let _guard = RequestContextGuard::install(ctx);
+    with_captured_dispatch(&host, |dispatch| {
         let _drop_claim = inject::Guard::arm(&host.flow_fault_injection.drop_last_discharge_claim);
         let key = flow_key(
             dispatch,
@@ -6971,9 +7014,10 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
 
     // Root leg.
     let host = make_host();
-    with_dispatch(&host, |dispatch| {
-        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
-        let _guard = RequestContextGuard::install(ctx);
+    // Bind the request before the captured resolver snapshots its receivers.
+    let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+    let _guard = RequestContextGuard::install(ctx);
+    with_captured_dispatch(&host, |dispatch| {
         let key = flow_key(
             dispatch,
             "subNonCallableCall",
@@ -7030,9 +7074,10 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
         );
     });
 
+    drop(_guard);
     // SCC leg: a degraded component publishes NEITHER member.
     let scc_host = make_scc_host();
-    with_dispatch(&scc_host, |dispatch| {
+    with_captured_dispatch(&scc_host, |dispatch| {
         let root = scc_key(dispatch, "scDegradedA");
         let peer = scc_key(dispatch, "scDegradedB");
         let result = flow_result_value(dispatch, root.clone());
@@ -7498,7 +7543,7 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
         use super::dispatch_txn::flow_obligation_state::{
             FlowDischargeEntry, FlowDischargeReport, FlowSuboperationEvidence, ObligationState,
         };
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         // The binder exactly as the member frame's own clause interns it.
         let whole_hash = dispatch
@@ -8282,7 +8327,7 @@ fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
         let QueryResult::Value(node) = read.value() else {
             panic!("the exported function has a type: {:?}", read.value());
         };
-        let store = dispatch.graph().signature_store();
+        let store = dispatch.graph().store().signature_store();
         let QueryOutcome::Ready(Ready { value: set, .. }) = dispatch.signatures_of_type(
             store,
             *node,
@@ -8962,14 +9007,16 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
         );
 
         // (6) D10-AC4, the COLD half: ONE heritage read per arm per cold
-        // edge. `Chain3 | string` under `instanceof Chain1` runs the
-        // guard over a THREE-level hierarchy, and the depth is invisible
-        // to the bound — the recursive walk lives in the heritage
-        // authority behind the single read and is memoized per dispatch,
-        // so the guard pays one read for `Chain3`, one for the tested
-        // class, and NONE for the declaration-less `string` arm, on each
-        // of the two edges the guard applies. Nothing is charged per
-        // ancestor, per member, per relation, or per re-ask.
+        // evaluation, and one for the tested class per edge. `Chain3 |
+        // string` under `instanceof Chain1` runs the guard over a
+        // THREE-level hierarchy, and the depth is invisible to the bound —
+        // the recursive walk lives in the heritage authority behind the
+        // single read and is memoized per dispatch, so the guard pays one
+        // read for `Chain3`, which the subject's arm index takes once for
+        // both edges, NONE for the declaration-less `string` arm, and one
+        // for the tested class on each of the two edges the guard applies.
+        // Nothing is charged per ancestor, per member, per relation, or per
+        // re-ask.
         let key = whole_return_key(dispatch, CANONICAL, "chain");
         INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(0));
         let result = flow_result_value(dispatch, key.clone());
@@ -8981,7 +9028,7 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
         );
         assert_eq!(
             cold_reads, COLD_CHAIN_HERITAGE_READS,
-            "the cold guard reads heritage once per arm per edge"
+            "the cold guard reads each arm's heritage once and the tested class's once per edge"
         );
         assert_eq!(
             dispatch
@@ -9029,16 +9076,17 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
 
 /// D10-AC4's cold bound, as case (6) of
 /// [`instanceof_heritage_decides_both_edges_and_bounds_its_reads`]
-/// measures it: one heritage read per ARM per cold EDGE.
+/// measures it: one heritage read per ARM per cold evaluation, and one for
+/// the tested class per EDGE.
 ///
-/// Two edges × (the `Chain3` arm + the tested class `Chain1`) = 4; the
+/// The `Chain3` arm once + two edges × the tested class `Chain1` = 3; the
 /// `string` arm carries no declaration and asks nothing. The subject's
 /// three-level hierarchy does NOT appear in this number — that is the
 /// point of the bound, and of putting the recursive ancestry walk behind
 /// one memoized heritage-authority read. A guard that starts charging per
 /// ancestor, per member, per relation or per re-ask fails here rather
 /// than silently paying for it.
-const COLD_CHAIN_HERITAGE_READS: usize = 4;
+const COLD_CHAIN_HERITAGE_READS: usize = 3;
 
 /// A heritage hop this generation can neither ROOT nor READ — a
 /// cross-file base whose declaration the walk's `ReturnOnly` accessor
@@ -10556,7 +10604,7 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let member_key = flow_key(
             dispatch,
@@ -10651,7 +10699,7 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
     // Control: a PROVEN member batch keeps the root admissible.
     let control = make_host();
     with_dispatch(&control, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let relate_key = dispatch.relate_key_for(number, number);
         let outcome = dispatch
@@ -10726,7 +10774,7 @@ fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
         for armed in [true, false] {
             let host = make_host();
             with_dispatch(&host, |dispatch| {
-                let graph = dispatch.graph();
+                let graph = dispatch.graph_arc();
                 let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
                 let member = flow_key(
                     dispatch,
@@ -10953,7 +11001,7 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
     use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet, RelationOutcome};
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let source = super::tests::simple_object(graph, &[("value", number)]);
@@ -11017,7 +11065,7 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
     });
     let control_host = make_host();
     with_dispatch(&control_host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let key = dispatch.relate_key_for(number, number).to_query_key();
         let control = dispatch.execute_via_cold_build_helper(key.clone());
@@ -11034,7 +11082,7 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
 fn unproven_flow_member_makes_relation_root_decided_return_only() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let query_key = dispatch.relate_key_for(number, number).to_query_key();
         let member = flow_key(
@@ -11109,7 +11157,7 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let declared = super::call_resolve_tests::signature(
             dispatch,
@@ -11224,7 +11272,7 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
 fn unproven_flow_member_withholds_flow_root_verdict() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let root = flow_key(
             dispatch,
             "subLiteral",
@@ -11411,7 +11459,7 @@ fn provenance_distinguishes_first_demands_of_two_runtimes() {
         );
         // The functional leg: runtime A's first-demand token presented as
         // runtime B's evaluation evidence is foreign, never a proof.
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let result = verter_type_engine::semantic_query::FlowReturnResult::new(
             graph,
@@ -11806,6 +11854,37 @@ fn flow_expr_cold_warm(
         .project_node_to_type_expr_for_test(cold.return_type())
         .expect("return node must project to TypeExpr");
     (expr, cold.degradation())
+}
+
+#[test]
+fn const_context_empty_spread_keeps_complete_readonly_members() {
+    for (expression, count, literal) in [
+        ("{ ...{} } as const", 0, false),
+        ("{ ...{}, value: 1 } as const", 1, true),
+        ("{ value: 1, ...{} } as const", 1, true),
+        ("{ ...{ value: 1 } } as const", 1, false),
+    ] {
+        let (expr, degradation) =
+            flow_expr_cold_warm(&format!("function makeProps() {{ return {expression}; }}"));
+        assert_eq!(degradation, None, "{expression}: {expr:?}");
+        let verter_type_expr::TypeExpr::Object(object) = &expr else {
+            panic!("expected an object for {expression}: {expr:?}");
+        };
+        assert_eq!(object.properties.len(), count);
+        if count == 0 {
+            continue;
+        }
+        let verter_type_expr::ObjectMember::Property(property) = &object.properties[0] else {
+            panic!("expected a property for {expression}: {object:?}");
+        };
+        assert!(property.readonly);
+        let expected = if literal {
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        } else {
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        };
+        assert_eq!(property.ty, expected, "{expression}");
+    }
 }
 
 /// A switch case's dispatch-edge refinement rides the reaching-TYPE
@@ -12490,7 +12569,7 @@ fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both(
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let string = graph.intern_node(
             verter_type_engine::semantic_query::SemanticNodeData::Primitive(
                 verter_type_engine::semantic_query::PrimitiveKind::String,
@@ -12834,7 +12913,7 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let literal = graph.intern_node(
             verter_type_engine::semantic_query::SemanticNodeData::Literal(
                 verter_type_expr::LiteralValue::String("x".to_owned()),
@@ -12877,7 +12956,7 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
         );
         assert_eq!(
             super::canonical_algebra::reduced_authored_intersection(
-                graph,
+                verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
                 written,
                 verter_session_query::flow::policy::NullabilityPolicy::Strict,
             ),

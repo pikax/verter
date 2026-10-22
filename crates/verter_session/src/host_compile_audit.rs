@@ -189,8 +189,7 @@ use crate::component_meta_audit::{RequestMemoryAudit, RequestStoreAudit, Request
 use crate::VerterHost;
 #[cfg(feature = "semantic-observe")]
 use verter_type_engine::instant::Instant;
-#[cfg(feature = "semantic-observe")]
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 
 /// The full requested product set, read directly off the `CompileRequest`
 /// — every product the request carries, not a collapsed "primary path".
@@ -494,120 +493,16 @@ impl VerterHost {
         let allocator = Allocator::new();
         let execution_inputs = VueExecutionInputs::default();
 
-        // 2. Audit-disabled fast path: drive the producer with NO
-        //    `RequestContextGuard` installed. Producer-side
-        //    `current_observer()` returns `None`, the instrumentation
-        //    short-circuits at the TLS check, and nothing is published.
-        //    The carrier still carries a cheap default-filled record
-        //    marked `AuditDisabled`.
-        #[cfg(feature = "semantic-observe")]
-        if self.config.audit_enabled {
-            // 3. Stamp request id and increment created-counter so the
-            //    `AuditedRequest` harness's multi-request guard surfaces
-            //    correctly when a closure issues both a component-meta
-            //    and compile call.
-            let request_id = self.next_request_id();
-            #[cfg(feature = "semantic-observe")]
-            verter_type_engine::request_context::increment_requests_created();
-
-            // 4. Construct the request context with the Compile kind.
-            let footprint_capture = self.config.footprint_capture;
-            let timing_capture = self.config.audit_timing_capture;
-            let ctx = RequestContext::with_kind_and_timing(
-                request_id,
-                Arc::<str>::from(canonical_id),
-                RequestKind::Compile {
-                    products: request_products,
-                    backend: resolved_backend,
-                },
-                footprint_capture,
-                timing_capture,
-                None,
-            );
-
-            // 5. Build the audit registration. `Active` adds the request
-            //    to the registry; `Noop` short-circuits when the consumer
-            //    filter rejects the kind.
-            let registration = Arc::new(crate::host_audit_runtime::AuditRequestRegistration::new(
-                self,
-                Arc::clone(&ctx),
-            ));
-            let _ = ctx.install_audit_registration(registration.clone());
-
-            // 6. Capture parent correlation off the RequestContext (sniffed
-            //    from the scheduler TLS at construction). A compile issued
-            //    inside another audited request's window inherits that
-            //    request's id as its `parent_request_id`.
-            let parent_request_id = ctx.parent_request_id.map(|id| id.to_string());
-
-            // 7. Branch Active / Noop BEFORE assembling any audit payload.
-            //    The compile RESULT computes on both arms (consumers asked
-            //    for it), but the Noop arm installs the cheap no-op observer
-            //    and skips all heavy payload-assembly work — matching the
-            //    analyze / resolve_type / typeinfo entry-points. This avoids
-            //    installing the real `RequestContextGuard` and assembling a
-            //    full `CompilePayload` only to discard it on a
-            //    consumer-filtered request.
-            if matches!(
-                registration.as_ref(),
-                crate::host_audit_runtime::AuditRequestRegistration::Noop
-            ) {
-                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                let mut attempt =
-                    verter_compiler::compile_transaction::CompileAttempt::enter_project(
-                        source,
-                        &request,
-                        "vue",
-                        self.host_view_project_identity_for(canonical_id),
-                    );
-                // An aborted production of the macro semantics publishes no compile.
-                let result = match self.vue_macro_semantic_input(canonical_id, target) {
-                    Ok(macro_input) => {
-                        attempt.stage_vue_macro_semantics(macro_input);
-                        compile_registered_vue_artifact(
-                            source,
-                            &framework_parse,
-                            &request,
-                            &execution_inputs,
-                            &attempt,
-                            &allocator,
-                        )
-                        .unwrap_or_else(|_| {
-                            registered_compile_rejected(
-                                "VerterE003",
-                                "registered Vue artifact rejected by its adapter".to_string(),
-                            )
-                        })
-                    }
-                    Err(abort) => aborted_compile(abort),
-                };
-                let record = noop_compile_record(
-                    request_id,
-                    canonical_id,
-                    parent_request_id,
-                    request_products,
-                    resolved_backend,
-                    verter_audit::AuditCaptureState::FilteredNoop,
-                );
-                return AuditedResult::ok(result, record);
-            }
-
-            // 8. Active arm: install the TLS guard so producers in
-            //    `verter_compiler` see `current_observer() = Some(ctx)`.
-            let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-
-            // 9. Drive the compile. Producers emit `record_phase_timing`
-            //    + `record_event(CompileCodeTransformOp)` while this
-            //    block runs.
-            let total_start = Instant::now();
+        // The compile itself, identical in both capture modes. An aborted
+        // production of the macro semantics publishes no compile.
+        let compile = || {
             let mut attempt = verter_compiler::compile_transaction::CompileAttempt::enter_project(
                 source,
                 &request,
                 "vue",
                 self.host_view_project_identity_for(canonical_id),
             );
-            // An aborted production of the macro semantics publishes no compile.
-            let result = match self.vue_macro_semantic_input(canonical_id, target) {
+            match self.vue_macro_semantic_input(canonical_id, target) {
                 Ok(macro_input) => {
                     attempt.stage_vue_macro_semantics(macro_input);
                     compile_registered_vue_artifact(
@@ -626,10 +521,79 @@ impl VerterHost {
                     })
                 }
                 Err(abort) => aborted_compile(abort),
-            };
+            }
+        };
+
+        // 2. One request context for BOTH modes: the same canonical, host
+        //    projection budget and cancellation, so the macro semantics the
+        //    compile stages answer and refuse alike whether or not the
+        //    request is captured. The root entry selects its capture mode
+        //    once, here.
+        let request_id = self.next_request_id();
+        let parent_request_id = verter_execution::request_context::current_request_id();
+        let ctx = crate::capture::root_entry_context(
+            self,
+            request_id,
+            Arc::<str>::from(canonical_id),
+            || RequestKind::Compile {
+                products: request_products,
+                backend: resolved_backend,
+            },
+            self.config.footprint_capture,
+            self.config.audit_timing_capture,
+            None,
+            verter_execution::cancellation::CancellationToken::new(),
+        );
+
+        #[cfg(feature = "semantic-observe")]
+        if ctx.observe_mode.is_captured() {
+            // 3. Increment the created-counter so the `AuditedRequest`
+            //    harness's multi-request guard surfaces correctly when a
+            //    closure issues both a component-meta and compile call.
+            verter_type_engine::request_context::increment_requests_created();
+
+            // 4. Build the audit registration BEFORE installing the TLS
+            //    guard: `Active` adds the request to the registry.
+            let registration = Arc::new(crate::host_audit_runtime::AuditRequestRegistration::new(
+                self,
+                Arc::clone(&ctx),
+            ));
+            let _ = ctx.install_audit_registration(registration.clone());
+
+            // 5. Parent correlation off the RequestContext (sniffed from
+            //    the scheduler TLS at construction). A compile issued inside
+            //    another audited request's window inherits that request's id
+            //    as its `parent_request_id`.
+            let parent_request_id = ctx.parent_request_id.map(|id| id.to_string());
+
+            // 6. Install the TLS guard so producers in `verter_compiler`
+            //    see `current_observer() = Some(ctx)`, and drive the
+            //    compile. Producers emit `record_phase_timing` +
+            //    `record_event(CompileCodeTransformOp)` while it runs.
+            let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+            let total_start = Instant::now();
+            let result = compile();
             let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-            // 10. Read accumulators off the active request context.
+            // The consumer filter admitted the kind when the mode was
+            // selected; a registration that still declines returns the
+            // cheap default-filled record without assembling a payload.
+            if matches!(
+                registration.as_ref(),
+                crate::host_audit_runtime::AuditRequestRegistration::Noop
+            ) {
+                let record = noop_compile_record(
+                    request_id,
+                    canonical_id,
+                    parent_request_id,
+                    request_products,
+                    resolved_backend,
+                    verter_audit::AuditCaptureState::FilteredNoop,
+                );
+                return AuditedResult::ok(result, record);
+            }
+
+            // 7. Read accumulators off the active request context.
             let payload =
                 self.assemble_compile_payload(request_products, resolved_backend, &result);
             let store = RequestStoreAudit::default();
@@ -663,52 +627,28 @@ impl VerterHost {
                 trace_id: String::new(),
             };
 
-            // 11. Finalise the record. Drop the TLS guard AFTER finalize so
-            //     the per-request counters stay coherent with the record we
-            //     publish.
+            // 8. Finalise the record. Drop the TLS guard AFTER finalize so
+            //    the per-request counters stay coherent with the record we
+            //    publish.
             registration.finalize(record.clone());
             drop(_ctx_guard);
             return AuditedResult::ok(result, record);
         }
 
-        // Uncaptured: audit disabled by the host, or capture compiled out.
-        let mut attempt = verter_compiler::compile_transaction::CompileAttempt::enter_project(
-            source,
-            &request,
-            "vue",
-            self.host_view_project_identity_for(canonical_id),
-        );
-        // An aborted production of the macro semantics publishes no compile.
-        let result = match self.vue_macro_semantic_input(canonical_id, target) {
-            Ok(macro_input) => {
-                attempt.stage_vue_macro_semantics(macro_input);
-                compile_registered_vue_artifact(
-                    source,
-                    &framework_parse,
-                    &request,
-                    &execution_inputs,
-                    &attempt,
-                    &allocator,
-                )
-                .unwrap_or_else(|_| {
-                    registered_compile_rejected(
-                        "VerterE003",
-                        "registered Vue artifact rejected by its adapter".to_string(),
-                    )
-                })
-            }
-            Err(abort) => aborted_compile(abort),
+        // Uncaptured: audit disabled by the host, the kind filtered, or
+        // capture compiled out. The compile still runs under the request's
+        // context.
+        let result = {
+            let _ctx_guard = RequestContextGuard::install(ctx);
+            compile()
         };
-        let request_id = self.next_request_id();
-        let parent_request_id =
-            verter_execution::request_context::current_request_id().map(|id| id.to_string());
         let record = noop_compile_record(
             request_id,
             canonical_id,
-            parent_request_id,
+            parent_request_id.map(|id| id.to_string()),
             request_products,
             resolved_backend,
-            crate::capture::uncaptured_state(false),
+            crate::capture::uncaptured_state(self.config.audit_enabled),
         );
         AuditedResult::ok(result, record)
     }
