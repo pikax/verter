@@ -38,6 +38,7 @@ import {
   MEMBER_INDEX_SIGNATURE,
   MEMBER_METHOD,
   MEMBER_PROPERTY,
+  MEMBER_SPREAD,
   NODE_ARRAY,
   NODE_CONDITIONAL,
   NODE_FUNCTION,
@@ -65,6 +66,8 @@ import {
   NODE_UNKNOWN,
   intrinsicOpDisplayName,
   type GraphNodeRecord,
+  type GraphObjectMemberRecord,
+  type GraphPropertyKeyRecord,
   type GraphTypeExprRef,
 } from "./type-graph-core.js";
 
@@ -175,6 +178,7 @@ export type NativeTypeExpr =
       parameters: NativeFunctionParam[];
       returnType?: NativeTypeExpr;
       typeParameters?: NativeTypeParameter[];
+      predicate?: NativeTypePredicate;
     }
   | {
       // A bare constructor type (`new (...) => R`). Rust's `to_json_value`
@@ -186,6 +190,7 @@ export type NativeTypeExpr =
       parameters: NativeFunctionParam[];
       returnType?: NativeTypeExpr;
       typeParameters?: NativeTypeParameter[];
+      abstract?: boolean;
     }
   | { kind: "ref"; name: string; typeArguments: NativeTypeExpr[] }
   // A compiler-native type OPERATION whose identity the checker has already
@@ -210,7 +215,7 @@ export type NativeTypeExpr =
       default?: NativeTypeExpr;
     }
   | { kind: "keyOf"; operand: NativeTypeExpr }
-  | { kind: "typeOf"; path: string[] }
+  | { kind: "typeOf"; path: string[]; typeArgs?: NativeTypeExpr[] }
   | { kind: "indexedAccess"; object: NativeTypeExpr; index: NativeTypeExpr }
   | {
       kind: "conditional";
@@ -276,7 +281,9 @@ interface NativeObjectMember {
     // operand contribution rather than a named member; exact key and absence
     // decisions remain in the Rust surface domain.
     | "spread";
-  // Property fields
+  // Property fields. The Rust producer keys a property or method by its
+  // typed `key`; `name` is the older spelling.
+  key?: NativePropertyKey;
   name?: string;
   ty?: NativeTypeExpr;
   optional?: boolean;
@@ -300,13 +307,30 @@ interface NativeFunctionExpr {
   parameters: NativeFunctionParam[];
   returnType?: NativeTypeExpr | null;
   typeParameters?: NativeTypeParameter[];
+  predicate?: NativeTypePredicate;
 }
 
 interface NativeTypeParameter {
   name: string;
   constraint?: NativeTypeExpr | null;
   default?: NativeTypeExpr | null;
+  isConst?: boolean;
 }
+
+/** A signature's type predicate (`x is T`, `asserts x`, `this is T`). */
+interface NativeTypePredicate {
+  asserts: boolean;
+  parameter?: string;
+  this?: boolean;
+  ty?: NativeTypeExpr;
+}
+
+/** A member's typed key, as the Rust producer serializes it. */
+type NativePropertyKey =
+  | { kind: "string"; value: string }
+  | { kind: "number"; value: number }
+  | { kind: "uniqueSymbol"; identity: { symbol: string } }
+  | { kind: "computed"; expression: NativeTypeExpr };
 
 // ── Converter ────────────────────────────────────────────────────
 
@@ -2685,139 +2709,442 @@ export function escapeTemplateQuasi(cooked: string): string {
   return out;
 }
 
-function graphTypeExprToString(expr: GraphTypeExprRef): string {
-  const node = expr.graph.getNode(expr.nodeId);
-  // Every graph node kind renders to a
-  // structural string form. The legacy `default: graphNode(N)`
-  // fallback leaked operator-node kinds into compat-layer strings as
-  // diagnostic placeholders (graphNode_leak bucket).
-  // Now every kind has explicit structural rendering; the exhaustive
-  // switch below replaces the fallback so future graph-node kinds
-  // surface as TypeScript compile errors at this site rather than
-  // silently leaking through.
-  switch (node.kind) {
-    case NODE_PRIMITIVE:
-      return graphPrimitiveName(node.primitive);
-    case NODE_LITERAL:
-      if (node.literalKind === LITERAL_STRING || node.literalKind === LITERAL_BIG_INT) {
-        return expr.graph.getString(node.stringId!);
-      }
-      if (node.literalKind === LITERAL_NUMBER) {
-        return String(node.numberValue);
-      }
-      if (node.literalKind === LITERAL_BOOLEAN) {
-        return String(node.booleanValue);
-      }
-      return "literal";
-    case NODE_REF: {
-      const name = expr.graph.getString(node.nameId);
-      if (node.typeArgumentNodeIds.length === 0) {
-        return name;
-      }
-      const args = node.typeArgumentNodeIds
-        .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
-        .join(", ");
-      return `${name}<${args}>`;
+// ── Display text ─────────────────────────────────────────────────
+//
+// An unreduced operator form keeps its type as display text. The text is
+// TypeScript type syntax that reparses to the printed tree: each operand
+// binds at least as tightly as its position requires, or is parenthesized,
+// and literals, keys and modifiers keep their spelling. The precedence
+// model is the Rust display renderer's (`verter_type_expr::display`).
+
+/** Type-operator binding strength, loosest first. */
+const PREC_LOWEST = 0;
+const PREC_CONDITIONAL_OR_FUNCTION = 1;
+const PREC_UNION = 2;
+const PREC_INTERSECTION = 3;
+const PREC_PREFIX = 4;
+const PREC_POSTFIX = 5;
+const PREC_PRIMARY = 6;
+
+/** A printed form and how tightly it binds. */
+interface Printed {
+  text: string;
+  precedence: number;
+}
+
+function printed(text: string, precedence: number): Printed {
+  return { text, precedence };
+}
+
+/** `form` in a position that requires at least `minimum` binding. */
+function operand(form: Printed, minimum: number): string {
+  return form.precedence < minimum ? `(${form.text})` : form.text;
+}
+
+/** `name` applied to already printed type arguments. */
+function applied(name: string, args: string[]): Printed {
+  return printed(args.length > 0 ? `${name}<${args.join(", ")}>` : name, PREC_PRIMARY);
+}
+
+/** A union or intersection; with no arm it is its identity type. */
+function joined(arms: Printed[], separator: string, precedence: number, empty: string): Printed {
+  if (arms.length === 0) {
+    return printed(empty, PREC_PRIMARY);
+  }
+  return printed(arms.map((arm) => operand(arm, precedence)).join(separator), precedence);
+}
+
+function arrayForm(element: Printed, readonly: boolean): Printed {
+  const text = `${operand(element, PREC_POSTFIX)}[]`;
+  return readonly ? printed(`readonly ${text}`, PREC_PREFIX) : printed(text, PREC_POSTFIX);
+}
+
+interface PrintedTupleElement {
+  label: string | undefined;
+  type: Printed;
+  optional: boolean;
+  rest: boolean;
+}
+
+function tupleForm(elements: PrintedTupleElement[], readonly: boolean): Printed {
+  const items = elements.map(({ label, type, optional, rest }) => {
+    if (label) {
+      const marker = optional && !rest ? "?" : "";
+      return `${rest ? "..." : ""}${label}${marker}: ${operand(type, PREC_LOWEST)}`;
     }
-    case NODE_TYPE_PARAMETER:
-      return expr.graph.getString(node.nameId);
-    case NODE_UNION:
-      return node.typeNodeIds
-        .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
-        .join(" | ");
-    case NODE_INTERSECTION:
-      return node.typeNodeIds
-        .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
-        .join(" & ");
-    case NODE_ARRAY: {
-      const elementNode = expr.graph.getNode(node.elementNodeId);
-      const element = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.elementNodeId));
-      const rendered = graphArrayElementNeedsParens(elementNode.kind) ? `(${element})` : element;
-      return node.readonly ? `readonly ${rendered}[]` : `${rendered}[]`;
+    if (rest) {
+      return `...${operand(type, PREC_LOWEST)}`;
     }
-    case NODE_TUPLE: {
-      const items = node.elements
-        .map((e) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, e.typeNodeId)))
-        .join(", ");
-      return node.readonly ? `readonly [${items}]` : `[${items}]`;
+    // An unlabeled optional element is its operand and a postfix `?`:
+    // `[A | B?]` would make `B?` the optional operand.
+    return optional ? `${operand(type, PREC_POSTFIX)}?` : operand(type, PREC_LOWEST);
+  });
+  const text = `[${items.join(", ")}]`;
+  return readonly ? printed(`readonly ${text}`, PREC_PREFIX) : printed(text, PREC_PRIMARY);
+}
+
+function objectForm(members: string[]): Printed {
+  return printed(members.length > 0 ? `{ ${members.join("; ")} }` : "{}", PREC_PRIMARY);
+}
+
+function conditionalForm(
+  check: Printed,
+  extendsType: Printed,
+  trueType: Printed,
+  falseType: Printed,
+): Printed {
+  return printed(
+    `${operand(check, PREC_UNION)} extends ${operand(extendsType, PREC_UNION)} ? ${operand(trueType, PREC_LOWEST)} : ${operand(falseType, PREC_LOWEST)}`,
+    PREC_CONDITIONAL_OR_FUNCTION,
+  );
+}
+
+function inferForm(name: string, constraint: Printed | undefined): Printed {
+  return constraint
+    ? printed(
+        `infer ${name} extends ${operand(constraint, PREC_UNION)}`,
+        PREC_CONDITIONAL_OR_FUNCTION,
+      )
+    : printed(`infer ${name}`, PREC_PREFIX);
+}
+
+function mappedForm(
+  parameter: string,
+  source: Printed,
+  nameType: Printed | undefined,
+  value: Printed,
+  optionalToken: string,
+  readonlyPrefix: string,
+): Printed {
+  const remap = nameType ? ` as ${operand(nameType, PREC_LOWEST)}` : "";
+  return printed(
+    `{ ${readonlyPrefix}[${parameter} in ${operand(source, PREC_LOWEST)}${remap}]${optionalToken}: ${operand(value, PREC_LOWEST)} }`,
+    PREC_PRIMARY,
+  );
+}
+
+function templateForm(quasis: string[], expressions: Printed[]): Printed {
+  let text = "`";
+  for (let i = 0; i < quasis.length; i += 1) {
+    text += escapeTemplateQuasi(quasis[i]!);
+    if (i < expressions.length) {
+      text += "${" + operand(expressions[i]!, PREC_LOWEST) + "}";
     }
-    case NODE_OBJECT:
-      return "object";
-    case NODE_FUNCTION: {
-      const params = node.parameters.map((parameter) => {
-        const name = expr.graph.getStringMaybe(parameter.nameId);
-        const label = name ? `${name}${parameter.optional ? "?" : ""}: ` : "";
-        const rest = parameter.rest ? "..." : "";
-        const ty = graphTypeExprToString(createGraphTypeExprRef(expr.graph, parameter.typeNodeId));
-        return `${rest}${label}${ty}`;
-      });
-      const renderedReturn = node.returnTypeNodeId
-        ? graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.returnTypeNodeId))
-        : "unknown";
-      return `(${params.join(", ")}) => ${renderedReturn}`;
-    }
-    case NODE_KEY_OF:
-      return `keyof ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.operandNodeId))}`;
-    case NODE_TYPE_OF:
-      return `typeof ${node.pathIds.map((id) => expr.graph.getString(id)).join(".")}`;
-    case NODE_INDEXED_ACCESS: {
-      const obj = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.objectNodeId));
-      const idx = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.indexNodeId));
-      return `${obj}[${idx}]`;
-    }
-    case NODE_CONDITIONAL: {
-      const check = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.checkNodeId));
-      const ext = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.extendsNodeId));
-      const tt = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.trueTypeNodeId));
-      const ft = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.falseTypeNodeId));
-      return `${check} extends ${ext} ? ${tt} : ${ft}`;
-    }
-    case NODE_MAPPED:
-      return "mapped";
-    case NODE_TEMPLATE_LITERAL: {
-      const quasis = node.quasiIds.map((id) => expr.graph.getString(id));
-      const exprs = node.expressionNodeIds.map((id) =>
-        graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)),
-      );
-      let out = "`";
-      for (let i = 0; i < quasis.length; i += 1) {
-        out += escapeTemplateQuasi(quasis[i]);
-        if (i < exprs.length) {
-          out += "${" + exprs[i] + "}";
+  }
+  return printed(`${text}\``, PREC_PRIMARY);
+}
+
+/** A parameter; an unnamed one takes a generated name, as `(_arg0: T)`. */
+function parameterText(
+  name: string | null | undefined,
+  index: number,
+  optional: boolean,
+  rest: boolean,
+  type: Printed,
+): string {
+  const marker = optional && !rest ? "?" : "";
+  return `${rest ? "..." : ""}${name || `_arg${index}`}${marker}: ${operand(type, PREC_LOWEST)}`;
+}
+
+function typeParameterText(
+  name: string,
+  isConst: boolean,
+  constraint: Printed | undefined,
+  defaultType: Printed | undefined,
+): string {
+  let text = `${isConst ? "const " : ""}${name}`;
+  if (constraint) {
+    text += ` extends ${operand(constraint, PREC_LOWEST)}`;
+  }
+  if (defaultType) {
+    text += ` = ${operand(defaultType, PREC_LOWEST)}`;
+  }
+  return text;
+}
+
+/** `<T>(a: A) => R` with `separator` " => ", or the member form with ": ". */
+function signatureText(
+  typeParameters: string[],
+  parameters: string[],
+  returnText: string,
+  separator: " => " | ": ",
+): string {
+  const generics = typeParameters.length > 0 ? `<${typeParameters.join(", ")}>` : "";
+  return `${generics}(${parameters.join(", ")})${separator}${returnText}`;
+}
+
+/**
+ * A member name: bare when it is an identifier or the canonical spelling of
+ * its number, quoted otherwise (`"0123"` names another property than `0123`).
+ */
+function memberName(name: string): string {
+  if (/^[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*$/u.test(name)) {
+    return name;
+  }
+  if (/^[0-9]+$/.test(name) && String(Number(name)) === name) {
+    return name;
+  }
+  return quoteStringLiteral(name);
+}
+
+/**
+ * A string literal type as the checker prints it: double-quoted, with a
+ * backslash, a double quote, every control character and U+2028 / U+2029 /
+ * U+0085 escaped.
+ */
+export function quoteStringLiteral(value: string): string {
+  let out = '"';
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i]!;
+    const next = value[i + 1];
+    switch (ch) {
+      case "\\":
+        out += "\\\\";
+        break;
+      case '"':
+        out += '\\"';
+        break;
+      case "\n":
+        out += "\\n";
+        break;
+      case "\t":
+        out += "\\t";
+        break;
+      case "\r":
+        out += "\\r";
+        break;
+      case "\b":
+        out += "\\b";
+        break;
+      case "\f":
+        out += "\\f";
+        break;
+      case "\v":
+        out += "\\v";
+        break;
+      case "\0":
+        out += next !== undefined && next >= "0" && next <= "9" ? "\\x00" : "\\0";
+        break;
+      default: {
+        const code = ch.charCodeAt(0);
+        if (code < 0x20 || code === 0x2028 || code === 0x2029 || code === 0x85) {
+          out += "\\u" + code.toString(16).toUpperCase().padStart(4, "0");
+        } else {
+          out += ch;
         }
       }
-      out += "`";
-      return out;
     }
-    case NODE_PARENTHESIZED:
-      return `(${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))})`;
-    case NODE_INFER:
-      return `infer ${expr.graph.getString(node.nameId)}${node.constraintNodeId ? ` extends ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.constraintNodeId))}` : ""}`;
-    case NODE_REST:
-      return `...${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))}`;
+  }
+  return `${out}"`;
+}
+
+function mappedOptionalToken(code: number): string {
+  return code === 2 ? "?" : code === 3 ? "-?" : "";
+}
+
+function mappedReadonlyPrefix(code: number): string {
+  return code === 2 ? "readonly " : code === 3 ? "-readonly " : "";
+}
+
+function graphTypeExprToString(expr: GraphTypeExprRef): string {
+  return printGraph(expr.graph, expr.nodeId).text;
+}
+
+function printGraph(graph: DecodedTypeGraph, nodeId: number): Printed {
+  const node = graph.getNode(nodeId);
+  const at = (id: number) => printGraph(graph, id);
+  const atLowest = (id: number) => operand(at(id), PREC_LOWEST);
+  // Every graph node kind has a structural spelling; the exhaustive switch
+  // makes a new kind a compile error here instead of a leaked placeholder.
+  switch (node.kind) {
+    case NODE_PRIMITIVE:
+      return printed(graphPrimitiveName(node.primitive), PREC_PRIMARY);
+    case NODE_LITERAL:
+      switch (node.literalKind) {
+        case LITERAL_STRING:
+          return printed(quoteStringLiteral(graph.getString(node.stringId!)), PREC_PRIMARY);
+        case LITERAL_BIG_INT:
+          return printed(`${graph.getString(node.stringId!)}n`, PREC_PRIMARY);
+        case LITERAL_NUMBER:
+          return printed(String(node.numberValue), PREC_PRIMARY);
+        case LITERAL_BOOLEAN:
+          return printed(String(Boolean(node.booleanValue)), PREC_PRIMARY);
+        default:
+          return printed("literal", PREC_PRIMARY);
+      }
+    case NODE_REF:
+      return applied(graph.getString(node.nameId), node.typeArgumentNodeIds.map(atLowest));
     case NODE_RECURSIVE_REF:
-      return expr.graph.getString(node.nameId);
+      return applied(graph.getString(node.nameId), node.typeArgumentNodeIds.map(atLowest));
+    case NODE_INTRINSIC_APPLICATION:
+      // Renders like a named application but resolves NOTHING: the op is a
+      // closed enum, so there is no string id and no registry lookup.
+      return applied(intrinsicOpDisplayName(node.op), node.argumentNodeIds.map(atLowest));
+    case NODE_TYPE_PARAMETER:
+      return printed(graph.getString(node.nameId), PREC_PRIMARY);
+    case NODE_UNION:
+      return joined(node.typeNodeIds.map(at), " | ", PREC_UNION, "never");
+    case NODE_INTERSECTION:
+      return joined(node.typeNodeIds.map(at), " & ", PREC_INTERSECTION, "unknown");
+    case NODE_ARRAY:
+      return arrayForm(at(node.elementNodeId), node.readonly);
+    case NODE_TUPLE:
+      return tupleForm(
+        node.elements.map((element) => {
+          const type = graph.getNode(element.typeNodeId);
+          const nestedRest = type.kind === NODE_REST ? type.innerNodeId : undefined;
+          return {
+            label: graph.getStringMaybe(element.labelId),
+            type: at(nestedRest ?? element.typeNodeId),
+            optional: element.optional,
+            rest: element.rest || nestedRest !== undefined,
+          };
+        }),
+        node.readonly,
+      );
+    case NODE_OBJECT:
+      return objectForm(node.members.flatMap((member) => graphMemberText(graph, member)));
+    case NODE_FUNCTION:
+      return printed(graphSignatureText(graph, node, " => "), PREC_CONDITIONAL_OR_FUNCTION);
+    case NODE_KEY_OF:
+      return printed(`keyof ${operand(at(node.operandNodeId), PREC_PREFIX)}`, PREC_PREFIX);
+    case NODE_TYPE_OF:
+      return printed(
+        `typeof ${node.pathIds.map((id) => graph.getString(id)).join(".")}`,
+        PREC_PREFIX,
+      );
+    case NODE_INDEXED_ACCESS:
+      return printed(
+        `${operand(at(node.objectNodeId), PREC_POSTFIX)}[${atLowest(node.indexNodeId)}]`,
+        PREC_POSTFIX,
+      );
+    case NODE_CONDITIONAL:
+      return conditionalForm(
+        at(node.checkNodeId),
+        at(node.extendsNodeId),
+        at(node.trueTypeNodeId),
+        at(node.falseTypeNodeId),
+      );
+    case NODE_MAPPED:
+      return mappedForm(
+        graph.getString(node.parameterId),
+        at(node.sourceNodeId),
+        node.nameTypeNodeId ? at(node.nameTypeNodeId) : undefined,
+        at(node.valueNodeId),
+        mappedOptionalToken(node.optionalModifier),
+        mappedReadonlyPrefix(node.readonlyModifier),
+      );
+    case NODE_TEMPLATE_LITERAL:
+      return templateForm(
+        node.quasiIds.map((id) => graph.getString(id)),
+        node.expressionNodeIds.map(at),
+      );
+    case NODE_PARENTHESIZED:
+      return printed(`(${atLowest(node.innerNodeId)})`, PREC_PRIMARY);
+    case NODE_INFER:
+      return inferForm(
+        graph.getString(node.nameId),
+        node.constraintNodeId ? at(node.constraintNodeId) : undefined,
+      );
+    case NODE_REST:
+      return printed(`...${atLowest(node.innerNodeId)}`, PREC_PRIMARY);
     case NODE_UNKNOWN:
-      return expr.graph.getString(node.rawId);
+      // Raw authored syntax of any shape: the loosest form, so an
+      // enclosing operator keeps its own grouping.
+      return printed(graph.getString(node.rawId), PREC_LOWEST);
     case NODE_SYNTHETIC_SLOT_BINDING:
       // Synthetic carriers display as their `bindingName` (the user-visible
       // identity) — they MUST NOT resolve through `TypeRegistry`.
-      return expr.graph.getString(node.bindingNameId);
-    case NODE_INTRINSIC_APPLICATION: {
-      // Renders like a named application but resolves NOTHING: the op is a
-      // closed enum, so there is no string id and no registry lookup.
-      const operands = node.argumentNodeIds.map((id) =>
-        graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)),
-      );
-      const spelled = intrinsicOpDisplayName(node.op);
-      return operands.length > 0 ? `${spelled}<${operands.join(", ")}>` : spelled;
-    }
+      return printed(graph.getString(node.bindingNameId), PREC_PRIMARY);
     default: {
       const _exhaustive: never = node;
       throw new Error(
         `graphTypeExprToString: unhandled graph node kind ${(_exhaustive as { kind: number }).kind}`,
       );
     }
+  }
+}
+
+function graphSignatureText(
+  graph: DecodedTypeGraph,
+  node: Extract<GraphNodeRecord, { kind: typeof NODE_FUNCTION }>,
+  separator: " => " | ": ",
+): string {
+  const typeParameters = node.typeParameterNodeIds.map((id) => {
+    const parameter = graph.getNode(id);
+    if (parameter.kind !== NODE_TYPE_PARAMETER) {
+      return printGraph(graph, id).text;
+    }
+    return typeParameterText(
+      graph.getString(parameter.nameId),
+      false,
+      parameter.constraintNodeId ? printGraph(graph, parameter.constraintNodeId) : undefined,
+      parameter.defaultNodeId ? printGraph(graph, parameter.defaultNodeId) : undefined,
+    );
+  });
+  const parameters = node.parameters.map((parameter, index) =>
+    parameterText(
+      graph.getStringMaybe(parameter.nameId),
+      index,
+      parameter.optional,
+      parameter.rest,
+      printGraph(graph, parameter.typeNodeId),
+    ),
+  );
+  const returnText = node.returnTypeNodeId
+    ? operand(printGraph(graph, node.returnTypeNodeId), PREC_LOWEST)
+    : "unknown";
+  return signatureText(typeParameters, parameters, returnText, separator);
+}
+
+function graphMemberKey(graph: DecodedTypeGraph, key: GraphPropertyKeyRecord): string {
+  switch (key.kind) {
+    case "string":
+      return memberName(graph.getString(key.nameId));
+    case "number":
+      return String(key.value);
+    case "uniqueSymbol":
+      return `[${graph.getString(key.nameId)}]`;
+    case "computed":
+      return `[${operand(printGraph(graph, key.nodeId), PREC_LOWEST)}]`;
+  }
+}
+
+/** One member's text, or none for a member kind with no spelling. */
+function graphMemberText(graph: DecodedTypeGraph, member: GraphObjectMemberRecord): string[] {
+  const readonly = member.readonly ? "readonly " : "";
+  const optional = member.optional ? "?" : "";
+  const signature = (separator: " => " | ": ") => {
+    const fn = member.functionNodeId ? graph.getNode(member.functionNodeId) : undefined;
+    return fn?.kind === NODE_FUNCTION ? graphSignatureText(graph, fn, separator) : undefined;
+  };
+  switch (member.kind) {
+    case MEMBER_PROPERTY:
+      return [
+        `${readonly}${graphMemberKey(graph, member.key)}${optional}: ${operand(printGraph(graph, member.typeNodeId), PREC_LOWEST)}`,
+      ];
+    case MEMBER_INDEX_SIGNATURE:
+      return [
+        `${readonly}[${graph.getStringMaybe(member.keyNameId) || "key"}: ${operand(printGraph(graph, member.keyTypeNodeId), PREC_LOWEST)}]: ${operand(printGraph(graph, member.valueTypeNodeId), PREC_LOWEST)}`,
+      ];
+    case MEMBER_CALL_SIGNATURE: {
+      const text = signature(": ");
+      return text === undefined ? [] : [text];
+    }
+    case MEMBER_CONSTRUCT_SIGNATURE: {
+      const text = signature(": ");
+      return text === undefined ? [] : [`new ${text}`];
+    }
+    case MEMBER_METHOD: {
+      const text = signature(": ");
+      return text === undefined ? [] : [`${graphMemberKey(graph, member.key)}${optional}${text}`];
+    }
+    case MEMBER_SPREAD:
+      // Type syntax has no spread member; the pre-fold operand prints as
+      // `...(T)`, as the Rust renderer spells it.
+      return [`...(${operand(printGraph(graph, member.typeNodeId), PREC_LOWEST)})`];
+    default:
+      return [];
   }
 }
 
@@ -2836,117 +3163,202 @@ export function buildEvaluatedTypeMap(
   return map;
 }
 
-/** Rough string representation for unknown/unreduced operator forms. */
 function nativeTypeExprToString(expr: NativeTypeExpr): string {
+  return printNative(expr).text;
+}
+
+/** The display text of a type expression: TypeScript type syntax that reparses to it. */
+export function typeExprDisplayText(expr: NativeTypeExprLike): string {
+  return printNativeLike(expr).text;
+}
+
+function printNativeLike(expr: NativeTypeExprLike): Printed {
+  return isGraphTypeExprRef(expr) ? printGraph(expr.graph, expr.nodeId) : printNative(expr);
+}
+
+function printNative(expr: NativeTypeExpr): Printed {
+  const atLowest = (child: NativeTypeExpr) => operand(printNative(child), PREC_LOWEST);
   switch (expr.kind) {
     case "primitive":
-      return expr.name;
+      return printed(expr.name, PREC_PRIMARY);
     case "literal":
-      return String(expr.value);
+      if (typeof expr.value === "string") {
+        return printed(
+          expr.literalKind === "bigInt" ? `${expr.value}n` : quoteStringLiteral(expr.value),
+          PREC_PRIMARY,
+        );
+      }
+      return printed(String(expr.value), PREC_PRIMARY);
     case "ref":
-      return expr.name;
+      return applied(expr.name, expr.typeArguments.map(atLowest));
     case "intrinsicApplication":
-      return expr.arguments.length > 0
-        ? `${intrinsicDisplayName(expr.op)}<${expr.arguments.map(nativeTypeExprToString).join(", ")}>`
-        : intrinsicDisplayName(expr.op);
+      return applied(intrinsicDisplayName(expr.op), expr.arguments.map(atLowest));
     case "recursiveRef":
-      return expr.typeArguments.length > 0
-        ? `${expr.name}<${expr.typeArguments.map(nativeTypeExprToString).join(", ")}>`
-        : expr.name;
+      return applied(expr.name, expr.typeArguments.map(atLowest));
+    case "typeParameter":
+      return printed(expr.name, PREC_PRIMARY);
     case "keyOf":
-      return `keyof ${nativeTypeExprToString(expr.operand)}`;
-    case "typeOf":
-      return `typeof ${expr.path.join(".")}`;
+      return printed(`keyof ${operand(printNative(expr.operand), PREC_PREFIX)}`, PREC_PREFIX);
+    case "typeOf": {
+      const args = expr.typeArgs ?? [];
+      const instantiation = args.length > 0 ? `<${args.map(atLowest).join(", ")}>` : "";
+      return printed(`typeof ${expr.path.join(".")}${instantiation}`, PREC_PREFIX);
+    }
     case "union":
-      return expr.types.map(nativeTypeExprToString).join(" | ");
+      return joined(expr.types.map(printNative), " | ", PREC_UNION, "never");
     case "intersection":
-      return expr.types.map(nativeTypeExprToString).join(" & ");
-    case "array": {
-      const element = nativeTypeExprToString(expr.element);
-      const rendered = nativeArrayElementNeedsParens(expr.element.kind) ? `(${element})` : element;
-      return `${expr.readonly ? "readonly " : ""}${rendered}[]`;
-    }
-    case "tuple": {
-      const elements = expr.elements.map((element) => {
-        const label = element.label ? `${element.label}${element.optional ? "?" : ""}: ` : "";
-        const rest = element.rest ? "..." : "";
-        return `${rest}${label}${nativeTypeExprToString(element.ty)}`;
-      });
-      return `${expr.readonly ? "readonly " : ""}[${elements.join(", ")}]`;
-    }
-    case "object": {
-      const members = expr.properties.flatMap((member) => {
-        if (
-          member.memberKind !== "property" ||
-          member.name === undefined ||
-          member.ty === undefined
-        ) {
-          return [];
-        }
-        return [
-          `${member.name}${member.optional ? "?" : ""}: ${nativeTypeExprToString(member.ty)}`,
-        ];
-      });
-      return `{ ${members.join("; ")} }`;
-    }
-    case "infer":
-      return `infer ${expr.name}${expr.constraint ? ` extends ${nativeTypeExprLikeToString(expr.constraint)}` : ""}`;
+      return joined(expr.types.map(printNative), " & ", PREC_INTERSECTION, "unknown");
+    case "array":
+      return arrayForm(printNative(expr.element), expr.readonly);
+    case "tuple":
+      return tupleForm(
+        expr.elements.map((element) => {
+          const nestedRest = element.ty.kind === "rest" ? element.ty.inner : undefined;
+          return {
+            label: element.label ?? undefined,
+            type: printNative(nestedRest ?? element.ty),
+            optional: element.optional,
+            rest: element.rest || nestedRest !== undefined,
+          };
+        }),
+        expr.readonly,
+      );
+    case "object":
+      return objectForm(expr.properties.flatMap(nativeMemberText));
     case "function":
-      return nativeCallableToString("", expr.parameters, expr.returnType);
+      return printed(nativeSignatureText(expr, " => "), PREC_CONDITIONAL_OR_FUNCTION);
     case "constructorType":
-      return nativeCallableToString("new ", expr.parameters, expr.returnType);
+      return printed(
+        `${expr.abstract ? "abstract " : ""}new ${nativeSignatureText(expr, " => ")}`,
+        PREC_CONDITIONAL_OR_FUNCTION,
+      );
+    case "indexedAccess":
+      return printed(
+        `${operand(printNative(expr.object), PREC_POSTFIX)}[${atLowest(expr.index)}]`,
+        PREC_POSTFIX,
+      );
+    case "conditional":
+      return conditionalForm(
+        printNative(expr.check),
+        printNative(expr.extends),
+        printNative(expr.trueType),
+        printNative(expr.falseType),
+      );
+    case "mapped":
+      return mappedForm(
+        expr.parameter,
+        printNative(expr.source),
+        expr.nameType ? printNative(expr.nameType) : undefined,
+        printNative(expr.value),
+        mappedOptionalToken(mappedModifierToCode(expr.optional)),
+        mappedReadonlyPrefix(mappedModifierToCode(expr.readonly)),
+      );
+    case "templateLiteral":
+      return templateForm(expr.quasis, expr.expressions.map(printNative));
+    case "parenthesized":
+      return printed(`(${atLowest(expr.inner)})`, PREC_PRIMARY);
+    case "infer":
+      return inferForm(expr.name, expr.constraint ? printNativeLike(expr.constraint) : undefined);
+    case "rest":
+      return printed(`...${atLowest(expr.inner)}`, PREC_PRIMARY);
     case "unknown":
-      return expr.raw;
+      // Raw authored syntax of any shape: the loosest form, so an
+      // enclosing operator keeps its own grouping.
+      return printed(expr.raw, PREC_LOWEST);
     case "syntheticSlotBinding":
       // Synthetic carriers render as their user-visible `bindingName` — they
       // MUST NOT route through `TypeRegistry` for display.
-      return expr.bindingName;
-    default:
-      return expr.kind;
+      return printed(expr.bindingName, PREC_PRIMARY);
+    default: {
+      const _exhaustive: never = expr;
+      return printed((_exhaustive as { kind: string }).kind, PREC_PRIMARY);
+    }
   }
 }
 
-function nativeTypeExprLikeToString(expr: NativeTypeExprLike): string {
-  return isGraphTypeExprRef(expr) ? graphTypeExprToString(expr) : nativeTypeExprToString(expr);
-}
-
-function nativeCallableToString(
-  prefix: "" | "new ",
-  parameters: NativeFunctionParam[],
-  returnType: NativeTypeExpr | undefined,
-): string {
-  const params = parameters
-    .map((parameter) => {
-      const rest = parameter.rest ? "..." : "";
-      const name = parameter.name ? `${parameter.name}${parameter.optional ? "?" : ""}: ` : "";
-      return `${rest}${name}${nativeTypeExprToString(parameter.ty)}`;
-    })
-    .join(", ");
-  const renderedReturn = returnType ? nativeTypeExprToString(returnType) : "unknown";
-  return `${prefix}(${params}) => ${renderedReturn}`;
-}
-
-/** `[]` binds tighter than these forms, so an array element needs parentheses. */
-function nativeArrayElementNeedsParens(kind: NativeTypeExpr["kind"]): boolean {
-  switch (kind) {
-    case "union":
-    case "intersection":
-    case "function":
-    case "constructorType":
-    case "conditional":
-    case "infer":
-      return true;
-    default:
-      return false;
-  }
-}
-
-function graphArrayElementNeedsParens(kind: number): boolean {
-  return (
-    kind === NODE_UNION ||
-    kind === NODE_INTERSECTION ||
-    kind === NODE_FUNCTION ||
-    kind === NODE_CONDITIONAL ||
-    kind === NODE_INFER
+function nativeSignatureText(fn: NativeFunctionExpr, separator: " => " | ": "): string {
+  const typeParameters = (fn.typeParameters ?? []).map((parameter) =>
+    typeParameterText(
+      parameter.name,
+      parameter.isConst === true,
+      parameter.constraint ? printNative(parameter.constraint) : undefined,
+      parameter.default ? printNative(parameter.default) : undefined,
+    ),
   );
+  const parameters = fn.parameters.map((parameter, index) =>
+    parameterText(
+      parameter.name,
+      index,
+      parameter.optional,
+      parameter.rest,
+      printNative(parameter.ty),
+    ),
+  );
+  // A predicate signature prints its predicate in the return position
+  // (`x is T`, `asserts this`), never the `boolean` / `void` it denotes.
+  const predicate = fn.predicate;
+  let returnText: string;
+  if (predicate) {
+    const subject = predicate.this ? "this" : (predicate.parameter ?? "this");
+    const target = predicate.ty ? ` is ${operand(printNative(predicate.ty), PREC_LOWEST)}` : "";
+    returnText = `${predicate.asserts ? "asserts " : ""}${subject}${target}`;
+  } else {
+    returnText = fn.returnType ? operand(printNative(fn.returnType), PREC_LOWEST) : "unknown";
+  }
+  return signatureText(typeParameters, parameters, returnText, separator);
+}
+
+function nativeMemberKey(member: NativeObjectMember): string | undefined {
+  const key = member.key;
+  if (!key) {
+    return member.name === undefined ? undefined : memberName(member.name);
+  }
+  switch (key.kind) {
+    case "string":
+      return memberName(key.value);
+    case "number":
+      return String(key.value);
+    case "uniqueSymbol":
+      return `[${key.identity.symbol}]`;
+    case "computed":
+      return `[${operand(printNative(key.expression), PREC_LOWEST)}]`;
+  }
+}
+
+/** One member's text, or none for a member missing what it prints. */
+function nativeMemberText(member: NativeObjectMember): string[] {
+  const readonly = member.readonly ? "readonly " : "";
+  const optional = member.optional ? "?" : "";
+  switch (member.memberKind) {
+    case "property": {
+      const key = nativeMemberKey(member);
+      return key === undefined || member.ty === undefined
+        ? []
+        : [`${readonly}${key}${optional}: ${operand(printNative(member.ty), PREC_LOWEST)}`];
+    }
+    case "indexSignature":
+      return member.keyType === undefined || member.valueType === undefined
+        ? []
+        : [
+            `${readonly}[${member.keyName || "key"}: ${operand(printNative(member.keyType), PREC_LOWEST)}]: ${operand(printNative(member.valueType), PREC_LOWEST)}`,
+          ];
+    case "callSignature":
+      return member.function ? [nativeSignatureText(member.function, ": ")] : [];
+    case "constructSignature":
+      return member.function ? [`new ${nativeSignatureText(member.function, ": ")}`] : [];
+    case "method": {
+      const key = nativeMemberKey(member);
+      return key === undefined || !member.function
+        ? []
+        : [`${key}${optional}${nativeSignatureText(member.function, ": ")}`];
+    }
+    case "spread":
+      // Type syntax has no spread member; the pre-fold operand prints as
+      // `...(T)`, as the Rust renderer spells it.
+      return member.ty === undefined
+        ? []
+        : [`...(${operand(printNative(member.ty), PREC_LOWEST)})`];
+    default:
+      return [];
+  }
 }

@@ -18,6 +18,8 @@ oxc_span = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-# Used only by the #[cfg(test)] dependency_facts_tests module.
+# Parse fixtures for the dependency-facts unit tests and the integration tests
+# (`serde_json` compares lowered trees in the display reparse cases).
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
+serde_json = { workspace = true }

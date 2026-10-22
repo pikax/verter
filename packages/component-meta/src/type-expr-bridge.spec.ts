@@ -59,7 +59,7 @@ describe("typeExprToDescriptor", () => {
         returnType: { kind: "primitive", name: "string" },
       },
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends () => string" });
+    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends (() => string)" });
   });
 
   it("parenthesizes a union array constraint on an unreduced infer", () => {
@@ -99,7 +99,7 @@ describe("typeExprToDescriptor", () => {
       name: "U",
       constraint: createGraphTypeExprRef(graph, 2),
     });
-    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends () => string" });
+    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends (() => string)" });
   });
 
   it("parenthesizes a graph union array constraint on an unreduced infer", () => {
@@ -1295,7 +1295,7 @@ describe("typeExprToDescriptor", () => {
   // modifier as absent. A genuinely-plain native mapped still recovers `Record`.
   // ===========================================================================
 
-  it("keeps a `+optional` native open-domain mapped type as unknown('mapped') (native raw-JSON carries the optional modifier)", () => {
+  it("keeps a `+optional` native open-domain mapped type as unknown (native raw-JSON carries the optional modifier)", () => {
     // `+? [P in string]: any` — the native producer surfaces the ADDED optional
     // modifier in the raw-JSON `optional` field. `Record` cannot express an
     // added optional, so the recovery must bail rather than silently drop it
@@ -1308,7 +1308,7 @@ describe("typeExprToDescriptor", () => {
       optional: "add",
     });
     expect(result.kind).toBe("unknown");
-    expect(result).toEqual({ kind: "unknown", rawType: "mapped" });
+    expect(result).toEqual({ kind: "unknown", rawType: "{ [P in string]?: any }" });
     // Negative: the unsound `Record` recovery is gone for the modified form.
     expect(result.kind).not.toBe("ref");
   });
@@ -1667,7 +1667,7 @@ describe("buildEvaluatedTypeMap", () => {
 
 describe("operator-shaped graph nodes render structurally in display text", () => {
   /**
-   * `Theme[color] extends Dark ? A : B` as a graph: node 3 is the indexed
+   * `Theme["color"] extends Dark ? A : B` as a graph: node 3 is the indexed
    * access, node 7 the conditional that consumes it.
    */
   function operatorGraph(): DecodedTypeGraph {
@@ -1676,7 +1676,7 @@ describe("operator-shaped graph nodes render structurally in display text", () =
       [
         { kind: NODE_REF, nameId: 1, typeArgumentNodeIds: [] }, // 1: Theme
         { kind: NODE_LITERAL, literalKind: LITERAL_STRING, stringId: 2 }, // 2: "color"
-        { kind: NODE_INDEXED_ACCESS, objectNodeId: 1, indexNodeId: 2 }, // 3: Theme[color]
+        { kind: NODE_INDEXED_ACCESS, objectNodeId: 1, indexNodeId: 2 }, // 3: Theme["color"]
         { kind: NODE_REF, nameId: 3, typeArgumentNodeIds: [] }, // 4: Dark
         { kind: NODE_REF, nameId: 4, typeArgumentNodeIds: [] }, // 5: A
         { kind: NODE_REF, nameId: 5, typeArgumentNodeIds: [] }, // 6: B
@@ -1687,7 +1687,7 @@ describe("operator-shaped graph nodes render structurally in display text", () =
           trueTypeNodeId: 5,
           falseTypeNodeId: 6,
         }, // 7
-        { kind: NODE_KEY_OF, operandNodeId: 3 }, // 8: keyof Theme[color]
+        { kind: NODE_KEY_OF, operandNodeId: 3 }, // 8: keyof Theme["color"]
       ],
     );
   }
@@ -1700,13 +1700,13 @@ describe("operator-shaped graph nodes render structurally in display text", () =
     const result = typeExprToDescriptor(createGraphTypeExprRef(operatorGraph(), 7));
     expect(result).toEqual({
       kind: "unknown",
-      rawType: "Theme[color] extends Dark ? A : B",
+      rawType: 'Theme["color"] extends Dark ? A : B',
     });
   });
 
   it("renders an unresolvable keyof over an indexed access as type syntax", () => {
     const result = typeExprToDescriptor(createGraphTypeExprRef(operatorGraph(), 8));
-    expect(result).toEqual({ kind: "unknown", rawType: "keyof Theme[color]" });
+    expect(result).toEqual({ kind: "unknown", rawType: 'keyof Theme["color"]' });
   });
 });
 

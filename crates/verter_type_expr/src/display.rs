@@ -246,7 +246,9 @@ pub fn render_type_expr_display(
                 if !value.is_finite() {
                     return Err(TypeExprDisplayError::NonFiniteNumberLiteral);
                 }
-                write!(&mut text, "{value}").expect("writing to String cannot fail");
+                // The checker's number spelling (`1e+21`, `1e-7`), which
+                // reparses to the same value.
+                text.push_str(&verter_ecma::js_number_to_string(value));
             }
             Frame::BigInt(value) => {
                 if !is_bigint_magnitude(value) {
@@ -636,12 +638,20 @@ pub fn render_type_expr_display(
                         kind: "tuple element",
                     });
                 }
-                if !is_rest && element.label.is_none() && element.optional {
+                // An unlabeled optional element is its operand followed by a
+                // postfix `?`, so only a postfix-or-tighter operand stays
+                // bare: `[A | B?]` would make `B?` the optional operand.
+                let unlabeled_optional = !is_rest && element.label.is_none() && element.optional;
+                if unlabeled_optional {
                     work.push(Frame::Text("?"));
                 }
                 work.push(Frame::Expr(
                     nested_rest.unwrap_or(&element.ty),
-                    Precedence::Lowest,
+                    if unlabeled_optional {
+                        Precedence::Postfix
+                    } else {
+                        Precedence::Lowest
+                    },
                 ));
                 if let Some(label) = &element.label {
                     work.push(Frame::Text(": "));
@@ -665,6 +675,9 @@ pub fn render_type_expr_display(
                     work.push(Frame::Text(" extends "));
                 }
                 work.push(Frame::Borrowed(&parameter.name));
+                if parameter.is_const {
+                    work.push(Frame::Text("const "));
+                }
             }
         }
     }
@@ -831,7 +844,15 @@ fn push_member_name(output: &mut String, name: &str) {
 
 fn is_bare_member_name(name: &str) -> bool {
     if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
-        return true;
+        // A bare numeric key names the property its number's canonical
+        // spelling names, so it stays bare only when that spelling is the
+        // name itself: a bare `0123`, or digits beyond the exact integers,
+        // would name another property than the quoted string does.
+        return name
+            .parse::<i64>()
+            .ok()
+            .and_then(CanonicalIndexInt::from_canonical_i64)
+            .is_some_and(|index| index.to_string() == name);
     }
     let mut chars = name.chars();
     let Some(first) = chars.next() else {

@@ -788,3 +788,6 @@ mod intersection_distribution_allocation;
 
 #[path = "allocation_cases/key_remap.rs"]
 mod key_remap_allocation;
+
+#[path = "allocation_cases/partial_print.rs"]
+mod partial_print_allocation;
