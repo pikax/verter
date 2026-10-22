@@ -4104,7 +4104,8 @@ pub struct HostRetentionSnapshot {
     pub semantic_graph_storage_bytes: usize,
     /// The part of [`Self::pinned_bytes`] this host's semantic memo pins for
     /// its own bookkeeping: its reverse index's shards, its shared-charge
-    /// registry's table and its dependency-rail interner.
+    /// registry's table, its dependency-rail interner and its per-node
+    /// structure-bit table.
     pub semantic_bookkeeping_storage_bytes: usize,
     /// High-water mark of the aggregate account's charged bytes.
     pub peak_total_bytes: usize,
@@ -4131,6 +4132,10 @@ pub struct HostRetentionSnapshot {
     /// references, so after a close this counts only identities a live
     /// reader still holds.
     pub identity_pool_entries: usize,
+    /// The part of [`Self::retained_bytes`] the intern pool charges for the
+    /// entries [`Self::identity_pool_entries`] counts: each pooled string's
+    /// cell and its map slot.
+    pub identity_pool_bytes: usize,
     /// Registered source snapshots (the base registration per document plus
     /// the current overlay; superseded overlays are retracted).
     pub registered_sources: usize,

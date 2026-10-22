@@ -3467,3 +3467,103 @@ fn fanout_fuse_trips_mark_request_result_budget_partial() {
         );
     }
 }
+
+/// A tripped wildcard-route fan-out fuse records the same budget class as its
+/// imported-root and registry-deepening siblings, so the final component
+/// result classifies as an operation-profile refusal rather than an
+/// unclassified partial, and the symbol it never looked up admits no warm
+/// negative. The below-cap control resolves the same symbol complete and
+/// warms it, and a later request with the fuse exhausted is served from that
+/// warm entry without ticking the fuse.
+#[test]
+fn wildcard_route_fuse_trip_records_budget_class_beside_below_cap_control() {
+    use crate::component_meta_result_db::{
+        classify_final_component_retention, ComponentMetaRefusalClass,
+        FinalComponentAdmissionProof, FinalComponentRetention,
+    };
+    use verter_type_engine::request_context::{
+        current_request_result_is_partial, current_request_result_reasons, RequestContext,
+        RequestContextGuard,
+    };
+    use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+    let host = build_route_only_reexport_host();
+    assert!(host.ensure_indexed_ready("/m4_src/index.ts").is_some());
+    let imported_db = host.project_type_store().imported_registry_db();
+    let live_before = imported_db.live_count();
+
+    // One request per run; `remaining` primes the wildcard-route fuse.
+    let run = |remaining: usize| {
+        let _guard = RequestContextGuard::install(RequestContext::new(
+            1,
+            Arc::from("/m4_src/index.ts"),
+            false,
+            None,
+        ));
+        let dispatch = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+            host.as_ref(),
+        );
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &dispatch);
+        engine.prime_wildcard_route_fuse_for_tests(remaining);
+        let primed = engine.wildcard_route_fuse_consumed_for_tests();
+        let resolved = engine
+            .resolve_imported_registry_symbol(
+                "/m4_src/index.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "ButtonProps",
+            )
+            .map(|r| (r.canonical_id.clone(), r.exported_name.clone()));
+        let reasons = current_request_result_reasons();
+        assert_eq!(current_request_result_is_partial(), !reasons.is_empty());
+        let retention = classify_final_component_retention(
+            if reasons.is_empty() {
+                ResultCompleteness::Complete
+            } else {
+                ResultCompleteness::partial(reasons)
+            },
+            FinalComponentAdmissionProof::isolated(false),
+        );
+        (
+            resolved,
+            reasons,
+            retention,
+            engine.wildcard_route_fuse_consumed_for_tests() - primed,
+        )
+    };
+
+    // Tripped: the symbol is never looked up and the request records the
+    // budget class alone.
+    let (resolved, reasons, retention, ticks) = run(0);
+    assert_eq!(resolved, None);
+    assert_eq!(ticks, 1);
+    assert_eq!(reasons, PartialReasonSet::BUDGET_EXCEEDED);
+    assert_eq!(
+        retention,
+        FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile),
+    );
+    assert_eq!(
+        imported_db.live_count(),
+        live_before,
+        "a tripped lookup admits no warm negative"
+    );
+
+    // Below-cap control: the same symbol resolves complete and warms.
+    let (resolved, reasons, retention, _) = run(1);
+    assert_eq!(
+        resolved,
+        Some(("/m4_src/types.ts".to_string(), "Props".to_string()))
+    );
+    assert!(reasons.is_empty());
+    assert_eq!(retention, FinalComponentRetention::Complete);
+    assert_eq!(imported_db.live_count(), live_before + 1);
+
+    // Warm: an exhausted fuse is never consulted for the warm symbol.
+    let (resolved, reasons, retention, ticks) = run(0);
+    assert_eq!(
+        resolved,
+        Some(("/m4_src/types.ts".to_string(), "Props".to_string()))
+    );
+    assert!(reasons.is_empty());
+    assert_eq!(retention, FinalComponentRetention::Complete);
+    assert_eq!(ticks, 0, "the warm hit ticks no fuse");
+}

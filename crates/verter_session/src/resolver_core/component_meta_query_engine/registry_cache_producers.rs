@@ -312,14 +312,13 @@ impl<M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'_, M> {
                 // exhausted, so the symbol was NEVER looked up. This `None`
                 // is a GENUINE PARTIAL — admitting it as a warm negative
                 // would poison subsequent identical requests that DO have
-                // budget. Mark the request partial sticky so the whole
-                // component-meta result refuses to warm, and route the
-                // absent value through `ReturnOnly(None)` (NOT a cacheable
-                // negative).
-                verter_type_engine::request_context::mark_request_result_partial();
+                // budget. The tripped fuse already marked the request
+                // budget-partial, so the whole component-meta result refuses
+                // to warm; the absent value routes through `ReturnOnly(None)`
+                // (NOT a cacheable negative).
                 return verter_type_engine::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
                     value: None,
-                    reason: verter_audit::NonAdmissionReason::PartialResult,
+                    reason: verter_audit::NonAdmissionReason::BudgetExceeded,
                 };
             }
         };
