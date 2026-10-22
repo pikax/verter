@@ -467,36 +467,6 @@ pub fn reset_decl_handoff_stats() {
     }
 }
 
-/// Without `semantic-observe` the handoff profile sink cannot exist: the
-/// type is uninhabited, so [`DeclLoweringService::profile`] is always
-/// `None` and every profiled rendezvous arm is statically dead.
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "semantic-observe")))]
-pub(crate) enum HandoffStats {}
-
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "semantic-observe")))]
-impl HandoffStats {
-    fn record_acquire(
-        &self,
-        _submitted: std::time::Instant,
-        _started: std::time::Instant,
-        _finished: std::time::Instant,
-        _received: std::time::Instant,
-        _parsed_now: bool,
-    ) {
-        match *self {}
-    }
-
-    fn record_run(
-        &self,
-        _submitted: std::time::Instant,
-        _started: std::time::Instant,
-        _finished: std::time::Instant,
-        _received: std::time::Instant,
-    ) {
-        match *self {}
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn shard_index(key: &SnapshotKey, worker_count: usize) -> usize {
     use std::hash::{Hash, Hasher};
@@ -1236,19 +1206,15 @@ impl DeclLoweringService {
         Self::new_with(/* lazy = */ false, 1)
     }
 
-    /// The handoff rendezvous profile sink, when one is installed. Always
-    /// `None` without `semantic-observe`, where no sink can exist.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The handoff rendezvous profile sink and this handoff's submission
+    /// instant, when a sink is installed. The profile exists only under
+    /// `semantic-observe`.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
     #[inline]
-    fn profile(&self) -> Option<&Arc<HandoffStats>> {
-        #[cfg(feature = "semantic-observe")]
-        {
-            self.profile.as_ref()
-        }
-        #[cfg(not(feature = "semantic-observe"))]
-        {
-            None
-        }
+    fn handoff_profile(&self) -> Option<(Arc<HandoffStats>, std::time::Instant)> {
+        self.profile
+            .as_ref()
+            .map(|stats| (Arc::clone(stats), std::time::Instant::now()))
     }
 
     /// Test-only single-worker constructor with an INJECTED handoff
@@ -1386,16 +1352,17 @@ impl DeclLoweringService {
             let workers = self.workers();
             let worker = &workers[shard_index(key, workers.len())];
             self.count_handoff();
-            let profile = self
-                .profile()
-                .map(|stats| (Arc::clone(stats), std::time::Instant::now()));
+            #[cfg(feature = "semantic-observe")]
+            let profile = self.handoff_profile();
             // The worker reads the clock only for a profiled acquisition.
+            #[cfg(feature = "semantic-observe")]
             let profiled = profile.is_some();
             let service = Arc::clone(self);
             let key = key.clone();
             let source = Arc::clone(source);
             let handoff = ShardHandoff::new(worker, Arc::clone(self), move |reply| {
                 Box::new(move |shard: &mut SnapshotShard| {
+                    #[cfg(feature = "semantic-observe")]
                     let started = profiled.then(std::time::Instant::now);
                     let (parsed_now, refused) =
                         shard.acquire(&service.account, &key, &source, source_type);
@@ -1405,12 +1372,14 @@ impl DeclLoweringService {
                         }),
                         _ => None,
                     };
+                    #[cfg(feature = "semantic-observe")]
                     let timing = started.map(|started| (started, std::time::Instant::now()));
                     let answer = LeaseAnswer {
                         lease: service.lease(key),
                         parsed_now,
                         refused,
                         result,
+                        #[cfg(feature = "semantic-observe")]
                         timing,
                     };
                     // An abandoned acquisition's lease releases here, on the
@@ -1418,7 +1387,11 @@ impl DeclLoweringService {
                     drop(reply.answer(answer));
                 }) as WorkerJob
             });
-            LeaseHandoff { handoff, profile }
+            LeaseHandoff {
+                handoff,
+                #[cfg(feature = "semantic-observe")]
+                profile,
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1730,13 +1703,14 @@ impl DeclLoweringService {
             let workers = self.workers();
             let worker = &workers[shard_index(key, workers.len())];
             self.count_handoff();
-            let profile = self
-                .profile()
-                .map(|stats| (Arc::clone(stats), std::time::Instant::now()));
+            #[cfg(feature = "semantic-observe")]
+            let profile = self.handoff_profile();
+            #[cfg(feature = "semantic-observe")]
             let profiled = profile.is_some();
             let key = key.clone();
             let handoff = ShardHandoff::new(worker, Arc::clone(self), move |reply| {
                 Box::new(move |shard: &mut SnapshotShard| {
+                    #[cfg(feature = "semantic-observe")]
                     let started = profiled.then(std::time::Instant::now);
                     // `None` = lease miss (job does not run, nothing is
                     // parsed); `Some(catch_unwind(..))` = the retained
@@ -1744,11 +1718,20 @@ impl DeclLoweringService {
                     let result = shard.snapshot_leased(&key).map(|parsed| {
                         std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())))
                     });
+                    #[cfg(feature = "semantic-observe")]
                     let timing = started.map(|started| (started, std::time::Instant::now()));
-                    drop(reply.answer(RunAnswer { result, timing }));
+                    drop(reply.answer(RunAnswer {
+                        result,
+                        #[cfg(feature = "semantic-observe")]
+                        timing,
+                    }));
                 }) as WorkerJob
             });
-            LeasedRunHandoff { handoff, profile }
+            LeasedRunHandoff {
+                handoff,
+                #[cfg(feature = "semantic-observe")]
+                profile,
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1868,6 +1851,7 @@ struct LeaseAnswer<R> {
     refused: Option<verter_parser::oxc_parse::StackUnavailable>,
     result: Option<std::thread::Result<R>>,
     /// The worker's job start and end, for a profiled acquisition.
+    #[cfg(feature = "semantic-observe")]
     timing: Option<(std::time::Instant, std::time::Instant)>,
 }
 
@@ -1875,6 +1859,7 @@ struct LeaseAnswer<R> {
 #[cfg(not(target_arch = "wasm32"))]
 struct RunAnswer<R> {
     result: Option<std::thread::Result<R>>,
+    #[cfg(feature = "semantic-observe")]
     timing: Option<(std::time::Instant, std::time::Instant)>,
 }
 
@@ -1898,7 +1883,7 @@ pub struct LeaseHandoff<R> {
     #[cfg(not(target_arch = "wasm32"))]
     handoff: ShardHandoff<LeaseAnswer<R>>,
     /// The profile sink and the submission instant, for a profiled handoff.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
     profile: Option<(Arc<HandoffStats>, std::time::Instant)>,
     /// wasm answers at submission: the shard is this thread's.
     #[cfg(target_arch = "wasm32")]
@@ -1912,6 +1897,7 @@ impl<R> LeaseHandoff<R> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let answer = std::task::ready!(self.handoff.poll(waker));
+            #[cfg(feature = "semantic-observe")]
             if let (Some((stats, submitted)), Some((started, finished))) =
                 (self.profile.as_ref(), answer.timing)
             {
@@ -1960,7 +1946,7 @@ impl<R> LeaseHandoff<R> {
 pub struct LeasedRunHandoff<R> {
     #[cfg(not(target_arch = "wasm32"))]
     handoff: ShardHandoff<RunAnswer<R>>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
     profile: Option<(Arc<HandoffStats>, std::time::Instant)>,
     #[cfg(target_arch = "wasm32")]
     ready: Option<Option<R>>,
@@ -1975,6 +1961,7 @@ impl<R> LeasedRunHandoff<R> {
             let answer = std::task::ready!(self.handoff.poll(waker));
             // A lease miss and a panicking job still record their op — the
             // caller paid the full rendezvous either way.
+            #[cfg(feature = "semantic-observe")]
             if let (Some((stats, submitted)), Some((started, finished))) =
                 (self.profile.as_ref(), answer.timing)
             {
