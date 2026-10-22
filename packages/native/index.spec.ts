@@ -15,12 +15,18 @@ import {
   prepareStyleForPreprocessor,
   analyzeStyle,
   parseSelectorThreadInvocations,
+  captureAvailability,
   type HostPublicApiProjectionError,
   type HostTscDeclarationShapeReason,
 } from "./index.js";
 
 const require = createRequire(import.meta.url);
 const VUE_SFC_VERSION = require("@vue/compiler-sfc/package.json").version as string;
+
+// Audit records exist only in a binding built with `semantic-observe`; the
+// default build reports unavailable capture from every audit method.
+const captured = captureAvailability() === "Available";
+const CAPTURE_UNAVAILABLE = /audit capture is unavailable/;
 
 function cssTokens(css: string): string[] {
   return css
@@ -1008,7 +1014,7 @@ describe("component-meta native aliases", () => {
     host.shutdown();
   });
 
-  it("getComponentMetaWithAudit throws when the host does not enable audit", () => {
+  it.runIf(captured)("getComponentMetaWithAudit throws when the host does not enable audit", () => {
     // Default HostConfig has audit_enabled = false. Calling the audit
     // binding must surface a clear error rather than returning an
     // empty-footprint bundle.
@@ -1022,7 +1028,37 @@ describe("component-meta native aliases", () => {
     host.shutdown();
   });
 
-  it("napi_get_component_meta_with_audit_returns_populated_footprint", () => {
+  it.runIf(!captured)(
+    "getComponentMetaWithAudit and the walkers report unavailable capture even on an audit-enabled host",
+    () => {
+      // A default build compiles capture out: an audit-enabled host
+      // must say capture is unavailable rather than return a bundle
+      // whose record carries no observation.
+      const native = require("./index.js");
+      const host = new native.ComponentMetaHost({
+        auditEnabled: true,
+        footprintCapture: true,
+      });
+      host.upsertBase(
+        "/Widget.vue",
+        '<script setup lang="ts">\nconst n: number = 1\n</script>\n<template><div>{{ n }}</div></template>',
+      );
+      const session = host.openSession();
+      expect(() => session.getComponentMetaWithAudit("/Widget.vue")).toThrow(CAPTURE_UNAVAILABLE);
+      // The plain query is unaffected by capture.
+      expect(session.getComponentMeta("/Widget.vue")).toBeInstanceOf(Buffer);
+      expect(() => session.whyLoadedFromAuditJson("{}", "/Widget.vue")).toThrow(
+        CAPTURE_UNAVAILABLE,
+      );
+      expect(() =>
+        session.whyInstantiatedFromAuditJson("{}", "/Widget.vue", "Widget", "0".repeat(32)),
+      ).toThrow(CAPTURE_UNAVAILABLE);
+      session.close();
+      host.shutdown();
+    },
+  );
+
+  it.runIf(captured)("napi_get_component_meta_with_audit_returns_populated_footprint", () => {
     // With audit_enabled +
     // footprint_capture on, the binding returns a Buffer containing
     // `{ analysis, resolution, record }` JSON — and the record's
@@ -1088,33 +1124,36 @@ describe("component-meta native aliases", () => {
     host.shutdown();
   });
 
-  it("whyLoadedFromAuditJson round-trips a provenance chain via the Rust walker", () => {
-    const native = require("./index.js");
-    const host = new native.ComponentMetaHost({
-      auditEnabled: true,
-      footprintCapture: true,
-    });
-    host.upsertBase(
-      "/Widget.vue",
-      '<script setup lang="ts">\nconst n: number = 1\n</script>\n<template><div>{{ n }}</div></template>',
-    );
-    const session = host.openSession();
-    const buffer = session.getComponentMetaWithAudit("/Widget.vue");
-    const auditJson = (buffer as Buffer).toString("utf-8");
-    const chainJson = session.whyLoadedFromAuditJson(auditJson, "/Widget.vue");
-    const chain = JSON.parse(chainJson);
-    // Either a complete walk or NotFound — both are valid shapes; the
-    // test asserts the walker binding produces a parseable
-    // ProvenanceChain JSON regardless of fixture-specific structure.
-    expect(chain).toHaveProperty("steps");
-    expect(chain).toHaveProperty("terminated");
-    expect(chain).toHaveProperty("shared_load_terminals");
-    expect(Array.isArray(chain.steps)).toBe(true);
-    session.close();
-    host.shutdown();
-  });
+  it.runIf(captured)(
+    "whyLoadedFromAuditJson round-trips a provenance chain via the Rust walker",
+    () => {
+      const native = require("./index.js");
+      const host = new native.ComponentMetaHost({
+        auditEnabled: true,
+        footprintCapture: true,
+      });
+      host.upsertBase(
+        "/Widget.vue",
+        '<script setup lang="ts">\nconst n: number = 1\n</script>\n<template><div>{{ n }}</div></template>',
+      );
+      const session = host.openSession();
+      const buffer = session.getComponentMetaWithAudit("/Widget.vue");
+      const auditJson = (buffer as Buffer).toString("utf-8");
+      const chainJson = session.whyLoadedFromAuditJson(auditJson, "/Widget.vue");
+      const chain = JSON.parse(chainJson);
+      // Either a complete walk or NotFound — both are valid shapes; the
+      // test asserts the walker binding produces a parseable
+      // ProvenanceChain JSON regardless of fixture-specific structure.
+      expect(chain).toHaveProperty("steps");
+      expect(chain).toHaveProperty("terminated");
+      expect(chain).toHaveProperty("shared_load_terminals");
+      expect(Array.isArray(chain.steps)).toBe(true);
+      session.close();
+      host.shutdown();
+    },
+  );
 
-  it("napi_audit_json_round_trips_through_typescript_json_parse_stringify", () => {
+  it.runIf(captured)("napi_audit_json_round_trips_through_typescript_json_parse_stringify", () => {
     // The audit JSON round-trip through
     // `JSON.parse`/`JSON.stringify` is the path the hover / playground
     // consumers take — they stringify, ship over a transport, parse,
@@ -1172,7 +1211,7 @@ describe("component-meta native aliases", () => {
     host.shutdown();
   });
 
-  it("napi_take_audit_record_called_synchronously_before_promise_resolves", () => {
+  it.runIf(captured)("napi_take_audit_record_called_synchronously_before_promise_resolves", () => {
     // Binding-shape rule: the audit NAPI
     // methods are SYNCHRONOUS. "Promise resolves
     // synchronously" means the binding hands the audit record
@@ -1321,6 +1360,10 @@ describe("VerterHost type declarations in sync with native binary", () => {
     expect(typeof native.prepareStyleForPreprocessor).toBe("function");
     expect(typeof native.analyzeStyle).toBe("function");
     expect(typeof native.VerterHost).toBe("function");
+    // The wrapper forwards the binding's capture probe; an omitted
+    // forward would leave every capture-aware consumer unable to branch.
+    expect(typeof native.captureAvailability).toBe("function");
+    expect(["Available", "Unavailable"]).toContain(native.captureAvailability());
     // `compileBatch` does not exist; batch SFC compile is
     // the `host.compileMany` instance method. Negative assertion to
     // catch any future re-export attempt.

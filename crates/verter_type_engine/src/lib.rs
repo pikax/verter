@@ -59,9 +59,12 @@ pub mod invalidation_domain;
 /// `SessionDemandIdentity`). Crate-private: the substrate is B1-internal;
 /// only the two R6-witness compile-fail helpers below are re-exported.
 pub mod locator_identity;
-/// Loop-5 inner-dispatch instrumentation counters. Inert in production —
+/// Investigation counters, timers and the stall watchdog for the inner
+/// dispatch loop. Measurement-only: compiled only under the observation gate,
+/// so a default build carries none of them —
 /// callers bump atomic counters at named call sites and dump aggregates
 /// via `dump_loop5_instrumentation_counters()`.
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 pub mod loop5_instrumentation;
 pub mod mapper_binder_registry;
 pub mod project_semantic_dispatch;

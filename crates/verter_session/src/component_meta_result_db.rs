@@ -505,9 +505,11 @@ mod tests {
     /// reintroduce.
     #[test]
     fn live_counter_exact_after_mixed_admit_evict_sequence() {
-        let counter = Arc::new(AtomicU64::new(0));
-        let db: ComponentMetaResultDb<u32> =
-            ComponentMetaResultDb::with_counters(Arc::clone(&counter), Arc::new(AtomicU64::new(0)));
+        let counter = verter_type_engine::cache_runtime::OccupancyCounter::new();
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::with_counters(
+            counter.clone(),
+            verter_type_engine::cache_runtime::OccupancyCounter::new(),
+        );
         let mk_key = |owner: &str| mk_result_key(owner, [0u8; 16]);
         let mk_entry = |v: u32| ComponentMetaResultEntry {
             payload: Arc::new(v),
@@ -1186,6 +1188,8 @@ mod tests {
             .with(|slot| *slot.borrow_mut() = None);
     }
 
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn session_resolution_and_payload_replay_retained_operation_refusal() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1276,6 +1280,7 @@ mod tests {
             .with(|slot| *slot.borrow_mut() = None);
     }
 
+    #[cfg(feature = "semantic-observe")]
     fn budget_refusal_host(canonical: &str) -> crate::component_meta_host::ComponentMetaHost {
         let host = crate::component_meta_host::ComponentMetaHost::new_standalone(
             crate::types::HostConfig {
@@ -1298,6 +1303,8 @@ mod tests {
         host
     }
 
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn session_resolution_first_caller_seals_operation_refusal() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1373,6 +1380,8 @@ mod tests {
             .with(|slot| *slot.borrow_mut() = None);
     }
 
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn session_payload_first_caller_seals_operation_refusal() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -2148,6 +2157,8 @@ mod tests {
         });
     }
 
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn retained_symbolic_budget_replay_is_a_host_error_and_skips_the_producer() {
         use std::sync::atomic::Ordering::Relaxed;

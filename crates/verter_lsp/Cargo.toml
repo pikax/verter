@@ -10,7 +10,6 @@ description = "Rust LSP server for Verter — Language Server Protocol implement
 publish = false
 
 [features]
-hotpath = ["verter_session/hotpath", "verter_diagnostics/hotpath"]
 # Opt-in test-support seam for items the SEPARATE integration-test binary needs
 # (`#[cfg(any(test, feature = "test-support"))]`) — e.g. the delivered-ledger
 # read `ProjectSync::delivered_provider_content`. Activated by the self-edge in
@@ -33,7 +32,7 @@ test-support = []
 # existing dependency edge (which forwards to every lower layer), so an
 # observation build of this root captures the same layers as the
 # measurement harness. No production edge or default feature enables it.
-semantic-observe = ["verter_session/semantic-observe"]
+semantic-observe = ["verter_session/semantic-observe", "verter_diagnostics/semantic-observe"]
 
 [dependencies]
 verter_resolution = { workspace = true }

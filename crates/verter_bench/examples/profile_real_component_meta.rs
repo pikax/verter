@@ -3,8 +3,8 @@
 //! Real-project component-meta hotpath profiler.
 //!
 //! Usage:
-//!   cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath -- EditorSuggestionMenu
-//!   cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath -- src/runtime/components/ContextMenuContent.vue
+//!   cargo run -p verter_bench --example profile_real_component_meta --release --features=semantic-observe -- EditorSuggestionMenu
+//!   cargo run -p verter_bench --example profile_real_component_meta --release --features=semantic-observe -- src/runtime/components/ContextMenuContent.vue
 //!
 //! Environment variables:
 //!   VERTER_PROFILE_PROJECT_ROOT  project root (default: repo-root-anchored `.integration-tests/repos/nuxt-ui`)
@@ -259,7 +259,7 @@ fn profile_one(project_root: &Path, token: &str, repeats: usize) -> io::Result<(
     Ok(())
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::main(limit = 120))]
+#[cfg_attr(feature = "semantic-observe", hotpath::main(limit = 120))]
 fn main() -> io::Result<()> {
     let project_root = std::env::var("VERTER_PROFILE_PROJECT_ROOT")
         .map(PathBuf::from)

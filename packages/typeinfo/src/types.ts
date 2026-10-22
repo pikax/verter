@@ -13,10 +13,11 @@ export interface TypeInfoSessionConfig {
   /** LRU cap for the host's evaluate-type-expression scratch cache. */
   evaluateTypeExpressionCacheSize?: number;
   /**
-   * Enable per-request audit. Default `true`. When `false` the
-   * `auditRecord` field on `ResolveSymbolResult` /
-   * `EvaluateTypeExpressionResult` is `undefined` (the resolution
-   * still runs).
+   * Enable per-request audit. Default `true`. When `false`, or when
+   * the loaded `@verter/native` binding was built without audit capture
+   * (`captureAvailability() === "Unavailable"`), the `auditRecord`
+   * field on `ResolveSymbolResult` / `EvaluateTypeExpressionResult` is
+   * `undefined` (the resolution still runs).
    */
   auditEnabled?: boolean;
 }
@@ -144,7 +145,10 @@ export interface AuditRecord {
 export interface ResolveSymbolResult {
   /** Resolved type descriptor; `undefined` when resolution failed. */
   type?: TypeDescriptor;
-  /** Per-request audit record; `undefined` when audit is disabled. */
+  /**
+   * Per-request audit record; `undefined` when audit is disabled or the
+   * native binding was built without audit capture.
+   */
   auditRecord?: AuditRecord;
 }
 
@@ -152,6 +156,9 @@ export interface ResolveSymbolResult {
 export interface EvaluateTypeExpressionResult {
   /** Resolved type descriptor; `undefined` when resolution failed. */
   type?: TypeDescriptor;
-  /** Per-request audit record; `undefined` when audit is disabled. */
+  /**
+   * Per-request audit record; `undefined` when audit is disabled or the
+   * native binding was built without audit capture.
+   */
   auditRecord?: AuditRecord;
 }

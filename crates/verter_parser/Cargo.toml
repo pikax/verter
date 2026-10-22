@@ -13,8 +13,13 @@ categories = ["compilers", "parsing"]
 publish = false
 
 [features]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# compiles this crate's `hotpath` measurement attributes. Forwarded by the
+# semantic and compiler layers; no production edge enables it.
+semantic-observe = ["dep:hotpath"]
+# Allocation profiling through hotpath's own allocator: a distinct measurement
+# mode on top of the coordinated opt-in.
+hotpath-alloc = ["semantic-observe", "hotpath/hotpath-alloc"]
 # Opt-in audit trace: emits `parser_cache_audit_hit` core trace events for
 # every `TypeResolutionContext::cached_named_resolution` hit so cache-key
 # sufficiency can be validated against the raw resolution graph. Enable
@@ -56,3 +61,8 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Threading"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }

@@ -28,7 +28,7 @@ use verter_type_engine::semantic_query::{
     SemanticQueryValue, SurfaceView,
 };
 use verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant;
-use verter_type_engine::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::semantic_query_memo::{GraphIn, SemanticGraphStore};
 
 fn open_a_lane(graph: &SemanticGraphStore) {
     let _scope = graph.enter_node_root_scope();
@@ -51,7 +51,7 @@ fn read_an_origin_scope(graph: &SemanticGraphStore, id: SemanticNodeId) {
 }
 
 fn copy_an_origin_scope(graph: &SemanticGraphStore, id: SemanticNodeId) -> SemanticNodeId {
-    graph.intern_preserving_scope(id, SemanticNodeData::Primitive(PrimitiveKind::String))
+    GraphIn::of(graph).intern_preserving_scope(id, SemanticNodeData::Primitive(PrimitiveKind::String))
 }
 
 fn classify_a_structure(graph: &SemanticGraphStore, id: SemanticNodeId) -> bool {
@@ -83,7 +83,7 @@ fn record_an_origin_edge(
     meta: OriginMeta,
     fence: DepSignature,
 ) {
-    graph.record_origin_edge(id, kind, std::sync::Arc::from([id]), meta, fence);
+    GraphIn::of(graph).record_origin_edge(id, kind, std::sync::Arc::from([id]), meta, fence);
 }
 
 fn key_an_ordinal(graph: &SemanticGraphStore, id: SemanticNodeId, ids: &mut Vec<SemanticNodeId>) {
@@ -105,6 +105,7 @@ fn build_over_ordinals(
     id: SemanticNodeId,
     nullability: NullabilityPolicy,
 ) {
+    let graph = GraphIn::of(graph);
     let _union = canonical_algebra::intern_ordered_union(graph, &[id], nullability);
     let unmetered = canonical_algebra::ConstructionMeter::UNMETERED;
     let _intersection =
@@ -148,6 +149,7 @@ fn merge_caller_surfaces(
     alternatives: &[ObjectProjectionAlternative],
     evidence: &mut canonical_algebra::CanonicalEvidence,
 ) {
+    let graph = GraphIn::of(graph);
     let unmetered = canonical_algebra::ConstructionMeter::UNMETERED;
     let _common = walk::merge_union_surfaces(graph, arms, unmetered, evidence);
     let _macro = walk::merge_union_surfaces_for_macro(graph, arms, unmetered, evidence);

@@ -895,6 +895,8 @@ fn directory_tree_dirty_advances_content_generation() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vfs_provenance_tracks_dir_index_hits_refreshes_and_dirty_rescans() {
     let dir = tempfile::tempdir().unwrap();
@@ -981,9 +983,13 @@ fn bounded_resolution_preflight_never_enumerates_or_retains_native_directory_ent
     )
     .expect("metadata-only native preflight");
 
-    let provenance = workspace.vfs_provenance_snapshot();
-    assert_eq!(provenance.native_fs_read_dir_count, 0);
-    assert_eq!(provenance.dir_index_refresh_count, 0);
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let provenance = workspace.vfs_provenance_snapshot();
+        assert_eq!(provenance.native_fs_read_dir_count, 0);
+        assert_eq!(provenance.dir_index_refresh_count, 0);
+    }
     assert!(matches!(
         reservation.entries(),
         [crate::resolver::ResolutionInputReservation::PathProbe {
@@ -997,6 +1003,8 @@ fn bounded_resolution_preflight_never_enumerates_or_retains_native_directory_ent
         WorkspaceRead::probe_path(&workspace, &target),
         verter_session_query::resolution::PathProbe::File
     );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
         workspace
             .vfs_provenance_snapshot()
@@ -1006,6 +1014,8 @@ fn bounded_resolution_preflight_never_enumerates_or_retains_native_directory_ent
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vfs_provenance_tracks_native_read_file_misses_after_stale_positive_index_hits() {
     let dir = tempfile::tempdir().unwrap();
@@ -1038,6 +1048,8 @@ fn vfs_provenance_tracks_native_read_file_misses_after_stale_positive_index_hits
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn dir_index_negative_avoids_disk_read_for_missing_sibling() {
     let dir = tempfile::tempdir().unwrap();
@@ -1698,9 +1710,9 @@ fn filesystem_resolution_publishes_and_reuses_a_warm_owner_edge() {
          production LSP backend paying full cold cost on every import."
     );
 
+    #[cfg(feature = "semantic-observe")]
     let before = workspace.vfs_provenance_snapshot();
     let warm = workspace.resolve_import_outcome(&owner, "./dep", CONTEXT);
-    let after = workspace.vfs_provenance_snapshot();
 
     assert_eq!(
         warm.result().map(|result| result.source_id.as_str()),
@@ -1711,8 +1723,13 @@ fn filesystem_resolution_publishes_and_reuses_a_warm_owner_edge() {
         warm.trace().reused(),
         "the second identical demand must REUSE the published candidate"
     );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
-        after.import_resolution_cache_miss_count - before.import_resolution_cache_miss_count,
+        workspace
+            .vfs_provenance_snapshot()
+            .import_resolution_cache_miss_count
+            - before.import_resolution_cache_miss_count,
         0,
         "a warm demand must drive the resolver ZERO times. Both passes of \
          the evidence-bridge protocol answer from the candidate slot."
@@ -1732,6 +1749,8 @@ fn filesystem_resolution_publishes_and_reuses_a_warm_owner_edge() {
 
 /// Anti-vacuity control for the counter used above: an UNRELATED cold
 /// demand on the same workspace does drive the resolver.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn filesystem_resolution_miss_counter_moves_on_a_cold_demand() {
     const CONTEXT: ResolutionContext = ResolutionContext {
@@ -1871,6 +1890,7 @@ fn steady_state_reuse_performs_no_evidence_reobservation() {
     let workspace = FilesystemWorkspace::new(FilesystemOptions::default());
     let _cold = workspace.resolve_import_outcome(&owner, "./dep", CONTEXT);
 
+    #[cfg(feature = "semantic-observe")]
     let before = workspace.vfs_provenance_snapshot();
     for _ in 0..4 {
         let warm = workspace.resolve_import_outcome(&owner, "./dep", CONTEXT);
@@ -1879,19 +1899,23 @@ fn steady_state_reuse_performs_no_evidence_reobservation() {
             "every steady-state demand must reuse the published candidate"
         );
     }
-    let after = workspace.vfs_provenance_snapshot();
-    assert_eq!(
-        after.import_resolution_cache_miss_count - before.import_resolution_cache_miss_count,
-        0,
-        "repeated demands inside one content generation must drive the \
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let after = workspace.vfs_provenance_snapshot();
+        assert_eq!(
+            after.import_resolution_cache_miss_count - before.import_resolution_cache_miss_count,
+            0,
+            "repeated demands inside one content generation must drive the \
          resolver ZERO times"
-    );
-    assert_eq!(
-        after.dir_index_refresh_count - before.dir_index_refresh_count,
-        0,
-        "and must rescan ZERO directories: re-observation is scoped to the \
+        );
+        assert_eq!(
+            after.dir_index_refresh_count - before.dir_index_refresh_count,
+            0,
+            "and must rescan ZERO directories: re-observation is scoped to the \
          first demand after a content transition, not to every reuse"
-    );
+        );
+    }
 }
 
 /// The realpath half of the same healing rail.

@@ -273,6 +273,8 @@ fn unfenced_compile_still_publishes_the_session_slot() {
 /// component-meta resolution stays `Complete` AND is refused warm admission (the
 /// repeat recomputes, no warm hit). RED-pre (with the request-partial rail call
 /// still at the fenced-serve sites) the resolution is a false `Partial`.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn fenced_component_meta_serve_stays_complete_not_partial_and_refuses_warm() {
     use std::sync::atomic::Ordering;

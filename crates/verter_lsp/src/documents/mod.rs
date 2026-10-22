@@ -2783,10 +2783,13 @@ mod tests {
     /// that FAILS returns before that tick, so a burst of malformed revisions
     /// could run a cold compile per keystroke while a tick-based counter
     /// reported zero.
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     fn cold_compile_runs(host: &verter_session::VerterHost) -> u64 {
         host.provenance_snapshot().compile_cold_runs
     }
 
+    #[cfg(feature = "semantic-observe")]
     fn carrier_revision(marker: &str) -> String {
         format!(
             "<script setup lang=\"ts\">\nconst msg = '{marker}'\n</script>\n\
@@ -2802,6 +2805,8 @@ mod tests {
     /// per-keystroke compile there is a strictly serialized queue as long as the
     /// typing burst (https://github.com/pikax/verter/issues/96). Every consumer
     /// that needs the TSX drives `ensure_ide_compiled` itself.
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn committing_an_edit_does_not_compile_the_ide_tsx() {
         let host = Arc::new(verter_session::VerterHost::new_standalone(
@@ -2882,6 +2887,8 @@ mod tests {
     /// Measured on the COLD-RUN rail rather than the post-success compile tick,
     /// which a failing compile never reaches: on that tick this burst reads zero
     /// whether it compiled twelve times or none.
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn repeated_invalid_edits_on_a_projectionless_carrier_never_compile() {
         let host = Arc::new(verter_session::VerterHost::new_standalone(

@@ -1,4 +1,4 @@
-//! Deterministic snapshot rendering (`attribution` feature only).
+//! Deterministic snapshot rendering (`semantic-observe` feature only).
 //!
 //! Walks [`WorkSite::ALL`] in declaration order and formats integers
 //! only, so two equal observations produce byte-identical output.

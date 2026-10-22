@@ -45,7 +45,8 @@ fn save_payload_source(project: &MetaProject) -> verter_type_expr::facts::Source
     let host = project.host();
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(host, &view, overlay);
+    let ctx =
+        HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(host, &view, overlay);
 
     let fixture_dispatch_0 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
@@ -67,7 +68,8 @@ fn demand_source(project: &MetaProject, source: &SemanticTypeSource) -> Option<T
     let host = project.host();
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(host, &view, overlay);
+    let ctx =
+        HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(host, &view, overlay);
     demand_semantic_source_type_expr_with_ctx(&ctx, "/App.vue", source)
 }
 
@@ -446,7 +448,8 @@ defineEmits<{ save: [id: number] }>()
     let host = project.host();
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(host, &view, overlay);
+    let ctx =
+        HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(host, &view, overlay);
 
     let fixture_dispatch_2 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
@@ -501,7 +504,8 @@ defineEmits<ImportedEmits>()
     let host = project.host();
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = HostResolverContext::new(host, &view, overlay);
+    let ctx =
+        HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(host, &view, overlay);
 
     let fixture_dispatch_3 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);

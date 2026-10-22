@@ -111,7 +111,12 @@ fn leaf_facts(signature: &ReadSetSignature) -> Vec<FactVersionRef> {
 fn read_flow_return(host: &Arc<VerterHost>, function: &str) -> FlowReturnRead {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = SemanticQueryKey::FlowReturn(Box::new(flow_return_key(&dispatch, function)));
     let (ty, diagnostics) = match dispatch.execute(key.clone()) {

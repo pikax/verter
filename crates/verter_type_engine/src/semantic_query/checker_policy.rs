@@ -24,7 +24,6 @@ use super::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
     RecoveryBasis, SemanticNodeData, SemanticNodeId,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
 
 /// The checker's `instantiationDepth` limit: an instantiation nested this
 /// deep fails with TS2589.
@@ -164,8 +163,8 @@ impl CertifiedDivergence {
 /// carrier: a complete answer, kept like any semantic answer, because the
 /// proof holds under every allowance. `origin` is the diverging
 /// operation's authored form, if one already exists.
-pub(crate) fn divergence_recovery(
-    graph: &SemanticGraphStore,
+pub(crate) fn divergence_recovery<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     divergence: CertifiedDivergence,
     origin: Option<SemanticNodeId>,
 ) -> SemanticNodeId {
@@ -182,8 +181,8 @@ pub(crate) fn divergence_recovery(
 /// recovery is a resource partial: the caller marks its result incomplete.
 /// A relation refusal (TS2859) recovers as a false relation instead, never
 /// as a type.
-pub(crate) fn resource_recovery(
-    graph: &SemanticGraphStore,
+pub(crate) fn resource_recovery<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     refusal: OperationRefusal,
     origin: Option<SemanticNodeId>,
 ) -> SemanticNodeId {
@@ -242,8 +241,8 @@ pub(crate) const fn unresolved_type_name() -> CheckerDiagnostic {
 /// The checker's error type after its TS2456 for the type alias `alias`
 /// (its `DeclRef`): the typed recovery carrier, a complete answer, whose
 /// origin names the alias its message is about.
-pub(crate) fn circular_type_alias_recovery(
-    graph: &SemanticGraphStore,
+pub(crate) fn circular_type_alias_recovery<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     alias: SemanticNodeId,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
@@ -256,8 +255,8 @@ pub(crate) fn circular_type_alias_recovery(
 /// The checker's error type after `diagnostic`, a diagnostic the types
 /// themselves decide (never a resource limit): the typed recovery carrier,
 /// a complete answer.
-pub(crate) fn checker_recovery(
-    graph: &SemanticGraphStore,
+pub(crate) fn checker_recovery<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     diagnostic: CheckerDiagnostic,
 ) -> SemanticNodeId {
     verter_debug_assert::verter_debug_assert!(

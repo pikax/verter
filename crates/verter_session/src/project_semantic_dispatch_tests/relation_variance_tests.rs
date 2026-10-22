@@ -655,7 +655,7 @@ fn variance_marker_nodes(
     Option<verter_type_engine::semantic_query::NodeScopeId>,
 )> {
     use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     (0..graph.node_count() as u64)
         .map(SemanticNodeId)
         .filter_map(|node| {

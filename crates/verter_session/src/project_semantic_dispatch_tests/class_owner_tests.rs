@@ -313,6 +313,8 @@ function mutual() { class P extends Q {} class Q extends P {} return P; }
 /// the number of class elements a demand lowered, so it depends on the
 /// elements declaring the demanded name alone — not on how many other
 /// members the class has.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn a_member_read_through_this_lowers_only_the_elements_declaring_it() {
     use super::checker_probe_lane_tests::{default_probe_host, with_probe_on_host, ProbeProject};

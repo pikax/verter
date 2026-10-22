@@ -27,6 +27,7 @@
 //!   `fromAug` survives.
 //!   PASSES.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
@@ -63,6 +64,7 @@ fn prop_names(
 /// Debug-rendered resolved type of the prop named `name`,
 /// demand-materialized from its published source through the ONE
 /// shared dispatch.
+#[cfg(feature = "semantic-observe")]
 fn prop_type_repr(
     host: &VerterHost,
     owner: &str,
@@ -110,6 +112,7 @@ fn cached_augmenter_content_hash(host: &VerterHost, augmenter_canonical: &str) -
 /// lists the augmenter. Lets the test prove the header-level fingerprint
 /// rail cannot see a body-only member-type edit (so the per-augmenter
 /// `FileWholeHash` self-root is the only rail that can).
+#[cfg(feature = "semantic-observe")]
 fn cached_augmenter_index_shape_fp(
     host: &VerterHost,
     augmenter_canonical: &str,
@@ -275,6 +278,8 @@ fn merged_decl_body_stitch_self_heals_rekeyed_augmenter() {
 /// (`fp_before == fp_after` proof) and the component-meta sibling
 /// `imported_prop_type_edit_misses_warm_component_meta` (warm hit/miss
 /// counter deltas, no eviction).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn augmenter_member_type_only_edit_invalidates_warm_consumer() {
     const AUG_TYPE_PRE: &str = "import './types'\n\

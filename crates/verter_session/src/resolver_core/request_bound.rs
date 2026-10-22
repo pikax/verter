@@ -25,50 +25,65 @@ use verter_type_engine::fact_tracing::tracing as tracer_stack;
 
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::request_context::{ObserveExec, Uncaptured};
 
 /// The capability types every host request context hands out: the source's
 /// owned expression-demand handle and the host's live workspace slot. Base
 /// and overlay contexts share them, so request structures carrying them are
-/// instantiated once.
-pub enum HostCapabilities {}
+/// instantiated once per capture mode.
+///
+/// `M` is the capture execution ([`verter_audit::observe::Captured`] or
+/// [`verter_audit::observe::Uncaptured`]) a request context of this family
+/// runs: the dispatcher and the request ports it resolves through are
+/// compiled for it. A host selects it from the mode the installed request
+/// carries ([`crate::capture::installed_mode`]); `Uncaptured` names the
+/// family of every context that never captures.
+pub struct HostCapabilities<M: ObserveExec = Uncaptured>(
+    std::convert::Infallible,
+    std::marker::PhantomData<M>,
+);
 
-impl ResolverCapabilities for HostCapabilities {
+impl<M: ObserveExec> ResolverCapabilities for HostCapabilities<M> {
     type ExpressionDemand = crate::host_source_demand::HostExpressionDemand;
     type Clocks = crate::resolver_store::WorkspaceSlotClocks;
     type HostAttachment = crate::session_attachment::SessionAttachment;
     type MacroMirrors = super::request_inputs::MacroMirrorSelector;
+    type Observe = M;
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl sealed::Sealed for crate::VerterHost {}
 
-impl<'a> sealed::Sealed for crate::resolver_core::host_resolver_context::HostResolverContext<'a> {}
-
-impl<'a> sealed::Sealed
-    for crate::resolver_core::session_resolver_context::SessionResolverContext<'a>
+impl<'a, M: ObserveExec> sealed::Sealed
+    for crate::resolver_core::host_resolver_context::HostResolverContext<'a, M>
 {
 }
 
-impl<'a> sealed::RequestBoundSealed
-    for crate::resolver_core::host_resolver_context::HostResolverContext<'a>
+impl<'a, M: ObserveExec> sealed::Sealed
+    for crate::resolver_core::session_resolver_context::SessionResolverContext<'a, M>
+{
+}
+
+impl<'a, M: ObserveExec> sealed::RequestBoundSealed
+    for crate::resolver_core::host_resolver_context::HostResolverContext<'a, M>
 {
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl sealed::RequestBoundSealed for crate::VerterHost {}
 
-impl<'a> sealed::RequestBoundSealed
-    for crate::resolver_core::session_resolver_context::SessionResolverContext<'a>
+impl<'a, M: ObserveExec> sealed::RequestBoundSealed
+    for crate::resolver_core::session_resolver_context::SessionResolverContext<'a, M>
 {
 }
 
-impl<'a> RequestBoundResolverContext<HostCapabilities>
-    for crate::resolver_core::host_resolver_context::HostResolverContext<'a>
+impl<'a, M: ObserveExec> RequestBoundResolverContext<HostCapabilities<M>>
+    for crate::resolver_core::host_resolver_context::HostResolverContext<'a, M>
 {
 }
 
-impl<'a> RequestBoundResolverContext<HostCapabilities>
-    for crate::resolver_core::session_resolver_context::SessionResolverContext<'a>
+impl<'a, M: ObserveExec> RequestBoundResolverContext<HostCapabilities<M>>
+    for crate::resolver_core::session_resolver_context::SessionResolverContext<'a, M>
 {
 }
 
@@ -543,6 +558,11 @@ impl verter_type_engine::resolver_core::request_ports::HostAttachmentPort for cr
 /// adapter as `ctx: &dyn ResolverContext` so the re-entry binds to the
 /// same request-bound context.
 pub(crate) trait RequestBoundLifecycle: Sync {
+    /// The capture execution this request context runs.
+    type Observe: ObserveExec;
+
+    fn capture_targets(&self) -> &verter_type_engine::request_observers::CaptureTargets;
+
     /// The host this request runs against.
     fn host(&self) -> &crate::VerterHost;
 
@@ -572,13 +592,13 @@ pub(crate) trait RequestBoundLifecycle: Sync {
 
     fn prepared_decl_bundle(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<Self::Observe>>,
         canonical_id: &str,
     ) -> Option<crate::resolver_core::CachedValue<PreparedDeclBundle>>;
 
     fn prepared_type_decl(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<Self::Observe>>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -589,7 +609,7 @@ pub(crate) trait RequestBoundLifecycle: Sync {
 
     fn prepared_value_decl(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<Self::Observe>>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -604,7 +624,11 @@ pub(crate) trait RequestBoundLifecycle: Sync {
         &self,
         canonical_id: &str,
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
-        crate::VerterHost::ensure_indexed_ready_serve(self.host(), canonical_id)
+        crate::VerterHost::ensure_indexed_ready_serve_in::<Self::Observe>(
+            self.host(),
+            self.capture_targets(),
+            canonical_id,
+        )
     }
 
     /// Load the canonical. The adapter performs the canonical completion
@@ -615,7 +639,7 @@ pub(crate) trait RequestBoundLifecycle: Sync {
 
     fn shallow_file_state(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<Self::Observe>>,
         canonical_id: &str,
     ) -> Option<Arc<ShallowFileState>> {
         self.host().shallow_file_state_with_context(
@@ -634,7 +658,8 @@ pub(crate) trait RequestBoundLifecycle: Sync {
     }
 
     fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
-        self.host().current_content_pinned_indexed(canonical)
+        self.host()
+            .current_content_pinned_indexed_in::<Self::Observe>(self.capture_targets(), canonical)
     }
 
     fn artifact_key_for_current_content(
@@ -646,7 +671,7 @@ pub(crate) trait RequestBoundLifecycle: Sync {
 
     fn observe_materialize_scope(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<Self::Observe>>,
         canonical: &str,
     ) -> Option<MaterializeScopeObservation> {
         self.host()
@@ -731,8 +756,10 @@ impl<L> RequestBoundAdapter<L> {
     }
 }
 
-impl<L: RequestBoundLifecycle> ResolverContext<HostCapabilities> for RequestBoundAdapter<L> where
-    Self: sealed::Sealed + sealed::RequestBoundSealed
+impl<L: RequestBoundLifecycle> ResolverContext<HostCapabilities<L::Observe>>
+    for RequestBoundAdapter<L>
+where
+    Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
 }
 
@@ -893,7 +920,12 @@ where
     #[inline]
     fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
         verter_type_engine::count_resolver_context_call!("IndexedInputs::base_indexed_ready_serve");
-        crate::VerterHost::ensure_indexed_ready_serve(self.0.host(), canonical_id).map(|serve| {
+        crate::VerterHost::ensure_indexed_ready_serve_in::<L::Observe>(
+            self.0.host(),
+            self.0.capture_targets(),
+            canonical_id,
+        )
+        .map(|serve| {
             self.0
                 .request_view()
                 .overlay()
@@ -939,7 +971,11 @@ where
     #[inline]
     fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
         verter_type_engine::count_resolver_context_call!("IndexedInputs::get_whole_hash");
-        crate::VerterHost::get_whole_hash(self.0.host(), canonical)
+        crate::VerterHost::get_whole_hash_in::<L::Observe>(
+            self.0.host(),
+            self.0.capture_targets(),
+            canonical,
+        )
     }
 
     #[inline]
@@ -994,7 +1030,11 @@ where
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::get_raw_analysis_snapshot"
         );
-        crate::VerterHost::get_raw_analysis_snapshot(self.0.host(), canonical)
+        crate::VerterHost::get_raw_analysis_snapshot_in::<L::Observe>(
+            self.0.host(),
+            self.0.capture_targets(),
+            canonical,
+        )
     }
 }
 
@@ -1124,7 +1164,11 @@ where
         verter_type_engine::count_resolver_context_call!("RouteLookup::routed_shallow_state");
         self.0
             .host()
-            .routed_shallow_state_with_view(canonical_id, self.0.session_view())
+            .routed_shallow_state_with_view_in::<L::Observe>(
+                self.0.capture_targets(),
+                canonical_id,
+                self.0.session_view(),
+            )
             .map(|state| {
                 self.0
                     .request_view()

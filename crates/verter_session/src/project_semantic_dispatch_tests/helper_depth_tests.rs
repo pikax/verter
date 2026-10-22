@@ -68,7 +68,7 @@ fn primitive(
 #[test]
 fn tuple_spreads_splice_at_any_depth() {
     let spliced = on_a_small_stack(|dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let (one, two) = (literal(dispatch, "1"), literal(dispatch, "2"));
         let mut tuple = graph.intern_node(SemanticNodeData::Tuple {
             elements: verter_type_engine::semantic_query::PayloadArray::from([
@@ -113,7 +113,7 @@ fn tuple_spreads_splice_at_any_depth() {
 #[test]
 fn index_key_unions_enumerate_at_any_depth() {
     let keys = on_a_small_stack(|dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let mut union = literal(dispatch, "k0");
         for level in 1..=DEPTH {
             let key = literal(dispatch, &format!("k{level}"));
@@ -138,7 +138,7 @@ fn index_key_unions_enumerate_at_any_depth() {
 #[test]
 fn index_key_intersections_filter_at_any_depth() {
     let keys = on_a_small_stack(|dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let string = primitive(dispatch, PrimitiveKind::String);
         let mut domain = literal(dispatch, "selected");
         for _ in 0..DEPTH {
@@ -162,7 +162,7 @@ fn index_key_intersections_filter_at_any_depth() {
 fn base_type_intersections_validate_at_any_depth() {
     let nest = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
                 bottom: PrimitiveKind| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let object = primitive(dispatch, PrimitiveKind::Object);
         let mut node = primitive(dispatch, bottom);
         // bounded-loop: a fixed DEPTH-level fixture constructor.
@@ -186,7 +186,7 @@ fn base_type_intersections_validate_at_any_depth() {
 #[test]
 fn constituents_count_at_any_depth() {
     let count = on_a_small_stack(|dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let mut node = literal(dispatch, "k0");
         for level in 1..=DEPTH {
             let leaf = literal(dispatch, &format!("k{level}"));
@@ -208,7 +208,7 @@ fn constituents_count_at_any_depth() {
 fn non_nullish_proofs_read_intersections_at_any_depth() {
     let nest = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
                 bottom: SemanticNodeId| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let unknown = primitive(dispatch, PrimitiveKind::Unknown);
         let mut node = bottom;
         // bounded-loop: a fixed DEPTH-level fixture constructor.
@@ -237,7 +237,7 @@ fn non_nullish_proofs_read_intersections_at_any_depth() {
 fn primitive_part_proofs_read_unions_at_any_depth() {
     let nest = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
                 bottom: SemanticNodeId| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let mut node = bottom;
         for level in 0..DEPTH {
             let arm = literal(dispatch, &format!("k{level}"));
@@ -248,7 +248,7 @@ fn primitive_part_proofs_read_unions_at_any_depth() {
         node
     };
     let verdicts = on_a_small_stack(move |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let array = graph.intern_node(SemanticNodeData::Array {
             element: primitive(dispatch, PrimitiveKind::String),
             readonly: false,
@@ -267,7 +267,7 @@ fn primitive_part_proofs_read_unions_at_any_depth() {
 #[test]
 fn alias_chains_end_at_any_length() {
     let ends = on_a_small_stack(|dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let array = graph.intern_node(SemanticNodeData::Array {
             element: primitive(dispatch, PrimitiveKind::Number),
             readonly: false,

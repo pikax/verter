@@ -290,6 +290,8 @@ defineProps<Props>()
 /// path whose terminal hop EXISTS and is a genuinely empty object type still
 /// publishes zero props as COMPLETE, exact, and WARM. A fix that marks every
 /// empty surface partial passes the test above and fails this one.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_resolved_empty_terminal_hop_still_publishes_complete_and_warm() {
@@ -2242,6 +2244,8 @@ defineProps<Props>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn get_component_meta_provenance_uses_single_resolver_path() {
     let project = make_project();
@@ -2267,6 +2271,8 @@ fn get_component_meta_provenance_uses_single_resolver_path() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn repeated_declared_component_meta_queries_reuse_cached_resolved_state_for_workspace_type_deps() {
@@ -2357,6 +2363,8 @@ export interface Props extends Base { msg: string; count?: number }"#,
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn repeated_full_component_meta_queries_reuse_cached_resolved_state_for_workspace_type_deps() {
@@ -2447,6 +2455,8 @@ export interface Props extends Base { msg: string; count?: number }"#,
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn repeated_full_component_meta_queries_reuse_cached_resolved_state_for_imported_dependency_graph()
@@ -5611,6 +5621,8 @@ defineProps<MyProps>()
     assert!(!names.contains(&"d"), "should NOT have 'd', got: {names:?}");
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn declared_component_meta_extract_keeps_recursive_get_item_keys_symbolic_without_hanging() {
     let project = make_project();
@@ -7371,6 +7383,8 @@ import Child from './Child.vue'
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn recursive_cycle_uses_structured_unresolved_reason() {
     let project = make_project();
@@ -7794,6 +7808,8 @@ defineProps<Props>()
         .any(|prop| prop.name == format!("p{}", import_count - 1)));
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn payload_cache_dependency_edit_invalidates_and_re_encodes() {
     let project = make_project();
@@ -8223,6 +8239,8 @@ defineProps<GrandchildProps>()
 /// grows `eval_program_parses` and this assertion FAILS; on the
 /// severed tree the imported surface is served through the shared
 /// typed-IR dispatch and the counter stays flat.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn imported_macro_query_path_runs_zero_parser_expander_parses() {
     let project = make_project();

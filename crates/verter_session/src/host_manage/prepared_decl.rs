@@ -113,7 +113,7 @@ enum BundleMaterialization {
 /// its compute observed, which is strictly more than tracer finalisation
 /// exposes: the tracer records only that the enclosing compute is
 /// non-cacheable, never why.
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) struct BundleReuseOutcome {
     pub(crate) bundle: Option<
         crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
@@ -135,6 +135,29 @@ pub(crate) struct SourceRequestServices<'a> {
     pub(crate) session_view: Option<&'a dyn crate::session_view::SessionView>,
     pub(crate) completion_overlay: Option<&'a crate::resolver_core::CanonicalCompletionOverlay>,
     pub(crate) base_view: Option<&'a crate::resolver_store::HostStoreView>,
+}
+
+/// Attribute one cold bundle to its bound accumulator without consulting worker state.
+fn record_prepared_decl_materialization<M: verter_audit::observe::ObserveExec>(
+    observation: &verter_type_engine::request_observers::CaptureTargets,
+    canonical_id: &str,
+    started: verter_audit::observe::Stopwatch,
+) {
+    let _ = std::marker::PhantomData::<M>;
+    #[cfg(feature = "semantic-observe")]
+    if M::CAPTURED {
+        if let Some(accumulator) = observation.accumulator.as_deref() {
+            accumulator.push_materialization(crate::component_meta_audit::MaterializationRecord {
+                subject: crate::component_meta_audit::MaterializationSubject::PreparedDeclBundle {
+                    canonical: std::sync::Arc::<str>::from(canonical_id),
+                    cold: true,
+                },
+                duration_ms: started.elapsed_ms(),
+            });
+        }
+    }
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = (observation, canonical_id, started);
 }
 
 impl VerterHost {
@@ -221,7 +244,7 @@ impl VerterHost {
     ///
     /// Builds a fresh `HostStoreView` at every call. Production
     /// resolver-tier code on the per-component-meta hot path MUST use
-    /// [`Self::prepared_decl_bundle_with_store_view`] instead so the view
+    /// [`Self::prepared_decl_bundle_with_store_view_in`] instead so the view
     /// is built ONCE at the request boundary and threaded down (per the
     /// per-request hoist). This entry point survives for
     /// integration tests + the test-only arm on `impl ResolverContext
@@ -241,22 +264,24 @@ impl VerterHost {
         // known-stale (`ReturnOnly`) read fails the warm validation closed
         // and the bundle materialises cold, never validating a warm entry
         // against a superseded snapshot.
-        let view = self.resolver_store_view_read().into_cold_seed_view();
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-            self,
-            &view,
-            Arc::clone(&overlay),
-        );
-        self.prepared_decl_bundle_with_context(
-            &ctx,
-            SourceRequestServices {
-                session_view: None,
-                completion_overlay: Some(&overlay),
-                base_view: None,
-            },
-            canonical_id,
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let view = self.resolver_store_view_read().into_cold_seed_view();
+            let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                self,
+                &view,
+                Arc::clone(&overlay),
+            );
+            self.prepared_decl_bundle_with_context(
+                &ctx,
+                SourceRequestServices {
+                    session_view: None,
+                    completion_overlay: Some(&overlay),
+                    base_view: None,
+                },
+                canonical_id,
+            )
+        })
     }
 
     /// Attribute a prepared-decl bundle warm-read rejection to one of
@@ -285,14 +310,12 @@ impl VerterHost {
     ///   itself is decided by `validates_domain_aggregate`, which is
     ///   exhaustive and fail-closed per domain.
     fn attribute_prepared_decl_bundle_rejection(
+        obs: &dyn verter_audit::AuditObserver,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         canonical_id: &str,
         rejected_fact: Option<&verter_session_query::facts::fact_cache::FactVersionRef>,
         candidate_count: usize,
     ) {
-        let Some(obs) = verter_audit::current_observer() else {
-            return;
-        };
         let event = match rejected_fact {
             None if candidate_count == 0 => {
                 verter_audit::AuditEvent::PreparedDeclBundleRejectEntryMissing
@@ -339,6 +362,10 @@ impl VerterHost {
     /// — the request-world reuse tier. `None` means "no request scope":
     /// the read still serves correctly, it just cannot reuse a value the
     /// shared cache is not allowed to hold.
+    ///
+    /// [`Self::prepared_decl_bundle_with_store_view_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn prepared_decl_bundle_with_store_view(
         &self,
         view: &dyn verter_session_query::facts::store_view::StoreView,
@@ -347,7 +374,25 @@ impl VerterHost {
     ) -> Option<
         crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
     > {
-        self.prepared_decl_bundle_classified(view, memo, canonical_id)
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.prepared_decl_bundle_with_store_view_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), view, memo, canonical_id)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub(crate) fn prepared_decl_bundle_with_store_view_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
+        memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
+        canonical_id: &str,
+    ) -> Option<
+        crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+    > {
+        let _ = observation;
+        self.prepared_decl_bundle_classified::<M>(observation, view, memo, canonical_id)
             .0
     }
 
@@ -359,14 +404,16 @@ impl VerterHost {
     /// projection above; the class governs admission INSIDE the
     /// implementation (the request memo's structural gate and the
     /// shared-cache gate), so no production caller needs to inspect it.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "semantic-observe"))]
     pub(crate) fn prepared_decl_bundle_with_reuse_class(
         &self,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
     ) -> BundleReuseOutcome {
-        let (bundle, reuse) = self.prepared_decl_bundle_classified(view, memo, canonical_id);
+        let (bundle, reuse) = verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.prepared_decl_bundle_classified::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), view, memo, canonical_id)
+        });
         BundleReuseOutcome { bundle, reuse }
     }
 
@@ -381,8 +428,9 @@ impl VerterHost {
     /// and a `RequestOnly` value replays its refusal into the caller's
     /// tracer on EVERY return (cold, memo hit, singleflight follower)
     /// before the bundle is handed over.
-    fn prepared_decl_bundle_classified(
+    fn prepared_decl_bundle_classified<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
@@ -394,6 +442,7 @@ impl VerterHost {
         >,
         verter_session_query::facts::reuse::ReuseClass,
     ) {
+        let _ = observation;
         use crate::resolver_core::request_store_view::BundleMemoWorld;
         use verter_session_query::facts::reuse::{
             classify_reuse, NoReuseCause, ObservedRefusal, ReuseClass,
@@ -409,9 +458,11 @@ impl VerterHost {
         // cold return carried.
         if let Some(memo) = memo {
             if let Some((bundle, reuse)) = memo.get(canonical_id, BundleMemoWorld::Base, token) {
-                self.provenance
-                    .bundle_request_memo_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+                    self.provenance
+                        .bundle_request_memo_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 verter_type_engine::fact_tracing::replay_reuse_refusal(&reuse);
                 return (Some(bundle), reuse);
             }
@@ -431,14 +482,16 @@ impl VerterHost {
         let key = canonical_id.to_string();
         match bundles.get_if_valid_self_rooted_attributed(&key, view, &[canonical_id]) {
             Ok(bundle) => {
-                self.provenance
-                    .bundle_cache_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+                    self.provenance
+                        .bundle_cache_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 // Per-request audit attribution: prepared-decl bundle
                 // served from cache (no materialisation).
-                if let Some(obs) = verter_audit::current_observer() {
+                verter_audit::observe!(M => on observation.observer.as_deref() =>|obs| {
                     obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleWarm);
-                }
+                });
                 // A warm hit came out of the SHARED cache, so it was
                 // admitted: `Shared` by construction. Nothing was
                 // refused on this read, so there is nothing to replay.
@@ -454,12 +507,13 @@ impl VerterHost {
                 return (Some(bundle), ReuseClass::Shared);
             }
             Err((rejected_fact, candidate_count)) => {
-                Self::attribute_prepared_decl_bundle_rejection(
+                verter_audit::observe!(M => on observation.observer.as_deref() =>|obs| Self::attribute_prepared_decl_bundle_rejection(
+                    obs,
                     view,
                     canonical_id,
                     rejected_fact.as_ref(),
                     candidate_count,
-                );
+                ));
             }
         }
 
@@ -492,18 +546,20 @@ impl VerterHost {
             // joiners that block on the leader do not count; a
             // fenced-retry re-run counts again (it genuinely re-runs
             // the cold build).
-            if let Some(obs) = verter_audit::current_observer() {
+            verter_audit::observe!(M => on observation.observer.as_deref() =>|obs| {
                 obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCold);
-            }
+            });
             // Deterministic mirror of the audit event above: counts a
             // genuine cold flight-body run regardless of outcome (Built
             // OR surface-empty miss) — the observable that separates a
             // burst member ADOPTING a retained rendezvous (no run) from
             // one RE-RUNNING the cold build (run, even when every store
             // read warm-hits and no materialisation counter moves).
-            self.provenance
-                .bundle_cold_flight_runs
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+                self.provenance
+                    .bundle_cold_flight_runs
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             // Producer chain: the routed-shallow producer first
             // (declaration files); on a non-`Built` outcome the
             // standard producer runs. `miss_serve_published`
@@ -521,9 +577,11 @@ impl VerterHost {
             // actually refused instead of inferring it from a boolean a
             // fenced serve and a broken lease set identically.
             let refusals = verter_type_engine::fact_tracing::RefusalObservationScope::enter();
-            let built = match self
-                .materialize_prepared_decl_bundle_from_routed_shallow(view, canonical_id)
-            {
+            let built = match self.materialize_prepared_decl_bundle_from_routed_shallow::<M>(
+                observation,
+                view,
+                canonical_id,
+            ) {
                 Some(BundleMaterialization::Built { bundle, admitted }) => Some((bundle, admitted)),
                 routed_miss => {
                     if let Some(BundleMaterialization::SurfaceEmpty { serve_published }) =
@@ -531,7 +589,7 @@ impl VerterHost {
                     {
                         note_empty(serve_published);
                     }
-                    match self.materialize_prepared_decl_bundle(canonical_id) {
+                    match self.materialize_prepared_decl_bundle::<M>(observation, canonical_id) {
                         Some(BundleMaterialization::Built { bundle, admitted }) => {
                             Some((bundle, admitted))
                         }
@@ -710,10 +768,10 @@ impl VerterHost {
     /// When the view carries no overlay for the canonical the call
     /// transparently delegates to [`Self::prepared_decl_bundle`] so the
     /// base session path keeps its warm-bundle reuse.
-    pub(crate) fn prepared_decl_bundle_with_context(
+    pub(crate) fn prepared_decl_bundle_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         services: SourceRequestServices<'_>,
         canonical_id: &str,
@@ -789,9 +847,11 @@ impl VerterHost {
                         .compat_token();
                 if let Some(memo) = memo {
                     if let Some((bundle, reuse)) = memo.get(canonical_id, world, token) {
-                        self.provenance
-                            .bundle_request_memo_hits
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+                            self.provenance
+                                .bundle_request_memo_hits
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         verter_type_engine::fact_tracing::replay_reuse_refusal(&reuse);
                         return Some(bundle);
                     }
@@ -836,7 +896,8 @@ impl VerterHost {
         // (the request-bound borrow) and the request's bundle memo
         // instead of building a fresh owned snapshot via
         // `self.prepared_decl_bundle(canonical_id)`.
-        self.prepared_decl_bundle_with_store_view(
+        self.prepared_decl_bundle_with_store_view_in::<M>(
+            verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
             &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx),
             services
                 .completion_overlay
@@ -876,10 +937,10 @@ impl VerterHost {
     ///   (`materialize_overlay_indexed_ready_with_view` resolves
     ///   imports against the analysis canonical) and the base bundle
     ///   path's route-dep cache identity.
-    fn materialize_prepared_decl_bundle_via_ctx(
+    fn materialize_prepared_decl_bundle_via_ctx<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         services: SourceRequestServices<'_>,
         identity: &crate::host_manage::overlay_materialize::OverlayArtifactIdentity,
@@ -893,12 +954,14 @@ impl VerterHost {
         // admission: this per-call bundle is NEVER inserted into the
         // shared `prepared_decl_bundles` cache (R17 below), so the
         // serve status needs no local admission gate.
-        let facts = crate::host_manage::overlay_priority::ensure_indexed_ready_serve_with_view(
-            self,
-            services.session_view?,
-            identity.raw_overlay_owner(),
-        )?
-        .indexed;
+        let facts =
+            crate::host_manage::overlay_priority::ensure_indexed_ready_serve_with_view_in::<M>(
+                self,
+                verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+                services.session_view?,
+                identity.raw_overlay_owner(),
+            )?
+            .indexed;
         // Completion remains epoch-guarded and uses the same captured session
         // view as the materializer; retention itself never promotes admission.
         if let (Some(overlay), Some(base), Some(view)) = (
@@ -972,7 +1035,7 @@ impl VerterHost {
         // cache from an overlay-bearing materialisation. The shared
         // slot is keyed by canonical alone and would alias the base
         // bundle, leaking overlay state to base-only consumers.
-        component_meta_trace_custom!(
+        component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
             "materialize_prepared_decl_bundle_via_ctx",
             format!(
                 "owner={} type_decls={} value_decls={} dep_edges={} source=session_overlay",
@@ -986,14 +1049,21 @@ impl VerterHost {
         Some(bundle)
     }
 
-    fn prepared_decl_bundle_route_dep_edges(
+    fn prepared_decl_bundle_route_dep_edges<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         state: &crate::resolver_core::ShallowFileState,
     ) -> Option<rustc_hash::FxHashMap<String, String>> {
-        self.with_base_resolver_context(|ctx| {
-            self.prepared_decl_bundle_route_dep_edges_with_context(ctx, canonical_id, state)
-        })
+        let base = self.resolver_store_view_read().into_cold_seed_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed_with_capture(
+            self,
+            &base,
+            overlay,
+            observation.clone(),
+        );
+        self.prepared_decl_bundle_route_dep_edges_with_context(&ctx, canonical_id, state)
     }
 
     /// Resolve the owner's authored import specifiers into the bundle's
@@ -1004,10 +1074,10 @@ impl VerterHost {
     /// through its OWN view or an overlay-only dependency silently
     /// disappears from the bundle. The base host is the ctx on the base
     /// path.
-    fn prepared_decl_bundle_route_dep_edges_with_context(
+    fn prepared_decl_bundle_route_dep_edges_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical_id: &str,
         state: &crate::resolver_core::ShallowFileState,
@@ -1026,8 +1096,11 @@ impl VerterHost {
                 continue;
             }
 
-            let cached_resolution =
-                self.cached_import_route_resolution(canonical_id, target.source_specifier.as_str());
+            let cached_resolution = self.cached_import_route_resolution::<M>(
+                verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+                canonical_id,
+                target.source_specifier.as_str(),
+            );
             let resolved: Option<String> = if let Some(resolution) = cached_resolution.as_ref() {
                 let preferred = match self.prefer_type_dependency_target_from_resolution(
                     canonical_id,
@@ -1152,8 +1225,11 @@ impl VerterHost {
     /// publication status BY VALUE — the flight lane consumes it: a
     /// non-admitted bundle, and a miss concluded from a FENCED serve's
     /// surface-emptiness, are never retained as a joinable rendezvous.
-    fn materialize_prepared_decl_bundle_from_routed_shallow(
+    fn materialize_prepared_decl_bundle_from_routed_shallow<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         canonical_id: &str,
     ) -> Option<BundleMaterialization> {
@@ -1171,13 +1247,13 @@ impl VerterHost {
         // pushes a `MaterializationRecord` at the cold-build exit (see
         // also `materialize_prepared_decl_bundle` below for the
         // standard cold-build sibling).
-        let materialize_started_at = verter_type_engine::instant::Instant::now();
+        let materialize_started_at = verter_audit::observe::Stopwatch::start_in::<M>();
 
         // The serve carries the publication status BY VALUE — consumed by
         // the admission gate below: a FENCED (ReturnOnly) routed-shallow
         // serve may feed THIS caller's bundle, never a shared cache
         // admission.
-        let serve = self.routed_shallow_state_serve(canonical_id)?;
+        let serve = self.routed_shallow_state_serve_in::<M>(observation, canonical_id)?;
         let state = serve.state;
         if !state.has_resolvable_surface()
             && state.import_targets.is_empty()
@@ -1192,7 +1268,11 @@ impl VerterHost {
             });
         }
 
-        let dep_edges = self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref())?;
+        let dep_edges = self.prepared_decl_bundle_route_dep_edges::<M>(
+            observation,
+            canonical_id,
+            state.as_ref(),
+        )?;
         // Record the DIRECT-hop import identities; final canonicalization is
         // DEMAND-DRIVEN (chain facts are observed into the CONSUMING query's
         // read-set at decl-prepare demand, never pinned on the bundle rail).
@@ -1228,7 +1308,8 @@ impl VerterHost {
         // perfectly well-formed signature — so the producer must refuse
         // here, exactly as the sibling `resolved_import_facts_witness`
         // and `framework::script_facts` producers do.
-        let import_route_witness = self.owner_import_route_witness(canonical_id);
+        let import_route_witness =
+            self.owner_import_route_witness_in::<M>(observation, canonical_id);
         let mut facts = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.to_string(),
@@ -1307,11 +1388,13 @@ impl VerterHost {
                 );
         }
 
-        self.provenance
-            .bundle_materializations
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.provenance
+                .bundle_materializations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
-        component_meta_trace_custom!(
+        component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>
             "materialize_prepared_decl_bundle",
             format!(
                 "owner={} type_decls={} value_decls={} dep_edges={} source=route_shallow",
@@ -1328,13 +1411,10 @@ impl VerterHost {
         // `materialize_prepared_decl_bundle` below (standard cold
         // path) so both `prepared_decl_bundles` cold producers light
         // up the `materializations` lane.
-        let duration_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
-        crate::component_meta_audit::record_materialization(
-            crate::component_meta_audit::MaterializationSubject::PreparedDeclBundle {
-                canonical: std::sync::Arc::<str>::from(canonical_id),
-                cold: true,
-            },
-            duration_ms,
+        record_prepared_decl_materialization::<M>(
+            observation,
+            canonical_id,
+            materialize_started_at,
         );
 
         Some(BundleMaterialization::Built {
@@ -1349,8 +1429,9 @@ impl VerterHost {
     /// consumed serve's publication status BY VALUE (see the
     /// routed-shallow sibling above for the contract). `None` means the
     /// canonical is unloadable (no serve at all).
-    fn materialize_prepared_decl_bundle(
+    fn materialize_prepared_decl_bundle<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<BundleMaterialization> {
         // Wall-clock fence for the cold materialisation envelope —
@@ -1361,13 +1442,13 @@ impl VerterHost {
         // `ensure_indexed_ready_serve` lookup so a cold IndexedReady build
         // that the materialiser triggers is part of the recorded
         // duration.
-        let materialize_started_at = verter_type_engine::instant::Instant::now();
+        let materialize_started_at = verter_audit::observe::Stopwatch::start_in::<M>();
 
         // 1. Ensure source/shallow data exists. The publication status is
         // consumed by the admission gate below: a FENCED (ReturnOnly)
         // IndexedReady serve may feed THIS caller's bundle, never a shared
         // cache admission.
-        let serve = self.ensure_indexed_ready_serve(canonical_id)?;
+        let serve = self.ensure_indexed_ready_serve_in::<M>(observation, canonical_id)?;
         let facts = &serve.indexed;
         let state = &facts.shallow_state;
         if !state.has_resolvable_surface()
@@ -1382,7 +1463,11 @@ impl VerterHost {
                 serve_published: serve.store_published,
             });
         }
-        let dep_edges = self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref())?;
+        let dep_edges = self.prepared_decl_bundle_route_dep_edges::<M>(
+            observation,
+            canonical_id,
+            state.as_ref(),
+        )?;
 
         // 4. Build script-setup type bindings for adapters that declare the
         // surface (once per bundle). An adapter without the surface gets an
@@ -1433,7 +1518,8 @@ impl VerterHost {
         // keeps serving its pre-appearance resolved edges for as long as
         // the owner's bytes stay put, which is precisely the invalidation
         // this rail exists to provide.
-        let import_route_witness = self.owner_import_route_witness(canonical_id);
+        let import_route_witness =
+            self.owner_import_route_witness_in::<M>(observation, canonical_id);
         let whole_hash = facts.whole_hash;
         let mut fact_versions = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
@@ -1478,11 +1564,13 @@ impl VerterHost {
                 );
         }
 
-        self.provenance
-            .bundle_materializations
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.provenance
+                .bundle_materializations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
-        component_meta_trace_custom!(
+        component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>
             "materialize_prepared_decl_bundle",
             format!(
                 "owner={} type_decls={} value_decls={} dep_edges={}",
@@ -1496,13 +1584,10 @@ impl VerterHost {
         // Push the materialization record onto the per-request
         // accumulator so the footprint lane gets a per-envelope
         // duration entry for this cold bundle build.
-        let duration_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
-        crate::component_meta_audit::record_materialization(
-            crate::component_meta_audit::MaterializationSubject::PreparedDeclBundle {
-                canonical: std::sync::Arc::<str>::from(canonical_id),
-                cold: true,
-            },
-            duration_ms,
+        record_prepared_decl_materialization::<M>(
+            observation,
+            canonical_id,
+            materialize_started_at,
         );
 
         Some(BundleMaterialization::Built {
@@ -1526,29 +1611,32 @@ impl VerterHost {
     > {
         // Cold-seed-routed (see [`Self::prepared_decl_bundle`]): a stale
         // read fails the warm probe closed and the bundle materialises cold.
-        let view = self.resolver_store_view_read().into_cold_seed_view();
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-            self,
-            &view,
-            Arc::clone(&overlay),
-        );
-        self.prepared_type_decl_in_with_context(
-            &ctx,
-            SourceRequestServices {
-                session_view: None,
-                completion_overlay: Some(&overlay),
-                base_view: None,
-            },
-            canonical_id,
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol_name,
-        )
-        .expect("prepared type declaration failed")
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let view = self.resolver_store_view_read().into_cold_seed_view();
+            let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                self,
+                &view,
+                Arc::clone(&overlay),
+            );
+            self.prepared_type_decl_in_with_context(
+                &ctx,
+                SourceRequestServices {
+                    session_view: None,
+                    completion_overlay: Some(&overlay),
+                    base_view: None,
+                },
+                canonical_id,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol_name,
+            )
+            .expect("prepared type declaration failed")
+        })
     }
 
-    pub(crate) fn prepared_type_decl_in_with_store_view(
+    pub(crate) fn prepared_type_decl_in_with_store_view<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
@@ -1562,13 +1650,17 @@ impl VerterHost {
         >,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
-        let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
-        else {
+        let _ = observation;
+        let Some(bundle) = self.prepared_decl_bundle_with_store_view_in::<M>(
+            observation,
+            view,
+            memo,
+            canonical_id,
+        ) else {
             return Ok(None);
         };
         let result = bundle.prepared_type_decls.get_in(owner, symbol_name);
-        component_meta_trace_custom!(
-            "prepared_type_decl_result",
+        component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"prepared_type_decl_result",
             format!(
                 "owner={} symbol={} source=bundle_hit hit={}",
                 canonical_id,
@@ -1579,10 +1671,10 @@ impl VerterHost {
         result
     }
 
-    pub(crate) fn prepared_type_decl_in_with_context(
+    pub(crate) fn prepared_type_decl_in_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         services: SourceRequestServices<'_>,
         canonical_id: &str,
@@ -1623,28 +1715,31 @@ impl VerterHost {
         // read fails the warm probe closed and the bundle materialises cold.
         let view = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-            self,
-            &view,
-            Arc::clone(&overlay),
-        );
-        self.prepared_value_decl_in_with_context(
-            &ctx,
-            SourceRequestServices {
-                session_view: None,
-                completion_overlay: Some(&overlay),
-                base_view: None,
-            },
-            canonical_id,
-            owner,
-            symbol_name,
-        )
-        .ok()
-        .flatten()
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                self,
+                &view,
+                Arc::clone(&overlay),
+            );
+            self.prepared_value_decl_in_with_context(
+                &ctx,
+                SourceRequestServices {
+                    session_view: None,
+                    completion_overlay: Some(&overlay),
+                    base_view: None,
+                },
+                canonical_id,
+                owner,
+                symbol_name,
+            )
+            .ok()
+            .flatten()
+        })
     }
 
-    pub(crate) fn prepared_value_decl_in_with_store_view(
+    pub(crate) fn prepared_value_decl_in_with_store_view<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
@@ -1658,17 +1753,22 @@ impl VerterHost {
         >,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
-        let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
-        else {
+        let _ = observation;
+        let Some(bundle) = self.prepared_decl_bundle_with_store_view_in::<M>(
+            observation,
+            view,
+            memo,
+            canonical_id,
+        ) else {
             return Ok(None);
         };
         bundle.prepared_value_decls.get_in(owner, symbol_name)
     }
 
-    pub(crate) fn prepared_value_decl_in_with_context(
+    pub(crate) fn prepared_value_decl_in_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         services: SourceRequestServices<'_>,
         canonical_id: &str,
@@ -1833,12 +1933,14 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        self.with_base_resolver_context(|ctx| {
-            self.shallow_file_state_with_context(
-                ctx,
-                SourceRequestServices::default(),
-                canonical_id,
-            )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.with_base_resolver_context::<_, M>(|ctx| {
+                self.shallow_file_state_with_context(
+                    ctx,
+                    SourceRequestServices::default(),
+                    canonical_id,
+                )
+            })
         })
     }
 
@@ -1885,10 +1987,10 @@ impl VerterHost {
     ///    artifact-store read is allowed exactly once, through the named
     ///    [`Self::artifact_current_indexed`] helper that documents that
     ///    contract.
-    pub(crate) fn shallow_file_state_with_context(
+    pub(crate) fn shallow_file_state_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
-        _ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities<M>,
         >,
         services: SourceRequestServices<'_>,
         canonical_id: &str,
@@ -1903,10 +2005,17 @@ impl VerterHost {
         // is edge-gated, so the re-index terminates at a fresh artifact.
         let current = match services.session_view {
             Some(view) if view.overlay_content_hash_for(canonical_id).is_some() => self
-                .materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
+                .materialize_overlay_indexed_ready_serve_with_view_in::<M>(
+                    verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+                    canonical_id,
+                    view,
+                )
                 .map(|serve| serve.indexed),
             Some(view) if view.is_tombstoned(canonical_id) => None,
-            _ => self.current_content_pinned_indexed(canonical_id),
+            _ => self.current_content_pinned_indexed_in::<M>(
+                verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+                canonical_id,
+            ),
         };
         if let Some(indexed) = current {
             if indexed.shallow_state.has_resolvable_surface() {
@@ -1917,9 +2026,11 @@ impl VerterHost {
         // Step 2 — route-surface accessor. Overlay branches serve the
         // overlay materialiser's artifact; the base fall-through joins the
         // canonical `IndexedReady` build (`ensure_indexed_ready_serve`).
-        if let Some(state) =
-            self.routed_shallow_state_with_view(canonical_id, services.session_view)
-        {
+        if let Some(state) = self.routed_shallow_state_with_view_in::<M>(
+            verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+            canonical_id,
+            services.session_view,
+        ) {
             return Some(state);
         }
 
@@ -1928,9 +2039,12 @@ impl VerterHost {
         // for a foreign-source-loaded / test-seeded artifact. It declines
         // (returns `None`) for any canonical the scheduler tracks, so a stale
         // older-content artifact for a live scope is never surfaced here.
-        self.artifact_current_indexed(canonical_id)
-            .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
-            .map(|indexed| indexed.shallow_state.clone())
+        self.artifact_current_indexed::<M>(
+            verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+            canonical_id,
+        )
+        .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
+        .map(|indexed| indexed.shallow_state.clone())
     }
 }
 
@@ -1992,7 +2106,7 @@ impl VerterHost {
     /// carry dependency-set-derived state, and what forced the global
     /// `edge_generation` stamp (plus a whole edge-refresh materialise
     /// lane) to guard it.
-    fn build_indexed_shallow_surface(
+    fn build_indexed_shallow_surface<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
@@ -2004,9 +2118,11 @@ impl VerterHost {
         framework_parse: Option<&Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         eval_source: Option<&str>,
     ) -> Arc<crate::resolver_core::ShallowFileState> {
-        self.provenance
-            .shallow_state_builds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.provenance
+                .shallow_state_builds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut shallow_state_inner = crate::resolver_core::ShallowFileState::from_route_inventory(
             whole_hash,
             Arc::clone(route_inventory),
@@ -2148,17 +2264,34 @@ impl VerterHost {
     /// On cache hit, returns the cached `IndexedReady` without any I/O.
     /// On miss, reads the file, parses, builds analysis/snapshot/eval, constructs
     /// `ShallowFileState`, and publishes to `FileArtifactStore`.
+    ///
+    /// [`Self::ensure_indexed_ready_serve_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn ensure_indexed_ready_serve(
         &self,
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.ensure_indexed_ready_serve_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub(crate) fn ensure_indexed_ready_serve_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) -> Option<IndexedReadyServe> {
+        let _ = observation;
         verter_session_query::probe_scope!(ENSURE_INDEXED_READY);
         verter_audit::attribute_scope!(IndexedReadyBuild);
-        let (serve, current_hit) = match self.ensure_indexed_ready_serve_located(canonical_id, None)
-        {
-            Some(located) => (Some(located.serve), located.current_hit),
-            None => (None, None),
-        };
+        let (serve, current_hit) =
+            match self.ensure_indexed_ready_serve_located::<M>(observation, canonical_id, None) {
+                Some(located) => (Some(located.serve), located.current_hit),
+                None => (None, None),
+            };
         // Test-only deterministic fenced-serve override: convert a would-be
         // PUBLISHED serve into a FENCED one (fire the non-cacheability fan-out +
         // `store_published = false`) WITHOUT a `project_generation` bump, so a
@@ -2247,22 +2380,41 @@ impl VerterHost {
         self.ensure_indexed_ready_serve_uninstrumented(canonical_id, None)
     }
 
+    /// [`Self::ensure_indexed_ready_serve_uninstrumented_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     fn ensure_indexed_ready_serve_uninstrumented(
         &self,
         canonical_id: &str,
         held_source: Option<&HeldIndexedSource>,
     ) -> Option<IndexedReadyServe> {
-        self.ensure_indexed_ready_serve_located(canonical_id, held_source)
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.ensure_indexed_ready_serve_uninstrumented_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, held_source)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    fn ensure_indexed_ready_serve_uninstrumented_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        held_source: Option<&HeldIndexedSource>,
+    ) -> Option<IndexedReadyServe> {
+        let _ = observation;
+        self.ensure_indexed_ready_serve_located::<M>(observation, canonical_id, held_source)
             .map(|located| located.serve)
     }
 
     /// [`Self::ensure_indexed_ready_serve_uninstrumented`], also naming the
     /// store entry a scheduler-current fast hit served.
-    fn ensure_indexed_ready_serve_located(
+    fn ensure_indexed_ready_serve_located<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         held_source: Option<&HeldIndexedSource>,
     ) -> Option<LocatedIndexedServe> {
+        let _ = observation;
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
 
@@ -2276,7 +2428,8 @@ impl VerterHost {
         // version per R1 (content-addressed identity).
         let current_key = self.authoritative_current_artifact_key(canonical_id);
         if let Some(current_key) = current_key {
-            if let Some(artifacts) = self.project_type_store.indexed().get_base_artifacts(
+            if let Some(artifacts) = self.project_type_store.indexed().get_base_artifacts::<M>(
+                observation,
                 canonical_id,
                 current_key.content_hash,
                 &current_key.parse_key,
@@ -2290,8 +2443,7 @@ impl VerterHost {
                 // environment, so falling through (not returning) routes
                 // the hit into the full re-materialise (re-parse).
                 if self.indexed_surface_is_current(canonical_id, &indexed) {
-                    component_meta_trace_custom!(
-                        "ensure_indexed_ready_fast_hit",
+                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"ensure_indexed_ready_fast_hit",
                         format!(
                             "owner={} whole_hash={}",
                             canonical_id,
@@ -2311,7 +2463,7 @@ impl VerterHost {
                 }
             }
         } else if let Some(indexed) = self
-            .artifact_current_indexed_raw(canonical_id)
+            .artifact_current_indexed_raw::<M>(observation, canonical_id)
             .filter(|indexed| self.indexed_surface_is_current(canonical_id, indexed))
         {
             // Scheduler doesn't have a current snapshot. The
@@ -2331,8 +2483,7 @@ impl VerterHost {
             // the `materialize` re-index below are the single re-index entry,
             // so there is no mutual recursion with `artifact_current_indexed`
             // (which itself calls `ensure_indexed_ready_serve` on edge-stale).
-            component_meta_trace_custom!(
-                "ensure_indexed_ready_fast_hit",
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"ensure_indexed_ready_fast_hit",
                 format!(
                     "owner={} whole_hash={}",
                     canonical_id,
@@ -2356,9 +2507,11 @@ impl VerterHost {
             #[cfg(test)]
             let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.instance_id);
             verter_session_query::probe_scope!(ENSURE_INDEXED_COLD);
-            self.provenance
-                .indexed_ready_materializes
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+                self.provenance
+                    .indexed_ready_materializes
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             #[cfg(test)]
             self.fire_materialize_seam();
             // Materialize: read source, build analysis, construct facts.
@@ -2531,7 +2684,7 @@ impl VerterHost {
             if cold_lease.refused.is_some() {
                 return None;
             }
-            if cold_lease.parsed_now {
+            if cold_lease.parsed_now && (cfg!(any(test, feature = "test-support")) || M::CAPTURED) {
                 self.provenance
                     .decl_lowering
                     .eval_program_parses
@@ -2568,9 +2721,11 @@ impl VerterHost {
             // canonical-keyed lookup allowed here, and only an entry
             // stamped with this source snapshot's generation; otherwise
             // None. Never consult live Analysis B.
-            self.provenance
-                .indexed_ready_scheduler_snapshot_reuse
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+                self.provenance
+                    .indexed_ready_scheduler_snapshot_reuse
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let export_signatures = verter_session_query::analysis::file_analysis::SharedList::new(
                 hd.parse.export_signatures.clone(),
             );
@@ -2602,7 +2757,7 @@ impl VerterHost {
                 Some(cold_lease.lease),
             ));
 
-            let shallow_state = self.build_indexed_shallow_surface(
+            let shallow_state = self.build_indexed_shallow_surface::<M>(
                 canonical_id,
                 whole_hash,
                 snapshot.as_ref(),
@@ -2752,13 +2907,14 @@ impl VerterHost {
             // so there is no back-edge into the re-indexing
             // `artifact_current_indexed`).
             let content_current_candidate = match current_key {
-                Some(current_key) => self.project_type_store.indexed().get(
+                Some(current_key) => self.project_type_store.indexed().get_in::<M>(
+                    observation,
                     canonical_id,
                     current_key.content_hash,
                     &current_key.parse_key,
                     &current_key.file_language_id,
                 ),
-                None => self.artifact_current_indexed_raw(canonical_id),
+                None => self.artifact_current_indexed_raw::<M>(observation, canonical_id),
             };
             if let Some(candidate) = content_current_candidate {
                 // Same gate as the outer fast path. A store hit IS the
@@ -2923,11 +3079,13 @@ impl VerterHost {
         None
     }
 
-    pub(crate) fn cached_import_route_resolution(
+    pub(crate) fn cached_import_route_resolution<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         import_source: &str,
     ) -> Option<DependencyResolution> {
+        let _ = observation;
         // The project-global cache already fact-validates entries on
         // warm read (each candidate's `read_set_signature.facts`
         // re-walked against the live `StoreView`), so readers consume
@@ -2953,9 +3111,9 @@ impl VerterHost {
         if resolution.is_known_miss() {
             // Per-request audit attribution: the caller will recompute
             // the miss against the live workspace.
-            if let Some(obs) = verter_audit::current_observer() {
+            verter_audit::observe!(M => on observation.observer.as_deref() =>|obs| {
                 obs.record_event(verter_audit::AuditEvent::KnownMissRouteRecomputed);
-            }
+            });
             return None;
         }
         Some(resolution)
@@ -3003,10 +3161,12 @@ impl VerterHost {
         }
     }
 
-    fn append_file_whole_and_route_fact_versions_with_context(
+    fn append_file_whole_and_route_fact_versions_with_context<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical_id: &str,
         known_shallow: Option<&verter_session_query::inputs::shallow::ShallowInputRecord>,
@@ -3043,10 +3203,12 @@ impl VerterHost {
         }
     }
 
-    fn syntactic_route_interface_fact_for_indexed_with_context(
+    fn syntactic_route_interface_fact_for_indexed_with_context<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical_id: &str,
         indexed: &Arc<verter_session_query::inputs::indexed::IndexedInputRecord>,
@@ -3070,10 +3232,12 @@ impl VerterHost {
         })
     }
 
-    pub(crate) fn resolve_direct_imported_type_root_fast_path_with_context(
+    pub(crate) fn resolve_direct_imported_type_root_fast_path_with_context<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
@@ -3151,7 +3315,8 @@ impl VerterHost {
                                     verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
                                 );
                             if let Some(indexed) = dep_key.as_ref().and_then(|key| {
-                                self.project_type_store.indexed().get(
+                                self.project_type_store.indexed().get_in::<M>(
+                                    verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
                                     dep_canonical,
                                     key.content_hash,
                                     &key.parse_key,
@@ -3345,15 +3510,17 @@ impl VerterHost {
         // stale entry against a superseded snapshot.
         let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx =
-            crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(self, &cold_seed, overlay);
 
-        self.owner_import_surface_with_store_view(
-            &ctx,
-            None,
-            &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
-            owner_canonical,
-        )
+            self.owner_import_surface_with_store_view(
+                &ctx,
+                None,
+                &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
+                owner_canonical,
+            )
+        })
     }
 
     /// View-bound variant of [`Self::owner_import_surface`].
@@ -3364,10 +3531,10 @@ impl VerterHost {
     /// stale entry on the next read; the producer's
     /// `validated_at_generation` ProjectGeneration fencing is
     /// preserved.
-    pub(crate) fn owner_import_surface_with_store_view(
+    pub(crate) fn owner_import_surface_with_store_view<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
@@ -3376,8 +3543,8 @@ impl VerterHost {
         let shallow = self.shallow_file_state(owner_canonical)?;
         let whole_hash = shallow.whole_hash;
         let surfaces = self.project_type_store.owner_import_surfaces();
-        crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(surfaces).get_or_compute(self, owner_canonical, whole_hash, view, || {
-            component_meta_trace_custom!(
+        crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(surfaces).get_or_compute::<_, _, M>(verter_type_engine::resolver_core::resolver_context::capture_targets(ctx), self, owner_canonical, whole_hash, view, || {
+            component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
                 "owner_import_surface_build",
                 format!("owner={}", owner_canonical),
             );
@@ -3575,9 +3742,11 @@ impl VerterHost {
         // see the original serve. Direct traced non-cacheability is
         // enforced independently by `OwnerImportSurfaceDb` after this closure.
         if unrooted_route_walk {
+            if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
             self.provenance
                 .owner_import_surface_fenced_serve_refusals
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let surface = crate::owner_import_surface::build_owner_import_surface(
                 Arc::from(owner_canonical),
                 whole_hash,
@@ -3619,9 +3788,11 @@ impl VerterHost {
                     }
                 }
                 true => {
+                    if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
                     self.provenance
                         .owner_import_surface_unrooted_skip_refusals
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     // Refusing the surface's OWN admission only protects
                     // this producer. An ENCLOSING traced cold compute (a
                     // semantic-memo build, a component-meta proof
@@ -3692,28 +3863,32 @@ impl VerterHost {
         // `_with_store_view` reads through the cold-seed-aware
         // `RequestStoreView`, so a stale read fails the warm validation
         // closed and the direct import re-resolves cold.
-        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx =
-            crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+            let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(self, &cold_seed, overlay);
 
-        self.resolve_owner_direct_import_with_store_view(
-            &ctx,
-            None,
-            &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
-            owner_canonical,
-            local_name,
-        )
+            self.resolve_owner_direct_import_with_store_view(
+                &ctx,
+                None,
+                &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
+                owner_canonical,
+                local_name,
+            )
+        })
     }
 
     /// View-bound variant of [`Self::resolve_owner_direct_import`].
     ///
     /// Threads the request-bound view down through
     /// [`Self::owner_import_surface_with_store_view`].
-    pub(crate) fn resolve_owner_direct_import_with_store_view(
+    pub(crate) fn resolve_owner_direct_import_with_store_view<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
@@ -3731,3 +3906,7 @@ impl VerterHost {
         ))
     }
 }
+
+#[cfg(all(test, feature = "semantic-observe"))]
+#[path = "prepared_decl_capture_tests.rs"]
+mod capture_tests;

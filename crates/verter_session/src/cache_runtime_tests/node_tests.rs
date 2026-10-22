@@ -4,7 +4,6 @@
 
 use crate::types::HostConfig;
 use crate::VerterHost;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -380,7 +379,9 @@ fn publish_rejects_candidate_when_self_root_edited_mid_compute() {
     let node = StaleGenerationQueryNode {
         inflight: InflightTable::new(),
         publish_count: Arc::new(AtomicUsize::new(0)),
-        store: ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0))),
+        store: ReverseIndexedCandidateStore::with_counter(
+            verter_type_engine::cache_runtime::OccupancyCounter::new(),
+        ),
     };
 
     let result = query::lookup(&node, 1u32, ctx, flags);
@@ -429,7 +430,9 @@ fn discriminant_generation_tracks_candidate_stamp_not_lookup_snapshot() {
     let node = SkewedDiscriminantQueryNode {
         generations: Arc::clone(host.project_type_store()),
         inflight: InflightTable::new(),
-        store: ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0))),
+        store: ReverseIndexedCandidateStore::with_counter(
+            verter_type_engine::cache_runtime::OccupancyCounter::new(),
+        ),
         compute_calls: Arc::new(AtomicUsize::new(0)),
     };
 
@@ -794,7 +797,9 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
         }
         let node = WideQueryNode {
             artifact,
-            store: ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0))),
+            store: ReverseIndexedCandidateStore::with_counter(
+                verter_type_engine::cache_runtime::OccupancyCounter::new(),
+            ),
             stale: false,
             lower,
         };

@@ -1980,6 +1980,8 @@ async fn contract_slot_name_completion_filters_already_used_slots() {
     drop(service);
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test]
 async fn contract_svelte_snippet_slot_completion_offers_child_snippet_props() {
     let child_source = "<script setup lang=\"ts\">\ndefineProps<{ label: string }>()\ndefineSlots<{ header(props: { title: string }): any; default(): any }>()\n</script>\n<template><slot name=\"header\" title=\"t\" /><slot /></template>\n";
@@ -2579,17 +2581,22 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract_f
             );
         let workspace_reads_after = workspace.vfs_provenance_snapshot();
         assert_eq!(
+                workspace_reads_after.resolution_evidence_live_read_count,
+                workspace_reads.resolution_evidence_live_read_count,
+                "{provider_label}/{label}/{route}/{child_state}: completion must not perform evidence reads"
+            );
+        // Reads optional audit capture: runs in the instrumentation lane.
+        #[cfg(feature = "semantic-observe")]
+        assert_eq!(
                 (
                     workspace_reads_after.native_fs_read_file_miss_count,
                     workspace_reads_after.native_fs_read_dir_count,
-                    workspace_reads_after.resolution_evidence_live_read_count,
                 ),
                 (
                     workspace_reads.native_fs_read_file_miss_count,
                     workspace_reads.native_fs_read_dir_count,
-                    workspace_reads.resolution_evidence_live_read_count,
                 ),
-                "{provider_label}/{label}/{route}/{child_state}: completion must not perform filesystem/evidence reads"
+                "{provider_label}/{label}/{route}/{child_state}: completion must not perform filesystem reads"
             );
         assert_eq!(
                 provider.file_sync_calls().len(),
@@ -5313,6 +5320,202 @@ async fn a_carrier_publication_never_announces_provider_sync_completion() {
             > 0,
         "the carrier publications still tell the editor the store changed"
     );
+    assert_eq!(
+        store_pings_from_a_debounced_sync(&fixture).await,
+        1,
+        "the debounced sync of an edited carrier tells a subscribed editor once"
+    );
+}
+
+/// Edit `Consumer.vue` and run its debounced coordinator sync to completion;
+/// return how many carrier-store pings that put on the wire. A marker sent
+/// after the sync bounds the observation: the wire is ordered, so once the
+/// marker is recorded every ping the sync produced has been counted.
+async fn store_pings_from_a_debounced_sync(fixture: &WatchedDependencyFixture) -> usize {
+    let server = fixture.service.inner();
+    let uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    let before = fixture
+        .store_changed
+        .load(std::sync::atomic::Ordering::SeqCst);
+    server.documents.did_change(
+        &uri,
+        2,
+        "<script setup lang=\"ts\">\nimport { value } from './helper';\nconst again = value;\n</script>\n<template>{{ again }}</template>",
+    );
+    let deps = lane_interleaving_deps(server);
+    assert_eq!(
+        crate::sync_coordinator::synchronize_document_outcome_for_test(&deps, &id, uri.as_str())
+            .await,
+        crate::sync_coordinator::SyncFileOutcome::Settled,
+        "the debounced sync must run to completion for its pings to be counted"
+    );
+    let marker = "window/logMessage";
+    let markers = || {
+        fixture
+            .methods
+            .lock()
+            .iter()
+            .filter(|method| method.as_str() == marker)
+            .count()
+    };
+    let markers_before = markers();
+    server
+        .client
+        .log_message(MessageType::INFO, "sync observed")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let changed = fixture.methods_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if markers() > markers_before {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .expect("the marker sent after the sync reaches the wire");
+    fixture
+        .store_changed
+        .load(std::sync::atomic::Ordering::SeqCst)
+        - before
+}
+
+/// The carrier-store ping is a subscription. A client that did not ask for it
+/// (an editor with no TypeScript service of its own over the store) receives
+/// none, however many carriers are published, while its diagnostics still
+/// arrive. Opening and publishing documents then puts nothing on the wire
+/// except those documents' diagnostics.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsubscribed_client_receives_no_carrier_store_pings() {
+    let fixture = watched_dependency_fixture_declaring(true, serde_json::json!({})).await;
+    assert_eq!(
+        fixture
+            .store_changed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no carrier-store ping may reach a client that did not subscribe"
+    );
+    let unrequested: Vec<String> = fixture
+        .methods
+        .lock()
+        .iter()
+        .filter(|method| method.as_str() != "textDocument/publishDiagnostics")
+        .cloned()
+        .collect();
+    assert!(
+        unrequested.is_empty(),
+        "an unsubscribed client receives only its open documents' diagnostics, got {unrequested:?}"
+    );
+    {
+        let published = fixture.published.lock();
+        for name in ["Consumer.vue", "Unrelated.vue"] {
+            let uri = workspace_uri(&fixture.root, &format!("src/{name}"));
+            assert!(
+                published.iter().any(|params| params.uri == uri),
+                "{name} still receives its diagnostics without the subscription"
+            );
+        }
+        let open = ["Consumer.vue", "Unrelated.vue"]
+            .map(|name| workspace_uri(&fixture.root, &format!("src/{name}")));
+        assert!(
+            published.iter().all(|params| open.contains(&params.uri)),
+            "only open documents are published"
+        );
+    }
+    assert_eq!(
+        store_pings_from_a_debounced_sync(&fixture).await,
+        0,
+        "nor may the debounced sync of an edited carrier ping it"
+    );
+}
+
+/// The heartbeat is a subscription too: a subscribed client's watchdog gets a
+/// beat every few seconds once the client has sent `initialized`; a client that
+/// did not subscribe gets no message, however long the session runs. Driven
+/// through the delivered `initialize` + `initialized` lifecycle, so the wiring
+/// from the handler to the heartbeat is what is proven.
+#[tokio::test(start_paused = true)]
+async fn only_a_subscribed_client_receives_heartbeats() {
+    async fn heartbeats_within(
+        initialization_options: serde_json::Value,
+        window: std::time::Duration,
+    ) -> usize {
+        let (mut service, _socket) = tower_lsp_server::LspService::new(|_client| {
+            VerterLanguageServer::new(
+                crate::outbound::Outbound::default(),
+                LspConfig {
+                    host: Arc::new(VerterHost::new_standalone(HostConfig::default())),
+                    type_provider: None,
+                    project_sync_mode: ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::None,
+                    type_provider_topology: crate::TypeProviderTopology::implied_by(
+                        crate::TypeProviderKind::None,
+                    ),
+                    mcp_port: None,
+                    type_provider_reason: None,
+                    type_provider_advisory: None,
+                    suppress_imported_carrier_prewarm: false,
+                },
+            )
+        });
+        let mut wire = service.inner().outbound().wire();
+        let response = tower_service::Service::call(
+            &mut service,
+            tower_lsp_server::jsonrpc::Request::build("initialize")
+                .id(1)
+                .params(serde_json::json!({
+                    "processId": null,
+                    "rootUri": null,
+                    "capabilities": {},
+                    "initializationOptions": initialization_options,
+                }))
+                .finish(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.is_ok());
+        service.inner().outbound().assume_initialized();
+        // `initialized` parks on client round-trips this wire never answers
+        // (capability registration); the heartbeat is spawned before them.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            tower_service::Service::call(
+                &mut service,
+                tower_lsp_server::jsonrpc::Request::build("initialized")
+                    .params(serde_json::json!({}))
+                    .finish(),
+            ),
+        )
+        .await;
+        let mut beats = 0;
+        let deadline = tokio::time::Instant::now() + window;
+        while let Ok(Some(message)) = tokio::time::timeout_at(deadline, wire.next()).await {
+            if message.method() == "$/verter/heartbeat" {
+                beats += 1;
+            }
+        }
+        beats
+    }
+
+    let window = std::time::Duration::from_secs(12);
+    let beats = heartbeats_within(
+        serde_json::json!({ "subscriptions": { "heartbeat": true } }),
+        window,
+    )
+    .await;
+    assert_eq!(beats, 3, "beats at 0s, 5s and 10s of a 12s window");
+
+    for unsubscribed in [
+        serde_json::json!({}),
+        serde_json::json!({ "subscriptions": { "carrierStoreChanged": true } }),
+    ] {
+        let beats = heartbeats_within(unsubscribed.clone(), window).await;
+        assert_eq!(beats, 0, "{unsubscribed}: no heartbeat on the wire");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -489,6 +489,9 @@ pub struct ServerCore {
     /// (`workspace.workspaceEdit.documentChanges`). Every foreground request
     /// captures it at admission, so one request delivers its edits in one shape.
     pub(crate) client_applies_versioned_edits: std::sync::atomic::AtomicBool,
+    /// The recurring notifications the client subscribed to at `initialize`;
+    /// shared with every producer of one.
+    pub(crate) subscriptions: Arc<crate::demand_plan::ClientSubscriptions>,
     /// Cached verter diagnostics per document:
     /// URI → (document_version, diagnostics_generation, diagnostics).
     /// Avoids re-running host + lint + component diagnostics when both push and
@@ -656,10 +659,19 @@ pub struct ServerCore {
     #[cfg(test)]
     request_barriers: Arc<test_support::RequestBarriers>,
     /// Handle for the background workspace scanner. Receives priority signals
-    /// from `did_open` to reorder the scan queue. `None` until `initialized()`.
+    /// from `did_open` to reorder the scan queue. `None` until a request demands
+    /// the complete workspace inventory (`activate_workspace_scan`).
     /// Arc-wrapped so background init can install the scanner without &self.
     workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
+    /// Set by the first request that needs the complete workspace inventory
+    /// (references/rename frontier, workspace-wide enumeration). The workspace
+    /// scanner exists only from that demand on; it survives re-init
+    /// generations once demanded.
+    workspace_scan_demanded: std::sync::atomic::AtomicBool,
+    /// Woken whenever a workspace scan ends or is retired, so the level-2
+    /// readiness waiter can hold behind a scan that is still running.
+    workspace_scan_settled: tokio::sync::Notify,
     /// Generation counter for background initialization. Incremented each time
     /// `initialized()` or `did_change_workspace_folders` spawns a new background
     /// init task. Background tasks check this before committing results to discard
@@ -1333,6 +1345,7 @@ impl VerterLanguageServer {
         // The DependencyReady receipts: minted by the background import
         // publication, read by the coordinator while a workspace scan runs.
         let import_sync = Arc::new(ImportSyncMemo::default());
+        let subscriptions = Arc::new(crate::demand_plan::ClientSubscriptions::default());
 
         let sync_coordinator = crate::sync_coordinator::spawn_sync_coordinator(
             crate::sync_coordinator::SyncCoordinatorDeps {
@@ -1350,6 +1363,7 @@ impl VerterLanguageServer {
                 carrier_publish_coordinator: carrier_publish_coordinator.clone(),
                 carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
                 dependency_receipts: Arc::clone(&import_sync),
+                subscriptions: Arc::clone(&subscriptions),
             },
         );
 
@@ -1371,6 +1385,7 @@ impl VerterLanguageServer {
             client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool::new(false),
             client_refreshes_inlay_hints: std::sync::atomic::AtomicBool::new(false),
             client_applies_versioned_edits: std::sync::atomic::AtomicBool::new(false),
+            subscriptions,
             cached_verter_diags,
             provider_sync_states,
             decl_overlay_owner,
@@ -1422,6 +1437,8 @@ impl VerterLanguageServer {
             #[cfg(test)]
             request_barriers: Arc::default(),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
+            workspace_scan_demanded: std::sync::atomic::AtomicBool::new(false),
+            workspace_scan_settled: tokio::sync::Notify::new(),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             handler_activity: Arc::new(HandlerActivity::default()),
             ownership_generation_fence: Arc::new(

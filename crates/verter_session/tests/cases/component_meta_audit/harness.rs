@@ -32,8 +32,11 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use verter_session::audited_request::AuditedRequest;
+#[cfg(feature = "semantic-observe")]
 pub use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
+#[cfg(feature = "semantic-observe")]
 use verter_session::component_meta_audit::{RequestAuditRecord, RequestFootprintAudit};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::resolution::IdeProjectCompilerOptions;
@@ -99,6 +102,7 @@ pub fn build_preupserted_host(files: &[(&str, &str)], entry_canonical: &str) -> 
     host
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Resolve `canonical` against `host` under an attached audit,
 /// returning the triple. Panics on error — test callers want loud
 /// failures.
@@ -116,6 +120,7 @@ pub fn resolve_under_audit(
         .unwrap_or_else(|e| panic!("hermetic audit for `{canonical}` must succeed, got {e}"))
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Convenience: return the footprint, panicking when absent. Every
 /// test in this suite opts into `footprint_capture`.
 pub fn footprint_of(record: &RequestAuditRecord) -> &RequestFootprintAudit {

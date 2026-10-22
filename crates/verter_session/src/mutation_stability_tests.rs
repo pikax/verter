@@ -404,6 +404,8 @@ fn warming_the_augmentation_index_inside_a_scope_does_not_destabilise_it() {
 /// `FactTracerBasisSource::live_basis`. This test fails; the movement
 /// fixtures above stay green, which is exactly why they could not have
 /// caught it.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn a_seeded_scope_reads_no_store_view_at_install_or_at_any_admission_boundary() {
     const ADMISSION_BOUNDARIES: usize = 8;
@@ -454,6 +456,8 @@ fn a_seeded_scope_reads_no_store_view_at_install_or_at_any_admission_boundary() 
 /// that simply never reaches the composer: the bound scope proves the
 /// composer RUNS and is free, this one proves the short-circuit did not
 /// silently become the only reason.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn an_unbound_scope_reads_no_store_view_either() {
     let host = host_with_a_file();

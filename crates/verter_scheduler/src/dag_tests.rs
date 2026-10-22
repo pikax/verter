@@ -276,7 +276,12 @@ fn cancellation_releases_capacity_permits_exactly_once_on_drop() {
     let dag = SchedulerDag::new();
     assert_eq!(dag.in_flight_permits(), 0);
     {
-        let _r = dag.reserve_capacity(3);
+        let _held: Vec<_> = (0..3)
+            .map(|_| {
+                dag.try_reserve_for_class(ResourceClass::Cpu)
+                    .expect("budget")
+            })
+            .collect();
         assert_eq!(dag.in_flight_permits(), 3);
     }
     assert_eq!(dag.in_flight_permits(), 0);
@@ -288,14 +293,18 @@ fn cancellation_releases_capacity_permits_exactly_once_on_drop() {
 #[test]
 fn capacity_release_returns_permits_and_makes_double_release_unrepresentable() {
     let dag = SchedulerDag::new();
-    let r = dag.reserve_capacity(2);
-    assert_eq!(dag.in_flight_permits(), 2);
+    let r = dag
+        .try_reserve_for_class(ResourceClass::Io)
+        .expect("budget");
+    assert_eq!(dag.in_flight_permits(), 1);
     r.release();
     assert_eq!(dag.in_flight_permits(), 0);
     // r is moved — calling release again would not compile.
     // A second reservation must be a fresh one:
-    let r2 = dag.reserve_capacity(5);
-    assert_eq!(dag.in_flight_permits(), 5);
+    let r2 = dag
+        .try_reserve_for_class(ResourceClass::Cpu)
+        .expect("budget");
+    assert_eq!(dag.in_flight_permits(), 1);
     drop(r2);
     assert_eq!(dag.in_flight_permits(), 0);
 }

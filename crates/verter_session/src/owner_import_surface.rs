@@ -23,7 +23,7 @@
 //!   caller folds into its dependency-fact set for the publish-side
 //!   completion-fence revalidation.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -81,7 +81,7 @@ pub struct OwnerImportSurface {
 /// at lookup time.
 pub struct OwnerImportSurfaceDb {
     entries: DashMap<Arc<str>, Arc<OwnerImportSurface>>,
-    live_counter: Arc<AtomicU64>,
+    live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`verter_type_engine::cache_schema`] for the contract. Production paths always use
     /// [`verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]; test fixtures
@@ -93,13 +93,15 @@ pub struct OwnerImportSurfaceDb {
 impl OwnerImportSurfaceDb {
     #[must_use]
     pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
+        Self::with_counter(verter_type_engine::cache_runtime::OccupancyCounter::new())
     }
 
     /// Construct with an externally-shared `live_counter` so the
     /// [`ProjectTypeStoreCounters`](crate::project_type_store::ProjectTypeStoreCounters)
     /// snapshot reflects live-entry changes without a second read.
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counter(
+        live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
+    ) -> Self {
         Self::with_counter_and_schema_version(
             live_counter,
             verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
@@ -111,10 +113,16 @@ impl OwnerImportSurfaceDb {
     /// entries under a prior cluster version.
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+        Self::with_counter_and_schema_version(
+            verter_type_engine::cache_runtime::OccupancyCounter::new(),
+            schema_version,
+        )
     }
 
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
+    fn with_counter_and_schema_version(
+        live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
+        schema_version: u32,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             live_counter,
@@ -135,11 +143,13 @@ impl OwnerImportSurfaceDb {
     /// to drain the storage; it is exposed so test fixtures can verify the
     /// stale-eviction invariant deterministically.
     #[must_use]
-    pub(crate) fn lookup_owner_hash_candidate(
+    pub(crate) fn lookup_owner_hash_candidate<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         owner_canonical: &str,
         expected_owner_whole_hash: Hash16,
     ) -> Option<Arc<OwnerImportSurface>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -149,7 +159,7 @@ impl OwnerImportSurfaceDb {
             }
             _ => None,
         };
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .owner_import
@@ -161,7 +171,7 @@ impl OwnerImportSurfaceDb {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -175,7 +185,9 @@ impl OwnerImportSurfaceDb {
         owner_canonical: &str,
         expected_owner_whole_hash: Hash16,
     ) -> Option<Arc<OwnerImportSurface>> {
-        self.lookup_owner_hash_candidate(owner_canonical, expected_owner_whole_hash)
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.lookup_owner_hash_candidate::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), owner_canonical, expected_owner_whole_hash)
+        })
     }
 
     /// Look up the owner surface for `owner_canonical` and validate
@@ -463,20 +475,27 @@ mod tests {
             };
 
         let admitted = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
-            .get_or_compute(&host, "/w/owner.ts", owner_hash, &view, || {
-                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
-                    transitive_fact.clone(),
-                );
-                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                    build_owner_import_surface(
-                        Arc::from("/w/owner.ts"),
-                        owner_hash,
-                        Vec::new(),
-                        Vec::new(),
-                        0,
-                    ),
-                )
-            })
+            .get_or_compute::<_, _, verter_audit::observe::Uncaptured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                &host,
+                "/w/owner.ts",
+                owner_hash,
+                &view,
+                || {
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                        transitive_fact.clone(),
+                    );
+                    verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                        build_owner_import_surface(
+                            Arc::from("/w/owner.ts"),
+                            owner_hash,
+                            Vec::new(),
+                            Vec::new(),
+                            0,
+                        ),
+                    )
+                },
+            )
             .expect("owner-controlled cold compute must serve its value");
         assert!(
             admitted.read_set_signature.facts.contains(&transitive_fact),
@@ -489,20 +508,27 @@ mod tests {
 
         let refused_hash = [9u8; 16];
         let refused = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
-            .get_or_compute(&host, "/w/refused.ts", refused_hash, &view, || {
-                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
-                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
-                );
-                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                    build_owner_import_surface(
-                        Arc::from("/w/refused.ts"),
-                        refused_hash,
-                        Vec::new(),
-                        Vec::new(),
-                        0,
-                    ),
-                )
-            })
+            .get_or_compute::<_, _, verter_audit::observe::Uncaptured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                &host,
+                "/w/refused.ts",
+                refused_hash,
+                &view,
+                || {
+                    verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
+                    );
+                    verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                        build_owner_import_surface(
+                            Arc::from("/w/refused.ts"),
+                            refused_hash,
+                            Vec::new(),
+                            Vec::new(),
+                            0,
+                        ),
+                    )
+                },
+            )
             .expect("non-admission must still serve the cold caller");
         assert_eq!(refused.owner_whole_hash, refused_hash);
         assert!(
@@ -540,20 +566,27 @@ mod tests {
 
         // Cold-admit a surface whose signature carries the leaf chain fact.
         let admitted = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
-            .get_or_compute(&host, "/w/owner.ts", owner_hash, &view, || {
-                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
-                    leaf_fact.clone(),
-                );
-                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                    build_owner_import_surface(
-                        Arc::from("/w/owner.ts"),
-                        owner_hash,
-                        Vec::new(),
-                        Vec::new(),
-                        generation,
-                    ),
-                )
-            })
+            .get_or_compute::<_, _, verter_audit::observe::Uncaptured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                &host,
+                "/w/owner.ts",
+                owner_hash,
+                &view,
+                || {
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                        leaf_fact.clone(),
+                    );
+                    verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                        build_owner_import_surface(
+                            Arc::from("/w/owner.ts"),
+                            owner_hash,
+                            Vec::new(),
+                            Vec::new(),
+                            generation,
+                        ),
+                    )
+                },
+            )
             .expect("cold admit must serve");
         assert!(
             admitted.read_set_signature.facts.contains(&leaf_fact),
@@ -565,7 +598,7 @@ mod tests {
         let ((), finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
             &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
             || {
-                let warm = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db).get_or_compute(
+                let warm = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db).get_or_compute::<_, _, verter_audit::observe::Uncaptured>(&verter_type_engine::request_observers::CaptureTargets::EMPTY,
                 &host,
                 "/w/owner.ts",
                 owner_hash,

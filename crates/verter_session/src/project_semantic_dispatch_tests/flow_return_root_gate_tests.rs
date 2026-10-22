@@ -245,7 +245,12 @@ fn with_dispatch<R>(
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
@@ -419,7 +424,7 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
             panic!("gateNestedArrowInArray must produce a value");
         };
         assert_eq!(result.degradation(), None);
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let element = match graph.node_data(result.return_type()).as_deref() {
             Some(SemanticNodeData::Array { element, .. }) => *element,
             other => panic!("gateNestedArrowInArray is an array, got {other:?}"),

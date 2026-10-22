@@ -21,15 +21,15 @@ use verter_type_engine::resolver_core::ResolverContext;
 /// test builds (the production path uses [`is_package_canonical`] on a
 /// concrete `&str`).
 #[cfg(test)]
-pub(super) fn is_package_source(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(super) fn is_package_source<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     source: Option<&str>,
 ) -> bool {
     source.is_some_and(|s| ctx.workspace_is_package_backed(s))
 }
 
-pub(super) fn is_package_canonical(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(super) fn is_package_canonical<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     canonical_id: &str,
 ) -> bool {
     ctx.workspace_is_package_backed(canonical_id)
@@ -88,8 +88,11 @@ pub(super) enum ImportedRegistrySymbolResolution {
     FuseTripped,
 }
 
-pub(super) fn resolve_imported_registry_symbol_with_budget<F>(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(super) fn resolve_imported_registry_symbol_with_budget<
+    F,
+    M: verter_audit::observe::ObserveExec,
+>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     canonical_id: &str,
     source_owner: verter_type_expr::TopLevelOwnerId,
     exported_name: &str,

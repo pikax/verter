@@ -204,17 +204,31 @@ Generic method relations follow `compareSignaturesRelated`:
   (`StrictCallback`). The callback relation runs inside the enclosing frame,
   so its parameters infer at `InferPosition::CallbackParam` (the two flips
   cancel) and its return at `InferPosition::ContravariantParam`.
-- Inference into a union with one naked parameter matches a source member to
-  another member referencing the same generic declaration by its type
-  arguments (`members_unmatched_by_inference`, the checker's
-  `inferToMultipleTypes` + `inferFromTypeArguments`): `PromiseLike<R'>` into
+- Inference into a union with one naked parameter follows the checker's
+  `inferFromMatchingTypes` + `inferToMultipleTypes`
+  (`union_source_inferred_to_naked_parameter`, `NakedUnionInference`):
+  source members identical to a fixed member are removed; a member
+  referencing the declaration a fixed member references
+  (`references_one_declaration`, the checker's `isTypeCloselyMatchedBy`)
+  pairs with it and infers by its type arguments — `PromiseLike<R'>` into
   `R | PromiseLike<R>` infers `R'`, a declaration's reference to itself in
   its own body (a `RecursiveRef` carrier, `raw_generic_reference`) matching
-  like any other reference. Only the arguments relate, so two
-  recursive declarations never expand into each other. Matching a member
-  through another declaration's structure is not done (the checker's
-  `inferFromObjectTypes`); `thenables_of_different_declarations_infer_through_their_structure`
-  pins the rows that need it.
+  like any other reference. Each remaining member is then tried against
+  each fixed member through the shared inference walk
+  (`infers_into_fixed_member`, read back with `InferenceSession::inferred_since`):
+  a member whose walk reaches the variable at the current priority pairs
+  with that fixed member — `Promise<2>` into `MyPL<any>`, `Promise<1> | 2`
+  into `PL<U> | U` infers `1 | 2` — and only the unmatched rest is one
+  candidate for the variable. A walk that met an inference circularity
+  makes the whole source a lower-priority candidate instead. Circularity is
+  recorded only where the cycling pair names one of the session's
+  variables (`pair_mentions_session_variable`, the checker's
+  `couldContainTypeVariables` stop): a generic method instantiated in
+  another's context, its own type parameters one level deeper each time,
+  is no inference circularity.
+  `thenables_of_different_declarations_infer_through_their_structure` and
+  `a_promise_member_infers_its_payload_beside_the_naked_union_remainder`
+  pin the cross-declaration rows.
 
 Guards: the `lib_generic_relation_tests` suite (`verter_session`).
 
@@ -289,4 +303,4 @@ resolved type surfaces.
 
 **Closed mapped operands reduce relation-locally.** The identity-carrier unwrap reduces a `Mapped` operand whose source, key domain and template are closed, such as a signature's mapped parameter after substitution. It handles identity templates, index-key domains and enumerable keys alike: each key reads the template with the binder bound to it, and `Keep` modifiers come from the modifiers type (the source of a homomorphic mapping). The object is interned for the relation alone, without member edges, matching the identity and index-key reducers. Open sources, name remaps, distributing homomorphic sources (unions, arrays, tuples), unique-symbol keys and templates that read as `Opaque` keep the carrier, so the relation stays undecided. The mapped build still carrier-stops under structural transit.
 
-**Function recursion counts repeated occurrences.** `RelationRecursionIdentity` pairs its origin with a typed `RecursionCountMode`. A signature uses its authored scope and span as the function origin and counts every occurrence, including revisiting the same instance. Declaration references retain distinct argument instances. The live stack and cached-footprint replay apply the same rule, independent of graph allocation and query order. `repeated_method_signatures_count_without_counting_finite_reference_descent` guards finite reference descent, the method expansion boundary, and both warm query orders.
+**Function recursion counts repeated occurrences.** `RelationRecursionIdentity` pairs its origin with a typed `RecursionCountMode`. A signature uses its authored scope and span as the function origin and counts every occurrence, including revisiting the same instance. Declaration references retain distinct argument instances. The live stack and cached-footprint replay apply the same rule, independent of graph allocation and query order. Inside an inference walk the live stack also reads each signature instance's first visit in the transaction, as the checker reads type ids; a verdict that order changes is context-dependent. A `BivariantCallback` return relates the target's return to the source's first, then covariantly, in the checker's order. `repeated_method_signatures_count_without_counting_finite_reference_descent` guards finite reference descent, the method expansion boundary, and both warm query orders.

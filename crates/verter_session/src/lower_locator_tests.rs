@@ -38,9 +38,11 @@ use verter_type_engine::project_semantic_dispatch::locator_shape::{
 };
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+#[cfg(feature = "semantic-observe")]
+use verter_type_engine::semantic_query::SemanticQueryKeyTag;
 use verter_type_engine::semantic_query::{
     DeclIdentity, MemberMergeRole, NodeScopeId, ObjectConstructionEffect, ProjectionMode,
-    ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKeyTag,
+    ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId,
 };
 
 fn host() -> VerterHost {
@@ -232,6 +234,8 @@ fn member_value(
         .value
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A COLD `lower_locator` demand performs ZERO reduction dispatches: the
 /// per-request dispatch mask records ONLY the `LowerLocator` tag — never
 /// `Instantiate` / `ResolveDecl` / `IndexedAccess` / `Conditional` / `KeyOf`
@@ -248,7 +252,10 @@ fn cold_lower_locator_dispatches_zero_reduction_queries() {
     let ctx = RequestContext::new(1, Arc::from(OWNER_ID), false, None);
     let _guard = RequestContextGuard::install(Arc::clone(&ctx));
 
-    let dispatch = ProjectSemanticDispatch::new(&host);
+    // Captured execution: only it records into the request counters read below.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch = ProjectSemanticDispatch::new(&captured);
     let node = match dispatch.lower_locator(decl_body_locator(OWNER_ID, "Deferred")) {
         QueryResult::Value(id) => id,
         other => panic!("cold lower_locator must produce a value, got {other:?}"),
@@ -994,6 +1001,8 @@ fn locator_shape_keeps_declared_type_parameters_as_shells() {
 /// A WARM `lower_locator` demand is a memo hit: the same node id returns and
 /// NO second snapshot re-borrow / re-lowering happens (the per-host
 /// `decl_bodies_lowered` counter stays flat across the warm demand).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn warm_lower_locator_demand_is_a_memo_hit_without_relowering() {
     let host = host();

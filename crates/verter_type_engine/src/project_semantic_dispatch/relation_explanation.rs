@@ -112,13 +112,30 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
+    /// Whether this dispatcher's request selected captured execution, so
+    /// its cold judgements record explanations.
+    pub(super) fn relation_explanations_captured(&self) -> bool {
+        self.relation_explanations.is_some()
+    }
+
     /// Append one cold judgement's explanation to this request's buffer.
-    pub(super) fn record_relation_explanation(&self, explanation: RelationExplanation) {
-        self.relation_explanations.borrow_mut().push(explanation);
+    /// An uncaptured request has no buffer: `explain` is never called, so
+    /// it leases no operand.
+    pub(super) fn record_relation_explanation(
+        &self,
+        explain: impl FnOnce() -> RelationExplanation,
+    ) {
+        if let Some(buffer) = &self.relation_explanations {
+            buffer.borrow_mut().push(explain());
+        }
     }
 
     /// Drain the explanations this request captured, in decision order.
+    /// Empty for an uncaptured request.
     pub fn take_relation_explanations(&self) -> Vec<RelationExplanation> {
-        std::mem::take(&mut *self.relation_explanations.borrow_mut())
+        self.relation_explanations
+            .as_ref()
+            .map(|buffer| std::mem::take(&mut *buffer.borrow_mut()))
+            .unwrap_or_default()
     }
 }

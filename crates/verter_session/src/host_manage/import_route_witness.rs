@@ -133,7 +133,7 @@ thread_local! {
 
 /// How many normalizations ran their probes on this thread so far
 /// (test-only).
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) fn normalization_builds_for_tests() -> usize {
     NORMALIZATION_BUILDS.with(Cell::get)
 }
@@ -210,7 +210,7 @@ thread_local! {
 
 /// How many witness builds were served by replay on this thread so far
 /// (test-only).
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) fn witness_replays_for_tests() -> usize {
     WITNESS_REPLAYS.with(Cell::get)
 }
@@ -293,7 +293,21 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<Vec<FactVersionRef>> {
-        let specifiers = self.authored_import_specifiers(canonical_id)?;
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.owner_import_route_witness_in::<M>(
+                &verter_type_engine::request_observers::CaptureTargets::installed::<M>(),
+                canonical_id,
+            )
+        })
+    }
+
+    /// Build the owner's witness with the calling execution's capture receivers.
+    pub(crate) fn owner_import_route_witness_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) -> Option<Vec<FactVersionRef>> {
+        let specifiers = self.authored_import_specifiers_in::<M>(observation, canonical_id)?;
         self.import_route_witness_for_lanes(canonical_id, &specifiers)
     }
 
@@ -525,8 +539,27 @@ impl VerterHost {
     ///
     /// `None` when the owner has no readable parse surface at all; an
     /// empty vector is a genuine "no import routes" answer.
+    #[cfg(any(test, feature = "test-support"))]
     fn authored_import_specifiers(
         &self,
+        canonical_id: &str,
+    ) -> Option<
+        Vec<(
+            String,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
+        )>,
+    > {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.authored_import_specifiers_in::<M>(
+                &verter_type_engine::request_observers::CaptureTargets::installed::<M>(),
+                canonical_id,
+            )
+        })
+    }
+
+    fn authored_import_specifiers_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<
         Vec<(
@@ -577,7 +610,9 @@ impl VerterHost {
 
         // Script-level routing surface from the shallow inventory, when
         // one is already published. Observe-only: never materialises.
-        if let Some(indexed) = self.observe_content_pinned_indexed(canonical_id) {
+        if let Some(indexed) =
+            self.observe_content_pinned_indexed_in::<M>(observation, canonical_id)
+        {
             readable = true;
             let state = &indexed.shallow_state;
             specifiers.extend(

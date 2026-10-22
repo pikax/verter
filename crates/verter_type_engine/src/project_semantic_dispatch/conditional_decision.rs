@@ -1203,7 +1203,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             pending,
         });
         let fence = self.project_generation_signature();
-        self.graph().record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            self.graph(),
             node,
             OriginEdgeKind::ConditionalSelect,
             Arc::from([check, extends]),
@@ -1551,7 +1552,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if let Some(selected) = infer {
             for binding in selected.bindings.iter() {
                 result = self.substitute_semantic_type_param(result, binding.param, binding.bound);
-                graph.record_origin_edge(
+                crate::semantic_query_memo::record_origin_edge!(
+                    graph,
                     result,
                     OriginEdgeKind::InferBind,
                     Arc::from([check, extends]),
@@ -1599,7 +1601,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             };
             if let Some(branch) = branch {
-                graph.record_origin_edge(
+                crate::semantic_query_memo::record_origin_edge!(
+                    graph,
                     result,
                     OriginEdgeKind::ConditionalSelect,
                     Arc::from([check, extends]),

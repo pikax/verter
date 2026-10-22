@@ -999,8 +999,12 @@ fn merged_decl_display_matches_graph_reduction_and_is_non_mutating() {
 
     // Canonical reduction through the single mutating peer-merge engine
     // (interns the reduced `Object` + the accumulated overload `Intersection`).
-    let reduced =
-        verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
+    let reduced = verter_session::for_tests::reduce_merged_decl_to_graph_node(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &store,
+        ),
+        &contributors,
+    );
     let graph_render = render(&store, reduced);
     let count_after_reduction = store.node_count();
 
@@ -1088,8 +1092,12 @@ fn merged_decl_display_preserves_heritage_arms_like_graph_reduction() {
         contributors: verter_type_engine::semantic_query::PayloadArray::from(contributors),
     });
 
-    let reduced =
-        verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
+    let reduced = verter_session::for_tests::reduce_merged_decl_to_graph_node(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &store,
+        ),
+        &contributors,
+    );
     let graph_render = render(&store, reduced);
     let count_after_reduction = store.node_count();
 
@@ -1130,8 +1138,12 @@ fn merged_decl_reduction_preserves_authored_multi_heritage_arm_order() {
     ));
     let contributors = [contributor];
 
-    let reduced =
-        verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
+    let reduced = verter_session::for_tests::reduce_merged_decl_to_graph_node(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            &store,
+        ),
+        &contributors,
+    );
     assert_eq!(
         render(&store, reduced),
         "A & B & { x: number }",

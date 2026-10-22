@@ -918,6 +918,8 @@ fn ensure_ide_compiled_is_idempotent_and_invalidates_on_dependency_edit() {
     assert!(host.get_ide("/src/Widget.svelte", &profile).is_some());
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn concurrent_ensure_ide_compiled_and_get_virtual_file_main_share_one_published_slot() {
     // Vue produces BOTH a runtime Main and an IDE artifact from ONE shared
@@ -1475,6 +1477,8 @@ fn runtime_main_request_on_a_supported_svelte_component_returns_the_main_module(
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
     // The refused runtime surface here is a standalone `<svelte:fragment>` (the transparent-

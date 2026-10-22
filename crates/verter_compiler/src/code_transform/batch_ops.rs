@@ -76,7 +76,7 @@ impl<'a> PrependMerge<'_, 'a> {
 }
 
 #[allow(dead_code)] // Some batch API methods are only exercised by tests currently
-impl<'a> CodeTransform<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// Apply multiple prepend_left operations in a single O(n+m) pass.
     ///
     /// `items` must be sorted by position (ascending). Content strings must
@@ -85,7 +85,7 @@ impl<'a> CodeTransform<'a> {
     /// This avoids O(n*m) Vec::insert cost by rebuilding the chunks Vec once.
     /// Specifically designed for batch-applying binding prefixes (`_ctx.`,
     /// `$setup.`, etc.) after all overwrites are complete.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn batch_prepend_left_static(&mut self, items: &[(u32, &'a str)]) -> &mut Self {
         self.record_audit_op();
         if items.is_empty() {
@@ -288,7 +288,7 @@ impl<'a> CodeTransform<'a> {
     /// and [`batch_prepend_left_with_source_map`](Self::batch_prepend_left_with_source_map):
     /// it removes the per-apply temporary Vec that would otherwise be needed to
     /// concatenate the two channels before a single source-map-aware batch.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn batch_prepend_left_merged(
         &mut self,
         plain: &[(u32, &'a str)],
@@ -396,7 +396,7 @@ impl<'a> CodeTransform<'a> {
     ///
     /// Only affects `Original` chunks; existing `Edited` chunks pass through unchanged.
     /// This avoids O(n*m) splice cost by rebuilding the chunks Vec once.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn batch_overwrite(&mut self, overwrites: &[(u32, u32, &'a str)]) -> &mut Self {
         self.record_audit_op();
         if overwrites.is_empty() {

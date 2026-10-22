@@ -80,6 +80,7 @@ pub struct ResolutionOverlaySnapshot {
     /// clones), holds ONE composition, and is replaced — never
     /// accumulated — when the underlying world moves.
     effective: Arc<Mutex<Option<EffectiveOverlayWorld>>>,
+    #[cfg(any(test, feature = "test-support"))]
     work: Arc<OverlayWorkCounters>,
 }
 
@@ -88,7 +89,9 @@ static NEXT_OVERLAY_SNAPSHOT_ID: std::sync::atomic::AtomicU64 =
 
 /// The overlay-side work one snapshot (and its clones) has performed,
 /// counted apart from the resolver work it enables so a relocated cost
-/// cannot pass for an eliminated one.
+/// cannot pass for an eliminated one. Test observability only: no
+/// production decision reads it.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default)]
 struct OverlayWorkCounters {
     root_builds: std::sync::atomic::AtomicU64,
@@ -98,6 +101,7 @@ struct OverlayWorkCounters {
 
 /// A snapshot's overlay-side work so far — see
 /// [`ResolutionOverlaySnapshot::work_counts`].
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayWorkCounts {
     /// Effective-root constructions (one per underlying root pair).
@@ -171,6 +175,7 @@ impl ResolutionOverlaySnapshot {
             id: NEXT_OVERLAY_SNAPSHOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             authority: authority.unwrap_or_default(),
             effective: Arc::default(),
+            #[cfg(any(test, feature = "test-support"))]
             work: Arc::default(),
         }
     }
@@ -200,6 +205,7 @@ impl ResolutionOverlaySnapshot {
     }
 
     /// The overlay-side work this snapshot (and every clone) has done.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn work_counts(&self) -> OverlayWorkCounts {
         let load = |counter: &std::sync::atomic::AtomicU64| {
@@ -212,6 +218,7 @@ impl ResolutionOverlaySnapshot {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn count(&self, counter: fn(&OverlayWorkCounters) -> &std::sync::atomic::AtomicU64) {
         counter(&self.work).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -219,6 +226,7 @@ impl ResolutionOverlaySnapshot {
     /// Parse an overlay manifest's bytes — the one place overlay
     /// `package.json` bytes are parsed, so the work is counted once.
     fn parse_manifest(&self, source: &str) -> crate::types::PackageManifest {
+        #[cfg(any(test, feature = "test-support"))]
         self.count(|work| &work.manifest_parses);
         crate::package_index::parse_package_json(source)
     }
@@ -249,6 +257,7 @@ impl ResolutionOverlaySnapshot {
                 return Arc::clone(&memo.world);
             }
         }
+        #[cfg(any(test, feature = "test-support"))]
         self.count(|work| &work.root_builds);
         let world = match RequestOverlayRoot::build(underlying, self) {
             Some(root) => Arc::new(CapturedResolutionWorld {
@@ -1434,10 +1443,10 @@ pub(crate) enum ContextProvenanceError {
 ///
 /// Same shape and rationale as [`crate::workspace_snapshot::OWNERS_MEMO_CAP`]:
 /// the rows are a cost mechanism, never an authority, so dropping them is
-/// always correct and costs only a recompute. A clear is COUNTED
-/// ([`PublishedContextSelection::table_clears`]) because it also restarts the
-/// per-path tally, and a tally that silently restarted would read
-/// "evaluated once" for a path this index evaluated many times.
+/// always correct and costs only a recompute. Under `cfg(test)` a clear is
+/// COUNTED (`PublishedContextSelection::table_clears`) because it also
+/// restarts the per-path tally, and a tally that silently restarted would
+/// read "evaluated once" for a path this index evaluated many times.
 pub(crate) const CONTEXT_MEMBERSHIP_TABLE_CAP: usize = 16 * 1024;
 
 /// One published index's record for one canonical path.
@@ -1447,7 +1456,9 @@ struct ContextMembershipRow {
     ///
     /// A true tally, not a memo-presence flag: it counts walks, so a
     /// memo that computed an answer and then failed to keep it makes this
-    /// climb instead of resting at one.
+    /// climb instead of resting at one. Only this crate's tests read it,
+    /// so it exists only under `cfg(test)`.
+    #[cfg(test)]
     evaluations: u64,
     /// The memoized answer, TYPED: a provenance error and an unowned
     /// selection are recorded exactly as computed, never collapsed into
@@ -1496,6 +1507,8 @@ struct ContextMembershipRow {
 pub(crate) struct PublishedContextSelection {
     rows: dashmap::DashMap<Box<str>, ContextMembershipRow>,
     cap: usize,
+    /// Capacity clears; read only by this crate's tests.
+    #[cfg(test)]
     table_clears: std::sync::atomic::AtomicU64,
 }
 
@@ -1507,11 +1520,13 @@ impl PublishedContextSelection {
         Self {
             rows: dashmap::DashMap::new(),
             cap,
+            #[cfg(test)]
             table_clears: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     /// Membership walks this index performed for `canonical_id`.
+    #[cfg(test)]
     pub(crate) fn evaluations(&self, canonical_id: &str) -> u64 {
         self.rows
             .get(canonical_id)
@@ -1521,6 +1536,7 @@ impl PublishedContextSelection {
 
     /// How often the row table was cleared for capacity. Non-zero means
     /// [`Self::evaluations`] counts only since the last clear.
+    #[cfg(test)]
     pub(crate) fn table_clears(&self) -> u64 {
         self.table_clears.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -1545,6 +1561,7 @@ impl PublishedContextSelection {
         // The capacity clear takes every shard: no row guard may be held.
         if self.rows.len() >= self.cap {
             self.rows.clear();
+            #[cfg(test)]
             self.table_clears
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1553,7 +1570,10 @@ impl PublishedContextSelection {
             return selected.clone();
         }
         let selected = evaluate();
-        row.evaluations += 1;
+        #[cfg(test)]
+        {
+            row.evaluations += 1;
+        }
         row.selected = Some(selected.clone());
         selected
     }
@@ -1567,11 +1587,11 @@ impl Default for PublishedContextSelection {
 
 impl std::fmt::Debug for PublishedContextSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PublishedContextSelection")
-            .field("rows", &self.rows.len())
-            .field("cap", &self.cap)
-            .field("table_clears", &self.table_clears())
-            .finish()
+        let mut f = f.debug_struct("PublishedContextSelection");
+        f.field("rows", &self.rows.len()).field("cap", &self.cap);
+        #[cfg(test)]
+        f.field("table_clears", &self.table_clears());
+        f.finish()
     }
 }
 
@@ -1624,9 +1644,10 @@ fn context_for_project(
 /// The context an entry selects in `world`'s published index.
 ///
 /// The membership-evaluation boundary the `RESOLVE_CONTEXT_SELECT` probe
-/// names, memoized per path on the index it walked. Every walk is
-/// tallied, so repeated evaluation of one path against one index stays
-/// observable through [`PublishedRoot::context_membership_evaluations`].
+/// names, memoized per path on the index it walked. Under `cfg(test)`
+/// every walk is tallied, so repeated evaluation of one path against one
+/// index stays observable through
+/// `PublishedRoot::context_membership_evaluations`.
 ///
 /// A world with NO published index answers before the boundary: there is
 /// no index to walk, none to memoize against, and none to tally on.
@@ -2767,6 +2788,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
     }
 
     fn probe_path(&self, canonical_id: &str) -> PathProbe {
+        #[cfg(any(test, feature = "test-support"))]
         self.overlay.count(|work| &work.probes);
         match self.overlay.get(canonical_id) {
             Some(Some(_)) => PathProbe::File,
@@ -2940,6 +2962,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
         self.inner.freshness_readers()
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         self.inner.vfs_provenance_snapshot()
     }
@@ -3210,6 +3233,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
         self.inner.freshness_readers()
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         self.inner.vfs_provenance_snapshot()
     }

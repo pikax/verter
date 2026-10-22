@@ -12,7 +12,7 @@
 
 use super::*;
 
-impl TemplateProjector<'_, '_> {
+impl<M: verter_audit::observe::ObserveExec> TemplateProjector<'_, '_, M> {
     /// Project a block construct.
     pub(super) fn project_block(&mut self, block: &SvelteBlock) {
         match &block.kind {

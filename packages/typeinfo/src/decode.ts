@@ -42,8 +42,9 @@ export class TypeResolutionFaultError extends Error {
 
 /**
  * Decode the optional audit-record buffer into an {@link AuditRecord}.
- * Returns `undefined` for an absent / empty buffer (audit disabled or
- * filtered).
+ * Returns `undefined` for an absent / empty buffer (audit disabled,
+ * filtered, or capture unavailable in a binding built without
+ * `semantic-observe`).
  */
 function decodeAuditRecord(buffer: Buffer | null): AuditRecord | undefined {
   if (buffer && buffer.length > 0) {

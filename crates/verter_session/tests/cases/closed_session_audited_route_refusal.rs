@@ -5,6 +5,7 @@
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::HostConfig;
 
+#[cfg(feature = "semantic-observe")]
 fn audited_host_with_component() -> ComponentMetaHost {
     let host = ComponentMetaHost::new_standalone(HostConfig {
         audit_enabled: true,
@@ -23,6 +24,8 @@ defineProps<{ label: string }>();
 <template><p>{{ label }}</p></template>
 "#;
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn a_closed_session_refuses_the_audited_lane_before_resolution_or_publication() {
     let host = audited_host_with_component();
@@ -66,12 +69,29 @@ fn a_closed_session_refuses_the_audited_lane_before_resolution_or_publication() 
 /// fixed label: on a host with audit disabled the closed-session refusal is
 /// marked `AuditDisabled` (capture is off at host config), never
 /// `FilteredNoop` (which claims audit is enabled and a filter rejected the
-/// kind). On an audited host the same refusal stays `FilteredNoop`.
+/// kind). On an audited host the same refusal stays `FilteredNoop`. A build
+/// without `semantic-observe` reports unavailable capture either way.
 #[test]
 fn a_closed_session_refusal_reports_the_hosts_capture_state() {
+    let captured = cfg!(feature = "semantic-observe");
+    let uncaptured = verter_audit::AuditCaptureState::Unavailable;
     for (audit_enabled, expected) in [
-        (false, verter_audit::AuditCaptureState::AuditDisabled),
-        (true, verter_audit::AuditCaptureState::FilteredNoop),
+        (
+            false,
+            if captured {
+                verter_audit::AuditCaptureState::AuditDisabled
+            } else {
+                uncaptured
+            },
+        ),
+        (
+            true,
+            if captured {
+                verter_audit::AuditCaptureState::FilteredNoop
+            } else {
+                uncaptured
+            },
+        ),
     ] {
         let host = ComponentMetaHost::new_standalone(HostConfig {
             audit_enabled,

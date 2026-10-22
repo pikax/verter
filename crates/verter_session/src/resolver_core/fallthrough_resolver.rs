@@ -444,9 +444,9 @@ impl FallthroughResolverState {
     /// after the compute; a result built across an epoch/project/env/identity
     /// transition is therefore return-only.  No caller-supplied probe or raw
     /// write surface is involved.
-    pub(crate) fn compute_and_maybe_admit<R>(
+    pub(crate) fn compute_and_maybe_admit<R, M: verter_audit::observe::ObserveExec>(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         compute: impl FnOnce() -> (R, Option<(FallthroughNodeKey, FallthroughNodeResult)>),
     ) -> R {
         let supersession_before = ctx.current_external_supersession_fingerprint();

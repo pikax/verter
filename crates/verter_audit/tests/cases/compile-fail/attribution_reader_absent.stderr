@@ -7,8 +7,8 @@ error[E0425]: cannot find function `snapshot` in module `verter_audit::attributi
 note: found an item that was configured out
   --> src/attribution/mod.rs
    |
-   | #[cfg(feature = "attribution")]
-   |       ----------------------- the item is gated behind the `attribution` feature
+   | #[cfg(feature = "semantic-observe")]
+   |       ---------------------------- the item is gated behind the `semantic-observe` feature
    | pub use table::{
    |     read, record_amount, record_call, record_digest, record_scope, reset, snapshot, snapshot_all,
    |                                                                           ^^^^^^^^
@@ -22,8 +22,8 @@ error[E0425]: cannot find function `snapshot_all` in module `verter_audit::attri
 note: found an item that was configured out
   --> src/attribution/mod.rs
    |
-   | #[cfg(feature = "attribution")]
-   |       ----------------------- the item is gated behind the `attribution` feature
+   | #[cfg(feature = "semantic-observe")]
+   |       ---------------------------- the item is gated behind the `semantic-observe` feature
    | pub use table::{
    |     read, record_amount, record_call, record_digest, record_scope, reset, snapshot, snapshot_all,
    |                                                                                     ^^^^^^^^^^^^
@@ -37,8 +37,8 @@ error[E0425]: cannot find function `read` in module `verter_audit::attribution`
 note: found an item that was configured out
   --> src/attribution/mod.rs
    |
-   | #[cfg(feature = "attribution")]
-   |       ----------------------- the item is gated behind the `attribution` feature
+   | #[cfg(feature = "semantic-observe")]
+   |       ---------------------------- the item is gated behind the `semantic-observe` feature
    | pub use table::{
    |     read, record_amount, record_call, record_digest, record_scope, reset, snapshot, snapshot_all,
    |     ^^^^
@@ -65,8 +65,8 @@ error[E0425]: cannot find function `reset` in module `verter_audit::attribution`
 note: found an item that was configured out
   --> src/attribution/mod.rs
    |
-   | #[cfg(feature = "attribution")]
-   |       ----------------------- the item is gated behind the `attribution` feature
+   | #[cfg(feature = "semantic-observe")]
+   |       ---------------------------- the item is gated behind the `semantic-observe` feature
    | pub use table::{
    |     read, record_amount, record_call, record_digest, record_scope, reset, snapshot, snapshot_all,
    |                                                                    ^^^^^

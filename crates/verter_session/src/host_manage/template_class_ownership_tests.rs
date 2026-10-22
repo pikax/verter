@@ -55,7 +55,7 @@ fn counted_rows(src: &str) -> Vec<ClosedLiteralDomain> {
     .data;
     let base = host.resolver_store_view_read().into_cold_seed_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(&host, &base, overlay);
+    let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(&host, &base, overlay);
     let dispatch = ProjectSemanticDispatch::with_graph_fixture(&ctx, zero_headroom_harness());
     let (_, rows, _) = classify_requested_subjects(
         &dispatch,

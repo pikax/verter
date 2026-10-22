@@ -9,7 +9,6 @@
 use super::*;
 use crate::cache_runtime::admission::{Candidate, FactCandidateDiscriminant};
 use crate::cache_runtime::node::QUERY_SLOT_CANDIDATE_CAP;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
@@ -71,8 +70,9 @@ fn publish(
 /// under the SAME view replaces in place.
 #[test]
 fn distinct_views_coexist_same_view_replaces() {
-    let store =
-        ReverseIndexedCandidateStore::<u32, String>::with_counter(Arc::new(AtomicU64::new(0)));
+    let store = ReverseIndexedCandidateStore::<u32, String>::with_counter(
+        crate::cache_runtime::OccupancyCounter::new(),
+    );
     let key = 7u32;
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/a.ts")]);
 
@@ -127,8 +127,9 @@ fn distinct_views_coexist_same_view_replaces() {
 /// reverse-index drain) for the victim exactly once.
 #[test]
 fn fifo_eviction_past_cap_runs_victim_cleanup() {
-    let store =
-        ReverseIndexedCandidateStore::<u32, String>::with_counter(Arc::new(AtomicU64::new(0)));
+    let store = ReverseIndexedCandidateStore::<u32, String>::with_counter(
+        crate::cache_runtime::OccupancyCounter::new(),
+    );
     let key = 1u32;
     let self_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
 
@@ -188,7 +189,7 @@ fn global_budget_evicts_oldest_across_slots() {
     // Budget cap 2; per-slot cap is the default 4, so the global budget —
     // not the per-slot cap — drives eviction here.
     let store = ReverseIndexedCandidateStore::<u32, String>::with_counter_and_budget(
-        Arc::new(AtomicU64::new(0)),
+        crate::cache_runtime::OccupancyCounter::new(),
         2,
     );
     let self_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
@@ -226,8 +227,9 @@ fn global_budget_evicts_oldest_across_slots() {
 /// candidate not referencing the canonical survives.
 #[test]
 fn invalidate_canonical_drains_only_referencing_candidates() {
-    let store =
-        ReverseIndexedCandidateStore::<u32, String>::with_counter(Arc::new(AtomicU64::new(0)));
+    let store = ReverseIndexedCandidateStore::<u32, String>::with_counter(
+        crate::cache_runtime::OccupancyCounter::new(),
+    );
     let self_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
 
     // Two keys reference /shared.ts; one references /other.ts only.
@@ -253,7 +255,7 @@ fn invalidate_canonical_drains_only_referencing_candidates() {
 #[test]
 fn invalidate_all_clears_everything() {
     let store = ReverseIndexedCandidateStore::<u32, String>::with_counter_and_budget(
-        Arc::new(AtomicU64::new(0)),
+        crate::cache_runtime::OccupancyCounter::new(),
         16,
     );
     let self_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
@@ -299,7 +301,7 @@ fn publish_core_atomic_install_counter_index_closes_f1p1() {
     use std::thread;
 
     let store = Arc::new(ReverseIndexedCandidateStore::<u32, String>::with_counter(
-        Arc::new(AtomicU64::new(0)),
+        crate::cache_runtime::OccupancyCounter::new(),
     ));
     let canonical = "/race.ts";
 
@@ -380,7 +382,7 @@ fn fifo_eviction_prunes_empty_reverse_index_shards() {
     // Budget cap 1, each key naming a distinct canonical. The (N+1)-th
     // admission evicts the oldest; its canonical's shard must be pruned.
     let store = ReverseIndexedCandidateStore::<u32, String>::with_counter_and_budget(
-        Arc::new(AtomicU64::new(0)),
+        crate::cache_runtime::OccupancyCounter::new(),
         1,
     );
     let self_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
@@ -413,8 +415,9 @@ fn fifo_eviction_prunes_empty_reverse_index_shards() {
 /// record is counted.
 #[test]
 fn budget_victim_eviction_is_admission_seq_scoped() {
-    let store =
-        ReverseIndexedCandidateStore::<u32, String>::with_counter(Arc::new(AtomicU64::new(0)));
+    let store = ReverseIndexedCandidateStore::<u32, String>::with_counter(
+        crate::cache_runtime::OccupancyCounter::new(),
+    );
     let self_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
 
     // Admit an OLD candidate under key 1, capturing its assigned seq via
@@ -471,7 +474,7 @@ fn budget_victim_eviction_is_admission_seq_scoped() {
 #[test]
 fn publish_core_defers_budget_victims() {
     let store = ReverseIndexedCandidateStore::<u32, String>::with_counter_and_budget(
-        Arc::new(AtomicU64::new(0)),
+        crate::cache_runtime::OccupancyCounter::new(),
         1,
     );
     let self_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
@@ -529,7 +532,7 @@ fn publisher_registration_visible_to_concurrent_invalidator() {
     use std::time::{Duration, Instant};
 
     let store = Arc::new(ReverseIndexedCandidateStore::<u32, String>::with_counter(
-        Arc::new(AtomicU64::new(0)),
+        crate::cache_runtime::OccupancyCounter::new(),
     ));
     let key = 42u32;
     let canonical = "/race.ts";
@@ -669,7 +672,7 @@ fn chained_receipts_reach_their_candidates_and_drain_with_the_last() {
         ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(receipt.clone())]))
     };
     let store: ReverseIndexedCandidateStore<u32, u32> =
-        ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0)));
+        ReverseIndexedCandidateStore::with_counter(crate::cache_runtime::OccupancyCounter::new());
     let account = verter_session_query::retention::SemanticRetentionAccount::new(
         verter_session_query::retention::RetentionLimits::defaults(),
     );
@@ -729,7 +732,7 @@ fn a_candidate_charge_does_not_grow_with_the_canonicals_its_receipts_reach() {
         receipts.push(ResultReceipt::new(facts));
     }
     let store: ReverseIndexedCandidateStore<u32, u32> =
-        ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0)));
+        ReverseIndexedCandidateStore::with_counter(crate::cache_runtime::OccupancyCounter::new());
     let account = verter_session_query::retention::SemanticRetentionAccount::new(
         verter_session_query::retention::RetentionLimits::defaults(),
     );

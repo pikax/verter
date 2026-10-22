@@ -44,6 +44,7 @@ const {
   memoryAuditResetHighWater,
   memoryAuditSites,
   parseSelectorThreadInvocations,
+  captureAvailability,
 } = nativeBinding;
 
 const ComponentMetaHost = MetaProject;
@@ -124,3 +125,6 @@ module.exports.memoryAuditSnapshot = memoryAuditSnapshot;
 module.exports.memoryAuditResetHighWater = memoryAuditResetHighWater;
 module.exports.memoryAuditSites = memoryAuditSites;
 module.exports.parseSelectorThreadInvocations = parseSelectorThreadInvocations;
+// "Available" when the binding was built with `semantic-observe` (audit
+// records are captured), "Unavailable" otherwise.
+module.exports.captureAvailability = captureAvailability;

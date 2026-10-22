@@ -86,6 +86,7 @@ use verter_type_expr::PrimitiveName;
 //   - `substitute`— generic type-parameter substitution into the graph.
 //   - `relation`  — the authoritative semantic-node assignability engine.
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
+use crate::request_observers as observation;
 mod arena_ops;
 mod engine_binding;
 pub mod engine_resources;
@@ -349,6 +350,9 @@ pub(super) struct ActiveInstantiations {
 }
 
 impl ActiveInstantiations {
+    /// The active depth: read only by the optional dispatch-intent counters
+    /// and the test request-state probe.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) fn len(&self) -> usize {
         self.order.len()
     }
@@ -418,6 +422,7 @@ impl ActiveInstantiations {
 /// and closes the stack-bound recursion hole Session 4 traced down to
 /// the `type TreeNode = { children: TreeNode[] }` materialisation path.
 pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabilities> {
+    observation: observation::CaptureTargets,
     binding: EngineBinding<C::MacroMirrors>,
     pub policy: EnginePolicy,
     cancellation: crate::resolver_core::request_ports::CancellationCheckpoint,
@@ -600,10 +605,13 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
         std::cell::RefCell<rustc_hash::FxHashMap<Arc<str>, dispatch_txn::RelationEnvironment>>,
     /// The relation explanations this request captured, in decision order
     /// ([`relation_explanation`]). Optional observation state: it exists
-    /// only under `semantic-observe` and is dropped with the request.
+    /// only under `semantic-observe`, is `Some` only when the request
+    /// context installed at construction selected captured execution (the
+    /// root entry's one selection, carried to every task dispatcher), and is
+    /// dropped with the request.
     #[cfg(feature = "semantic-observe")]
     pub(super) relation_explanations:
-        std::cell::RefCell<Vec<relation_explanation::RelationExplanation>>,
+        Option<std::cell::RefCell<Vec<relation_explanation::RelationExplanation>>>,
     /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
     /// deposit carrying file self-roots or an `incomplete` verdict).
     /// Snapshot-and-compare fences an evidence-blind memo publish: the
@@ -975,7 +983,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // it, so a destroyed one is an ownership defect: loud in
                 // checked builds, a typed no-value failure in shipped ones.
                 crate::semantic_query::FlowReturnStep::Complete(result) => {
-                    match result.delivered(self.graph()) {
+                    match result.delivered(self.graph().store()) {
                         Ok(result) => crate::semantic_query::FlowReturnStep::Complete(result),
                         Err(error) => {
                             verter_debug_assert!(
@@ -1110,7 +1118,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
         .unwrap_or_default();
         ThreadDispatch {
-            dispatch: Self::with_binding(ctx, binding, completions),
+            dispatch: Self::with_binding(
+                ctx,
+                binding,
+                crate::resolver_core::resolver_context::capture_targets(ctx).clone(),
+                completions,
+            ),
             _construction: binding_graph_scope,
         }
     }
@@ -1121,11 +1134,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn with_binding(
         ctx: &'a dyn ResolverContext<C>,
         binding: EngineBinding<C::MacroMirrors>,
+        observation: observation::CaptureTargets,
         completions: Arc<request_completions::RequestCompletionTier>,
     ) -> Self {
+        // A dispatcher runs compiled for its context family's capture mode;
+        // the host selects that family from the mode the installed request
+        // carries, so a mismatch is a dispatcher that would drop (or invent)
+        // its request's observations. The bare-host test seam is not
+        // request-bound and always runs uncaptured; a fixture context that
+        // no root entry selected carries no selection to check.
+        #[cfg(all(feature = "semantic-observe", debug_assertions))]
+        if ctx.is_request_bound() {
+            if let Some(selected) = crate::request_context::installed_root_selected_mode() {
+                assert_eq!(
+                    <C::Observe as verter_audit::observe::ObserveExec>::MODE,
+                    selected,
+                    "a dispatcher's capture execution must be the installed request's selected mode",
+                );
+            }
+        }
         let snapshot =
             crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx);
         Self {
+            observation,
             binding,
             policy: ctx.engine_policy(),
             cancellation: snapshot.flags().cancellation_checkpoint(),
@@ -1153,7 +1184,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "semantic-observe")]
-            relation_explanations: std::cell::RefCell::new(Vec::new()),
+            relation_explanations: <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
+                .then(|| std::cell::RefCell::new(Vec::new())),
             canonical_evidence_epoch: std::cell::Cell::new(0),
             checking_site: std::cell::Cell::new(Default::default()),
             operation_budget_epoch: std::cell::Cell::new(0),
@@ -1182,7 +1214,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut binding = self.ctx.attach_engine();
         binding.graph = Arc::clone(&self.binding.graph);
         binding.construction = self.binding.construction.clone();
-        let dispatch = Self::with_binding(self.ctx, binding, Arc::clone(&self.completions));
+        let dispatch = Self::with_binding(
+            self.ctx,
+            binding,
+            self.observation.clone(),
+            Arc::clone(&self.completions),
+        );
         Self {
             connected_demand: self.connected_demand.sibling(),
             ..dispatch
@@ -1199,6 +1236,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// is not exchanged: both dispatchers already share it.
     pub(super) fn exchange_request_state(&self, other: &Self) {
         let Self {
+            observation: _,
             binding: _,
             policy: _,
             cancellation: _,
@@ -1268,7 +1306,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         relation_env_scope.swap(&other.relation_env_scope);
         relation_env_by_file.swap(&other.relation_env_by_file);
         #[cfg(feature = "semantic-observe")]
-        relation_explanations.swap(&other.relation_explanations);
+        if let (Some(mine), Some(theirs)) = (relation_explanations, &other.relation_explanations) {
+            mine.swap(theirs);
+        }
         canonical_evidence_epoch.swap(&other.canonical_evidence_epoch);
         checking_site.swap(&other.checking_site);
         operation_budget_epoch.swap(&other.operation_budget_epoch);
@@ -1925,7 +1965,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return;
         }
         self.completions
-            .keep(self.graph(), key, read, carrier, computed_at);
+            .keep(self.graph().store(), key, read, carrier, computed_at);
     }
 
     /// How many results the request's completion tier keeps on this
@@ -2482,8 +2522,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// choke point (so nested `execute_read`-only sub-dispatches are captured
     /// there); these intent counters stay on the consumer entry. No-op when
     /// no `RequestContext` is installed on the calling thread.
+    ///
+    /// Optional capture: without `semantic-observe` this reads no request
+    /// context and records nothing.
+    #[inline(always)]
     pub(crate) fn record_dispatch_intent_counters(&self, key: &SemanticQueryKey) {
-        let Some(ctx) = crate::request_context::current_request_context() else {
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = key;
+        #[cfg(feature = "semantic-observe")]
+        self.record_dispatch_intent_counters_captured(key);
+    }
+
+    #[cfg(feature = "semantic-observe")]
+    fn record_dispatch_intent_counters_captured(&self, key: &SemanticQueryKey) {
+        if !<C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+            return;
+        }
+        let Some(ctx) = self.observation.request.as_deref() else {
             return;
         };
         let depth = self.instantiate_active.borrow().len();
@@ -3135,7 +3190,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
-    pub fn graph(&self) -> &Arc<SemanticGraphStore> {
+    /// The semantic graph store, compiled for this dispatcher's capture
+    /// mode (`C::Observe`): every intern and cache operation the
+    /// dispatcher performs through it records optional capture only in the
+    /// captured instantiation.
+    pub fn graph(&self) -> crate::semantic_query_memo::GraphIn<'_, C::Observe> {
+        crate::semantic_query_memo::GraphIn::observed(&self.binding.graph, &self.observation)
+    }
+
+    /// The shared handle of the semantic graph store this dispatcher
+    /// resolves through.
+    #[must_use]
+    pub fn graph_arc(&self) -> &Arc<SemanticGraphStore> {
         &self.binding.graph
     }
 
@@ -3252,7 +3318,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         name: &Arc<str>,
     ) {
         let fence = self.dep_signature_for(&owner.canonical_id, owner.whole_hash);
-        self.graph().record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            self.graph(),
             member_value,
             OriginEdgeKind::ProjectMember,
             Arc::from(vec![parent_surface].into_boxed_slice()),
@@ -4077,10 +4144,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &finalise,
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         );
-        let provenance = &self.binding.observers.provenance;
-        provenance
-            .memo_entry_fact_tracer_installs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support"))
+            || <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
+        {
+            let provenance = &self.binding.observers.provenance;
+            provenance
+                .memo_entry_fact_tracer_installs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         finalise_rooted_build_output(self.ctx, output, finalise, carrier_prelude)
     }
 
@@ -4126,7 +4197,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             verter_audit::attribute!(SemanticWarmHit);
         }
-        if let Some(observer) = verter_audit::current_observer() {
+        verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
             use verter_audit::AuditEvent;
             let event = match key {
                 SemanticQueryKey::TypeOf { .. } => {
@@ -4191,7 +4262,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(event) = event {
                 observer.record_event(event);
             }
-        }
+        });
         // UNIVERSAL READ-BOUNDARY FOLD (the single fold point). Every
         // cold-build subquery read — issued through `execute`,
         // `execute_read`, the `execute_type_node` override, OR any direct
@@ -4444,7 +4515,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // under-count post-trip dispatches once the
                     // early-exit lands, and bench attribution would lose
                     // the runaway signal.
-                    if let Some(observer) = verter_audit::current_observer() {
+                    verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                         use verter_audit::AuditEvent;
                         // The early-exit attribution must mirror EVERY kind
                         // the aggregate work-budget gate counts — including
@@ -4482,7 +4553,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if let Some(event) = event {
                             observer.record_event(event);
                         }
-                    }
+                    });
                     // CRITICAL: the post-trip budget early-exit is a SECOND
                     // return point of this helper. It must fold its rails into
                     // the request sticky + active build-local frame BEFORE
@@ -4636,9 +4707,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // reduction in `build.rs`, mapped-type `ProjectPath` member
         // projection). Idempotent per tag (sets one bit). No-op when no
         // `RequestContext` is installed on the calling thread.
-        crate::request_context::with_current_request_context(|ctx| {
-            ctx.record_dispatched_query_tag(key.tag())
-        });
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| { ctx.record_dispatched_query_tag(key.tag()) });
 
         // Admission-time canonicalisation:
         //   - `ProjectMember { base, member, mode }` rewrites to
@@ -4697,7 +4766,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 members,
                 nullability,
             } => SemanticQueryKey::ReduceUnion {
-                members: canonicalize_node_list(self.graph(), &members),
+                members: canonicalize_node_list(self.graph().store(), &members),
                 nullability,
             },
             SemanticQueryKey::ReduceIntersection {
@@ -6213,7 +6282,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Hop 2: the slot value's first-parameter type holds the bindings.
         // CALL kind only — a construct-signature slot value is not a
         // callable slot shape and holds no bindings.
-        let param0_ty = match node_data_for(self.graph(), slot_node).as_deref() {
+        let param0_ty = match node_data_for(self.graph().store(), slot_node).as_deref() {
             Some(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
                 params,
@@ -6393,6 +6462,8 @@ pub enum BuiltinUtilityResolution {
 /// request ports. Scope is resolved fresh per call, with no host reference or
 /// independent query driver.
 pub struct SessionDispatchHost<'a, C: crate::resolver_core::ResolverCapabilities> {
+    #[cfg(feature = "semantic-observe")]
+    observation: &'a observation::CaptureTargets,
     resources: &'a EngineBinding<C::MacroMirrors>,
     ctx: &'a dyn ResolverContext<C>,
 }
@@ -6400,6 +6471,8 @@ pub struct SessionDispatchHost<'a, C: crate::resolver_core::ResolverCapabilities
 impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, C> {
     pub fn from_facade(dispatch: &'a ProjectSemanticDispatch<'_, C>) -> Self {
         Self {
+            #[cfg(feature = "semantic-observe")]
+            observation: &dispatch.observation,
             resources: &dispatch.binding,
             ctx: dispatch.ctx,
         }
@@ -6442,11 +6515,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
                 // (`resolve_prepared_type_decl`, `resolve_builtin_utility`)
                 // route through this helper — dominant expected source of
                 // the warm-read pressure.
-                if let Some(obs) = verter_audit::current_observer() {
+                verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |obs| {
                     obs.record_event(
                         verter_audit::AuditEvent::PreparedDeclBundleCallsiteScopePayload,
                     );
-                }
+                });
                 let payload = self.ctx.prepared_decl_bundle(canonical_id.as_ref()).map(
                     |bundle| {
                         crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -6511,7 +6584,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
         let identity = BuiltinUtility::from_name(name);
         if identity.is_some()
             || matches!(
-                self.resources.intrinsics.lookup(name),
+                self.resources.intrinsics.lookup::<C::Observe>(
+                    crate::resolver_core::resolver_context::capture_targets(self.ctx),
+                    name
+                ),
                 crate::intrinsic_registry::IntrinsicLookup::Found(_)
             )
         {
@@ -6527,7 +6603,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
     /// `None` for a name that selects no utility, which the caller answers
     /// as that unsupported intrinsic.
     pub fn resolve_intrinsic_alias(&self, name: &str) -> Option<BuiltinUtility> {
-        match self.resources.intrinsics.lookup(name) {
+        match self.resources.intrinsics.lookup::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(self.ctx),
+            name,
+        ) {
             crate::intrinsic_registry::IntrinsicLookup::Found(intrinsic) => {
                 intrinsic.as_builtin_utility()
             }

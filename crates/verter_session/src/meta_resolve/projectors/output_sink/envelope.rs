@@ -141,10 +141,10 @@ impl<'a> OutputSourceMemo<'a> {
     ///   position whose faithful source could not be constructed FAILS the
     ///   output; it must never render as an `unknown` success.
     #[allow(clippy::too_many_arguments)]
-    fn materialize_output_lane_slot(
+    fn materialize_output_lane_slot<M: verter_audit::observe::ObserveExec>(
         &mut self,
-        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-        cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+        cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities<M>>,
         effective_scope: &'a str,
         lane: crate::meta_resolve::ComponentMetaOutputLane,
         index: usize,
@@ -204,10 +204,10 @@ impl<'a> OutputSourceMemo<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn materialize_publication_lane_slot(
+    fn materialize_publication_lane_slot<M: verter_audit::observe::ObserveExec>(
         &mut self,
-        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-        cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+        cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities<M>>,
         effective_scope: &'a str,
         lane: crate::meta_resolve::ComponentMetaOutputLane,
         index: usize,
@@ -362,9 +362,9 @@ impl<'a> OutputSourceMemo<'a> {
 ///   REQUIRED position's producer-typed failure fails the output.
 ///
 /// [`ComponentMetaOutputError`]: crate::meta_resolve::ComponentMetaOutputError
-fn materialize_component_meta_output_types<'a>(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
+fn materialize_component_meta_output_types<'a, M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities<M>>,
     scope_canonical_id: &'a str,
     analysis: &'a verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Result<
@@ -691,11 +691,11 @@ fn finalize_resolved_type_registry_overlay(
 /// result-cache admission gate refuses on.
 ///
 /// [`ComponentMetaOutput`]: crate::meta_resolve::ComponentMetaOutput
-pub(crate) fn build_component_meta_output(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(crate) fn build_component_meta_output<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     scope_canonical_id: &str,
     mut analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,

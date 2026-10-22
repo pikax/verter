@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use verter_type_engine::request_context::{ObserveExec, Uncaptured};
+
 use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use crate::project_type_store::IndexedReady;
@@ -16,7 +18,8 @@ use verter_type_engine::resolver_core::resolver_context::{
     MaterializeScopeObservation, ResolverContext,
 };
 
-pub(crate) struct SessionRequestLifecycle<'a> {
+pub(crate) struct SessionRequestLifecycle<'a, M: ObserveExec = Uncaptured> {
+    mode: std::marker::PhantomData<M>,
     inner: &'a crate::VerterHost,
     view: &'a dyn SessionView,
     request_view: RequestStoreView<'a>,
@@ -29,9 +32,10 @@ pub(crate) struct SessionRequestLifecycle<'a> {
 }
 
 /// Request-bound session context using the shared `ResolverContext` adapter.
-pub(crate) type SessionResolverContext<'a> = RequestBoundAdapter<SessionRequestLifecycle<'a>>;
+pub(crate) type SessionResolverContext<'a, M = Uncaptured> =
+    RequestBoundAdapter<SessionRequestLifecycle<'a, M>>;
 
-impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
+impl<'a, M: ObserveExec> RequestBoundAdapter<SessionRequestLifecycle<'a, M>> {
     #[must_use]
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new(
@@ -41,8 +45,9 @@ impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
         overlay: Arc<CanonicalCompletionOverlay>,
     ) -> Self {
         Self(SessionRequestLifecycle {
+            mode: std::marker::PhantomData,
             inner,
-            snapshot: inner.capture_request_snapshot(),
+            snapshot: inner.capture_request_snapshot_in::<M>(),
             view,
             request_view: RequestStoreView::new(base, overlay),
             fallback_overlay: std::sync::OnceLock::new(),
@@ -57,8 +62,9 @@ impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
         overlay: Arc<CanonicalCompletionOverlay>,
     ) -> Self {
         Self(SessionRequestLifecycle {
+            mode: std::marker::PhantomData,
             inner,
-            snapshot: inner.capture_request_snapshot(),
+            snapshot: inner.capture_request_snapshot_in::<M>(),
             view,
             request_view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
             fallback_overlay: std::sync::OnceLock::new(),
@@ -66,7 +72,13 @@ impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
     }
 }
 
-impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
+impl<M: ObserveExec> RequestBoundLifecycle for SessionRequestLifecycle<'_, M> {
+    type Observe = M;
+
+    fn capture_targets(&self) -> &verter_type_engine::request_observers::CaptureTargets {
+        self.snapshot.capture_targets()
+    }
+
     fn host(&self) -> &crate::VerterHost {
         self.inner
     }
@@ -112,7 +124,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn prepared_decl_bundle(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         canonical_id: &str,
     ) -> Option<crate::resolver_core::CachedValue<PreparedDeclBundle>> {
         self.inner.prepared_decl_bundle_with_context(
@@ -128,7 +140,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn prepared_type_decl(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -151,7 +163,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn prepared_value_decl(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -176,8 +188,9 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
         &self,
         canonical_id: &str,
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
-        crate::host_manage::overlay_priority::ensure_indexed_ready_serve_with_view(
+        crate::host_manage::overlay_priority::ensure_indexed_ready_serve_with_view_in::<M>(
             self.inner,
+            self.capture_targets(),
             self.view,
             canonical_id,
         )
@@ -193,7 +206,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn shallow_file_state(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         self.inner.shallow_file_state_with_context(
@@ -221,13 +234,18 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
         if self.view.overlay_content_hash_for(canonical).is_some() {
             return self
                 .inner
-                .materialize_overlay_indexed_ready_serve_with_view(canonical, self.view)
+                .materialize_overlay_indexed_ready_serve_with_view_in::<M>(
+                    self.capture_targets(),
+                    canonical,
+                    self.view,
+                )
                 .map(|serve| serve.indexed);
         }
         if self.view.is_tombstoned(canonical) {
             return None;
         }
-        self.inner.current_content_pinned_indexed(canonical)
+        self.inner
+            .current_content_pinned_indexed_in::<M>(self.capture_targets(), canonical)
     }
 
     fn artifact_key_for_current_content(
@@ -245,7 +263,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn observe_materialize_scope(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         canonical: &str,
     ) -> Option<MaterializeScopeObservation> {
         if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {

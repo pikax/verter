@@ -217,7 +217,7 @@ fn a_substituted_heritage_body_stays_a_declaration() {
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = super::ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let binder = graph.intern_node(SemanticNodeData::TypeParam {

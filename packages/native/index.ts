@@ -123,15 +123,18 @@ export declare function analyzeStyle(
 ): AnalyzeStyleResult;
 
 // =============================================================================
-// Runtime-gated deep memory audit (always compiled, single binary)
+// Runtime-gated deep memory audit (instrumented binding only)
 //
-// The wrapper allocator ships in every build. Disabled (the default),
-// each allocator call costs one cached branch on top of the system
-// allocator — enable at runtime via `memoryAuditEnable()` (fresh counter
+// The counting allocator is compiled only into the instrumented binding
+// (`pnpm --filter @verter/native run build:observe`, `semantic-observe`).
+// A default binding keeps the system allocator: `memoryAuditEnable()`
+// returns `false` and the readers report the audit unavailable. In an
+// instrumented binding each allocator call costs one cached branch while
+// disabled — enable at runtime via `memoryAuditEnable()` (fresh counter
 // epoch) or env `VERTER_MEMORY_AUDIT=1` / `VERTER_MEMORY_AUDIT_SAMPLE=N`
-// (read once, on the first memory-audit call). While disabled,
-// `memoryAuditSnapshot()`/`memoryAuditSites()` return `null` and
-// `memoryAuditResetHighWater()` returns `false` so callers can detect
+// (read once, on the first memory-audit call). While disabled or
+// unavailable, `memoryAuditSnapshot()`/`memoryAuditSites()` return `null`
+// and `memoryAuditResetHighWater()` returns `false` so callers can detect
 // the state and fail loudly instead of reporting zeros.
 // =============================================================================
 
@@ -165,7 +168,8 @@ export interface MemoryAuditEnableOptions {
 /**
  * Enable the runtime memory audit (idempotent; the disabled→enabled
  * transition starts a fresh counter epoch). Call BEFORE the workload of
- * interest. Returns `true`.
+ * interest. Returns `true`, or `false` in a binding built without
+ * `semantic-observe` (the audit is unavailable there).
  */
 export declare function memoryAuditEnable(options?: MemoryAuditEnableOptions | null): boolean;
 
@@ -201,6 +205,29 @@ export declare function memoryAuditSites(topK: number): string | null;
  * `matchCssSelectors` must not increment this.
  */
 export declare function parseSelectorThreadInvocations(): number;
+
+// =============================================================================
+// Request audit capture availability
+//
+// Request audit records, footprints and provenance walkers are compiled in
+// only when the binding is built with the `semantic-observe` Cargo feature
+// (`pnpm --filter @verter/native build:observe`). A default build runs every
+// `*WithAudit` operation but carries no record: the record-returning methods
+// return `null` (or a `Workspace` record whose `capture_state` is
+// `"Unavailable"`), and `getLastAuditRecord` / `getAuditRecords` /
+// `getBundlerBatchSummary` / `getComponentMetaWithAudit` /
+// `why*FromAuditJson` throw "audit capture is unavailable: ...".
+// =============================================================================
+
+/** Whether the loaded binding can capture request audit records. */
+export type CaptureAvailability = "Available" | "Unavailable";
+
+/**
+ * `"Available"` when this binding was built with `semantic-observe`,
+ * `"Unavailable"` otherwise. Consumers that read audit records branch on
+ * this instead of interpreting an absent record as an empty one.
+ */
+export declare function captureAvailability(): CaptureAvailability;
 
 // =============================================================================
 // Host-backed batch compile — VerterHost.compileMany
@@ -978,8 +1005,10 @@ export declare class VerterHost {
   // Each entry-point wraps a `VerterHost::*_with_audit` Rust producer
   // and returns the produced `RequestAuditRecord` as a JSON Buffer.
   // Audit must be enabled on the host config (`auditEnabled: true`)
-  // for these calls to publish a record; otherwise they short-circuit
-  // to `null` (the underlying operation still runs).
+  // AND the binding must capture (`captureAvailability() ===
+  // "Available"`) for these calls to publish a record; otherwise they
+  // short-circuit to `null` (the underlying operation still runs).
+  // Without capture the store-reading methods below throw.
   // ===========================================================================
 
   /**
@@ -1277,7 +1306,8 @@ export declare class ComponentMetaSession {
    * not resolve.
    *
    * The host must have `audit_enabled` + `footprint_capture` set on
-   * construction; otherwise this throws. Promise ergonomics (if
+   * construction and the binding must capture
+   * (`captureAvailability() === "Available"`); otherwise this throws. Promise ergonomics (if
    * desired) live in `packages/native/audit.ts` — the Rust binding
    * itself is synchronous.
    */
@@ -1315,7 +1345,11 @@ export declare class ComponentMetaSession {
   /** Returns canonical IDs of all files visible to this session. */
   trackedFileIds(): string[];
 
-  /** Return provenance counters for observability. */
+  /**
+   * Return provenance counters for observability. Throws the
+   * unavailable-capture error when the binding was built without
+   * `semantic-observe` (see `captureAvailability()`).
+   */
   getProvenance(): string;
 
   /** Close the session, releasing the overlay and lease. Idempotent. */

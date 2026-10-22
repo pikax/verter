@@ -471,12 +471,15 @@ where
         self.component_meta.len()
     }
 
-    /// Take a snapshot of the current counter values.
+    /// Take a snapshot of the current counter values (test-only, like the
+    /// counters themselves).
+    #[cfg(test)]
     pub fn counter_snapshot(&self) -> crate::resolver_core::ResolverCountersSnapshot {
         self.counters.snapshot()
     }
 
-    /// Reset all counters to zero.
+    /// Reset all counters to zero (test-only).
+    #[cfg(test)]
     pub fn reset_counters(&self) {
         self.counters.reset();
     }

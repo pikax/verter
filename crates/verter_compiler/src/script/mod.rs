@@ -165,13 +165,13 @@ pub struct ScriptCodeGenResult<'alloc> {
 /// The accumulated operations are applied to the [`CodeTransform`] in a single pass.
 ///
 /// Returns binding metadata for template codegen and runtime imports.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 pub fn generate_script<'alloc>(
     script: Option<&RootNodeScript>,
     script_setup: Option<&RootNodeScript>,
     prepared: &PreparedScript<'alloc>,
     source: &'alloc str,
-    ct: &mut CodeTransform<'alloc>,
+    ct: &mut CodeTransform<'alloc, impl verter_audit::observe::ObserveExec>,
     alloc: &'alloc Allocator,
     options: &ScriptCodeGenOptions<'_>,
 ) -> ScriptCodeGenResult<'alloc> {

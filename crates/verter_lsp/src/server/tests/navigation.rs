@@ -2416,6 +2416,8 @@ async fn goto_type_definition_delegates_to_provider() {
 /// Measured on the host's `compile_cold_runs`, not only on calls into the
 /// registry accounting ingress: the claim is about compiles the rename
 /// ingress causes.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_later_rename_retries_a_failed_projectionless_revision() {
     let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());

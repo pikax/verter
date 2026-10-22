@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl TemplateProjector<'_, '_> {
+impl<M: verter_audit::observe::ObserveExec> TemplateProjector<'_, '_, M> {
     /// Project the attributes of an element (events verbatim-lowercase, class
     /// object/array via the checker, CSS custom props stripped, bindings,
     /// directives).

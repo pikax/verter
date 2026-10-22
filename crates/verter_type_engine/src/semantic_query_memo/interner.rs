@@ -27,7 +27,9 @@ use rustc_hash::FxHashMap;
 
 use verter_session_query::retention::owned::{BlockShare, ChargeCtx, Owned, WeakOwned};
 
-use crate::semantic_query::{DepEntry, DepRail, DepSignature, DepVersion};
+#[cfg(any(test, feature = "test-support"))]
+use crate::semantic_query::DepVersion;
+use crate::semantic_query::{DepEntry, DepRail, DepSignature};
 
 /// `Weak` view of an interned `DepSignature` payload: it holds its share of
 /// the charge on the block it keeps allocated — see
@@ -152,7 +154,15 @@ impl DepSignatureInterner {
     /// removed. This ensures `intern([(a, v1), (b, v2)])` returns the
     /// same `Arc` as `intern([(b, v2), (a, v1), (a, v1)])`. An empty
     /// payload interns to the process-static empty rail.
-    pub fn intern(&self, payload: &[DepEntry]) -> DepSignature {
+    ///
+    /// `M` is the capture execution interning: only a captured one counts
+    /// its intern hits into the request.
+    pub fn intern_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &crate::request_observers::CaptureTargets,
+        payload: &[DepEntry],
+    ) -> DepSignature {
+        let _ = observation;
         // Normalise: sort + dedup so equivalent content collapses.
         let mut normalised: Vec<DepEntry> = payload.to_vec();
         normalised.sort_by(|a, b| a.canonical().cmp(b.canonical()).then_with(|| a.1.cmp(&b.1)));
@@ -187,7 +197,7 @@ impl DepSignatureInterner {
         });
         let rail = match hit {
             Some(rail) => {
-                crate::request_observers::record_dep_signature_intern_hit();
+                crate::request_observers::record_dep_signature_intern_hit::<M>(observation);
                 rail
             }
             None => {
@@ -220,12 +230,22 @@ impl DepSignatureInterner {
 
     /// Intern a single `(canonical, version)` pair. Convenience for
     /// call sites that build dep_signatures incrementally.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn intern_canonical(&self, canonical: &str, version: DepVersion) -> DepSignature {
         verter_debug_assert!(
             !canonical.is_empty(),
             "intern_canonical: canonical id must be non-empty"
         );
         self.intern(&[DepEntry::new(canonical, version)])
+    }
+
+    /// [`Self::intern_in`] for an uncaptured fixture.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn intern(&self, payload: &[DepEntry]) -> DepSignature {
+        self.intern_in::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            payload,
+        )
     }
 
     /// Periodic sweep — removes empty buckets and dead `Weak`s, and

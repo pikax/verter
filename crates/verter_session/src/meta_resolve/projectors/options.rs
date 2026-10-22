@@ -34,8 +34,8 @@ use super::publication_authority::{
 /// Returns `Vec::new()` when the macro has no `parsed_type_argument`
 /// — the parser-side analysis already covers the runtime
 /// `defineOptions({ ... })` form via flags on `AnalyzedMacro`.
-pub(crate) fn project_options(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+pub(crate) fn project_options<M: verter_audit::observe::ObserveExec>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -52,7 +52,7 @@ pub(crate) fn project_options(
         return Vec::new();
     }
 
-    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> = query_engine.ctx;
     // Admission applies the public-visibility filter, the derived-kind/cursor
     // match, the `descend_published_member` gate, AND records the
     // published-field edge uniformly — previously the options projector

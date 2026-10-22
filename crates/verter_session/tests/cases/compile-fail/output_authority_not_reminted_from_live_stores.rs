@@ -6,16 +6,16 @@
 //! (or its retention account in place of a store account) does not compile,
 //! so recovering a store never yields authority over the engine that owns it.
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
+use verter_type_engine::cache_runtime::OccupancyCounter;
 use verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores;
 
 fn remint(host: &verter_session::VerterHost) {
     let store = host.project_type_store();
     let live_graph = Arc::clone(store.semantic_graph());
     let live_account = Arc::clone(store.retention_account());
-    let counter = Arc::new(AtomicU64::new(0));
+    let counter = OccupancyCounter::new();
     let _ = EngineStores::create(live_graph, live_account, &counter, Default::default());
 }
 

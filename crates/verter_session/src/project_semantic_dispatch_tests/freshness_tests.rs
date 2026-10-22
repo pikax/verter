@@ -58,7 +58,7 @@ fn all_fresh_own_members_derive_fresh() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
@@ -81,7 +81,7 @@ fn empty_object_surface_derives_fresh() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let node = object_with(graph, Vec::new());
     assert_eq!(
         dispatch.freshness_for_source_node(node),
@@ -96,7 +96,7 @@ fn empty_object_surface_derives_fresh() {
 fn spread_tainted_member_revokes_freshness() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
@@ -118,7 +118,7 @@ fn spread_tainted_member_revokes_freshness() {
 fn non_literal_member_revokes_freshness() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
@@ -138,7 +138,7 @@ fn alias_chains_derive_through() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _builder = dispatch.enter_construction_scope();
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
@@ -155,7 +155,7 @@ fn alias_chains_derive_through() {
 fn non_object_nodes_are_regular() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
     ));

@@ -1243,7 +1243,7 @@ where
             if facts.is_empty() {
                 self.admission_refused
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                verter_type_engine::request_observers::push_structured_event(
+                verter_type_engine::component_meta_trace_structured!(
                     crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                         cache_kind: Arc::from(cache_kind),
                         reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -1384,7 +1384,7 @@ where
         if facts.is_empty() {
             self.admission_refused
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            verter_type_engine::request_observers::push_structured_event(
+            verter_type_engine::component_meta_trace_structured!(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                     cache_kind: Arc::from(cache_kind),
                     reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -1672,7 +1672,7 @@ where
         let archive_checks = self
             .archive_checks
             .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
-        verter_type_engine::request_observers::push_structured_event(
+        verter_type_engine::component_meta_trace_structured!(
             crate::component_meta_audit::StructuredAuditEvent::FactValidationSummary {
                 request_id,
                 cache_kind: Arc::from(cache_kind),
@@ -2417,24 +2417,33 @@ where
 /// Atomic counters for resolver observability.
 ///
 /// Thread-safe via `AtomicU64`. The resolver increments these during resolution;
-/// consumers read snapshots via `snapshot()` for diagnostics, benchmarks, and tests.
+/// this crate's tests read snapshots via `snapshot()`. No production path
+/// reads them, so the counters exist only under `cfg(test)`: elsewhere the
+/// struct is zero-size and every `record_*` call is a no-op.
 #[derive(Debug, Default)]
 pub struct ResolverCounters {
     /// Number of times a cached node result was reused (fact-validated hit).
+    #[cfg(test)]
     pub node_cache_hits: std::sync::atomic::AtomicU64,
     /// Number of times a node had to be recomputed (cache miss or stale).
+    #[cfg(test)]
     pub node_cache_misses: std::sync::atomic::AtomicU64,
     /// Number of times singleflight coalesced a follower onto an in-flight leader.
+    #[cfg(test)]
     pub singleflight_coalesces: std::sync::atomic::AtomicU64,
     /// Number of cycle detections during resolution.
+    #[cfg(test)]
     pub cycle_detections: std::sync::atomic::AtomicU64,
     /// Number of times incompatible StoreViews forked separate singleflight lanes.
+    #[cfg(test)]
     pub cross_view_lane_forks: std::sync::atomic::AtomicU64,
     /// Number of route/barrel fact reuses (cached route entries validated and reused).
+    #[cfg(test)]
     pub route_fact_reuses: std::sync::atomic::AtomicU64,
 }
 
 /// A non-atomic snapshot of `ResolverCounters` for reading/comparison.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResolverCountersSnapshot {
     pub node_cache_hits: u64,
@@ -2450,6 +2459,7 @@ impl ResolverCounters {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> ResolverCountersSnapshot {
         use std::sync::atomic::Ordering::Relaxed;
         ResolverCountersSnapshot {
@@ -2462,6 +2472,7 @@ impl ResolverCounters {
         }
     }
 
+    #[cfg(test)]
     pub fn reset(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         self.node_cache_hits.store(0, Relaxed);
@@ -2474,36 +2485,42 @@ impl ResolverCounters {
 
     #[inline]
     pub fn record_cache_hit(&self) {
+        #[cfg(test)]
         self.node_cache_hits
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[inline]
     pub fn record_cache_miss(&self) {
+        #[cfg(test)]
         self.node_cache_misses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[inline]
     pub fn record_singleflight_coalesce(&self) {
+        #[cfg(test)]
         self.singleflight_coalesces
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[inline]
     pub fn record_cycle_detection(&self) {
+        #[cfg(test)]
         self.cycle_detections
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[inline]
     pub fn record_cross_view_lane_fork(&self) {
+        #[cfg(test)]
         self.cross_view_lane_forks
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[inline]
     pub fn record_route_fact_reuse(&self) {
+        #[cfg(test)]
         self.route_fact_reuses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }

@@ -20,11 +20,14 @@ test-support = ["verter_execution/test-support", "verter_session_query/test-supp
 # flight, for the soak/tooling runner. `test-support` already carries it.
 # Forwarded by `verter_session`'s `soak-support`; no production edge enables it.
 soak-support = []
-# Measurement-only instrumentation, forwarded by `verter_session`'s `hotpath`.
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
-# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md).
-# Forwarded by `verter_session`; no production edge enables it.
-semantic-observe = ["verter_audit/semantic-observe", "hotpath"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# also compiles this crate's `hotpath` measurement attributes. Forwarded by
+# `verter_session`; no production edge enables it.
+semantic-observe = [
+  "verter_audit/semantic-observe",
+  "verter_execution/semantic-observe",
+  "dep:hotpath",
+]
 
 # Dependency closure is a layering contract: the engine depends only on the
 # shared query vocabulary, the execution substrate and parser-free leaves — never
@@ -57,6 +60,7 @@ serde_json = { workspace = true }
 smallvec = "1.15"
 static_assertions = "1.1.0"
 tracing = "0.1.44"
+# Correlation-only request trace ids (minted only with `semantic-observe`).
 uuid = { version = "1.23", features = ["v4"] }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
@@ -65,6 +69,9 @@ web-time = "1.1"
 uuid = { version = "1.23", features = ["js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
 uuid = { version = "1.23", features = ["rng-getrandom"] }
 
 # Generator for the SemanticQueryKeySpec table artifact (sole writer of
@@ -75,5 +82,6 @@ name = "gen-query-key-spec"
 path = "src/bin/gen_query_key_spec.rs"
 
 [dev-dependencies]
+aho-corasick = "1.1.4"
 verter_session_query = { workspace = true, features = ["test-support"] }
 verter_type_engine = { path = ".", features = ["test-support"] }

@@ -559,12 +559,14 @@ impl MetaSession {
     }
 
     /// Whether the project host captures per-request audit records
-    /// (`audit_enabled` + `footprint_capture`).
+    /// (`audit_enabled` + `footprint_capture`). Always `false` in a build
+    /// without `semantic-observe`, whose host config is normalized.
     pub(crate) fn audit_capture_enabled(&self) -> bool {
         let config = self.project.host().config();
         config.audit_enabled && config.footprint_capture
     }
 
+    #[cfg(feature = "semantic-observe")]
     /// The project host's audited output-bearing component-meta
     /// resolution, with the request id its audit record was published
     /// under. One of the three audited-lane operations a session lends
@@ -582,6 +584,7 @@ impl MetaSession {
     }
 
     /// Drain the audit record a resolution published under `request_id`.
+    #[cfg(feature = "semantic-observe")]
     pub(crate) fn take_audit_record(
         &self,
         request_id: u64,
@@ -1113,7 +1116,9 @@ impl MetaSession {
         self.get_component_meta_payload(canonical_or_alias, encode_fn)
     }
 
-    /// Return provenance counters for this session's host.
+    /// Return provenance counters for this session's host. Exists only
+    /// under `semantic-observe`; a build without it keeps no provenance.
+    #[cfg(feature = "semantic-observe")]
     pub fn get_provenance(
         &self,
     ) -> Result<crate::meta_provenance::MetaProvenanceSnapshot, MetaError> {

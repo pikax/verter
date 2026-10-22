@@ -206,7 +206,7 @@ fn a_warm_signature_set_of_a_retired_epoch_is_a_miss_that_recomputes_the_answer(
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     for subject in subjects(&d) {
         let before = shared(&d, subject);
         assert!(!before[0].starts_with("incomplete"), "premise: {before:?}");
@@ -244,7 +244,7 @@ fn compaction_evicts_retired_kernel_families_and_the_answers_recompute() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
-    let graph = d.graph();
+    let graph = d.graph_arc();
     let store = graph.signature_store();
     let [overloaded, union] = subjects(&d);
     let before = [shared(&d, overloaded), shared(&d, union)];
@@ -322,7 +322,7 @@ fn releasing_the_named_nodes_evicts_the_warm_set_and_the_answer_recomputes() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
-    let graph = d.graph();
+    let graph = d.graph_arc();
     let store = graph.signature_store();
     let [overloaded, _] = subjects(&d);
     let before = shared(&d, overloaded);
@@ -367,7 +367,7 @@ fn a_warm_signature_result_of_a_retired_epoch_is_never_served() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let [overloaded, _] = subjects(&d);
     let set = d
         .signature_set_value(overloaded, SignatureKind::Call)
@@ -415,7 +415,7 @@ fn a_replacement_between_the_memo_read_and_the_pin_is_a_miss_not_an_incomplete_a
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
-    let graph = d.graph();
+    let graph = d.graph_arc();
     let expected = fresh_answers();
     for (subject, expected) in subjects(&d).into_iter().zip(expected) {
         let _cold = d.signature_set_value(subject, SignatureKind::Call).unwrap();
@@ -462,7 +462,7 @@ fn a_build_that_straddles_a_replacement_cannot_poison_later_reads() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let [overloaded, _] = subjects(&d);
     let expected = fresh_answers().remove(0);
 
@@ -516,7 +516,7 @@ fn a_replacement_during_the_walk_is_walked_again_not_an_incomplete_answer() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let expected = fresh_answers();
     for (subject, expected) in subjects(&d).into_iter().zip(expected) {
         let swapped = Arc::new(AtomicBool::new(false));
@@ -550,7 +550,7 @@ fn a_joiner_never_takes_a_retired_epoch_value_from_the_build_it_joined() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let shallow = d
         .ctx
         .shallow_file_state(CANONICAL)
@@ -734,7 +734,10 @@ fn observe(host: &VerterHost) -> Vec<String> {
             let degraded = result.degradation().is_some();
             let store_view = host.resolver_store_view_read().into_owned_view();
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+            let ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::new(host, &store_view, overlay);
             let d = ProjectSemanticDispatch::new(&ctx);
             let node = d
                 .normalize_node_keeping_declaration_refs_for_tests(
@@ -874,7 +877,7 @@ fn a_signature_set_roots_its_candidates_in_the_graph_that_published_them() {
         panic!("an overloaded callable answers");
     };
     let value = ready.value;
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     drop(builder);
     drop(d);
     graph.invalidate_all();
@@ -920,7 +923,7 @@ fn a_cloned_signature_set_owns_its_candidate_nodes_through_its_final_holder() {
     use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let host = host();
     let d = ProjectSemanticDispatch::with_graph_fixture(host.as_ref(), GraphFixture::new());
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     let builder = d.enter_construction_scope();
     let [overloaded, _] = subjects(&d);
     let value = d
@@ -973,7 +976,7 @@ fn a_cloned_signature_set_keeps_its_candidate_table_charged_through_its_final_ho
         host.as_ref(),
         GraphFixture::with_account(StoreAccount::new(Arc::clone(&account))),
     );
-    let graph = Arc::clone(d.graph());
+    let graph = Arc::clone(d.graph_arc());
     // The fixture composes construction ordinals across operations, so it
     // holds an explicit builder owner; the dispatcher's lane owns nothing.
     let builder = d.enter_construction_scope();

@@ -609,11 +609,11 @@ fn public_component_name<'a>(
 /// preserves cache/partial semantics; this projector only formats its already
 /// resolved one-level rows. A partial outcome contributes its best safe rows
 /// and is never admitted by the executor's surface cache.
-fn resolve_public_props_text(
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+fn resolve_public_props_text<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     script_syntax: Option<
@@ -740,11 +740,11 @@ fn resolve_public_props_text(
 /// rendering the captured locator/name would be invalid. The shared executor
 /// dereferences it once and returns the one-level event rows; partial outcomes
 /// retain their best safe rows and are never admitted to the surface cache.
-fn resolve_public_dispatcher_text(
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+fn resolve_public_dispatcher_text<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
 ) -> Option<String> {
@@ -781,11 +781,11 @@ fn resolve_public_dispatcher_text(
 /// executor that component-meta uses. Each field is rooted at the local value
 /// binding's `typeof`, so an alias export keeps the public key while deriving
 /// its type from the real local identity.
-fn resolve_public_exports_text(
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+fn resolve_public_exports_text<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
@@ -829,10 +829,10 @@ fn resolve_public_exports_text(
     })
 }
 
-fn resolve_public_module_exports(
+fn resolve_public_module_exports<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,

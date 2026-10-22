@@ -6964,8 +6964,10 @@ defineProps<{ msg: string }>()
     ///
     /// DISCRIMINATION — two independent properties:
     ///  1. **O(1)-not-per-N store-view reads.** `host.provenance()
-    ///     .store_view_from_host_reads` (a per-`VerterHost` atomic bumped in the
-    ///     `HostStoreView::from_host` chokepoint) is reachable from this crate.
+    ///     .store_view_from_host_reads` (a per-`VerterHost` counter bumped in the
+    ///     `HostStoreView::from_host` chokepoint, kept only under
+    ///     `semantic-observe`, so this half runs in the instrumentation lane)
+    ///     is reachable from this crate.
     ///     A per-file loop takes ≥ N reads (each macro-bearing render re-reads
     ///     the store view); the batch collapses to ONE per-batch fixed-view
     ///     capture. A WARM declaration stage of N files must read `< N` (and
@@ -6982,6 +6984,7 @@ defineProps<{ msg: string }>()
     ///     type export). A failed cross-item walk drops `payload: number` → RED.
     #[test]
     fn generate_all_tsc_routes_through_batch_o1_reads_and_resolves_cross_item() {
+        #[cfg(feature = "semantic-observe")]
         use std::sync::atomic::Ordering::Relaxed;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -7041,13 +7044,10 @@ defineEmits<ChildEmits>()
             .expect("declaration carrier infrastructure");
 
         // WARM pass: measure this host's `from_host` reads in isolation.
-        const N: u64 = 4;
-        host.provenance()
-            .store_view_from_host_reads
-            .store(0, Relaxed);
+        #[cfg(feature = "semantic-observe")]
+        let reads_before = host.provenance().store_view_from_host_reads.load(Relaxed);
         let results = generate_all_tsc(&host, &vue_files, &out_dir)
             .expect("declaration carrier infrastructure");
-        let warm_from_host = host.provenance().store_view_from_host_reads.load(Relaxed);
 
         assert_eq!(
             results.value.len(),
@@ -7059,18 +7059,25 @@ defineEmits<ChildEmits>()
             "projection failures: {:?}",
             results.failures
         );
-        assert!(
-            warm_from_host >= 1,
-            "the warm declaration stage must perform at least one real `from_host` \
+        // Reads optional audit capture: runs in the instrumentation lane.
+        #[cfg(feature = "semantic-observe")]
+        {
+            const N: u64 = 4;
+            let warm_from_host =
+                host.provenance().store_view_from_host_reads.load(Relaxed) - reads_before;
+            assert!(
+                warm_from_host >= 1,
+                "the warm declaration stage must perform at least one real `from_host` \
              read (the per-batch fixed-view capture), so a dead counter cannot \
              trivially satisfy the bound; observed {warm_from_host}",
-        );
-        assert!(
-            warm_from_host < N,
-            "generate_all_tsc must route through ONE `get_public_api_batch` (O(1) \
+            );
+            assert!(
+                warm_from_host < N,
+                "generate_all_tsc must route through ONE `get_public_api_batch` (O(1) \
              `from_host` reads — the single per-batch capture), NOT a per-file \
              `get_public_api` loop (≥ N={N} reads). Observed {warm_from_host}",
-        );
+            );
+        }
 
         // Cross-item correctness: every consumer's declaration output
         // MATERIALIZES the sibling `Child.vue`'s `ChildEmits` payload.

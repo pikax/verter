@@ -55,8 +55,8 @@ use verter_type_engine::resolver_core::ResolverContext;
 /// flat fields. `diag_sink` is reserved for macro-expansion diagnostics; the
 /// shape conversions below are pure (the diagnostics surface upstream at the
 /// projector / DTO resolution layer).
-pub(crate) fn project_define_macro_shapes(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+pub(crate) fn project_define_macro_shapes<M: verter_audit::observe::ObserveExec>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
     evaluated_types: &mut ExpandedComponentTypes,
@@ -144,11 +144,11 @@ pub(crate) fn project_define_macro_shapes(
 /// The DTO's producer-owned guarantee accompanies even an empty shape. A
 /// complete no-surface answer and an unavailable membership demand therefore
 /// remain distinct without a second surface probe or an aggregate summary.
-fn define_props_shape(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn define_props_shape<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     macro_index: usize,
@@ -232,11 +232,11 @@ fn define_props_shape(
 ///
 /// No secondary evaluated/analyzer row participates: every occurrence owns
 /// its payload source and publication evidence.
-fn define_emits_shape(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn define_emits_shape<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     macro_index: usize,
@@ -299,11 +299,11 @@ fn define_emits_shape(
 /// Build the `define_slots` shape: one [`ExpandedProperty`] per DTO slot, typed
 /// as the slot's `(props: { ... }) => RT` function expression. Per-slot
 /// bindings are published separately by `resolve_slot_bindings_graph_native`.
-fn define_slots_shape(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn define_slots_shape<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     macro_index: usize,

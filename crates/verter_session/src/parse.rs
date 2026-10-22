@@ -2414,7 +2414,7 @@ fn build_vue_script_outputs(
 /// Counted inside the test publication fixture so
 /// every caller's carrier parse lights up the `carrier_parses` / `sfc_parses`
 /// rails.
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) fn build_script_analysis_from_source(
     source: &str,
     provenance: &crate::meta_provenance::MetaProvenance,
@@ -2455,7 +2455,7 @@ pub(crate) fn build_script_analysis_from_parsed(
 /// Counted inside the test publication fixture so
 /// every caller's carrier parse lights up the `carrier_parses` / `sfc_parses`
 /// rails.
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) fn build_style_analyses_from_source(
     source: &str,
     canonical_id: &str,

@@ -170,12 +170,9 @@ impl Default for ResolutionBudgets {
     }
 }
 
-/// Counters tracking work done across the three resolution domains.
-///
-/// These are per-request counters, not global accumulators.
+/// Per-request work tally, not a global accumulator.
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionCounters {
-    pub local_closure_steps: u64,
     /// Test-only visit tally; no production path reads it.
     #[cfg(test)]
     pub frontier_symbol_visits: u64,

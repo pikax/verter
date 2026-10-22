@@ -6,6 +6,32 @@
 
 use super::*;
 
+/// A source job's bound capture execution. The job boundary adopts its
+/// installed winner context once; individual reads use these plain values.
+#[cfg(feature = "semantic-observe")]
+struct CapturedSourceLoader<'a> {
+    inner: &'a dyn SourceLoader,
+    request_id: u64,
+    timing: bool,
+}
+
+#[cfg(feature = "semantic-observe")]
+impl SourceLoader for CapturedSourceLoader<'_> {
+    fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.inner
+            .load_captured(canonical_id, self.request_id, self.timing)
+    }
+    fn exists(&self, canonical_id: &str) -> bool {
+        self.inner.exists(canonical_id)
+    }
+    fn classify(&self, canonical_id: &str) -> verter_language::FileLanguage {
+        self.inner.classify(canonical_id)
+    }
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        self.inner.realpath(canonical_id)
+    }
+}
+
 /// THE single routing point from a dequeued [`ReadyJob`] to the
 /// [`StageExecutor`]. Both the native pump path
 /// ([`Scheduler::dispatch_ready_job`]) and the inline path
@@ -225,6 +251,24 @@ pub(super) fn run_file_stage(
             job.kind,
         )
     });
+    #[cfg(feature = "semantic-observe")]
+    let captured_loader = job
+        .request_context
+        .clone()
+        .or_else(|| {
+            dag.lock()
+                .winner_context_for(&Arc::from(node.canonical_id.as_str()), generation)
+        })
+        .filter(|ctx| ctx.0.captured())
+        .map(|ctx| CapturedSourceLoader {
+            inner: source_loader,
+            request_id: ctx.0.request_id(),
+            timing: ctx.0.timing_enabled(),
+        });
+    #[cfg(feature = "semantic-observe")]
+    let source_loader = captured_loader
+        .as_ref()
+        .map_or(source_loader, |loader| loader as &dyn SourceLoader);
     Scheduler::execute_stage_on_worker(
         node,
         generation,
@@ -449,10 +493,10 @@ pub(crate) enum DispatchOutcome {
 /// instead. Scoping the wrap to this one alias keeps every other lock in the
 /// file byte-identical to the pre-instrumentation code regardless of the
 /// feature.
-#[cfg(feature = "hotpath")]
+#[cfg(feature = "semantic-observe")]
 pub(super) type DagMutex = hotpath::wrap::parking_lot::Mutex<SchedulerDag>;
 
-#[cfg(not(feature = "hotpath"))]
+#[cfg(not(feature = "semantic-observe"))]
 pub(super) type DagMutex = Mutex<SchedulerDag>;
 
 /// Guard type returned by locking a [`DagMutex`]. See [`DagMutex`] for why
@@ -462,23 +506,23 @@ pub(super) type DagMutex = Mutex<SchedulerDag>;
 // this alias — reproduces on EITHER branch (whichever is the active cfg), so
 // it is a rustc false positive for a private lifetime-generic alias used
 // only in return position, not an actually-unused alias.
-#[cfg(feature = "hotpath")]
+#[cfg(feature = "semantic-observe")]
 #[allow(dead_code)]
 pub(super) type DagMutexGuard<'a> = hotpath::wrap::parking_lot::MutexGuard<'a, SchedulerDag>;
 
-#[cfg(not(feature = "hotpath"))]
+#[cfg(not(feature = "semantic-observe"))]
 #[allow(dead_code)]
 pub(super) type DagMutexGuard<'a> = parking_lot::MutexGuard<'a, SchedulerDag>;
 
 /// Construct a [`DagMutex`]. Under `hotpath` this routes through
 /// `hotpath::mutex!`; without it, this is a plain `parking_lot::Mutex::new`,
 /// identical to the pre-instrumentation code.
-#[cfg(feature = "hotpath")]
+#[cfg(feature = "semantic-observe")]
 pub(super) fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
     hotpath::mutex!(parking_lot::Mutex::new(dag), label = "scheduler_dag")
 }
 
-#[cfg(not(feature = "hotpath"))]
+#[cfg(not(feature = "semantic-observe"))]
 pub(super) fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
     Mutex::new(dag)
 }
@@ -658,12 +702,13 @@ impl Scheduler {
         loop {
             // Sample DAG depth under the lock so the audit figure
             // matches the depth observed by the entry that is about
-            // to leave.
+            // to leave. Optional capture: without `semantic-observe` the
+            // O(N) depth scan never runs.
             let (job, queue_depth_pre_dequeue) = {
                 let mut dag = self.dag.lock();
-                let depth = dag.pending_len();
+                let depth = verter_audit::observe::Sample::take(|| dag.pending_len() as u32);
                 let dequeued = dag.next_ready_for_pump(caller_kind, active_path);
-                (dequeued, depth as u32)
+                (dequeued, depth)
             };
             let job = match job {
                 Some(j) => j,
@@ -709,28 +754,19 @@ impl Scheduler {
         job: ReadyJob,
         _reason: PumpReason,
         caller_kind: caller_kind::CallerKind,
-        queue_depth_pre_dequeue: u32,
+        queue_depth_pre_dequeue: verter_audit::observe::Sample<u32>,
     ) -> DispatchOutcome {
-        // Compute queue dwell ms: time the entry spent in the DAG
-        // between enqueue and this dispatch.
-        let dequeue_at = Instant::now();
-        let queue_dwell_ms = dequeue_at
-            .saturating_duration_since(job.enqueue_time)
-            .as_secs_f64()
-            * 1000.0;
-        let inbox_depth = self.inbox.sender.len() as u32;
+        // Optional capture: the time the entry spent in the DAG between
+        // enqueue and this dispatch, and the inbox depth. Neither the
+        // clock nor the channel is read without `semantic-observe`.
+        let queue_dwell_ms = verter_audit::observe::Sample::take(|| job.enqueue_time.elapsed_ms());
+        let inbox_depth = verter_audit::observe::Sample::take(|| self.inbox.sender.len() as u32);
         // One dispatch = one executed task; the dwell is the time the entry
         // sat in the DAG, and the pre-dequeue depth is the queue high-water
         // mark this dispatch observed.
         verter_audit::attribute!(TaskExecute);
-        verter_audit::attribute_n!(
-            TaskWait,
-            dequeue_at
-                .saturating_duration_since(job.enqueue_time)
-                .as_nanos()
-                .min(u64::MAX as u128)
-        );
-        verter_audit::attribute_max!(QueueDepth, queue_depth_pre_dequeue);
+        verter_audit::attribute_n!(TaskWait, job.enqueue_time.elapsed_nanos());
+        verter_audit::attribute_max!(QueueDepth, queue_depth_pre_dequeue.get());
 
         let inbox_sender = self.inbox.sender.clone();
         let executor = Arc::clone(&self.executor);
@@ -969,11 +1005,10 @@ impl Scheduler {
             let identity_for_path = identity.clone();
             caller_kind::with_active_path(identity_for_path, || {
                 Self::publish_scheduler_dispatch(
+                    winner_ctx.as_ref(),
                     inline_pool_tag,
-                    audit_publish::SchedulerDepthsSnapshot {
-                        inbox: inbox_depth,
-                        queue: queue_depth_pre_dequeue,
-                    },
+                    inbox_depth,
+                    queue_depth_pre_dequeue,
                     queue_dwell_ms,
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1025,13 +1060,14 @@ impl Scheduler {
                 let job = job.started(&inbox_sender);
                 let _guard: Option<
                     Box<dyn verter_execution::request_context::TlsUninstall + Send>,
-                > = winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
+                > = winner_ctx
+                    .as_ref()
+                    .map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
+                    winner_ctx.as_ref(),
                     audit_publish::WorkerPoolTag::Io,
-                    audit_publish::SchedulerDepthsSnapshot {
-                        inbox: inbox_depth,
-                        queue: queue_depth_pre_dequeue,
-                    },
+                    inbox_depth,
+                    queue_depth_pre_dequeue,
                     queue_dwell_ms,
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1087,13 +1123,14 @@ impl Scheduler {
                 let job = job.started(&inbox_sender);
                 let _guard: Option<
                     Box<dyn verter_execution::request_context::TlsUninstall + Send>,
-                > = winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
+                > = winner_ctx
+                    .as_ref()
+                    .map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
+                    winner_ctx.as_ref(),
                     audit_publish::WorkerPoolTag::Cpu,
-                    audit_publish::SchedulerDepthsSnapshot {
-                        inbox: inbox_depth,
-                        queue: queue_depth_pre_dequeue,
-                    },
+                    inbox_depth,
+                    queue_depth_pre_dequeue,
                     queue_dwell_ms,
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1318,22 +1355,42 @@ impl Scheduler {
     /// no-op via [`verter_audit::observer::AuditObserver`]'s default
     /// implementation. Static so it can be called from worker
     /// closures without holding `&self`.
+    ///
+    /// Optional capture: without `semantic-observe` this compiles to
+    /// nothing and the samples are never read.
     #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// `job_context` is the request context the job carries from its
+    /// submission: only a job whose submitting request selected captured
+    /// execution publishes, and the decision reads that carried context,
+    /// not a thread-local slot.
     pub(super) fn publish_scheduler_dispatch(
+        job_context: Option<&verter_execution::request_context::OpaqueRequestContext>,
         pool: audit_publish::WorkerPoolTag,
-        depths: audit_publish::SchedulerDepthsSnapshot,
-        queue_dwell_ms: f64,
+        inbox_depth: verter_audit::observe::Sample<u32>,
+        queue_depth: verter_audit::observe::Sample<u32>,
+        queue_dwell_ms: verter_audit::observe::Sample<f64>,
     ) {
-        if let Some(observer) = verter_audit::current_observer() {
+        #[cfg(feature = "semantic-observe")]
+        if !job_context.is_some_and(|context| context.0.captured()) {
+            return;
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = job_context;
+        verter_audit::observe!(|observer| {
             let audit = verter_audit::SchedulerAudit {
                 worker_thread_id: format!("{:?}", std::thread::current().id()),
                 worker_pool: pool.into(),
-                depths: depths.into(),
-                queue_dwell_ms,
+                depths: audit_publish::SchedulerDepthsSnapshot {
+                    inbox: inbox_depth.get(),
+                    queue: queue_depth.get(),
+                }
+                .into(),
+                queue_dwell_ms: queue_dwell_ms.get(),
                 dispatch_count: 1,
             };
             observer.record_scheduler_dispatch(audit);
-        }
+        });
     }
 
     /// Dispatch work inline (used by `drive_one`/`drive_all` in sync mode and WASM).
@@ -1598,7 +1655,7 @@ impl Scheduler {
 
     /// Execute the Source stage: load content, run executor, commit.
     /// Returns the terminal `StageComplete` for the caller to deliver.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     #[must_use = "the terminal StageComplete must be delivered to the inbox"]
     pub(super) fn execute_source_stage(
         node: &FileNode,

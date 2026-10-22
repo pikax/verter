@@ -73,14 +73,19 @@
 //! `navigations + expansions <= hops` (within the request's
 //! accounting buckets).
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use verter_audit::ProjectionModeTag;
+#[cfg(feature = "semantic-observe")]
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, ResolveDeclKey, ScopeId, SemanticQueryKey,
 };
 
+#[cfg(feature = "semantic-observe")]
 /// Fixture: deeply-nested type so the three-segment path
 /// `A['c']['full']['bar']` exercises distinct intermediate hops.
 /// Each intermediate level (`c`, `full`) carries unrelated sibling
@@ -99,6 +104,8 @@ export type A = {
 };
 "#;
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn path_a_c_full_bar_navigates_intermediates_and_expands_terminal() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {

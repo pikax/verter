@@ -634,7 +634,7 @@ fn a_mapping_over_a_keyof_constrained_key_parameter_keeps_source_modifiers() {
             )
             .into_usable_node()
             .expect("the pick evaluates completely");
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let data = graph.node_data(value);
         let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
             panic!("the pick evaluates to an object");

@@ -28,7 +28,9 @@ self.onmessage = async (event) => {
     const wasm = await import(wasmJsUrl);
     await wasm.default(wasmUrl);
     const host = new wasm.VerterHost({ auditEnabled: true });
-    const probed = runProbes(host, { tsSource, vueSource });
+    const capture =
+      typeof wasm.captureAvailability === "function" ? wasm.captureAvailability() : undefined;
+    const probed = runProbes(host, { tsSource, vueSource, capture });
     self.postMessage({
       ok: true,
       nodeGlobals,

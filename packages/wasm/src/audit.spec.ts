@@ -14,14 +14,19 @@
  *
  * Unlike `index.spec.ts`, this file does NOT mock `verter_wasm.js` —
  * it drives the real bindings through an in-memory audit request.
+ *
+ * Records exist only in a module built with `semantic-observe`
+ * (`captureAvailability() === "Available"`). A default module must
+ * report unavailable capture from the audit bindings instead of
+ * returning a bundle whose record carries no observation.
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { initSync, MetaProject } from "../wasm/verter_wasm.js";
+import { captureAvailability, initSync, MetaProject, VerterHost } from "../wasm/verter_wasm.js";
 import type { AuditBundle } from "./audit.js";
 import { type AuditCapableMetaSession, loadedFiles, renderChainText, whyLoaded } from "./audit.js";
 
@@ -41,12 +46,62 @@ function ensureWasmInitialized(): void {
   initSync({ module: bytes });
 }
 
+ensureWasmInitialized();
+const captured = captureAvailability() === "Available";
+const CAPTURE_UNAVAILABLE = /audit capture is unavailable/;
+
 describe("@verter/wasm audit bindings", () => {
-  beforeAll(() => {
-    ensureWasmInitialized();
+  it("captureAvailability names one of the two capture states", () => {
+    expect(["Available", "Unavailable"]).toContain(captureAvailability());
   });
 
-  it("wasm_get_component_meta_with_audit_serializes_across_boundary", () => {
+  it.runIf(!captured)(
+    "getComponentMetaWithAudit and the walkers report unavailable capture even on an audit-enabled host",
+    () => {
+      const project = new MetaProject({ auditEnabled: true, footprintCapture: true });
+      project.upsertBase("/Widget.vue", SIMPLE_SFC);
+      const session = project.openSession();
+
+      expect(() => session.getComponentMetaWithAudit("/Widget.vue")).toThrow(CAPTURE_UNAVAILABLE);
+      // The plain query is unaffected by capture.
+      expect(session.getComponentMeta("/Widget.vue")).not.toBeNull();
+      expect(() => session.whyLoadedFromAuditJson("{}", "/Widget.vue")).toThrow(
+        CAPTURE_UNAVAILABLE,
+      );
+      expect(() =>
+        session.whyInstantiatedFromAuditJson("{}", "/Widget.vue", "Widget", "0".repeat(32)),
+      ).toThrow(CAPTURE_UNAVAILABLE);
+
+      session.close();
+      project.shutdown();
+    },
+  );
+
+  it.runIf(!captured)(
+    "VerterHost audit entry-points run without a record and the record store reports unavailable capture",
+    () => {
+      const host = new VerterHost({ auditEnabled: true, footprintCapture: true });
+      host.upsert({
+        canonicalId: "/types.ts",
+        inputId: "/types.ts",
+        source: "export type Greeting = { value: string };\n",
+        fileKind: "non_sfc",
+      });
+      // A capturing module returns the stored record here.
+      expect(host.resolveTypeWithAudit("/types.ts", "Greeting")).toBeNull();
+      const symbol = host.resolveSymbolWithAudit("/types.ts", "Greeting", null, null) as {
+        typeExpr?: string | null;
+        auditRecord?: string | null;
+      };
+      expect(symbol.typeExpr).toContain("value");
+      expect(symbol.auditRecord ?? null).toBeNull();
+      expect(() => host.getLastAuditRecord()).toThrow(CAPTURE_UNAVAILABLE);
+      expect(() => host.getAuditRecords(undefined)).toThrow(CAPTURE_UNAVAILABLE);
+      host.free();
+    },
+  );
+
+  it.runIf(captured)("wasm_get_component_meta_with_audit_serializes_across_boundary", () => {
     // Exercise the real WASM boundary:
     // `MetaProject` constructor with audit enabled, upsert source,
     // open a session, call `getComponentMetaWithAudit`, and assert
@@ -109,7 +164,7 @@ describe("@verter/wasm audit bindings", () => {
     project.shutdown();
   });
 
-  it("wasm_why_loaded_binding_invokes_rust_walker", () => {
+  it.runIf(captured)("wasm_why_loaded_binding_invokes_rust_walker", () => {
     // End-to-end exercise of the Rust
     // walker through the WASM binding. The TS wrapper `whyLoaded`
     // stringifies the bundle, hands it to `whyLoadedFromAuditJson`,
@@ -152,7 +207,7 @@ describe("@verter/wasm audit bindings", () => {
     project.shutdown();
   });
 
-  it("wasm_binding_returns_typed_request_id_distinct_across_calls", () => {
+  it.runIf(captured)("wasm_binding_returns_typed_request_id_distinct_across_calls", () => {
     // Discrimination: the audit binding MUST assign
     // a fresh request_id per call. A regression where the session
     // reuses a request_id across `getComponentMetaWithAudit` calls

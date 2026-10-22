@@ -12,7 +12,7 @@
 //! - local `typeof` and double `<script>` visibility in the target SFC
 //!
 //! Usage:
-//!   cargo run -p verter_bench --example profile_component_meta --release --features=hotpath
+//!   cargo run -p verter_bench --example profile_component_meta --release --features=semantic-observe
 //!
 //! Environment variables:
 //!   VERTER_META_SYNTHETIC_LAYERS           default 320
@@ -625,7 +625,7 @@ fn print_profile(run_index: usize, profile: &RequestProfile) {
     }
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::main(limit = 80))]
+#[cfg_attr(feature = "semantic-observe", hotpath::main(limit = 80))]
 fn main() {
     let config = scenario_from_env();
     let project = generate_synthetic_project(&config).expect("synthetic project should be created");

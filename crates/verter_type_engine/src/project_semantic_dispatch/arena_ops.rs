@@ -3,12 +3,19 @@
 
 use super::{NodeScopeId, SemanticGraphStore, SemanticNodeData, SemanticNodeId};
 
-#[derive(Clone, Copy)]
-pub(super) struct ArenaOps<'a> {
-    graph: &'a SemanticGraphStore,
+/// The arena operations are compiled for the driver's capture mode `M`, so
+/// an evaluator's interns record optional capture only when captured.
+pub(super) struct ArenaOps<'a, M: verter_audit::observe::ObserveExec> {
+    graph: crate::semantic_query_memo::GraphIn<'a, M>,
 }
-impl<'a> ArenaOps<'a> {
-    pub(super) fn new(graph: &'a SemanticGraphStore) -> Self {
+impl<M: verter_audit::observe::ObserveExec> Clone for ArenaOps<'_, M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<M: verter_audit::observe::ObserveExec> Copy for ArenaOps<'_, M> {}
+impl<'a, M: verter_audit::observe::ObserveExec> ArenaOps<'a, M> {
+    pub(super) fn new(graph: crate::semantic_query_memo::GraphIn<'a, M>) -> Self {
         Self { graph }
     }
     pub(super) fn node_data(
@@ -41,7 +48,7 @@ impl<'a> ArenaOps<'a> {
     }
 }
 
-impl crate::semantic_query::NodeRead for ArenaOps<'_> {
+impl<M: verter_audit::observe::ObserveExec> crate::semantic_query::NodeRead for ArenaOps<'_, M> {
     fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         self.graph.node_data(node)
     }

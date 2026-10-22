@@ -563,6 +563,9 @@ pub struct SyncCoordinatorDeps {
     /// the server's own memo. Read only while a workspace scan runs, to decide
     /// whether an open document's dependencies are current enough to publish.
     pub(crate) dependency_receipts: Arc<crate::server::ImportSyncMemo>,
+    /// The client's subscriptions: a carrier publication tells the editor
+    /// the store changed only when it subscribed to that.
+    pub(crate) subscriptions: Arc<crate::demand_plan::ClientSubscriptions>,
 }
 
 /// Debounce interval: sync fires after [`crate::edit_quiet_window::EDIT_QUIET_WINDOW`]
@@ -2238,7 +2241,7 @@ async fn sync_file(
             }
         }
     }
-    if deps.carrier_publish_coordinator.is_some() {
+    if deps.carrier_publish_coordinator.is_some() && deps.subscriptions.carrier_store_changed() {
         deps.client
             .send_notification::<crate::server::protocol_types::CarrierStoreChanged>(())
             .await;

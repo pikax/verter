@@ -316,13 +316,31 @@ impl RouteDb {
     // -----------------------------------------------------------------------
 
     /// Look up a cached route for `key` if valid in the view.
+    ///
+    /// [`Self::get_route_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get_route<V: StoreView>(
         &self,
         key: &RouteNameKey,
         view: &V,
     ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_route_in::<_, M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), key, view)
+        })
+    }
+
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
+    pub fn get_route_in<V: StoreView, M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        key: &RouteNameKey,
+        view: &V,
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
+        let _ = observation;
         let result = self.routes.get_if_valid(key, view);
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -334,7 +352,7 @@ impl RouteDb {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -345,7 +363,7 @@ impl RouteDb {
         key: &RouteNameKey,
     ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
         let result = self.routes.get_if_valid(key, &PermissiveStoreView);
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -357,7 +375,7 @@ impl RouteDb {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -762,7 +780,7 @@ pub(crate) fn emit_export_route_resolved_event(
         ..
     } = result
     {
-        verter_type_engine::request_observers::push_structured_event(
+        verter_type_engine::component_meta_trace_structured!(
             crate::component_meta_audit::StructuredAuditEvent::ExportRouteResolved {
                 provider_canonical: Arc::<str>::from(provider_canonical),
                 exported_name: Arc::<str>::from(exported_name),

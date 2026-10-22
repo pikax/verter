@@ -960,7 +960,7 @@ impl VerterHost {
         }
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn ensure_compiled(
         &self,
         canonical_id: &str,
@@ -1958,7 +1958,7 @@ impl VerterHost {
         // is preserved on the event for telemetry even though the public
         // single-reason projection keeps only the first.
         if actual_mode != classification.requested_mode {
-            verter_type_engine::request_observers::push_structured_event(
+            verter_type_engine::component_meta_trace_structured!(
                 crate::component_meta_audit::StructuredAuditEvent::CompileModeDowngrade {
                     requested: classification.requested_mode.into(),
                     actual: actual_mode.into(),
@@ -3045,28 +3045,32 @@ impl VerterHost {
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
             if seed.view.overlay_content_hash_for(&canonical).is_some() {
-                let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-                    self,
-                    seed.view,
-                    seed.cold_seed,
-                    overlay,
-                );
-                self.produce_vue_macro_codegen_with_ctx(
-                    &session_ctx,
-                    &canonical,
-                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
-                )
+                verter_audit::specialise!(crate::capture::installed_mode() => M, {
+                    let session_ctx = crate::resolver_core::SessionResolverContext::<'_, M>::from_cold_seed(
+                        self,
+                        seed.view,
+                        seed.cold_seed,
+                        overlay,
+                    );
+                    self.produce_vue_macro_codegen_with_ctx(
+                        &session_ctx,
+                        &canonical,
+                        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+                    )
+                })
             } else {
-                let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-                    self,
-                    seed.cold_seed,
-                    overlay,
-                );
-                self.produce_vue_macro_codegen_with_ctx(
-                    &host_ctx,
-                    &canonical,
-                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
-                )
+                verter_audit::specialise!(crate::capture::installed_mode() => M, {
+                    let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                        self,
+                        seed.cold_seed,
+                        overlay,
+                    );
+                    self.produce_vue_macro_codegen_with_ctx(
+                        &host_ctx,
+                        &canonical,
+                        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+                    )
+                })
             }
         } else {
             self.produce_vue_macro_codegen(
@@ -3304,7 +3308,7 @@ impl VerterHost {
         }
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     fn compile_entry_unrecorded(
         &self,
         snapshot: &CompileInput,

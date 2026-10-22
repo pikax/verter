@@ -12,7 +12,7 @@ use super::surface::compound_root_surface_view_via_dispatch;
 use super::ComponentMetaQueryEngine;
 use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 
-impl ComponentMetaQueryEngine<'_> {
+impl<M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'_, M> {
     /// Select the graph-backed registry surface for both initial observation
     /// and later queue publication. Whole routes compose lone-heritage
     /// surfaces and otherwise retain the authored carrier. Non-Whole routes

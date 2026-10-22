@@ -72,6 +72,9 @@ use verter_type_engine::semantic_query::{
 pub(crate) mod u6_flow_expect_tests;
 
 #[path = "flow_gap_retraction_tests.rs"]
+// Measures cold/warm work through optional audit capture: runs in the
+// instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod flow_gap_retraction_tests;
 use self::u6_flow_expect_tests::{
     Boundary, Expect, ExpectedNode, ExpectedSpreadArm, ExpectedSpreadMember, Lit,
@@ -835,7 +838,12 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
 
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
 
@@ -1044,6 +1052,7 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
 
 include!("u6_flow_shape_corpus_rows_tests.rs");
 
+#[cfg(feature = "semantic-observe")]
 /// Locked baseline rows that were checker-correct, complete, and singly admitted.
 ///
 /// The cohort is derived mechanically from the table: it is EXACTLY the rows
@@ -2468,6 +2477,8 @@ mod corpus_suite {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn flow_gap_retraction_preserves_clean_checker_matches() {
         use sha2::{Digest, Sha256};
@@ -2510,8 +2521,10 @@ mod corpus_suite {
 
             let store_view = host.resolver_store_view_read().into_owned_view();
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+            let host_ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::new(host, &store_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let key = FlowReturnKey {
                 function: dispatch.flow_function_slot_for(
@@ -2652,8 +2665,10 @@ mod corpus_suite {
             {
                 let store_view = host.resolver_store_view_read().into_owned_view();
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let host_ctx =
-                    crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+                let host_ctx = crate::resolver_core::HostResolverContext::<
+                    '_,
+                    verter_audit::observe::Uncaptured,
+                >::new(&host, &store_view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&host_ctx);
                 assert_eq!(
                     node_shape(dispatch.graph().node_data(first_node).as_deref()),
@@ -3121,6 +3136,8 @@ mod corpus_suite {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// The RECURSIVE-expectation + PUBLIC-BOUNDARY lane.
     ///
     /// For every row carrying an [`Expect::Node`], [`Boundary::Audit`],

@@ -1725,6 +1725,8 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// MODELESS WARM-HIT COUNTER RAIL — a `Relate`-family warm read through
 /// the modeless payload accessor must travel the ONE unified warm-hit
 /// implementation: it bumps `cache_counters.semantic_graph.hits` exactly
@@ -1739,12 +1741,15 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
-    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-        crate::resolver_core::HostCapabilities,
-    > = &host;
-    let store = SemanticGraphStore::new();
     let rctx = RequestContext::new(7781, Arc::from("/w/modeless_counter.ts"), false, None);
     let _g = RequestContextGuard::install(Arc::clone(&rctx));
+    // Bind the request before the captured resolver snapshots its receivers.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+    > = &captured;
+    let store = SemanticGraphStore::new();
     let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let key = verter_type_engine::semantic_query::RelateMemoKey::assignable(
@@ -1786,6 +1791,8 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// MODELESS PROBE MISS-NEUTRALITY — a `Relate`-family probe miss through
 /// the modeless payload accessor must NOT bump
 /// `cache_counters.semantic_graph.misses`. The probe never short-circuits
@@ -1802,12 +1809,15 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
-    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-        crate::resolver_core::HostCapabilities,
-    > = &host;
-    let store = SemanticGraphStore::new();
     let rctx = RequestContext::new(7783, Arc::from("/w/modeless_miss.ts"), false, None);
     let _g = RequestContextGuard::install(Arc::clone(&rctx));
+    // Bind the request before the captured resolver snapshots its receivers.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+    > = &captured;
+    let store = SemanticGraphStore::new();
     let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let key = verter_type_engine::semantic_query::RelateMemoKey::assignable(
@@ -4443,6 +4453,8 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Loop 6 — `execute_cooperative` warm-hit fast path bypasses the
 /// admission-overhead branches that the cooperative-admission slow
 /// path runs even on warm hits.
@@ -4469,10 +4481,10 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
 /// and post-fix it is bumped on every fast-path return.
 #[test]
 fn execute_cooperative_warm_hit_skips_admission_overhead() {
-    let host = ctx_host();
     use verter_type_engine::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS;
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
+    let host = ctx_host();
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/fast_path.ts"),
@@ -4481,10 +4493,13 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
 
     let ctx = RequestContext::new(7777, Arc::from("/w/fast_path.ts"), false, None);
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
+    // Bind the request before the captured resolver snapshots its receivers.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
 
     // Cold build to populate the warm slot. Records one Miss.
     let _ = store.execute_cooperative(
-        &host,
+        &captured,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -4522,7 +4537,7 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
     // Warm call — must skip the build closure (panic indicates a
     // miscount) and route through the fast path.
     let _ = store.execute_cooperative(
-        &host,
+        &captured,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || -> (QueryResult<SemanticNodeId>, DepSignature) {
@@ -4795,6 +4810,8 @@ fn cold_abort_sweep_global_counter_increments_without_request_context() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Drive the production cold-abort path with an installed
 /// `RequestContext` and confirm the per-request `cold_aborts_swept`
 /// counter is bumped — this is what the audit miner reads at
@@ -4823,12 +4840,15 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
     // exactly when the helper fires.
     let ctx = RequestContext::new(7, Arc::from("/c.vue"), false, None);
     let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+    // Bind the request before the captured resolver snapshots its receivers.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
 
     // Force the cold-abort sweep deterministically on this store.
     let _force_guard = store.test_force_cold_abort_sweep();
 
     let result = store.execute_cooperative(
-        &host,
+        &captured,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -4860,6 +4880,8 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Drive the inflight-aborted-retry path with an installed
 /// `RequestContext` on the joiner thread and confirm the per-request
 /// `inflight_aborted_retries` counter is bumped — the audit miner
@@ -4908,10 +4930,13 @@ fn inflight_aborted_retry_attributes_to_per_request_context() {
     let joiner = thread::spawn(move || {
         let host = ctx_host();
         // Install the context on the JOINER thread — that's where
-        // the retry-bump helper runs.
+        // the retry-bump helper runs — before the captured resolver
+        // snapshots its receivers.
         let _ctx_guard = RequestContextGuard::install(Arc::clone(&joiner_ctx));
+        let view = host.resolver_store_view_read().into_owned_view();
+        let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
         joiner_store.execute_cooperative(
-            &host,
+            &captured,
             joiner_key,
             || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
@@ -5548,7 +5573,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(follower_host.as_ref(), &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             follower_host.as_ref(),
             &view,
             &session_store_view,
@@ -5964,7 +5989,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(follower_host.as_ref(), &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             follower_host.as_ref(),
             &view,
             &session_store_view,
@@ -6241,7 +6266,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(follower_host.as_ref(), &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             follower_host.as_ref(),
             &view,
             &session_store_view,
@@ -6539,7 +6564,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
             .resolver_store_view_read()
             .into_owned_view()
             .with_session_overlay(follower_host.as_ref(), &view);
-        let session_ctx = SessionResolverContext::new(
+        let session_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
             follower_host.as_ref(),
             &view,
             &session_store_view,

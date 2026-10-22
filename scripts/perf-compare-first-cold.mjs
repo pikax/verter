@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Block 6.c perf gate: compare two `summary.csv` files emitted by
- * `cargo run --release --example audit_real_component_meta -p verter_bench`
+ * `cargo run --release --example audit_real_component_meta -p verter_bench --features semantic-observe`
  * and assert each of 10 components + the aggregate `total_ms` is within
  * +10% of the baseline.
  *

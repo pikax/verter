@@ -85,13 +85,13 @@ impl NativePropProjectionCache {
 /// Resolve one named declaration to component-meta's native visibility rows.
 /// This projection owns no runtime DTO and performs one graph-only shallow
 /// demand. Member display rendering is publication-only.
-pub(crate) fn named_native_props_outcome(
+pub(crate) fn named_native_props_outcome<M: verter_audit::observe::ObserveExec>(
     ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     root_canonical: &str,
     root_owner: verter_type_expr::TopLevelOwnerId,

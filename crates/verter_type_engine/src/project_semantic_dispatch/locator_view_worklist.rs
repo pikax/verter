@@ -776,8 +776,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(reasons) = preexisting_trip {
             return Err(ProjectedViewOutcome::partial(root, reasons));
         }
-        crate::loop5_instrumentation::watchdog_beat();
-        crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+            crate::loop5_instrumentation::watchdog_beat();
+            crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+        }
         let Some(root_data) = root_data else {
             if let Err(reasons) = self.charge_connected_work() {
                 return Err(ProjectedViewOutcome::partial(root, reasons));
@@ -1597,8 +1600,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let data = self.graph().node_data(node);
         let Some(data) = data else {
             work_credit.consume()?;
-            crate::loop5_instrumentation::watchdog_beat();
-            crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                crate::loop5_instrumentation::watchdog_beat();
+                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+            }
             return Err(ProjectionFailure::MissingNode);
         };
         match data.as_ref() {
@@ -1610,15 +1616,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
                 work_credit.consume()?;
-                crate::loop5_instrumentation::watchdog_beat();
-                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                    crate::loop5_instrumentation::watchdog_beat();
+                    crate::loop5_instrumentation::watchdog_check_and_dump(
+                        "project_view_node_worklist",
+                    );
+                }
                 memo.insert((node, context, ProjectionSlot::Plain), node);
                 Ok(None)
             }
             SemanticNodeData::RawFallback { .. } => {
                 work_credit.consume()?;
-                crate::loop5_instrumentation::watchdog_beat();
-                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                    crate::loop5_instrumentation::watchdog_beat();
+                    crate::loop5_instrumentation::watchdog_check_and_dump(
+                        "project_view_node_worklist",
+                    );
+                }
                 memo.insert(
                     (node, context, ProjectionSlot::Plain),
                     self.opaque(QueryError::Miss),
@@ -1630,8 +1646,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if self.graph().node_is_inert_structure(node) =>
             {
                 work_credit.consume()?;
-                crate::loop5_instrumentation::watchdog_beat();
-                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                    crate::loop5_instrumentation::watchdog_beat();
+                    crate::loop5_instrumentation::watchdog_check_and_dump(
+                        "project_view_node_worklist",
+                    );
+                }
                 memo.insert((node, context, ProjectionSlot::Plain), node);
                 Ok(None)
             }
@@ -1641,14 +1662,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return Ok(None);
                 }
                 work_credit.consume()?;
-                crate::loop5_instrumentation::watchdog_beat();
-                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                    crate::loop5_instrumentation::watchdog_beat();
+                    crate::loop5_instrumentation::watchdog_check_and_dump(
+                        "project_view_node_worklist",
+                    );
+                }
                 Ok(Some(data))
             }
             _ => {
                 work_credit.consume()?;
-                crate::loop5_instrumentation::watchdog_beat();
-                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                    crate::loop5_instrumentation::watchdog_beat();
+                    crate::loop5_instrumentation::watchdog_check_and_dump(
+                        "project_view_node_worklist",
+                    );
+                }
                 Ok(Some(data))
             }
         }
@@ -1685,8 +1716,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let child_data = self.graph().node_data(child);
             let Some(child_data) = child_data else {
                 work_credit.consume()?;
-                crate::loop5_instrumentation::watchdog_beat();
-                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                    crate::loop5_instrumentation::watchdog_beat();
+                    crate::loop5_instrumentation::watchdog_check_and_dump(
+                        "project_view_node_worklist",
+                    );
+                }
                 return Err(ProjectionFailure::MissingNode);
             };
             match child_data.as_ref() {
@@ -1698,19 +1734,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::SyntheticBinding { .. } => {
                     work_credit.consume()?;
-                    crate::loop5_instrumentation::watchdog_beat();
-                    crate::loop5_instrumentation::watchdog_check_and_dump(
-                        "project_view_node_worklist",
-                    );
+                    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                    if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                        crate::loop5_instrumentation::watchdog_beat();
+                        crate::loop5_instrumentation::watchdog_check_and_dump(
+                            "project_view_node_worklist",
+                        );
+                    }
                     vacant.insert(child);
                     continue;
                 }
                 SemanticNodeData::RawFallback { .. } => {
                     work_credit.consume()?;
-                    crate::loop5_instrumentation::watchdog_beat();
-                    crate::loop5_instrumentation::watchdog_check_and_dump(
-                        "project_view_node_worklist",
-                    );
+                    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                    if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                        crate::loop5_instrumentation::watchdog_beat();
+                        crate::loop5_instrumentation::watchdog_check_and_dump(
+                            "project_view_node_worklist",
+                        );
+                    }
                     vacant.insert(self.opaque(QueryError::Miss));
                     continue;
                 }
@@ -1719,10 +1761,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if self.graph().node_is_inert_structure(child) =>
                 {
                     work_credit.consume()?;
-                    crate::loop5_instrumentation::watchdog_beat();
-                    crate::loop5_instrumentation::watchdog_check_and_dump(
-                        "project_view_node_worklist",
-                    );
+                    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                    if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                        crate::loop5_instrumentation::watchdog_beat();
+                        crate::loop5_instrumentation::watchdog_check_and_dump(
+                            "project_view_node_worklist",
+                        );
+                    }
                     vacant.insert(child);
                     continue;
                 }
@@ -1740,8 +1785,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // The vacant-entry handle is no longer used beyond this point, so
             // its mutable memo borrow ends before non-terminal staging.
             work_credit.consume()?;
-            crate::loop5_instrumentation::watchdog_beat();
-            crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+                crate::loop5_instrumentation::watchdog_beat();
+                crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
+            }
             frames.push(ProjectionFrame::CompositeResume {
                 node,
                 context,

@@ -217,7 +217,12 @@ pub(super) fn observe<R>(
     let (degradation, node) = (result.degradation(), result.return_type());
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     read(&dispatch, degradation, node)
 }
@@ -287,7 +292,7 @@ pub(super) fn assert_predicate(host: &VerterHost, root: &str, symbol: &str, prin
     };
     observe(host, root, symbol, |dispatch, degradation, node| {
         let signature = lone_signature(dispatch, node);
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let matches = match graph.node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature {
                 return_type,
@@ -903,7 +908,7 @@ fn an_inferred_predicate_names_the_positional_parameter() {
     let host = host_with(&source_with_wrappers(&["withThis", "twoParams"]));
     for (symbol, position) in [("sig_withThis", 0), ("sig_twoParams", 1)] {
         observe(&host, STRICT_ROOT, symbol, |dispatch, _, node| {
-            let graph = dispatch.graph();
+            let graph = dispatch.graph_arc();
             let signature = match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Object(surface)) => surface.call_signatures()[0],
                 _ => node,

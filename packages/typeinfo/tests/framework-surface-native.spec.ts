@@ -23,7 +23,7 @@ import {
   TYPEINFO_GRAPH_SCHEMA_VERSION,
   TypeInfoGraphRequestSchema,
 } from "@verter/proto";
-import { VerterHost } from "@verter/native";
+import { VerterHost, captureAvailability } from "@verter/native";
 import { describe, expect, it } from "vitest";
 
 import type { FunctionType, TypeDescriptor } from "@verter/type-ir";
@@ -90,8 +90,15 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
       encodeRequest(canonicalId, "vue"),
     );
     expect(response).toBeInstanceOf(Buffer);
-    // Audit is enabled, so the record rides the result.
-    expect(auditRecord).not.toBeNull();
+    // Audit is enabled, so the record rides the result exactly when the
+    // binding captures (`semantic-observe`); a default binding resolves the
+    // same surface and carries no record (an absent field crosses NAPI as
+    // `undefined`).
+    if (captureAvailability() === "Available") {
+      expect(auditRecord).toBeInstanceOf(Buffer);
+    } else {
+      expect(auditRecord ?? null).toBeNull();
+    }
 
     const decoded = decodeFrameworkSurfaceResponse(new Uint8Array(response));
     expect("error" in decoded).toBe(false);

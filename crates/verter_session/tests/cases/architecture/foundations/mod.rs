@@ -496,6 +496,9 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // Public so `tests/cases/g_binder/binder_identity_facts.rs` can
         // drive the demand producer + read the artifact payload.
         "pub mod binder_identity_facts",
+        // Compile-time capture availability: `verter_napi` / `verter_wasm`
+        // report it from `captureAvailability`.
+        "pub mod capture",
         // Frozen eight-field carrier-owned compatibility cohort consumed by
         // B2 persistence/adoption and exercised by its owning module tests.
         "pub mod carrier_artifact_cohort",

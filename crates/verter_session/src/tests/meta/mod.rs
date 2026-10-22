@@ -676,6 +676,7 @@ fn render_runtime_macro(
 /// (fallthrough-phase ops). Disjoint types ⇒ the two phases' op costs are
 /// additive (no shared sub-resolution that would warm one phase from the
 /// other).
+#[cfg(feature = "semantic-observe")]
 fn upsert_mixed_budget_owner(project: &Arc<MetaProject>) {
     project
         .upsert_base(
@@ -720,6 +721,7 @@ defineProps<Partial<PropsBase>>()
 /// The mixed owner with the `v-bind` spread REMOVED — same props macro, no
 /// fallthrough spread — so the fallthrough phase charges ~0 ops. Isolates
 /// the RESOLVE-phase op cost `R`.
+#[cfg(feature = "semantic-observe")]
 fn upsert_mixed_budget_resolve_only_owner(project: &Arc<MetaProject>) {
     project
         .upsert_base(
@@ -798,6 +800,8 @@ fn upsert_macro_dto_budget_owner(project: &Arc<MetaProject>) {
 // ===========================================================================
 
 /// Helper to read the provenance counters from a MetaProject's host.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn provenance(project: &MetaProject) -> crate::meta_provenance::MetaProvenanceSnapshot {
     project.host().provenance().snapshot()
 }

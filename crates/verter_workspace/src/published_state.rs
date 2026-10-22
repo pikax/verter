@@ -233,12 +233,16 @@ impl PublishedRoot {
     /// however many resolutions ask. Read this together with
     /// [`Self::context_membership_table_clears`]: a non-zero clear count
     /// means the number below counts only since the last clear.
+    ///
+    /// Test-only: the tally exists only under `cfg(test)`.
+    #[cfg(test)]
     pub fn context_membership_evaluations(&self, canonical_id: &str) -> u64 {
         self.context_selection.evaluations(canonical_id)
     }
 
     /// How often this index's per-path membership table was cleared for
-    /// capacity.
+    /// capacity. Test-only, like the tally it qualifies.
+    #[cfg(test)]
     pub fn context_membership_table_clears(&self) -> u64 {
         self.context_selection.table_clears()
     }

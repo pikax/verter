@@ -32,10 +32,10 @@ fn materializer_context(
 /// The shared shape-engine fold peels aliases and normalizes intersection
 /// sentinels before classifying the root. Mapped carriers publish unless their
 /// value is the typed semantic-miss carrier.
-fn node_root_is_published_operator(
+fn node_root_is_published_operator<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
@@ -49,10 +49,10 @@ fn node_root_is_published_operator(
 /// `Navigate` plus a published-operator root is explicit consumer demand and
 /// therefore uses `Published(Navigate)`. Other `Navigate` roots remain
 /// structural transit; all other modes publish directly.
-pub(crate) fn node_materialize_reduction_context(
+pub(crate) fn node_materialize_reduction_context<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     mode: verter_type_engine::semantic_query::ProjectionMode,
@@ -70,10 +70,12 @@ pub(crate) fn node_materialize_reduction_context(
 
 /// Reduce a settled member node through the single semantic dispatch and emit
 /// the complete dependency signature to both active fact channels.
-pub(crate) fn reduce_member_value_graph_native_with_context(
+pub(crate) fn reduce_member_value_graph_native_with_context<
+    M: verter_audit::observe::ObserveExec,
+>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     _scope_canonical_id: &str,
     member_value: verter_type_engine::semantic_query::SemanticNodeId,
@@ -90,9 +92,9 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
 /// Append a contributing declaration scope's authoritative content hash to a
 /// cache fence. A missing hash makes the verdict non-cacheable; the keyed owner
 /// is already rooted separately and is not duplicated here.
-fn push_decl_scope_fence(
+fn push_decl_scope_fence<M: verter_audit::observe::ObserveExec>(
     ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     canonical: &str,
     scope_canonical_id: &str,
@@ -117,8 +119,10 @@ fn push_decl_scope_fence(
 /// The declaration is always resolved from its own canonical file. A missing
 /// contributing hash returns `None` for the fence so callers must refuse shared
 /// cache admission instead of manufacturing a stand-in fact.
-pub(crate) fn package_backed_object_like_root_identity_with_fence(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+pub(crate) fn package_backed_object_like_root_identity_with_fence<
+    M: verter_audit::observe::ObserveExec,
+>(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     scope_canonical_id: &str,
     root_identity: &verter_type_engine::semantic_query::DeclIdentity,
 ) -> (
