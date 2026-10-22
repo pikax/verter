@@ -847,6 +847,69 @@ fn raw_fallbacks_key_their_raw_text_not_their_provenance() {
     );
 }
 
+#[test]
+fn lexical_and_ambient_namespace_scope_ordinals_key_apart() {
+    use crate::semantic_query::{LocalScopeId, NodeLocalScopeId, NodeScopeId};
+
+    let graph = SemanticGraphStore::new();
+    let _build = graph.enter_node_root_scope();
+    let nodes = [
+        NodeLocalScopeId::Lexical(LocalScopeId(0)),
+        NodeLocalScopeId::AugmentationNamespace(0),
+        NodeLocalScopeId::AugmentationModule(0),
+    ]
+    .map(|address| {
+        let scope = NodeScopeId::File {
+            canonical_id: "/scopes.ts".into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: [0; 16],
+            local_scope: Some(address),
+        };
+        graph.intern_node_with_scope(
+            SemanticNodeData::new_bare_ref(Arc::from("Foo"), scope.clone(), Arc::from([])),
+            scope,
+        )
+    });
+    for (index, node) in nodes.iter().enumerate() {
+        for other in &nodes[..index] {
+            assert_ne!(node, other, "distinct inventories must intern apart");
+            assert!(
+                stable_key_for_node(&graph, *node) != stable_key_for_node(&graph, *other),
+                "stable keys must include the inventory discriminator",
+            );
+        }
+    }
+}
+
+#[test]
+fn enum_literals_key_their_declaring_ambient_module() {
+    use crate::semantic_query::{DeclIdentity, EnumLiteralType};
+
+    let graph = SemanticGraphStore::new();
+    let _build = graph.enter_node_root_scope();
+    let base = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(99.0)));
+    let nodes = [None, Some("pkg"), Some("other-pkg")].map(|module| {
+        graph.intern_node(SemanticNodeData::EnumLiteral(EnumLiteralType {
+            enum_decl: DeclIdentity {
+                canonical_id: "/ambient.d.ts".into(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [0; 16],
+                decl_name: "NS.E".into(),
+            },
+            module_specifier: module.map(Into::into),
+            member: "X".into(),
+            base,
+            member_count: 1,
+        }))
+    });
+    for (index, node) in nodes.iter().enumerate() {
+        for other in &nodes[..index] {
+            assert_ne!(node, other, "same-valued enum declarations remain distinct");
+            assert!(stable_key_for_node(&graph, *node) != stable_key_for_node(&graph, *other));
+        }
+    }
+}
+
 fn import_type(graph: &SemanticGraphStore, importer: Option<&str>) -> SemanticNodeId {
     use crate::semantic_query::NodeScopeId;
     let data = SemanticNodeData::new_import_type(

@@ -934,7 +934,9 @@ pub enum NodeScopeId {
         /// Exact authored top-level owner within `canonical_id`.
         owner: verter_type_expr::TopLevelOwnerId,
         whole_hash: HashValue,
-        local_scope: Option<u32>,
+        /// A typed address into the owning file generation's lexical-scope
+        /// table or retained ambient namespace-block inventory.
+        local_scope: Option<NodeLocalScopeId>,
     },
 }
 
@@ -966,14 +968,28 @@ impl NodeScopeId {
     }
 }
 
-/// The typed local-scope id that [`NodeScopeId::File::local_scope`] indexes.
+/// The inventory addressed by a declaration-bound node's inner scope.
+/// Equal ordinals in different inventories never name the same scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeLocalScopeId {
+    /// An index into the owning file's lowered local-scope table.
+    Lexical(LocalScopeId),
+    /// An index into the owning file generation's retained
+    /// `augmentation_namespace_blocks` inventory.
+    AugmentationNamespace(u32),
+    /// An index into the owning file generation's retained
+    /// `augmentation_blocks` inventory, for a module-root declaration body.
+    AugmentationModule(u32),
+}
+
+/// The typed index into the owning file's lexical local-scope table.
 ///
-/// `NodeScopeId::File` carries a `local_scope: Option<u32>` to disambiguate an
+/// `NodeScopeId::File` carries a [`NodeLocalScopeId::Lexical`] to disambiguate an
 /// inner lexical scope (a namespace body, a block, a lambda body, a type-param
 /// scope) from the file's top-level scope. `LocalScopeId` is the typed index
 /// into the owning file's [`IndexedReady`](crate::project_type_store::IndexedReady)
 /// / [`ShallowFileState`](crate::resolver_core::ShallowFileState) local-scope
-/// table that the raw `u32` denotes — a CONTENT-FREE id (an index, never a
+/// table — a CONTENT-FREE id (an index, never a
 /// sibling map), so a carrier that stores it stays compact and the resolver
 /// reconstructs the scope's sibling visibility from shallow file state on
 /// demand.
@@ -981,8 +997,7 @@ impl NodeScopeId {
 pub struct LocalScopeId(pub u32);
 
 impl LocalScopeId {
-    /// The raw `u32` index this id wraps — the value stored in
-    /// [`NodeScopeId::File::local_scope`].
+    /// The raw index within the lexical-scope table.
     #[must_use]
     pub fn index(self) -> u32 {
         self.0
@@ -1151,6 +1166,8 @@ pub struct EnumLiteralType {
     /// resolves to. Its `decl_name` is the enum's qualified name
     /// (`NS.Inner`), which is how the checker prints it.
     pub enum_decl: DeclIdentity,
+    /// The ambient module declaring the enum, when it has no file-scope identity.
+    pub module_specifier: Option<OwnedStr>,
     /// The member's name.
     pub member: OwnedStr,
     /// The value the member stands for.
@@ -1206,17 +1223,17 @@ construction_ordinal_seam! {
                 _ => None,
             })
             .collect();
-        let mut present: std::collections::HashMap<&DeclIdentity, u32> =
+        let mut present: std::collections::HashMap<(&DeclIdentity, &Option<OwnedStr>), u32> =
             std::collections::HashMap::new();
         for literal in literals.iter().flatten() {
-            *present.entry(&literal.enum_decl).or_default() += 1;
+            *present.entry((&literal.enum_decl, &literal.module_specifier)).or_default() += 1;
         }
-        let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
+        let mut printed = std::collections::HashSet::new();
         let mut arms = Vec::with_capacity(members.len());
         for (member, literal) in members.iter().zip(literals.iter()) {
             match literal {
-                Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
-                    if printed.insert(&literal.enum_decl) {
+                Some(literal) if present.get(&(&literal.enum_decl, &literal.module_specifier)) == Some(&literal.member_count) => {
+                    if printed.insert((&literal.enum_decl, &literal.module_specifier)) {
                         arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
                     }
                 }

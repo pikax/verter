@@ -242,7 +242,11 @@ producers. For queued-waiter cancellation, poll the acquire future to
 `Pending`, assert participant registration, then drop the future; a zero-duration
 timeout still pays a timer turn. Concurrency regressions
 should force the relevant orders and observe lock ownership at the decision
-boundary rather than rely on repeated probabilistic races. Fixture drain tasks
+boundary rather than rely on repeated probabilistic races. A flag set before
+`write_lock` signals intent, not an actually queued writer. Hold an existing
+reader and observe failed `try_read` admission when proving writer preference;
+release the held guard on assertion failure before joining the writer.
+Fixture drain tasks
 must abort on assertion failure as well as success.
 
 LSP mock foreign-target checks settle after both `ProviderDispatch` and

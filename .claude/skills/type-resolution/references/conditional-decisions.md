@@ -43,6 +43,43 @@ Concrete expectations:
 
 ## Operands A Decision Relates
 
+Conditional syntax lowering and graph-native view projection share
+`conditional_operand_context`: both relation operands use `Navigate` mode (or
+`Skeleton` for a skeleton demand), preserving declaration identity and type
+arguments for the shared relation authority. The check retains the caller's
+value demand so an unread indexed carrier cannot prove a reflexive relation.
+The extends pattern uses structural transit, so its nested mapped operators
+do not publish members while a decision reads its inputs. The selected branch
+retains the caller's publication context. Eagerly
+expanding an operand into its object body would bypass
+same-generic variance: `Cell<'a'> extends Cell<string>` is false for
+`interface Cell<in out T> { get(): T }`, despite the covariant member surface.
+Annotations already flow from the retained syntax through `NarrowTypeParam` to
+prepared declarations; `relation_variance` reads them before measuring any
+unannotated parameters. `authored_variance_annotations_decide_same_generic_relations`
+checks named publication and warm reuse for interfaces, classes and aliases in
+all four strictness settings. Flow-return probes alone do not exercise the
+publication lowering context.
+
+Transparent alias applications normalize independently on both sides before
+same-generic argument comparison. Target unions and intersections retain a
+declaration source until each arm is related; a source that itself names a
+composition keeps the ordinary source-distribution order. Structural targets
+continue to compare member shapes, and discriminant fallback reads the source
+structure after ordinary target-arm comparisons. Selected indexed references
+and recursive declaration carriers retain their identity through composition.
+Within an inference session, fixed annotated arguments are checked before
+candidate collection; other arguments keep the ordinary inference path and
+unannotated parameters keep their existing variance computation. A failed fixed
+argument still respects structural fallback for the whole declaration: an
+unreliable or unmeasurable unannotated parameter, or a covariant `void` target
+argument, can permit the structural comparison even when an annotated slot
+alone would reject it. Inferred and concrete rest-parameter targets exercise
+the same fallback.
+Named-publication tests cover these paths
+and unannotated covariance, contravariance, bivariance, independent parameters
+and unmeasurable-variance fallback, including warm reuse.
+
 A conditional is decided by relating its operands as the checker relates them; a decision is only as exact as the operands' shapes. The rules below keep the operand shapes a branch selection reads checker-faithful.
 
 - **Generic signature identity keeps deferred returns.** Contextual inference collects from parameters first, then from uninferred return positions. Two deferred conditional returns infer through corresponding checks, extends operands and branches, so an unused binder can align without replacing inference for generic signatures whose parameters differ. The shared `Identity` relation compares their `extends` operands semantically, resolving declaration carriers at every descent. Object member order, union/intersection member order, tuple labels and parameter names do not decide inequality; readonly, optionality and member types do. Optional member types include implicit `undefined` unless exact-optional policy preserves their authored types. Heritage bodies use the shared complete one-level surface; authored intersections retain their composite identity. Callable identity uses the signature kernel's exact positional, receiver, binder and result comparison; deferred conditional results compare their semantic operands and substituted branches. Sub-relations retain the relation transaction's binding barrier, SCC discharge, budget and freshness receipts. The canonical algebra keeps its conservative construction comparator; its `Distinct` is not semantic inequality for an unread deferred shape. A default constraint that is a union of closed types retains the conditional target's complete negative verdict. In the permissive test, a conditional with a wildcard check or `extends` operand is the wildcard itself, after error absorption and before generic deferral. Thus `Eq<{ a: 1 }, { a: 1 }>` is `true`, different closed arguments are `false`, and free outer arguments retain the conditional.
@@ -50,7 +87,7 @@ A conditional is decided by relating its operands as the checker relates them; a
 - **The permissive wildcard is a known internal value.** Its `QueryErrorDisposition::PermissiveWildcard` is distinct from a failed query, so a complete conditional reduction to it remains an exact internal fact. It has its own lattice extreme and retains the existing absorbing operator rules; real errors take precedence. Partial observations and real faults stay unavailable, and an error-channel wildcard still fails rather than acquiring public TypeScript syntax. `a_permissive_wildcard_is_an_exact_internal_operand` pins those fact-boundary controls.
 
 - **Accessor pairs are one property.** An interface or type-literal `get value(): T` / `set value(v: S)` pair lowers with its accessor kind (`verter_type_expr_oxc::interface_method_kind`, used by the type-expression lowerer, the shallow declaration lowerer and the member headers), never as two methods. A relation and an inference read the pair as ONE property of the getter's type (the setter's parameter type only when there is no getter), so `Ref<number> extends ShallowRef<infer V, unknown>` infers `number` and a reference whose setter-only argument differs (`Acc<number, number>` against `Acc<number, unknown>`) relates by the getter. A setter read as a method with no return type made every such relation undecided.
-- **Weak targets reject on every object route.** The weak-type check (`isWeakType` + `hasCommonProperties`) runs on the whole target before a structural comparison, including the record-shaped object shortcut (`try_object_vs_record_relation`), never on one intersection arm: `{ a: 1 } extends { [RawSymbol]?: true }` is false. Skipping it there selected Vue's `UnwrapRefSimple` raw branch for every plain object.
+- **Weak targets reject on every object route.** The weak-type check (`isWeakType` + `hasCommonProperties`) runs on the whole target before a structural comparison, including the record-shaped object shortcut (`try_object_vs_record_relation`), never on one intersection arm: `{ a: 1 } extends { [RawSymbol]?: true }` is false. It reads a declaration source's structural surface even while the constituent relations retain that source's declaration identity for variance. Skipping it there selected Vue's `UnwrapRefSimple` raw branch for every plain object.
 - **Package augmentations merge into the module they resolve to.** In a module file, a `declare module "<package>"` block augments the module FILE its specifier resolves to from the augmenting file (`fact_augments_resolved_module`; the `ResolvedRelativeCanonical` index target covers package and relative specifiers). A script's package declaration instead declares an ambient module of that name; relative matching retains its existing behavior. Vue's `RefUnwrapBailTypes`, declared empty by reactivity and augmented by runtime-core and runtime-dom through `declare module "@vue/reactivity"`, therefore holds both bail members, so `VNode` bails out of ref unwrapping. The resolver-free index invalidation treats every module-naming fact as a possible contributor to every resolved-file entry (over-invalidation is correctness-safe).
 - **Indexed operands relate as their member's type.** A relation settles an indexed-access operand at `Navigate` (`unwrap_identity_carrier_for_relation`), and the deferred evaluator reads an indexed member at `Navigate` under every structural-transit `Shallow` demand (`indexed_read_mode`), so an alias over one (`type Core = Bag["core"]`) instantiates to the member's type. A `Shallow` projected-path terminal is a one-level publication surface: for a union member (`Local | { $: number }`) that is the empty object its arms share, which every object satisfies — the relation then took `{ a: 1 } extends Bag["core"]` as true.
 - **An access of a type parameter is generic and relates through its constraint.** In the permissive test an access of the wildcard, or by it, is the wildcard (`getIndexedAccessType` over `wildcardType`): substitution folds `W["a"]` to `W`, so `{ a: T["a"] } extends { a: number }` is not definitely false. Outside an inference session a relation reads `T["a"]` (and `T["a"]["b"]`) as its constraint, `getConstraintOfIndexedAccess`: the same access of `T`'s constraint, `unknown` when `T` declares none, so the restrictive test (constraints dropped) fails for `{ a: number }` and the conditional stays deferred, as the checker defers it; it holds for `{ a: unknown }`, and for `{ a: {} }` without `strictNullChecks`, where the constrained relation then decides the true branch. The constraint is read only against a target that is no indexed access, deferred shell or type parameter (a union holding the access itself takes it), and a computed index of a constrained parameter stays undecided. The carrier unwrap keeps an access of a type parameter that the deferred evaluator reads as a miss as the operand it is, never the miss.
@@ -102,3 +139,9 @@ Known open rows, measured against TypeScript 7.0.2 and left unavailable rather t
 > **Superseding note (declaration augmentation):** `declaration-augmentation.md` describes cross-file augmentation discovery as relative-specifier only ("Relative-augmenter discovery …"). That is superseded: the resolved-file target covers package specifiers too, as described above. Fold this into `declaration-augmentation.md` at documentation closure.
 
 > **Superseding note (continuation-runtime completeness):** `continuation-runtime.md` says a task carries its cold-compute completeness and folds it into the lender. That is narrowed: each frame step runs in its own cold-compute completeness scope (`query_frames.rs`, the frame step), folds a partial step into that frame's build-local taint and discards the scope, so a step's partiality is frame-local — it reaches the frame's output through its taint and a consumer only through the delivery that consumer reads, never the native caller whose drive happens to step the frame. A non-root frame's partiality therefore reaches the task's `TaskCompletenessCarry` only through a consumer's delivery read; a child delivery no consumer reads contributes no partiality. The root delivery is the lender's read: `SemanticTask::poll` marks the request result partial from a partial root delivery (with its partial-reason classes) before the task returns to the lender. Fold this into `continuation-runtime.md` at documentation closure.
+
+## Tail calls through forwarding aliases
+
+Only a declaration whose own body is a conditional may follow a forwarding chain. Ordinary alias instantiation keeps its existing cycle carriers and one-hop work; eligibility is checked lazily when a result names a different declaration.
+
+A conditional tail call can return through aliases whose bodies only apply another declaration to their own bare type parameters. The tail recognizer follows those declared forwarding applications, substituting parameters by ordinal, and uses the existing exact-step and uniform-growth proofs for the original conditional. It never evaluates another conditional or descends through a constructor while recognizing the forwarding chain. Repeated declarations and cancellation stop recognition; unsupported bodies retain ordinary evaluation and its instantiation budget. This lets a growing conditional recover through an alias without spending the full budget on freshly minted applications.
