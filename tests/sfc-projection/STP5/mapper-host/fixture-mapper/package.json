@@ -1,0 +1,14 @@
+{
+  "name": "stp5-fixture-mapper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "STP5 fixture content mapper. The harness materializes this package into a temporary project and rewrites `typescript.contentMapper` per run.",
+  "typescript": {
+    "contentMapper": {
+      "exec": ["node", "server.mjs"],
+      "compilerOptions": ["strict"],
+      "dynamicConfig": true
+    }
+  }
+}

@@ -54,6 +54,10 @@ import {
   validateProbeManifest,
   verifyNode,
 } from "./verify-node.mjs";
+import {
+  HOST_CAPABILITY_OPERATIONS,
+  helpTextHasMapperHost,
+} from "../../tests/sfc-projection/STP5/protocol.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -597,32 +601,71 @@ test("STP5 verify: encoding, reject twins, and selected-build capability on both
     assert.ok(run.edits >= 1);
   }
   assert.equal(result.incremental, "fresh");
+  // Pin-agnostic: each engine's host rows follow its own executed probe. A
+  // build without a host records "no mapper host on <id>@<version>" on every
+  // host operation; a build with one is supported only from the end-to-end
+  // run. Moving the root pin to a mapper-capable build flips these rows
+  // without touching this test.
+  for (const engine of result.engines) {
+    const probe = probeMapperHost(engine, { helpTextHasMapperHost });
+    const hostRows = result.capabilityRows.filter(
+      (row) => row.engineId === engine.id && HOST_CAPABILITY_OPERATIONS.includes(row.operation),
+    );
+    assert.equal(hostRows.length, HOST_CAPABILITY_OPERATIONS.length, JSON.stringify(hostRows));
+    for (const row of hostRows) {
+      if (!probe.present) {
+        assert.equal(row.status, "blocking-upstream-defect", JSON.stringify(row));
+        assert.ok(
+          row.evidence.startsWith(`no mapper host on ${engine.id}@${engine.version}`),
+          JSON.stringify(row),
+        );
+      } else if (row.status === "supported") {
+        assert.equal(row.evidence, "executable-selected-build", JSON.stringify(row));
+      } else {
+        assert.ok(row.evidence.length > 0, JSON.stringify(row));
+      }
+    }
+  }
   const jsInit = result.capabilityRows.find(
     (row) => row.operation === "initialize" && row.engineId === "ts-js",
   );
-  const nativeInit = result.capabilityRows.find(
-    (row) => row.operation === "initialize" && row.engineId === "ts-native",
-  );
-  assert.ok(jsInit, JSON.stringify(result.capabilityRows));
-  assert.ok(nativeInit, JSON.stringify(result.capabilityRows));
-  assert.equal(jsInit.status, "blocking-upstream-defect");
-  assert.equal(nativeInit.status, "blocking-upstream-defect");
-  assert.match(jsInit.evidence, /ts-js@6\.0\.3 tsc --help/);
-  assert.match(nativeInit.evidence, /ts-native@7\.0\.2 tsc --help/);
+  assert.match(jsInit.evidence, /no mapper host on ts-js@6\.0\.3: tsc --help --all/);
   assert.equal(
     result.capabilityRows.filter((row) => row.operation === "encoding-negotiation").length,
     2,
   );
 });
 
-test("STP5 mapper-host probe uses tsc --help on the selected engine", () => {
+test("STP5 mapper-host probe records a skipped probe as no mapper host", () => {
   const skipped = probeMapperHost(
     { id: "ts-js", version: "6.0.3", kind: "javascript" },
     { helpTextHasMapperHost: () => true },
   );
   assert.equal(skipped.performed, false);
-  assert.match(skipped.evidence, /ts-js@6\.0\.3 mapper-host probe skipped/);
+  assert.match(skipped.evidence, /^no mapper host on ts-js@6\.0\.3: mapper-host probe skipped/);
   assert.doesNotMatch(skipped.evidence, /help\/API/);
+});
+
+test("STP5 mapper-host probe reads the full help (--help --all), where 7.1 lists --runExternalCode", () => {
+  // A stand-in executable that prints the flag only under --all, as
+  // TypeScript 7.1.0-beta does.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stp5-help-"));
+  try {
+    const script = path.join(dir, "tsc.js");
+    fs.writeFileSync(
+      script,
+      'console.log(process.argv.includes("--all") ? "--runExternalCode" : "tsc: The TypeScript Compiler");\n',
+    );
+    const probe = probeMapperHost(
+      { id: "ts-fake", version: "0.0.0", kind: "javascript", executable: script },
+      { helpTextHasMapperHost },
+    );
+    assert.equal(probe.performed, true);
+    assert.equal(probe.method, "tsc --help --all");
+    assert.equal(probe.present, true, probe.evidence);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("STP5 --require-all does not demand STP1 cases", async () => {
