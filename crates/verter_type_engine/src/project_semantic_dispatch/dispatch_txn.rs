@@ -331,7 +331,9 @@ pub(crate) enum RecursionCountMode {
     /// Declaration references distinguish their instantiated arguments.
     DistinctInstantiation(Arc<[SemanticNodeId]>),
     /// Function symbols count repeated visits to the same instance too.
-    EveryOccurrence,
+    /// `visit` is when the transaction first met the instance
+    /// ([`RelationDomainRuntime::signature_visits`]).
+    EveryOccurrence { visit: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -2445,6 +2447,13 @@ pub struct RelationDomainRuntime {
         usize,
         crate::semantic_query::checker_policy::RelationComplexity,
     )>,
+    /// The order in which this transaction first met each signature
+    /// instance as a recursion identity: its position stands in for the
+    /// checker's type id, which orders a type's creation, so an inference
+    /// walk reads an instance an earlier walk already expanded as the
+    /// cached, older type the checker's `isDeeplyNestedType` does not count
+    /// again. Every transaction starts empty, as a fresh checker does.
+    pub(crate) signature_visits: FxHashMap<SemanticNodeId, u32>,
     /// Per-session deferred-admission ledger.
     pub session_admission: SessionAdmissionLedger,
     /// SCC-closed members queued for the root's batched publish drain, and
