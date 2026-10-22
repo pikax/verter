@@ -839,18 +839,45 @@ pub struct BuildLocalTaint {
     /// build reports them with its own diagnostics, so a refusal reaches
     /// every read composed over the refused operation.
     pub(super) operation_refusals: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
-    /// The identity of the instantiation this frame builds, when it builds
-    /// one ([`instantiation_frame_identity`]): a same-path claim finds the
-    /// frame producing the claimed instantiation by it.
-    pub(super) produces: Option<u64>,
+    /// The instantiation this frame builds, when it builds one
+    /// ([`FrameProduction::of`]): a same-path claim finds the frame
+    /// producing the claimed instantiation by it.
+    pub(super) produces: Option<FrameProduction>,
 }
 
-/// The identity a frame building `key` records in
-/// [`BuildLocalTaint::produces`]: the hash of an `Instantiate` key, `None`
-/// for any other key.
-pub(super) fn instantiation_frame_identity(key: &SemanticQueryKey) -> Option<u64> {
-    use std::hash::BuildHasher;
-    matches!(key, SemanticQueryKey::Instantiate(_)).then(|| rustc_hash::FxBuildHasher.hash_one(key))
+/// The instantiation a build frame produces, in the family memo claim's own
+/// equality space: the exact key and the checking site it is produced at,
+/// as the claim matches its open producer. A frame building another key, or
+/// the same key at the other checking site, never stands in for the claim's
+/// producer.
+#[derive(Debug)]
+pub(super) struct FrameProduction {
+    key: SemanticQueryKey,
+    site: crate::semantic_query::checker_policy::TupleSplicePosition,
+}
+
+impl FrameProduction {
+    /// What a frame building `key` at `site` records in
+    /// [`BuildLocalTaint::produces`]: the key and site of an `Instantiate`,
+    /// `None` for any other key.
+    pub(super) fn of(
+        key: &SemanticQueryKey,
+        site: crate::semantic_query::checker_policy::TupleSplicePosition,
+    ) -> Option<Self> {
+        matches!(key, SemanticQueryKey::Instantiate(_)).then(|| Self {
+            key: key.clone(),
+            site,
+        })
+    }
+
+    /// Whether this is the production of exactly `key` at `site`.
+    pub(super) fn is(
+        &self,
+        key: &SemanticQueryKey,
+        site: crate::semantic_query::checker_policy::TupleSplicePosition,
+    ) -> bool {
+        self.site == site && self.key == *key
+    }
 }
 
 /// Append each of `roots` to `into` unless it is already there, keeping
@@ -5231,7 +5258,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // cold build never leaks a stale frame onto the stack.
             let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
             if let Some(frame) = self.build_local_taint.borrow_mut().last_mut() {
-                frame.produces = instantiation_frame_identity(key);
+                frame.produces = FrameProduction::of(key, self.checking_site.get());
             }
             // The build's carrier — every fact it traced, its fence and
             // prelude facts and its self-roots — is delivered to the tracers

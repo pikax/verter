@@ -1609,12 +1609,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut only_candidate = None;
         // With explicit type arguments every candidate is instantiated, and
         // the checker reports the argument error of the ONE candidate whose
-        // arity fits rather than TS2769 — continuing with it when it is also
-        // the candidate it recovers with (`getLongestCandidateIndex`: the
-        // first that takes as many parameters as the call has arguments).
-        let mut explicit_recovery = (visible.len() > 1 && !key.explicit_type_args.is_empty())
-            .then(|| self.sole_arity_fitting_candidate(visible, arguments))
+        // arity fits rather than TS2769, then continues with the candidate
+        // it recovers with (`getLongestCandidateIndex`: the first that takes
+        // as many parameters as the call has arguments) — the same one, or
+        // another whose instantiated return the call then takes.
+        let explicit_recovery = (visible.len() > 1 && !key.explicit_type_args.is_empty())
+            .then(|| self.explicit_overload_recovery(visible, arguments))
             .flatten();
+        let mut recovered_candidate = None;
         let mut raw_pairing = RawCandidatePairing::new(raw);
         for &applicability in passes {
             for (position, candidate) in visible.iter().enumerate() {
@@ -1671,6 +1673,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         false,
                         visible.len() == 1,
                         resumed.take().map(|resumed| resumed.candidate),
+                        None,
                     ),
                     Err(verdict) => verdict.into(),
                 };
@@ -1698,9 +1701,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return CandidateVerdict::Degraded(failure);
                     }
                 }
-                if visible.len() == 1 || explicit_recovery == Some(position) {
-                    explicit_recovery = None;
-                    only_candidate = Some((candidate, raw_candidate));
+                if visible.len() == 1
+                    || explicit_recovery.is_some_and(|explicit| explicit.reported == position)
+                {
+                    only_candidate.get_or_insert((candidate, raw_candidate));
+                }
+                if explicit_recovery.is_some_and(|explicit| {
+                    explicit.recovered == position && explicit.reported != position
+                }) {
+                    recovered_candidate.get_or_insert((candidate, raw_candidate));
                 }
             }
         }
@@ -1709,7 +1718,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // candidate (`getCandidateForOverloadFailure` picks the only one,
         // re-inferred from the arguments), carrying the diagnostic the
         // checker reports. It is checked under assignability, the one pass
-        // a single candidate has.
+        // a single candidate has. Under explicit type arguments the checker
+        // reports the arity-fitting candidate's argument error but recovers
+        // with its longest candidate: when that is another candidate, the
+        // call continues with it, carrying the fitting candidate's
+        // diagnostic.
         if let Some((candidate, raw_candidate)) = only_candidate {
             self.dispatch_txn.borrow_mut().call.applicability =
                 crate::semantic_query::RelationKind::Assignable;
@@ -1722,7 +1735,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 true,
                 true,
                 None,
+                None,
             );
+            let verdict = match (verdict, recovered_candidate) {
+                (CandidateVerdict::Selected(reported), Some((recovered, raw_recovered))) => {
+                    match reported.selection.recovery_diagnostic() {
+                        Some(diagnostic) => {
+                            if let Some(session) = reported.staged_session {
+                                self.abandon_session(session);
+                            }
+                            self.check_call_candidate(
+                                key,
+                                recovered,
+                                raw_recovered,
+                                arguments,
+                                &mut budget,
+                                true,
+                                true,
+                                None,
+                                Some(diagnostic),
+                            )
+                        }
+                        None => CandidateVerdict::Selected(reported),
+                    }
+                }
+                (verdict, _) => verdict,
+            };
             self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
             match verdict {
                 CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),
@@ -2234,6 +2272,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         recovery: bool,
         sole_candidate: bool,
         resume: Option<SuspendedCandidate>,
+        reported: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
     ) -> CandidateVerdict {
         let graph = self.graph();
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
@@ -2339,10 +2378,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let too_many = maximum.is_some_and(|maximum| arguments.len() > maximum);
         // The diagnostic the checker reports for this candidate when it is
         // the call's error-recovery candidate (`recovery`): the first
-        // failure applicability meets. An applicable candidate has none.
+        // failure applicability meets. An applicable candidate has none. A
+        // candidate recovering for another candidate's argument error
+        // (`reported`) reports that error instead.
         let mut failure = match &resume {
             Some(resume) => resume.failure,
-            None if recovery => contextual_diagnostic,
+            None if recovery => reported.or(contextual_diagnostic),
             None => None,
         };
         if too_few || too_many {
@@ -2363,14 +2404,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return CandidateVerdict::Mismatch;
                 }
             };
-            let mut arity = ArityEvidence::default();
-            arity.add(
-                required,
-                maximum.unwrap_or(ordinary_params.len()),
-                effective_rest,
-                arguments.len(),
-            );
-            failure = arity.recipe(arguments);
+            if reported.is_none() {
+                let mut arity = ArityEvidence::default();
+                arity.add(
+                    required,
+                    maximum.unwrap_or(ordinary_params.len()),
+                    effective_rest,
+                    arguments.len(),
+                );
+                failure = arity.recipe(arguments);
+            }
         }
         let arguments = if too_few || too_many {
             &arguments[..0]
@@ -5059,6 +5102,17 @@ fn assumption_is_relation_only(
     own_return_function.is_none_or(|function| !evidence.reaches_flow_function(function))
 }
 
+/// The candidates, by position, an explicit-type-argument overload failure
+/// reports and recovers with
+/// ([`ProjectSemanticDispatch::explicit_overload_recovery`]).
+#[derive(Debug, Clone, Copy)]
+struct ExplicitOverloadRecovery {
+    /// The one arity-fitting candidate, whose argument error is reported.
+    reported: usize,
+    /// The candidate the call continues with (`getLongestCandidateIndex`).
+    recovered: usize,
+}
+
 /// One uninferred type parameter a call bound to its declared default: the
 /// raw default and constraint, instantiated again when the call's
 /// inferences widen.
@@ -5089,16 +5143,18 @@ enum RestShape {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// The position of the one candidate of `visible` whose arity fits the
-    /// call's `arguments`, when it is also the first that takes at least
-    /// as many parameters as there are arguments (or has a rest). `None`
-    /// when no candidate, or several, fit, or the call spreads an argument
-    /// of unknown length.
-    fn sole_arity_fitting_candidate(
+    /// The candidates of `visible` an explicit-type-argument overload
+    /// failure reports and recovers with: the one candidate whose arity
+    /// fits the call's `arguments`, whose argument error the checker
+    /// reports, and the first that takes at least as many parameters as
+    /// there are arguments (or has a rest), which it recovers with
+    /// (`getLongestCandidateIndex`). `None` when no candidate, or several,
+    /// fit, or the call spreads an argument of unknown length.
+    fn explicit_overload_recovery(
         &self,
         visible: &[SignatureRef],
         arguments: &[CallArgument],
-    ) -> Option<usize> {
+    ) -> Option<ExplicitOverloadRecovery> {
         if arguments.iter().any(|argument| argument.indefinite_spread) {
             return None;
         }
@@ -5135,21 +5191,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 fitting = Some(position);
             }
         }
-        // The checker reports the fitting candidate's argument error but
-        // recovers with the longest candidate's signature
-        // (`getLongestCandidateIndex`). Recovery here is the fitting
-        // candidate, which answers the same only when both return the same
-        // instantiated type.
-        let (fitting, longest) = (fitting?, longest?);
-        if fitting == longest {
-            return Some(fitting);
-        }
-        let return_of =
-            |position: usize| match self.graph().node_data(visible[position].node)?.as_ref() {
-                SemanticNodeData::Signature { return_type, .. } => Some(*return_type),
-                _ => None,
-            };
-        (return_of(fitting)? == return_of(longest)?).then_some(fitting)
+        Some(ExplicitOverloadRecovery {
+            reported: fitting?,
+            recovered: longest?,
+        })
     }
 
     /// The parameter type a TS2345 names for the argument at `index`: an

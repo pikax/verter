@@ -300,13 +300,26 @@ fn non_isolated_and_other_profile_requests_compute_the_depth_refusal() {
     assert_eq!(replay.status(), sealed.status());
 }
 
+/// The status carries `CONNECTED_QUERY_DEPTH_LIMIT` among its partial
+/// reasons, whatever else it carries.
+fn status_has_depth_limit(status: verter_type_engine::semantic_query::FactStatus) -> bool {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet};
+    match status {
+        FactStatus::Complete => false,
+        FactStatus::Approximate(reasons, _) | FactStatus::Unavailable(reasons) => reasons
+            .get()
+            .contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
+    }
+}
+
 /// A real missing dependency beside the depth trip is a competing cause:
-/// both are delivered and the outcome is not retained. Supplying the input
-/// heals the missing-dependency cause, after which the remaining depth
-/// refusal is retained.
+/// both are delivered, on every round, and the outcome is not retained.
+/// Supplying the input heals the missing-dependency cause, after which the
+/// remaining depth refusal is retained.
 ///
 /// Mutation: admitting a set that also holds `MISSING_DEPENDENCY` in
-/// `classify_final_component_retention` fails this test.
+/// `classify_final_component_retention` fails this test, and so does
+/// dropping the depth trip when a missing dependency coexists.
 #[test]
 fn a_missing_input_beside_the_depth_trip_is_kept_and_vetoes_retention() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -325,6 +338,11 @@ fn a_missing_input_beside_the_depth_trip_is_kept_and_vetoes_retention() {
         assert!(
             status_has_missing_dependency(meta.status()),
             "the missing import is kept as its own cause: {:?}",
+            meta.status()
+        );
+        assert!(
+            status_has_depth_limit(meta.status()),
+            "the depth trip is delivered beside the missing import ({round}): {:?}",
             meta.status()
         );
         assert!(!meta.is_complete());

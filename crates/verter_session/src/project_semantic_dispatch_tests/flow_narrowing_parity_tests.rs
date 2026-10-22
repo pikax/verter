@@ -1340,14 +1340,21 @@ export function weak_member() { return po(um); }
 declare function pn(x: { o: { a?: number } }): void;
 declare const on: { o: number };
 export function weak_nested() { return pn(on); }
+declare function gd<T>(x: T, y: T, z: T): number;
+declare function gd<T>(x: T): string;
+export function differing_return() { return gd<string>(1); }
 "#;
 
 /// An optional target property or parameter reports against its declared
 /// type (`Type 'string' is not assignable to type 'number'.`), an overload
 /// set under explicit type arguments reports its one arity-fitting
-/// candidate's argument error, a union is related and printed in the
-/// checker's own order, and `strictNullChecks: false` leaves `null` and
-/// `undefined` out of every message. Measured on TypeScript 7.0.2.
+/// candidate's argument error and continues with the candidate the checker
+/// recovers with, its first taking as many parameters as the call has
+/// arguments (`getLongestCandidateIndex`): `gd<string>(1)` is `number`, that
+/// candidate's return, beside the fitting one's TS2345. A union is related
+/// and printed in the checker's own order, and `strictNullChecks: false`
+/// leaves `null` and `undefined` out of every message. Measured on
+/// TypeScript 7.0.2.
 #[test]
 fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability() {
     const ARG: &str = "is not assignable to parameter of type";
@@ -1378,6 +1385,12 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
             (
                 "reversed_explicit",
                 "(17,57)",
+                number_string.clone(),
+                number_string.clone(),
+            ),
+            (
+                "differing_return",
+                "(65,56)",
                 number_string.clone(),
                 number_string.clone(),
             ),
@@ -1541,6 +1554,10 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
         }
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        assert_prints(&host, root, "reversed_explicit", "string");
+        assert_prints(&host, root, "differing_return", "number");
+    }
 }
 
 const CALL_REPORT_IDENTITY: &str = r#"declare function assertNever(x: never): never;
