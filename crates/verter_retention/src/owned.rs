@@ -664,7 +664,7 @@ pub(crate) fn read_node(node: &dyn Node) -> NodeReading {
                 node.block_bytes() + arc_block_bytes(std::mem::size_of::<RetentionCharge>()),
             )
         }),
-        children: registered.unwrap_or(measured_children),
+        children: registered.unwrap_or_else(|| measured_children.into_boxed_slice()),
     }
 }
 
