@@ -158,14 +158,12 @@ impl InputResolutionRetention {
     /// witnesses into a new [`crate::AttemptOutput`] and dropping it would
     /// produce. When even an all-new set fits, `keys` is never called; only
     /// at the edge of the budget are the witnesses already retained looked
-    /// up. Outside any scope a new output gets a fresh default ledger.
-    pub(crate) fn current_admits_fresh_completed_witnesses<I>(
+    /// up, and `keys` is built before the ledger is locked. Outside any
+    /// scope a new output gets a fresh default ledger.
+    pub(crate) fn current_admits_fresh_completed_witnesses(
         distinct: usize,
-        keys: impl FnOnce() -> I,
-    ) -> Result<(), verter_session_query::resolution::AttemptFailure>
-    where
-        I: IntoIterator<Item = CompletedWitnessRetentionKey>,
-    {
+        keys: impl FnOnce() -> Vec<CompletedWitnessRetentionKey>,
+    ) -> Result<(), verter_session_query::resolution::AttemptFailure> {
         CURRENT_RETENTION.with(|current| match current.borrow().last() {
             Some(retention) => retention.admits_fresh_completed_witnesses(distinct, keys),
             None => {
@@ -175,19 +173,41 @@ impl InputResolutionRetention {
         })
     }
 
-    fn admits_fresh_completed_witnesses<I>(
+    fn admits_fresh_completed_witnesses(
         &self,
         distinct: usize,
-        keys: impl FnOnce() -> I,
-    ) -> Result<(), verter_session_query::resolution::AttemptFailure>
-    where
-        I: IntoIterator<Item = CompletedWitnessRetentionKey>,
-    {
-        let retained = self
-            .state
+        keys: impl FnOnce() -> Vec<CompletedWitnessRetentionKey>,
+    ) -> Result<(), verter_session_query::resolution::AttemptFailure> {
+        let (current, _, maximum) = self.completed_witness_occupancy(&self.lock_witnesses());
+        if u64::from(current) + distinct as u64 <= u64::from(maximum) {
+            return Ok(());
+        }
+        let keys = keys();
+        let retained = self.lock_witnesses();
+        let (current, forced, maximum) = self.completed_witness_occupancy(&retained);
+        let new = keys
+            .iter()
+            .filter(|key| !retained.contains_key(key))
+            .count();
+        admit_new_witnesses(current, new, forced, maximum)
+    }
+
+    fn lock_witnesses(
+        &self,
+    ) -> std::sync::MutexGuard<'_, FxHashMap<CompletedWitnessRetentionKey, u64>> {
+        self.state
             .completed_witnesses
             .lock()
-            .expect("completed-witness retention lock poisoned");
+            .expect("completed-witness retention lock poisoned")
+    }
+
+    /// The retained count a new witness is admitted against (a forced test
+    /// count when one is set, which does not grow as witnesses are added),
+    /// whether it is forced, and the budget.
+    fn completed_witness_occupancy(
+        &self,
+        retained: &FxHashMap<CompletedWitnessRetentionKey, u64>,
+    ) -> (u32, bool, u32) {
         #[cfg(test)]
         let forced = self
             .state
@@ -205,15 +225,11 @@ impl InputResolutionRetention {
         };
         #[cfg(not(test))]
         let current = u32::try_from(retained.len()).unwrap_or(u32::MAX);
-        let maximum = self.state.budgets.completed_witness_retention();
-        if u64::from(current) + distinct as u64 <= u64::from(maximum) {
-            return Ok(());
-        }
-        let new = keys()
-            .into_iter()
-            .filter(|key| !retained.contains_key(key))
-            .count();
-        admit_new_witnesses(current, new, forced, maximum)
+        (
+            current,
+            forced,
+            self.state.budgets.completed_witness_retention(),
+        )
     }
 
     pub(crate) fn release_completed_witness(&self, key: &CompletedWitnessRetentionKey) {

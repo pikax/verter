@@ -12,12 +12,28 @@
 //! a rollback mechanism for the discard rules
 //! below (a blocked/terminal candidate must not leave partial writes in
 //! the caller's accumulator) — but [`crate::AttemptOutput`]
-//! deliberately has no public truncate/reset. The evaluator therefore
-//! returns `KernelAttempt<Option<T>>`, reusing the
-//! `CompletedAttempt<T>`/`KernelAttempt<T>` envelope (this file's own
-//! envelope: each candidate's own `Complete`
-//! carries its own fresh output, `NeedInputs`/`Terminal` carry none
-//! (structurally — no rollback needed, discard falls out of the type).
+//! deliberately has no public truncate/reset. Two evaluator shapes keep
+//! the discard rules without one:
+//!
+//! - [`PriorityFrontierState::push`] takes a `KernelAttempt<Option<T>>`,
+//!   reusing the `CompletedAttempt<T>`/`KernelAttempt<T>` envelope: each
+//!   candidate's own `Complete` carries its own fresh output and
+//!   `NeedInputs`/`Terminal` carry none (structurally — no rollback
+//!   needed, discard falls out of the type).
+//! - [`PriorityFrontierState::push_recorded`] serves an evaluator that
+//!   records straight into the frontier's live output, through the
+//!   [`CandidateOutput`] the frontier hands it, instead of building an
+//!   output per candidate. Nothing is ever rolled back, so such an
+//!   evaluator reads every observation first and records only once its
+//!   outcome is known to be complete: a candidate that needs an input
+//!   records nothing. That is checked in debug builds. It matters even
+//!   though a blocked frontier never publishes its output: witnesses left
+//!   in the live output stay retained in the operation's ledger, where the
+//!   budget checks of later discarded candidates would count them. A
+//!   `Terminal` may follow partial writes, because before a block it ends
+//!   the frontier and its output with it (rule 6), and after a block the
+//!   frontier records nothing (rules 1 and 5).
+//!
 //! The semantics are the ten rules below.
 //!
 //! ## Rules
@@ -56,6 +72,10 @@ use verter_session_query::resolution::{
 /// and resume without putting that graph depth on the native call stack.
 pub(crate) struct PriorityFrontierState {
     expected_basis: ResolutionBasis,
+    /// Whether the candidate being evaluated has recorded into
+    /// `accumulated` (see the module docs: a candidate that needs an input
+    /// must not have).
+    candidate_recorded: bool,
     /// The output kept so far, created on the first output the frontier
     /// keeps. A frontier that ends blocked never builds one.
     accumulated: Option<AttemptOutput>,
@@ -84,10 +104,14 @@ pub(crate) enum CandidateOutput<'a> {
 pub(crate) struct Accumulator<'a> {
     output: &'a mut Option<AttemptOutput>,
     retention: &'a InputResolutionRetention,
+    recorded: &'a mut bool,
 }
 
 impl Accumulator<'_> {
+    /// The frontier's output, for a candidate whose outcome is known to be
+    /// complete (a hit, a miss, or a terminal failure while recording).
     pub(crate) fn output(&mut self) -> &mut AttemptOutput {
+        *self.recorded = true;
         let retention = self.retention;
         self.output
             .get_or_insert_with(|| AttemptOutput::new_in(retention.clone()))
@@ -97,6 +121,9 @@ impl Accumulator<'_> {
 /// A candidate whose output was already handled through [`CandidateOutput`].
 pub(crate) enum RecordedCandidate<T> {
     Hit(T),
+    /// A hit evaluated after a block, where it cannot win (rule 5): its
+    /// answer is never spelled.
+    DiscardedHit,
     Miss,
     NeedInputs(LoadSet),
     /// One missing input, under the basis of the snapshot that lacked it:
@@ -113,6 +140,7 @@ impl PriorityFrontierState {
     ) -> Self {
         Self {
             expected_basis,
+            candidate_recorded: false,
             accumulated: None,
             retention: InputResolutionRetention::current_or_default(),
             blocked: None,
@@ -121,12 +149,14 @@ impl PriorityFrontierState {
 
     /// Where the next candidate's output goes; see [`CandidateOutput`].
     pub(crate) fn candidate_output(&mut self) -> CandidateOutput<'_> {
+        self.candidate_recorded = false;
         if self.blocked.is_some() {
             return CandidateOutput::Discard;
         }
         CandidateOutput::Accumulate(Accumulator {
             output: &mut self.accumulated,
             retention: &self.retention,
+            recorded: &mut self.candidate_recorded,
         })
     }
 
@@ -194,6 +224,17 @@ impl PriorityFrontierState {
         &mut self,
         candidate: RecordedCandidate<T>,
     ) -> Option<KernelAttempt<Option<T>>> {
+        // A pure predicate, checked in debug builds only.
+        #[cfg(debug_assertions)]
+        assert!(
+            !(self.candidate_recorded
+                && matches!(
+                    candidate,
+                    RecordedCandidate::NeedInput(..) | RecordedCandidate::NeedInputs(_)
+                )),
+            "a candidate that needs an input recorded into the frontier's output"
+        );
+        self.candidate_recorded = false;
         match candidate {
             RecordedCandidate::Hit(hit) => Some(match self.blocked.take() {
                 // Rule 5: a lower-priority hit after a higher block cannot
@@ -208,6 +249,15 @@ impl PriorityFrontierState {
                     self.take_accumulated(),
                 )),
             }),
+            // Rule 5, for a hit only ever evaluated after a block.
+            RecordedCandidate::DiscardedHit => Some(AttemptOutcome::NeedInputs(LoadSet::new(
+                self.blocked
+                    .take()
+                    .expect("a discarded hit is evaluated only after a block")
+                    .into_iter()
+                    .collect(),
+                self.expected_basis,
+            ))),
             // Rule 1: a miss after a block contributes nothing.
             RecordedCandidate::Miss => None,
             RecordedCandidate::NeedInputs(load_set) => {

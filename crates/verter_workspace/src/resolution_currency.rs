@@ -3587,7 +3587,7 @@ impl ResolutionTransaction {
     }
 
     fn observe_recovery_chain(&mut self, canonical: &str) {
-        for prefix in ancestor_scope_prefixes(canonical) {
+        for prefix in verter_session_query::resolution::ancestor_scope_prefixes(canonical) {
             self.observe(ResolutionFactKey::RecoveryScope {
                 canonical_prefix: CanonicalResolutionId::new(prefix),
                 population: self.population(),
@@ -3629,19 +3629,9 @@ impl ResolutionTransaction {
 }
 
 pub(crate) fn ancestor_scopes(path: &str) -> Vec<String> {
-    ancestor_scope_prefixes(path).map(str::to_owned).collect()
-}
-
-/// The prefixes [`ancestor_scopes`] lists, nearest first, borrowed from
-/// `path` instead of copied.
-fn ancestor_scope_prefixes(path: &str) -> impl Iterator<Item = &str> {
-    let mut current = Some(path);
-    std::iter::from_fn(move || {
-        let index = current?.rfind('/')?;
-        let prefix = if index == 0 { "/" } else { &current?[..index] };
-        current = (prefix != "/").then_some(prefix);
-        Some(prefix)
-    })
+    verter_session_query::resolution::ancestor_scope_prefixes(path)
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(test)]

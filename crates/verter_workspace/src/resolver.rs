@@ -1063,7 +1063,7 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                     ));
                 }
 
-                let mut new_keys = Vec::with_capacity(delta.len());
+                let mut new_keys = Vec::new();
                 let mut new_key_bytes = 0_u64;
                 for key in &delta {
                     if !ledger.unique_keys.contains(key) {

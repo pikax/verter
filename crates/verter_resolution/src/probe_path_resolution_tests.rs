@@ -268,13 +268,13 @@ fn barrel_views(directory: &str, count: usize) -> (ResolverAttemptView, Resolver
         for index in 0..count {
             let base = format!("{directory}/leaf-{index}");
             let leaf = format!("{base}.ts");
-            for candidate in super::build_probe_candidate_list(&base, true, true) {
-                let probe = if *candidate == *leaf {
+            for candidate in super::build_probe_candidate_list(&base, true, true).iter() {
+                let probe = if **candidate == *leaf {
                     verter_session_query::resolution::PathProbe::File
                 } else {
                     verter_session_query::resolution::PathProbe::Absent
                 };
-                snapshot.insert_path_probe(candidate, probe);
+                snapshot.insert_path_probe(Arc::clone(candidate), probe);
             }
             if with_realpaths {
                 snapshot.insert_real_path(leaf.as_str(), Some(Arc::from(leaf.as_str())));
@@ -567,7 +567,7 @@ fn frontier_summary(
 fn the_probe_frontier_matches_building_an_output_per_candidate() {
     use verter_session_query::resolution::PathProbe::{Absent, File};
 
-    let candidates = |base: &str| super::build_probe_candidate_list(base, true, true);
+    let candidates = |base: &str| super::build_probe_candidate_list(base, true, true).to_vec();
     let listed = |paths: &[&str]| {
         paths
             .iter()
@@ -676,4 +676,69 @@ fn the_probe_frontier_matches_building_an_output_per_candidate() {
     // Revert control: admitting nothing after a block (treating every
     // discarded miss as fitting) unions the unknown probe in the budget-edge
     // case, so its needed inputs differ from the reference.
+}
+
+/// Imports spread over several directories, some resolving through their
+/// directory index and every one through a link into a store, touch more
+/// directories than a handful: each import's own directory, its index
+/// directory, and the real directory it follows. Their recovery-scope
+/// chains are still spelled once each, however often the imports repeat.
+#[test]
+fn recovery_scope_chains_are_spelled_once_across_many_directories() {
+    let packages = 6;
+    let mut files = Vec::new();
+    let mut realpaths = Vec::new();
+    for package in 0..packages {
+        let (file, real) = if package % 2 == 0 {
+            (
+                format!("/r/pkg-{package}/src/mod.ts"),
+                format!("/r/store/pkg-{package}/mod.ts"),
+            )
+        } else {
+            (
+                format!("/r/pkg-{package}/src/mod/index.ts"),
+                format!("/r/store/pkg-{package}/index.ts"),
+            )
+        };
+        files.push(file);
+        realpaths.push(real);
+    }
+    let file_refs: Vec<(&str, &str)> = files.iter().map(|file| (file.as_str(), "")).collect();
+    let link_refs: Vec<(&str, &str)> = files
+        .iter()
+        .zip(&realpaths)
+        .map(|(file, real)| (file.as_str(), real.as_str()))
+        .collect();
+    let view = known_world_view(&file_refs, &link_refs);
+    let imports: Vec<_> = (0..packages)
+        .map(|package| {
+            super::build_probe_candidate_list(&format!("/r/pkg-{package}/src/mod"), true, true)
+        })
+        .collect();
+    // Each package's source directory and store directory, and the index
+    // directory of every package resolved through its index.
+    let directories = packages * 2 + packages / 2;
+
+    let mut builds_per_round = Vec::new();
+    for _round in 0..3 {
+        let ((), work) = probe_work(|| {
+            for (package, candidates) in imports.iter().enumerate() {
+                match super::evaluate_probe_candidates(&view, basis(), candidates) {
+                    AttemptOutcome::Complete(CompletedAttempt {
+                        value: Some(value), ..
+                    }) => assert_eq!(value, realpaths[package]),
+                    other => panic!("expected package {package} to resolve, got {other:?}"),
+                }
+            }
+        });
+        builds_per_round.push(work.scope_chains_built);
+    }
+    assert_eq!(
+        builds_per_round,
+        [directories as u64, 0, 0],
+        "every directory's chain is spelled once, then reused"
+    );
+
+    // Revert control: a cache of four directories replaced in turn cycles
+    // through these directories and spells their chains again every round.
 }
