@@ -351,10 +351,10 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
 
 /// Resolve exact direct local call targets after discovery: a bare
 /// identifier callee whose name binds a served function in the same index
-/// (same file, same namespace qualification) targets the highest-ordinal
-/// entry for that name — the trailing implementation of its overload
-/// group. Computed callees, member calls, and unresolved names are never
-/// direct calls.
+/// (same file, the caller's namespace or an enclosing one, innermost
+/// first) targets the highest-ordinal entry for that name — the trailing
+/// implementation of its overload group. Computed callees, member calls,
+/// and unresolved names are never direct calls.
 fn resolve_direct_calls(entries: &mut [FunctionProgramDiscovery]) {
     let candidates: Vec<(
         verter_type_expr::OwnedStr,
@@ -384,29 +384,7 @@ fn resolve_direct_calls(entries: &mut [FunctionProgramDiscovery]) {
             let FunctionEffectCallee::Identifier(callee) = &effect.callee else {
                 continue;
             };
-            // Lexical preference: the namespace-qualified binding
-            // (`N.callee`) shadows the file-global one, exactly like
-            // scoped name resolution — never the globally-highest overload
-            // ordinal across both spellings.
-            let best_for = |spelling: &str| {
-                candidates
-                    .iter()
-                    .filter(|(name, part, _, _)| {
-                        name.as_ref() == spelling
-                            && matches!(
-                                part,
-                                FunctionPartIdentity::DeclarationBody
-                                    | FunctionPartIdentity::Initializer
-                            )
-                    })
-                    .max_by_key(|(_, _, ordinal, _)| *ordinal)
-                    .map(|(_, _, _, key)| key.clone())
-            };
-            let target = caller_ns
-                .as_ref()
-                .and_then(|ns| best_for(&format!("{ns}.{callee}")))
-                .or_else(|| best_for(callee));
-            if let Some(target) = target {
+            if let Some(target) = scoped_call_target(&candidates, caller_ns.as_deref(), callee) {
                 direct.push(FunctionDirectCall {
                     span: effect.span,
                     target,
@@ -415,6 +393,46 @@ fn resolve_direct_calls(entries: &mut [FunctionProgramDiscovery]) {
         }
         entry.direct_calls = Arc::from(direct.into_boxed_slice());
     }
+}
+
+/// The served function a bare-identifier call binds from a caller declared
+/// in namespace `caller_ns`: lexical preference, so the innermost
+/// namespace-qualified binding (`N.A.B.callee`) shadows each enclosing
+/// namespace's (`N.A.callee`, then `N.callee`) and those the file-global
+/// one, exactly like scoped name resolution. Within the binding scope the
+/// highest overload ordinal wins — the trailing implementation — never the
+/// globally-highest ordinal across spellings.
+fn scoped_call_target(
+    candidates: &[(
+        verter_type_expr::OwnedStr,
+        FunctionPartIdentity,
+        u32,
+        FunctionProgramKey,
+    )],
+    caller_ns: Option<&str>,
+    callee: &str,
+) -> Option<FunctionProgramKey> {
+    let best_for = |spelling: &str| {
+        candidates
+            .iter()
+            .filter(|(name, part, _, _)| {
+                name.as_ref() == spelling
+                    && matches!(
+                        part,
+                        FunctionPartIdentity::DeclarationBody | FunctionPartIdentity::Initializer
+                    )
+            })
+            .max_by_key(|(_, _, ordinal, _)| *ordinal)
+            .map(|(_, _, _, key)| key.clone())
+    };
+    let mut scope = caller_ns;
+    while let Some(ns) = scope {
+        if let Some(key) = best_for(&format!("{ns}.{callee}")) {
+            return Some(key);
+        }
+        scope = ns.rsplit_once('.').map(|(outer, _)| outer);
+    }
+    best_for(callee)
 }
 
 /// Whether `scope` lexically contains `site`.
@@ -1160,33 +1178,11 @@ fn resolve_call_site_targets(entries: &mut [FunctionProgramDiscovery]) {
             let FunctionEffectCallee::Identifier(callee) = &site.callee else {
                 continue;
             };
-            // Lexical preference: the namespace-qualified binding
-            // (`N.callee`) shadows the file-global one, exactly like
-            // scoped name resolution — never the globally-highest overload
-            // ordinal across both spellings.
-            let best_for = |spelling: &str| {
-                candidates
-                    .iter()
-                    .filter(|(name, part, _, _)| {
-                        name.as_ref() == spelling
-                            && matches!(
-                                part,
-                                FunctionPartIdentity::DeclarationBody
-                                    | FunctionPartIdentity::Initializer
-                            )
-                    })
-                    .max_by_key(|(_, _, ordinal, _)| *ordinal)
-                    .map(|(_, _, _, key)| key.clone())
-            };
             let nested = nested_declarations.iter().find_map(|(parent, name, key)| {
                 (parent == &entry.key && name.as_ref() == callee.as_ref()).then(|| key.clone())
             });
-            site.target = nested.or_else(|| {
-                caller_ns
-                    .as_ref()
-                    .and_then(|ns| best_for(&format!("{ns}.{callee}")))
-                    .or_else(|| best_for(callee))
-            });
+            site.target =
+                nested.or_else(|| scoped_call_target(&candidates, caller_ns.as_deref(), callee));
         }
         entry.call_sites = Arc::from(sites.into_boxed_slice());
     }
@@ -3874,8 +3870,8 @@ enum DeclRef<'a> {
     /// A class declaration.
     #[cfg(any(test, feature = "test-support"))]
     Class(&'a Class<'a>),
-    /// A namespace or module declaration's block (`None` for a bodiless
-    /// module or a dotted namespace, whose body is the inner namespace).
+    /// A namespace or module declaration's block, past a dotted name's
+    /// segments (`None` for a bodiless module).
     Module(Option<&'a oxc_ast::ast::TSModuleBlock<'a>>),
     /// An `export default { … }` object expression.
     #[cfg(any(test, feature = "test-support"))]
@@ -3899,13 +3895,18 @@ fn class_declaration_of<'a>(statement: &'a Statement<'a>) -> Option<&'a Class<'a
     }
 }
 
-/// A namespace declaration's own block (`None` for a dotted namespace).
+/// A namespace declaration's block, past a dotted name's segments
+/// (`namespace A.B.C { … }` is `C`'s block).
 fn namespace_block<'a>(
-    module: &'a oxc_ast::ast::TSNamespaceDeclaration<'a>,
-) -> Option<&'a oxc_ast::ast::TSModuleBlock<'a>> {
-    match &module.body {
-        oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => Some(block),
-        oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => None,
+    mut module: &'a oxc_ast::ast::TSNamespaceDeclaration<'a>,
+) -> &'a oxc_ast::ast::TSModuleBlock<'a> {
+    loop {
+        match &module.body {
+            oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => return block,
+            oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
+                module = inner;
+            }
+        }
     }
 }
 
@@ -3916,7 +3917,9 @@ fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
         Statement::VariableDeclaration(decl) => Some(DeclRef::Variable(decl)),
         #[cfg(any(test, feature = "test-support"))]
         Statement::ClassDeclaration(class) => Some(DeclRef::Class(class)),
-        Statement::TSNamespaceDeclaration(module) => Some(DeclRef::Module(namespace_block(module))),
+        Statement::TSNamespaceDeclaration(module) => {
+            Some(DeclRef::Module(Some(namespace_block(module))))
+        }
         Statement::TSExternalModuleDeclaration(module) => {
             Some(DeclRef::Module(module.body.as_deref()))
         }
@@ -3926,7 +3929,7 @@ fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
             #[cfg(any(test, feature = "test-support"))]
             Declaration::ClassDeclaration(class) => Some(DeclRef::Class(class)),
             Declaration::TSNamespaceDeclaration(module) => {
-                Some(DeclRef::Module(namespace_block(module)))
+                Some(DeclRef::Module(Some(namespace_block(module))))
             }
             Declaration::TSExternalModuleDeclaration(module) => {
                 Some(DeclRef::Module(module.body.as_deref()))

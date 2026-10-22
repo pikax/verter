@@ -18,6 +18,9 @@ import {
   BENCH_TAG,
   buildSummary,
   defaultValidator,
+  invokeSoakRunner,
+  SOAK_BUILD,
+  SOAK_METRICS,
   loadManifest,
   main,
   MANIFEST_DIR,
@@ -544,5 +547,265 @@ describe("worker record", () => {
     const path = join(freshDir(), "w.json");
     writeFileSync(path, JSON.stringify({ id: "x", tags: "bench-m3" }));
     assert.throws(() => readWorker(path), /list of string tags/);
+  });
+});
+
+describe("soak manifests", () => {
+  const registered = () =>
+    JSON.parse(readFileSync(join(MANIFEST_DIR, "rev11-l1-soak.json"), "utf8"));
+  const problemsOf = (edit) => {
+    const manifest = registered();
+    edit(manifest);
+    return validateManifest(manifest, "rev11-l1-soak.json").problems;
+  };
+
+  test("the registered soak manifest resolves to both modes of the full workload", () => {
+    const { run } = loadManifest("rev11-l1-soak");
+    assert.deepEqual(run.soak, { modes: ["normal", "pressure"], tranches: 100 });
+  });
+
+  test("surge bounds are complete finite registrations, independent of requested work", () => {
+    assert.deepEqual(
+      problemsOf(() => {}),
+      [],
+    );
+    for (const edit of [
+      (m) => delete m.soak.surgeLimits,
+      (m) => delete m.soak.surgeLimits.full,
+      (m) => (m.soak.surgeLimits.bounded = null),
+      (m) => (m.soak.surgeLimits.full.extra = 1),
+      ...Object.keys(registered().soak.surgeLimits.full).flatMap((field) => [
+        (m) => delete m.soak.surgeLimits.full[field],
+        (m) => (m.soak.surgeLimits.full[field] = 0),
+        (m) => (m.soak.surgeLimits.full[field] = Number.MAX_SAFE_INTEGER + 1),
+      ]),
+      (m) => (m.soak.surgeLimits.full.modules += 1),
+      (m) => (m.soak.surgeLimits.full.concurrency += 1),
+      (m) => (m.soak.surgeLimits.full.retainedBytesMax = 2 ** 30 + 1),
+      (m) => (m.soak.surgeLimits.bounded.retainedBytesMax = 2 ** 26 + 1),
+    ]) {
+      const problems = problemsOf(edit);
+      assert.ok(
+        problems.some((p) => /soak.surgeLimits/.test(p)),
+        problems.join("\n"),
+      );
+    }
+  });
+
+  test("a time or memory metric outside a bench-m3-only cell is rejected", () => {
+    const problems = problemsOf((m) => m.requiredCells[0].metrics.push("peakRssBytes"));
+    assert.ok(
+      problems.some((p) => /mark the cell benchM3Only/.test(p)),
+      problems.join("\n"),
+    );
+  });
+
+  test("a workload below the distinct-query floor or without a digest is rejected", () => {
+    assert.ok(
+      problemsOf((m) => (m.soak.workloads.normal.distinctQueries = 2999)).some((p) =>
+        /fewer than 3000 distinct queries/.test(p),
+      ),
+    );
+    assert.ok(
+      problemsOf((m) => (m.soak.workloads.pressure.digest = "nope")).some((p) =>
+        /soak.workloads.pressure needs a sha-256 digest/.test(p),
+      ),
+    );
+  });
+
+  test("the full run binds only to bench-m3 and samples at least every 100 actions", () => {
+    assert.ok(problemsOf((m) => (m.soak.binding.full = "any")).some((p) => /soak.binding/.test(p)));
+    assert.ok(
+      problemsOf((m) => (m.soak.sampleEvery = 101)).some((p) => /at least every 100/.test(p)),
+    );
+  });
+
+  test("the run declares exactly the soak-support build of the runner", () => {
+    assert.deepEqual(registered().soak.build, SOAK_BUILD);
+    for (const edit of [
+      (m) => delete m.soak.build,
+      (m) => (m.soak.build.features = []),
+      (m) => m.soak.build.features.push("semantic-observe"),
+      (m) => (m.soak.build.profile = "dev"),
+    ])
+      assert.ok(
+        problemsOf(edit).some((p) => /soak.build must declare the support-feature build/.test(p)),
+      );
+  });
+
+  test("surge figures are the surges' own deltas and window peaks, not lifetime counters", () => {
+    const result = {
+      summary: {
+        records: [
+          { class: "cold-demand", refusalsPressure: 50 },
+          {
+            class: "pressure-surge",
+            refusalsPressure: 2,
+            refusalsOversized: 1,
+            pressure: { refusalsActive: 0, active: { attributedPeak: 10 } },
+          },
+          {
+            class: "pressure-surge",
+            refusalsPressure: 3,
+            refusalsOversized: 0,
+            pressure: { refusalsActive: 0, active: { attributedPeak: null } },
+          },
+        ],
+        samples: [{ at: "closed", counts: { refusalsPressure: 99, peakTotalBytes: 1e12 } }],
+      },
+    };
+    assert.equal(SOAK_METRICS.surgeRefusalsPressure.from(result), 5);
+    assert.equal(SOAK_METRICS.surgeRefusalsOversized.from(result), 1);
+    assert.equal(SOAK_METRICS.surgeRefusalsActive.from(result), 0);
+    assert.equal(SOAK_METRICS.surgeActivePeakBytes.from(result), 10);
+    assert.equal(SOAK_METRICS.surgeActivePeakBytes.from({ summary: { records: [] } }), null);
+  });
+
+  test("an unknown kind is rejected", () => {
+    assert.ok(problemsOf((m) => (m.kind = "loop")).some((p) => /unknown kind "loop"/.test(p)));
+  });
+
+  const controlsPassed = (loaded) => ({
+    verdict: "passed",
+    controls: loaded.manifest.soak.controls.names.map((name) => ({ name, bit: true })),
+  });
+  const stand =
+    (verdict, digest, { summary = true, controls = controlsPassed, figures = true } = {}) =>
+    (loaded) => {
+      const shared = controls(loaded);
+      return {
+        controls: shared,
+        ...Object.fromEntries(
+          loaded.run.soak.modes.map((mode) => [
+            mode,
+            {
+              verdict: {
+                verdict,
+                failures: verdict === "passed" ? [] : [{ kind: "retained-leak" }],
+              },
+              summary: summary
+                ? {
+                    mode,
+                    tranches: loaded.run.soak.tranches,
+                    manifestDigest: digest ?? loaded.manifest.soak.workloads[mode].digest,
+                    ...(figures
+                      ? {
+                          records: Array.from({ length: 10_000 }, (_, i) =>
+                            i === 0
+                              ? {
+                                  class: "pressure-surge",
+                                  refusalsPressure: 1,
+                                  refusalsOversized: 1,
+                                  pressure: { refusalsActive: 0, active: { attributedPeak: 5 } },
+                                }
+                              : { class: "cold-demand" },
+                          ),
+                          samples: [
+                            { at: "closed", counts: { retainedBytes: 0, peakTotalBytes: 9 } },
+                            { at: "final", counts: { retainedBytes: 0, peakTotalBytes: 9 } },
+                          ],
+                          process: { peakBytes: 7 },
+                        }
+                      : {}),
+                  }
+                : null,
+              controls: shared,
+              wallMs: 1,
+            },
+          ]),
+        ),
+      };
+    };
+
+  test("a run passes only when both modes pass the frozen workload", async () => {
+    const run = async (runSoak) => {
+      const dir = freshDir();
+      const code = await quiet(() => main(["--run", "rev11-l1-soak", "--out", dir], { runSoak }));
+      return { code, summary: readSummary(dir) };
+    };
+    const passed = await run(stand("passed"));
+    assert.equal(passed.code, 0);
+    assert.equal(passed.summary.cells[0].metrics.actions.values, 10_000);
+    assert.equal(passed.summary.cells[2].metrics.peakRssBytes.status, "not measured");
+    const failed = await run(stand("failed"));
+    assert.equal(failed.code, 1);
+    assert.ok(failed.summary.validation.problems.some((p) => /retained-leak/.test(p)));
+    const drifted = await run(stand("passed", "0".repeat(64)));
+    assert.equal(drifted.code, 1);
+    assert.ok(drifted.summary.validation.problems.some((p) => /not the frozen/.test(p)));
+  });
+
+  test("a passing verdict with required work figures unrecorded is not accepted", async () => {
+    const dir = freshDir();
+    const code = await quiet(() =>
+      main(["--run", "rev11-l1-soak", "--out", dir], {
+        runSoak: stand("passed", undefined, { figures: false }),
+      }),
+    );
+    assert.equal(code, 1);
+    const problems = readSummary(dir).validation.problems;
+    for (const metric of ["actions", "samples", "closedRetainedBytes", "surgeRefusalsOversized"])
+      assert.ok(
+        problems.some((p) => p.includes(`required work metric ${metric} is unavailable`)),
+        problems.join("\n"),
+      );
+    // Time and memory stay advisory.
+    assert.ok(!problems.some((p) => /peakRssBytes|wallMs/.test(p)));
+  });
+
+  test("a passing verdict without the summary it judged is not accepted", async () => {
+    const dir = freshDir();
+    const code = await quiet(() =>
+      main(["--run", "rev11-l1-soak", "--out", dir], {
+        runSoak: stand("passed", undefined, { summary: false }),
+      }),
+    );
+    assert.equal(code, 1);
+    assert.ok(readSummary(dir).validation.problems.some((p) => /wrote no summary/.test(p)));
+  });
+
+  test("negative controls that did not run or did not bite fail the run", async () => {
+    const check = async (controls, pattern) => {
+      const dir = freshDir();
+      const code = await quiet(() =>
+        main(["--run", "rev11-l1-soak", "--out", dir], {
+          runSoak: stand("passed", undefined, { controls }),
+        }),
+      );
+      assert.equal(code, 1);
+      const problems = readSummary(dir).validation.problems;
+      assert.ok(
+        problems.some((p) => pattern.test(p)),
+        problems.join("\n"),
+      );
+    };
+    await check(
+      () => ({ verdict: "passed", controls: [] }),
+      /negative control retained-key-leak did not run/,
+    );
+    await check(
+      (loaded) => ({
+        verdict: "failed",
+        controls: loaded.manifest.soak.controls.names.map((name) => ({
+          name,
+          bit: name !== "unexpected-skip",
+        })),
+      }),
+      /negative controls failed: unexpected-skip/,
+    );
+  });
+
+  test("a runner that ends abnormally leaves no earlier artifact to accept", () => {
+    const dir = freshDir();
+    const crash = join(dir, "crash.mjs");
+    writeFileSync(crash, "process.exit(3);\n");
+    const out = join(dir, "run");
+    mkdirSync(out, { recursive: true });
+    writeFileSync(join(out, "soak-verdict.json"), JSON.stringify({ verdict: "passed" }));
+    writeFileSync(join(out, "soak-summary.json"), JSON.stringify({ manifestDigest: "old" }));
+    const run = invokeSoakRunner(process.execPath, [crash], out);
+    assert.match(run.ended ?? "", /ended abnormally \(status 3\)/);
+    assert.equal(run.read("soak-verdict.json"), null);
+    assert.equal(run.read("soak-summary.json"), null);
   });
 });

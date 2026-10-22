@@ -9352,10 +9352,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The identity that addresses the global contributor `entry`'s
     /// contribution to the GLOBAL type `name`: `(canonical, owner, name)`,
     /// except for a module's `declare global` contribution when the module
-    /// also declares a module-scope type of the name — that identity names
-    /// the module-scope type, an ordinary type the module's own references
-    /// and its importers read — whose contribution is addressed by the
-    /// owner's [`TopLevelOwnerId::global_augmentation`] scope instead.
+    /// also binds the name in module scope, by a type of its own or an
+    /// import — that identity names the module-scope binding, which the
+    /// module's own references (and its importers) read — whose
+    /// contribution is addressed by the owner's
+    /// [`TopLevelOwnerId::global_augmentation`] scope instead.
     ///
     /// [`TopLevelOwnerId::global_augmentation`]: verter_type_expr::TopLevelOwnerId::global_augmentation
     fn global_contribution_identity(
@@ -9372,7 +9373,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     serve
                         .indexed
                         .shallow_state
-                        .has_type_symbol_in(entry.owner, name)
+                        .binds_module_scope_type_in(entry.owner, name)
                 });
         ResolvedRootIdentity::new_in_owner(
             Arc::clone(&entry.artifact_key.canonical),
@@ -9788,9 +9789,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Whether the TYPE declaration `name` in `canonical` is (one
     /// declaration of) a GLOBAL declaration: a `declare global` interface
-    /// of a module that has no file-scope symbol of the name, or that its
-    /// owner's global-augmentation scope addresses, or a file-scope
-    /// interface of a script. Every other declaration of the
+    /// of a module that binds the name in no module scope (no type, no
+    /// import), or that its owner's global-augmentation scope addresses, or
+    /// a file-scope interface of a script. Every other declaration of the
     /// same global lives in another file, and its `Instantiate` folds them
     /// in.
     fn declares_global_interface(
@@ -9823,7 +9824,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &indexed.shallow_state,
         ) {
             verter_session_query::inputs::contributors::FileModuleKind::Module => {
-                !shallow.has_type_symbol_in(owner, name) && shallow.has_global_augmentation(name)
+                !shallow.binds_module_scope_type_in(owner, name)
+                    && shallow.has_global_augmentation(name)
             }
             verter_session_query::inputs::contributors::FileModuleKind::Script => {
                 shallow.has_type_symbol_in(owner, name)
