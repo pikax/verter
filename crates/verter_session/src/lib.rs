@@ -48,6 +48,8 @@
 //! - [`parse`] â€” SFC tokenization â†’ [`ParseSnapshot`](types::ParseSnapshot), non-SFC hashing
 //! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
 //! - [`upsert`] â€” change detection, result building, export signature diffing
+#[cfg(any(feature = "soak-support", feature = "semantic-observe"))]
+pub use crate::meta_provenance::HostWorkSnapshot;
 use crate::meta_provenance::MetaProvenance;
 
 #[macro_use]

@@ -9,6 +9,17 @@ members = [
   "crates/verter_napi/tests/fixture_addon",
   "xtask",
 ]
+# `crates/verter_compile_contracts_session_observe` puts
+# `verter_session/semantic-observe` on a NORMAL dependency edge (the only
+# channel trybuild copies into its fixture projects). Membership would make
+# resolver-2 feature unification turn that feature on for every
+# `--workspace` build — `cargo nextest archive --workspace`,
+# `cargo check --workspace --all-targets`, `cargo clippy --workspace` and
+# the release check — so the canonical gate would silently stop compiling
+# and testing the capture-off configuration it exists to verify. The lane
+# runs the crate by manifest path instead
+# (scripts/compile-contracts.mjs, session-observe stage).
+exclude = ["crates/verter_compile_contracts_session_observe"]
 resolver = "2"
 
 [workspace.package]

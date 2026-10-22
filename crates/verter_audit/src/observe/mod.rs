@@ -173,6 +173,44 @@ pub fn capture<T>(collect: impl FnOnce() -> T) -> Option<T> {
     }
 }
 
+/// Selected tooling work counter, independent of capture availability.
+///
+/// Storage and reads exist with `soak-support` or `semantic-observe`. Without
+/// either it is zero-size and writes compile out. Owners use this only for
+/// their explicitly selected work boundaries, never for general telemetry.
+#[derive(Debug, Default)]
+pub struct WorkObservedU64 {
+    #[cfg(any(feature = "soak-support", feature = "semantic-observe"))]
+    value: std::sync::atomic::AtomicU64,
+}
+
+impl WorkObservedU64 {
+    /// Add work at the owner's existing increment boundary.
+    #[inline(always)]
+    pub fn fetch_add(&self, amount: u64, order: std::sync::atomic::Ordering) {
+        #[cfg(any(feature = "soak-support", feature = "semantic-observe"))]
+        self.value.fetch_add(amount, order);
+        #[cfg(not(any(feature = "soak-support", feature = "semantic-observe")))]
+        let _ = (amount, order);
+    }
+
+    /// Reset with the owning counter set.
+    #[inline(always)]
+    pub fn store(&self, value: u64, order: std::sync::atomic::Ordering) {
+        #[cfg(any(feature = "soak-support", feature = "semantic-observe"))]
+        self.value.store(value, order);
+        #[cfg(not(any(feature = "soak-support", feature = "semantic-observe")))]
+        let _ = (value, order);
+    }
+
+    /// Read only where real storage is compiled in.
+    #[cfg(any(feature = "soak-support", feature = "semantic-observe"))]
+    #[must_use]
+    pub fn load(&self, order: std::sync::atomic::Ordering) -> u64 {
+        self.value.load(order)
+    }
+}
+
 mod counter_storage {
     pub trait Sealed {}
     impl Sealed for () {}

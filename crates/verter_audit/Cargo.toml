@@ -22,6 +22,8 @@ default = []
 # exist — which is what structurally prevents a counter from reaching a
 # semantic decision.
 semantic-observe = []
+# Two selected work counters per host/store; no capture or general test seams.
+soak-support = []
 
 [[bin]]
 name = "verter-audit-inspect"

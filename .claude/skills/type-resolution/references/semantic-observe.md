@@ -1,5 +1,18 @@
 ## Derivation / Origin Layer Contract
 
+**Narrow capture-off work observations.** `soak-support` adds only the graph's
+existing `misses` and `joined_waits` storage/readers through
+`SemanticGraphStore::work_snapshot() -> GraphWorkSnapshot`. Existing broad
+test/observation builds use the same fields and increment sites. Graph misses
+count memo claims, not exact producers. Session `VerterHost::work_snapshot()`
+returns `HostWorkSnapshot` with request-result `resolver_node_cache_misses`
+and producer-entry `component_meta_resolved_state_recomputes`, including early
+returns. These four OPTIONAL counters are bounded per owner, have no runtime
+enable checks, and never imply capture or general test-support. Missing
+unrelated metrics stay absent. See `docs/arch/semantic-observe.md` for public
+build and standalone proof commands. The general telemetry description below
+continues to apply to every other tally and to the full snapshot reader.
+
 The type graph structurally interns nodes — two distinct derivations producing the same structural result share one arena entry. Origin therefore cannot live inline on each node: the same node may be the result of many derivations. Origin is modelled as a **separate graph layer** of edges from result nodes to their source nodes, co-owned by the `SemanticGraphStore`.
 
 - Origin edges are stored outside the interned node table, in a sibling edge set keyed by `(result_node, edge_kind, source_node)` with optional per-edge metadata.

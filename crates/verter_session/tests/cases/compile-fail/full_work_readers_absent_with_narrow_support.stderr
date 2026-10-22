@@ -1,0 +1,17 @@
+error[E0599]: no method named `provenance_snapshot` found for reference `&VerterHost` in the current scope
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/full_work_readers_absent_with_narrow_support.rs
+  |
+  |     let _ = host.provenance_snapshot();
+  |                  ^^^^^^^^^^^^^^^^^^^
+  |
+help: there is a method `provenance` with a similar name
+  |
+4 -     let _ = host.provenance_snapshot();
+4 +     let _ = host.provenance();
+  |
+
+error[E0599]: no method named `stats_snapshot` found for reference `&Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>` in the current scope
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/full_work_readers_absent_with_narrow_support.rs
+  |
+  |     let _ = host.project_type_store().semantic_graph().stats_snapshot();
+  |                                                        ^^^^^^^^^^^^^^ method not found in `&Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>`

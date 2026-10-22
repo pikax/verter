@@ -2,7 +2,8 @@
 //! entries-mutex guard.
 //!
 //! `AtomicSemanticGraphStats` holds the store's measurement-only counter
-//! set. No production decision reads it: every counter is a [`Tally`], an
+//! set. No production decision reads it. Except for the two selected work
+//! fields retained by `soak-support`, every counter is a [`Tally`], an
 //! atomic only under the observation gate
 //! (`cfg(any(test, feature = "test-support", feature = "semantic-observe"))`) and a zero-size no-op
 //! otherwise, and the [`SemanticGraphStore::stats_snapshot`] reader exists
@@ -14,7 +15,16 @@
 //! the diagnosis benchmark.
 
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
+// `Ordering` also reaches the `work_snapshot` reader retained by
+// `soak-support` alone, so its gate is the work-counter gate.
+#[cfg(any(
+    test,
+    feature = "test-support",
+    feature = "semantic-observe",
+    feature = "soak-support"
+))]
+use std::sync::atomic::Ordering;
 
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use parking_lot::Mutex;
@@ -23,7 +33,12 @@ use rustc_hash::FxHashMap;
 
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use super::derivation::sorted_percentile;
-#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+#[cfg(any(
+    test,
+    feature = "test-support",
+    feature = "semantic-observe",
+    feature = "soak-support"
+))]
 use super::SemanticGraphStore;
 // Only the (gated) `EntriesLockGuard::hold_start` timing field uses
 // `Instant`; gate the import to match so release does not see it unused.
@@ -42,6 +57,46 @@ use crate::semantic_query::{SemanticGraphStats, SemanticNodeId};
 pub(crate) type Tally = verter_audit::observe::Counter<std::sync::atomic::AtomicU64>;
 #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
 pub(crate) type Tally = verter_audit::observe::Counter<()>;
+
+// Keep the existing test/observation tally as the single authority in broad
+// builds. Only these selected fields gain storage in a narrow tooling build.
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+type WorkTally = Tally;
+#[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+type WorkTally = verter_audit::observe::WorkObservedU64;
+
+/// Narrow OPTIONAL work observations; no unrelated metric is reported as zero.
+#[cfg(any(
+    test,
+    feature = "test-support",
+    feature = "semantic-observe",
+    feature = "soak-support"
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphWorkSnapshot {
+    /// Memo claim misses, possibly including recursion and subscribers.
+    /// This is not an exact producer execution count.
+    pub misses: u64,
+    /// Cooperative waits that actually joined a producer's flight.
+    pub joined_waits: u64,
+}
+
+#[cfg(any(
+    test,
+    feature = "test-support",
+    feature = "semantic-observe",
+    feature = "soak-support"
+))]
+impl SemanticGraphStore {
+    /// Read only the work counters retained by narrow tooling support.
+    #[must_use]
+    pub fn work_snapshot(&self) -> GraphWorkSnapshot {
+        GraphWorkSnapshot {
+            misses: self.stats.misses.load(Ordering::Relaxed),
+            joined_waits: self.stats.joined_waits.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Bounded sample reservoir for histogram-style metrics (path length /
 /// projection depth). Cap = 8192 samples per metric; once full, new
@@ -110,14 +165,14 @@ pub(super) const SAMPLE_RESERVOIR_CAP: usize = 8192;
 )]
 pub(crate) struct AtomicSemanticGraphStats {
     pub(super) hits: Tally,
-    pub(super) misses: Tally,
+    pub(super) misses: WorkTally,
     pub(super) same_path_sentinel_returns: Tally,
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) in_flight_current: AtomicU32,
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) in_flight_peak: AtomicU32,
     pub(super) waits_ms: Tally,
-    pub(super) joined_waits: Tally,
+    pub(super) joined_waits: WorkTally,
     pub(super) inflight_aborted_retries: Tally,
     /// Number of cooperative joiners that woke from the condvar and
     /// forked to a cold recompute rather than reusing the winner's
