@@ -36,5 +36,6 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 | `VariancePolicy::DeclaredMethod` | Method signatures enter the common relation authority under their own variance key; child keys restore ordinary function variance | REQUIRED | One relation judgement | `src/semantic_query.rs`, `src/project_semantic_dispatch/relation.rs` | always |
 | `relation_session_infers_parameter` | Unrelated signature parameters remain rigid while the active collector infers its own parameters | REQUIRED | Stateless | `src/project_semantic_dispatch/inference/collect.rs`, `src/project_semantic_dispatch/relation.rs` | always |
 | `RelationRecursionIdentity` and `RecursionCountMode` | Authored signature origins count repeated instances while declaration references distinguish argument instances; live stack and replay counts agree | REQUIRED | One relation frame | `src/project_semantic_dispatch/dispatch_txn.rs`, `src/project_semantic_dispatch/relation.rs` | always |
+| Candidate-only reference-argument traversal | Identical declaration heads infer through their arguments without proof-only invariance or structural fallback | REQUIRED | Stateless | `src/project_semantic_dispatch/relation_variance.rs` | always |
 
 No production counter, trace or charge history is added, so nothing is gated behind `semantic-observe`.

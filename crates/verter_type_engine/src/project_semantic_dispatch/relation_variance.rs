@@ -180,9 +180,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let (target_declaration, target_args) = target_ref?;
         if !same_declaration(&declaration, &target_declaration)
             || source_args.len() != target_args.len()
-            || !target_args
-                .iter()
-                .any(|arg| self.holds_inference_site(*arg))
+            || (!candidates_only
+                && !target_args
+                    .iter()
+                    .any(|arg| self.holds_inference_site(*arg)))
             || self.variance_measurement(source).is_some()
             || self.variance_measurement(target).is_some()
         {
@@ -233,6 +234,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                     _ => false,
                 });
+        let relate = |from, into, bindings: &mut Vec<InferBinding>, position| {
+            let (from, into) = if reverse { (into, from) } else { (from, into) };
+            self.relate_member(from, into, bindings, position)
+        };
         let variances = if identity_inference {
             let measured = if params.is_empty() {
                 None
@@ -271,44 +276,52 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // over a `then` returning `PL<TResult1 | TResult2>`).
                 DeclarationVariance::InProgress(result) => {
                     for (&source, &target) in source_args.iter().zip(target_args.iter()) {
-                        let _ =
-                            self.relate_member(source, target, bindings, InferPosition::Covariant);
+                        let _ = relate(source, target, bindings, InferPosition::Covariant);
                     }
                     return Some(result_and(assignable(bindings), result));
                 }
             }
         };
-        if variances
-            .iter()
-            .any(|variance| variance.unmeasurable || variance.unreliable)
+        if !candidates_only
+            && variances
+                .iter()
+                .any(|variance| variance.unmeasurable || variance.unreliable)
         {
             return None;
         }
         let checkpoint = self.relation_session_checkpoint();
         let bindings_len = bindings.len();
         let mut acc = assignable(bindings);
-        let relate = |from, into, bindings: &mut Vec<InferBinding>, position| {
-            let (from, into) = if reverse { (into, from) } else { (from, into) };
-            self.relate_member(from, into, bindings, position)
-        };
         for ((&source, &target), variance) in
             source_args.iter().zip(target_args.iter()).zip(&variances)
         {
-            let related = match variance.mask {
-                Variance::CONTRAVARIANT => {
+            let related = if candidates_only {
+                // inferFromTypeArguments walks identical reference heads
+                // even when their arguments are rigid. Only exact
+                // contravariance reverses inference; invariant, independent
+                // and uncertain variances still infer forward once.
+                if variance.mask == Variance::CONTRAVARIANT {
                     relate(target, source, bindings, InferPosition::ContravariantParam)
+                } else {
+                    relate(source, target, bindings, InferPosition::Covariant)
                 }
-                Variance::INDEPENDENT => {
-                    // Inferred from all the same; no argument decides the
-                    // relation.
-                    let _ = relate(source, target, bindings, InferPosition::Covariant);
-                    continue;
+            } else {
+                match variance.mask {
+                    Variance::CONTRAVARIANT => {
+                        relate(target, source, bindings, InferPosition::ContravariantParam)
+                    }
+                    Variance::INDEPENDENT => {
+                        // Inferred from all the same; no argument decides the
+                        // relation.
+                        let _ = relate(source, target, bindings, InferPosition::Covariant);
+                        continue;
+                    }
+                    Variance::INVARIANT => result_and(
+                        relate(source, target, bindings, InferPosition::Covariant),
+                        relate(target, source, bindings, InferPosition::ContravariantParam),
+                    ),
+                    _ => relate(source, target, bindings, InferPosition::Covariant),
                 }
-                Variance::INVARIANT => result_and(
-                    relate(source, target, bindings, InferPosition::Covariant),
-                    relate(target, source, bindings, InferPosition::ContravariantParam),
-                ),
-                _ => relate(source, target, bindings, InferPosition::Covariant),
             };
             acc = result_and(acc, related);
             if !candidates_only && !matches!(acc, RelationResult::Assignable { .. }) {

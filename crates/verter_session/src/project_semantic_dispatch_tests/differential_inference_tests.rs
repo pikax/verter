@@ -18,6 +18,16 @@
 use super::differential_global_library_tests::GLOBALS_LIB;
 use super::differential_harness_tests::{Matrix, Read};
 
+#[test]
+fn contextual_invariant_reference_inference_uses_forward_candidates() {
+    let matrix = Matrix::new("interface Inv<in out T> { value: T; input: (x: T) => void }");
+    let failures = matrix.types(&[(
+        "(<U extends 1 | 2>(x: Inv<{v: U}>) => [NoInfer<U>]) extends ((x: Inv<{v: 1} | {v: 2}>) => [1 | 2]) ? 1 : 0",
+        "1",
+    )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// The fixture of [`bare_infer_selection`].
 const BARE_INFER_SELECTION: &str = r##"
 type InferSel<T> = T extends infer X ? { label: string } : T;
