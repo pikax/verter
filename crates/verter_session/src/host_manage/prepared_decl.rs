@@ -3382,9 +3382,8 @@ impl VerterHost {
                             // round-trips; when the artifact is absent, the
                             // dep's `FileWholeHash` remains the (sufficient)
                             // covering fact for a direct local export.
-                            // The snapshot's own parse identity: hashing
-                            // the source here, once per exported name read,
-                            // made a file cost its size times its exports.
+                            // Keyed by the snapshot's own parse identity,
+                            // with no pass over the source.
                             let dep_key = source_data.artifact_key(
                                 Arc::clone(&dep_id),
                                 verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,

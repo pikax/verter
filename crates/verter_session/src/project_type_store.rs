@@ -20,7 +20,6 @@
 //! subsequent phases of the project-global overhaul — this module introduces
 //! the foundation without rewiring the hot path yet.
 
-use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -261,28 +260,23 @@ impl SourceParseKey {
 }
 
 impl IndexedReady {
-    pub(crate) fn cached_source_parse_key(&self) -> Option<Option<verter_language::ParseKey>> {
-        self.source_parse_key.0.get().cloned()
-    }
-
     /// The exact parse identity of this artifact's source under its
     /// runtime language: its framework parse's key, or a plain script's,
-    /// derived from the whole source the first time it is asked for. The
-    /// same identity [`verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity`]
+    /// derived from the whole source the first time it is asked for unless
+    /// the artifact was seeded with it. The identity
+    /// [`verter_session_query::source::framework_parse::exact_source_parse_key`]
     /// derives (`None` where that refuses).
     pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
         self.source_parse_key
             .0
             .get_or_init(|| {
-                verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-                    Arc::from(""),
-                    self.whole_hash,
+                verter_session_query::source::framework_parse::exact_source_parse_key(
                     self.raw_source.as_ref(),
-                    self.file_language.clone(),
-                    self.framework_parse.as_deref(),
-                    self.parse_env_hash,
+                    &self.file_language,
+                    self.framework_parse
+                        .as_deref()
+                        .map(crate::parse::carrier_parse_key),
                 )
-                .map(|key| key.parse_key)
             })
             .clone()
     }

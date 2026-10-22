@@ -744,6 +744,21 @@ pub(crate) fn framework_parse_facts(
     facts
 }
 
+/// The parse identity a carrier's framework parse recorded, with the
+/// adapter and carrier language that recorded it, borrowed from the
+/// artifact. (The borrowed key type lives in `verter_session_query`, which
+/// may not depend on the compiler crate that owns the artifact, so the
+/// projection lives here.)
+pub(crate) fn carrier_parse_key(
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+) -> verter_session_query::source::framework_parse::CarrierParseKey<'_> {
+    verter_session_query::source::framework_parse::CarrierParseKey {
+        adapter_id: artifact.adapter_id(),
+        language_id: artifact.language_id(),
+        parse_key: artifact.parse_key(),
+    }
+}
+
 /// The parser-owned non-script mode inputs carried by a neutral parse artifact.
 ///
 /// Svelte captures `<svelte:options runes={...}>` during its single carrier

@@ -1068,6 +1068,19 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
         use crate::host_executor::HostSourceData;
+        let snap = self.authoritative_current_source(canonical)?;
+        let hd = snap.downcast_data::<HostSourceData>()?;
+        Some(hd.parse.whole_hash)
+    }
+
+    /// The scheduler's current source snapshot of `canonical`, behind the
+    /// same eviction gate as [`Self::authoritative_current_content_hash`]:
+    /// a reader that needs the content hash together with other facts of
+    /// the same revision takes them all from this one snapshot.
+    pub(crate) fn authoritative_current_source(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_scheduler::node::SourceSnapshot>> {
         // Eviction gate — mirrors `get_whole_hash`'s scheduler branch.
         // An EXPLICITLY evicted entry means the canonical is no longer
         // live; any artifact still in `FileArtifactStore` is stale and
@@ -1083,9 +1096,7 @@ impl VerterHost {
         if entry_evicted {
             return None;
         }
-        let snap = self.scheduler.try_get_source(canonical)?;
-        let hd = snap.downcast_data::<HostSourceData>()?;
-        Some(hd.parse.whole_hash)
+        self.scheduler.try_get_source(canonical)
     }
 
     /// Exact base artifact key for the scheduler-authoritative source stage.

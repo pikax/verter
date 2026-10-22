@@ -1,22 +1,25 @@
 //! Exported alias chains read each exported name once, and each read keys
 //! the declaring file's artifact. That key's parse identity belongs to the
 //! source revision: it is derived once with the source snapshot (or, for a
-//! session overlay, once per view) and every read reuses it. Deriving it
-//! per read hashed the whole file once per exported name, so a chain of N
-//! exported links in one file hashed about N times the file's size, and
-//! the file grows with N: the square of the chain.
+//! session overlay, once per view) and every read reuses it, so the
+//! whole-source derivations an answer makes do not grow with the chain.
+//!
+//! The derivations are counted across every thread of the process (the
+//! source stage derives on the scheduler's workers), so each counting test
+//! runs in a fresh process of its own ([`in_a_fresh_process`]).
 
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
 use super::checker_probe_lane_tests::{
-    evaluated_render_in as evaluated, probe_host, upsert_probe_files, ProbeProject,
+    evaluated_render_in as evaluated, in_a_fresh_process, probe_host, test_path,
+    upsert_probe_files, ProbeProject,
 };
 use crate::file_artifact_store::FileArtifactKeySource;
 use crate::session_view::OverlaidViewRef;
 use verter_session_query::source::artifact_key::{FileArtifactKey, BASE_PARSE_ENV_HASH};
-use verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests;
+use verter_session_query::source::framework_parse::source_parse_identity_derivations_in_process_for_tests as derivations;
 
 /// The chain file's canonical in a probe project.
 const CHAIN_FILE: &str = "/wb/chain.ts";
@@ -36,9 +39,10 @@ fn chain_from(n: usize, exported: bool, root: &str) -> String {
     source
 }
 
-/// The whole-source parse-identity derivations one cold answer of the
-/// chain's last link makes, and that answer: the chain in the probe module
-/// itself, or (`cross_file`) in a sibling module the probe imports from.
+/// The whole-source parse-identity derivations, on any thread, that
+/// loading the project and one cold answer of the chain's last link make,
+/// and that answer: the chain in the probe module itself, or (`cross_file`)
+/// in a sibling module the probe imports from.
 fn derivations_for(n: usize, exported: bool, cross_file: bool) -> (usize, String) {
     let source = chain(n, exported);
     let files = [("chain.ts", source.as_str())];
@@ -50,26 +54,27 @@ fn derivations_for(n: usize, exported: bool, cross_file: bool) -> (usize, String
     } else {
         ProbeProject::default()
     };
-    let host = probe_host(project);
     let module = if cross_file {
         format!("import type {{ A{n} }} from \"./chain\";\n")
     } else {
         source.clone()
     };
-    let before = source_parse_identity_derivations_for_tests();
+    let before = derivations();
+    let host = probe_host(project);
     let answer = evaluated(&host, project, &module, &format!("A{n}<\"ok\">"));
-    (
-        source_parse_identity_derivations_for_tests() - before,
-        answer,
-    )
+    (derivations() - before, answer)
 }
 
 /// The derivations do not grow with the chain: 100, 200 and 400 exported
 /// links, in the probe module and imported from a sibling, derive the same
-/// number of times (deriving per exported-name read made it N + 3 and
-/// N + 5, each pass over a file of size proportional to N).
+/// number of times — each source revision once, in its source stage, which
+/// the count must see (it is never zero).
 #[test]
 fn an_exported_alias_chain_derives_its_source_parse_identity_a_fixed_number_of_times() {
+    in_a_fresh_process(test_path!(), exported_alias_chain_derivations_stay_fixed);
+}
+
+fn exported_alias_chain_derivations_stay_fixed() {
     for (exported, cross_file) in [(true, false), (true, true), (false, false)] {
         let counts: Vec<usize> = [100, 200, 400]
             .into_iter()
@@ -82,6 +87,11 @@ fn an_exported_alias_chain_derives_its_source_parse_identity_a_fixed_number_of_t
                 derivations
             })
             .collect();
+        assert!(
+            counts[0] > 0,
+            "the count must see each source revision's one derivation \
+             (exported: {exported}, cross-file: {cross_file}): {counts:?}"
+        );
         assert!(
             counts.windows(2).all(|pair| pair[0] == pair[1]),
             "doubling the chain (exported: {exported}, cross-file: {cross_file}) must not \
@@ -165,9 +175,14 @@ fn an_edit_to_an_exported_chain_rekeys_it_and_changes_the_answer() {
 /// A session overlay's artifact key derives the overlay's parse identity
 /// once per view, however often it is read, and that identity is exactly
 /// the one the overlay bytes derive; a view over edited overlay bytes keys
-/// them anew.
+/// them anew. A file the view does not overlay is keyed from the base
+/// snapshot, exactly as the host keys it, with no derivation at all.
 #[test]
 fn an_overlay_key_derives_its_parse_identity_once_per_view() {
+    in_a_fresh_process(test_path!(), overlay_key_derives_once_per_view);
+}
+
+fn overlay_key_derives_once_per_view() {
     let base = chain(10, true);
     let files = [("chain.ts", base.as_str())];
     let host = probe_host(ProbeProject {
@@ -185,7 +200,7 @@ fn an_overlay_key_derives_its_parse_identity_once_per_view() {
             verter_semantic_source::source_hash::hash_16(overlay.as_bytes()),
         );
         let view = OverlaidViewRef::new(&host, &sources, &hashes, &tombstones);
-        let before = source_parse_identity_derivations_for_tests();
+        let before = derivations();
         let key = identity
             .current_read_key(&host, &view)
             .expect("the overlay has a key");
@@ -193,7 +208,7 @@ fn an_overlay_key_derives_its_parse_identity_once_per_view() {
             assert_eq!(identity.current_read_key(&host, &view).as_ref(), Some(&key));
         }
         assert_eq!(
-            source_parse_identity_derivations_for_tests() - before,
+            derivations() - before,
             1,
             "fifty-one reads of one view's overlay key derive its identity once"
         );
@@ -212,4 +227,27 @@ fn an_overlay_key_derives_its_parse_identity_once_per_view() {
         "a view over edited overlay bytes must not reuse the earlier identity"
     );
     assert_eq!(overlay_key(&chain(20, true)), first);
+
+    // A view overlaying another file reads the chain file from the base.
+    let mut sources = FxHashMap::default();
+    sources.insert("/wb/other.ts".to_owned(), Arc::<str>::from("export {};\n"));
+    let mut hashes = FxHashMap::default();
+    hashes.insert(
+        "/wb/other.ts".to_owned(),
+        verter_semantic_source::source_hash::hash_16(b"export {};\n"),
+    );
+    let view = OverlaidViewRef::new(&host, &sources, &hashes, &tombstones);
+    let before = derivations();
+    for _ in 0..50 {
+        assert_eq!(
+            identity.current_read_key(&host, &view),
+            host.authoritative_current_artifact_key(CHAIN_FILE),
+            "a base read keys the chain file as the host does"
+        );
+    }
+    assert_eq!(
+        derivations() - before,
+        0,
+        "base reads take the snapshot's identity without a derivation"
+    );
 }

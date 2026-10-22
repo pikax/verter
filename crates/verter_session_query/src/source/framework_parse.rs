@@ -116,6 +116,9 @@ pub fn exact_source_parse_key(
         None => {
             #[cfg(feature = "test-support")]
             SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
+            #[cfg(feature = "test-support")]
+            SOURCE_PARSE_IDENTITY_DERIVATIONS_IN_PROCESS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             verter_language::default_parse_identity_for(source, file_language)
                 .ok()
                 .map(|(_, parse_key)| parse_key)
@@ -152,4 +155,18 @@ thread_local! {
 #[cfg(feature = "test-support")]
 pub fn source_parse_identity_derivations_for_tests() -> usize {
     SOURCE_PARSE_IDENTITY_DERIVATIONS.with(std::cell::Cell::get)
+}
+
+/// How many parse identities every thread of this process derived by
+/// hashing a whole source through [`exact_source_parse_key`].
+#[cfg(feature = "test-support")]
+static SOURCE_PARSE_IDENTITY_DERIVATIONS_IN_PROCESS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many parse identities every thread of this process derived from a
+/// whole source text so far: the scheduler's workers included, so a test
+/// that reads it owns its process.
+#[cfg(feature = "test-support")]
+pub fn source_parse_identity_derivations_in_process_for_tests() -> usize {
+    SOURCE_PARSE_IDENTITY_DERIVATIONS_IN_PROCESS.load(std::sync::atomic::Ordering::Relaxed)
 }

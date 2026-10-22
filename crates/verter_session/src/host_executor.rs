@@ -112,11 +112,7 @@ impl HostSourceData {
             Some(artifact) => {
                 verter_session_query::source::framework_parse::carrier_source_parse_key(
                     &self.file_language,
-                    verter_session_query::source::framework_parse::CarrierParseKey {
-                        adapter_id: artifact.adapter_id(),
-                        language_id: artifact.language_id(),
-                        parse_key: artifact.parse_key(),
-                    },
+                    crate::parse::carrier_parse_key(artifact),
                 )
             }
             None => self.script_parse_key.clone(),
@@ -124,10 +120,8 @@ impl HostSourceData {
     }
 
     /// The exact artifact key of this source revision for `canonical` under
-    /// `parse_env_hash`. Every read of a snapshot's key goes through here, so
-    /// a read costs no pass over the source: re-hashing the whole source per
-    /// read made each one cost the file's size, and a file whose exported
-    /// names are read once each paid its size times its export count.
+    /// `parse_env_hash`, built from the snapshot's own content hash, language
+    /// and parse identity: one snapshot, no pass over the source.
     pub(crate) fn artifact_key(
         &self,
         canonical: Arc<str>,

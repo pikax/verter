@@ -31,6 +31,9 @@ impl crate::project_type_store::IndexedReady {
     #[allow(clippy::let_and_return)]
     pub(crate) fn input_record(&self) -> Arc<IndexedInputRecord> {
         self.input_projection.get_or_init(|| {
+            // The record's identity always carries the artifact's parse
+            // identity (seeded, or derived here once per artifact).
+            let source_parse_key = self.source_parse_key();
             let record = IndexedInputRecord::new(
                 IndexedInputIdentity {
                     source: self.shallow_state.source_identity.clone(),
@@ -40,7 +43,7 @@ impl crate::project_type_store::IndexedReady {
                         NEXT_ARTIFACT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     },
                     file_language: self.file_language.clone(),
-                    parse_key: self.cached_source_parse_key().flatten(),
+                    parse_key: source_parse_key.clone(),
                 },
                 self.whole_hash,
                 self.file_language.clone(),
@@ -53,7 +56,7 @@ impl crate::project_type_store::IndexedReady {
                     .map(crate::parse::framework_parse_facts),
                 self.script_analysis.clone(),
                 Arc::clone(&self.snapshot),
-                self.cached_source_parse_key(),
+                Some(source_parse_key),
             );
             #[cfg(any(test, feature = "test-support"))]
             let record =
@@ -270,18 +273,27 @@ impl InputArtifactLeases {
         serve: crate::host_manage::prepared_decl::IndexedReadyServe,
     ) -> IndexedInputServe {
         let input = serve.indexed.input_record();
-        let mut retained = self.retained.write();
-        retained
-            .sources
-            .entry(input.shallow_state.observation_id())
-            .or_insert_with(|| Arc::clone(&serve.indexed.shallow_state));
-        // A request serves one artifact many times: only its first serve
-        // copies the identity (whose parse key owns its encoded bytes) into
-        // the map.
-        if !retained.indexed.contains_key(&input.identity) {
+        let observation = input.shallow_state.observation_id();
+        // A request serves one artifact many times: a repeat serve finds it
+        // retained under the read lock, and only the first serve takes the
+        // write lock and copies the identity (whose parse key owns its
+        // encoded bytes) into the map.
+        let retained_already = {
+            let retained = self.retained.read();
+            retained.sources.contains_key(&observation)
+                && retained.indexed.contains_key(&input.identity)
+        };
+        if !retained_already {
+            let mut retained = self.retained.write();
             retained
-                .indexed
-                .insert(input.identity.clone(), serve.indexed);
+                .sources
+                .entry(observation)
+                .or_insert_with(|| Arc::clone(&serve.indexed.shallow_state));
+            if !retained.indexed.contains_key(&input.identity) {
+                retained
+                    .indexed
+                    .insert(input.identity.clone(), serve.indexed);
+            }
         }
         IndexedInputServe {
             indexed: input,
