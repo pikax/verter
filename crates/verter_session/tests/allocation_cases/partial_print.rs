@@ -4,12 +4,15 @@
 //! target is reversed: a request out of operations answers the undecided
 //! conditional, partial, with the unions it never related behind it. Its
 //! print names `S` and `T`, so projecting and rendering it costs the same
-//! however wide the unions are. A complete answer prints all it holds:
-//! printing `S` costs in proportion to the text it prints. Neither print
-//! may pay for structure it does not print.
+//! however wide the unions are. A relation stopped partway, out of
+//! structured comparisons, answers the checker's TS2859 recovery with the
+//! comparisons it ran behind it, and its print is as flat. A complete
+//! answer prints all it holds: printing `S` costs in proportion to the
+//! text it prints. No print may pay for structure it does not print.
 
 use std::sync::Arc;
 
+use verter_session::for_tests::with_relation_comparisons_for_tests;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -36,6 +39,12 @@ struct Print {
     text: String,
     allocations: u64,
     peak_live_bytes: u64,
+}
+
+/// The pairs relating `arms` reversed arms compares in full: each arm of
+/// `S` scans `T` up to its partner.
+fn reversed_pairs(arms: usize) -> usize {
+    arms * (arms + 1) / 2
 }
 
 /// Evaluate `symbol` over unions of `arms` arms under a projection fuse of
@@ -109,6 +118,53 @@ fn printing_a_partial_answer_costs_what_it_prints_not_what_it_hides() {
     assert!(
         wide.peak_live_bytes <= narrow.peak_live_bytes + narrow.peak_live_bytes / 4 + 4096,
         "four times the hidden arms leaves the print's peak live bytes flat: {runs:?}"
+    );
+}
+
+/// A relation stopped partway prints what it answers. Each request runs
+/// about half the comparisons its reversed unions need before its allowance
+/// runs out — about four times as many at each doubling of the arms — and
+/// answers the checker's TS2859 recovery, which names neither operand. The
+/// cost of printing it stays flat however far the relation got.
+#[test]
+fn printing_a_mid_relation_partial_costs_what_it_prints_not_what_it_ran() {
+    let allowance = |pairs: usize| u32::try_from(pairs).expect("a small allowance");
+    // The allowance alone stops the relation: one with room for every
+    // pair relates the unions and answers the checker's `1`.
+    assert_eq!(
+        with_relation_comparisons_for_tests(allowance(2 * reversed_pairs(50)), || {
+            print(50, "__Probe", 0)
+        })
+        .text,
+        "1",
+        "an allowance with room for every pair relates the unions"
+    );
+    let sizes = [50usize, 100, 200];
+    let runs = sizes.map(|arms| {
+        // A cold check refuses a comparison only once it has recorded its
+        // whole allowance, so a request refused under half the pairs ran
+        // that half first.
+        with_relation_comparisons_for_tests(allowance(reversed_pairs(arms) / 2), || {
+            print(arms, "__Probe", 0)
+        })
+    });
+    eprintln!("MID_RELATION_PRINT {runs:?}");
+    for (arms, run) in sizes.into_iter().zip(&runs) {
+        assert_eq!(
+            run.text, "2",
+            "{arms} arms: half the pairs cannot relate the unions, and the refused check \
+             recovers as false"
+        );
+    }
+    let [narrow, _, wide] = &runs;
+    assert!(
+        wide.allocations <= narrow.allocations + narrow.allocations / 4 + 16,
+        "about sixteen times the comparisons run leaves the print's allocations flat: {runs:?}"
+    );
+    assert!(
+        wide.peak_live_bytes <= narrow.peak_live_bytes + narrow.peak_live_bytes / 4 + 4096,
+        "about sixteen times the comparisons run leaves the print's peak live bytes flat: \
+         {runs:?}"
     );
 }
 
