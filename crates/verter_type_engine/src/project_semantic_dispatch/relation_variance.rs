@@ -176,6 +176,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if !self.relation_session_active() {
             return None;
         }
+        let candidates_only = self.relation_session_reads_candidates_only();
+        let reverse = candidates_only
+            && self.relation_current_occurrence().variance
+                == crate::semantic_query::VariancePhase::Contravariant;
+        let (source, target) = if reverse {
+            (target, source)
+        } else {
+            (source, target)
+        };
         let source_ref = self.generic_reference(source);
         let target_ref = self.generic_reference(target);
         let (declaration, source_args) = source_ref?;
@@ -210,9 +219,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 return Some(result);
             }
         }
-        if !target_args
-            .iter()
-            .any(|arg| self.holds_inference_site(*arg))
+        if !candidates_only
+            && !target_args
+                .iter()
+                .any(|arg| self.holds_inference_site(*arg))
         {
             return None;
         }
@@ -261,6 +271,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                     _ => false,
                 });
+        let relate = |from, into, bindings: &mut Vec<InferBinding>, position| {
+            let (from, into) = if reverse { (into, from) } else { (from, into) };
+            self.relate_member(from, into, bindings, position)
+        };
         let variances = if identity_inference {
             let measured = if params.is_empty() {
                 None
@@ -289,24 +303,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         } else {
             match self.parameter_variances(&declaration, source_args.len(), true)? {
                 DeclarationVariance::Known(variances) => variances,
-                // The checker's in-progress `getVariances` is `emptyArray`:
-                // `inferFromTypeArguments` infers every argument
-                // covariantly, and the references relate as the open
-                // measurement answers. Expanding them instead would re-enter
-                // the measured declaration at every level of its own
-                // recursion (`Promise<T>`'s `then` returns `Promise<R>`).
+                // While the declaration's variance is measured, the checker's
+                // `inferFromTypeArguments` reads every argument as covariant
+                // and the relation answers the in-progress `Unknown`: the
+                // pair infers from its arguments and never relates the two
+                // references structurally, which would instantiate each
+                // member's methods in the other's context again, one more
+                // level per member (`PL<R1 | R2>` against `PL<R1' | R2'>`
+                // over a `then` returning `PL<TResult1 | TResult2>`).
                 DeclarationVariance::InProgress(result) => {
                     for (&source, &target) in source_args.iter().zip(target_args.iter()) {
-                        let _ =
-                            self.relate_member(source, target, bindings, InferPosition::Covariant);
+                        let _ = relate(source, target, bindings, InferPosition::Covariant);
                     }
-                    return Some(result);
+                    return Some(result_and(assignable(bindings), result));
                 }
             }
         };
-        if variances
-            .iter()
-            .any(|variance| variance.unmeasurable || variance.unreliable)
+        if !candidates_only
+            && variances
+                .iter()
+                .any(|variance| variance.unmeasurable || variance.unreliable)
         {
             return None;
         }
@@ -316,31 +332,46 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         for ((&source, &target), variance) in
             source_args.iter().zip(target_args.iter()).zip(&variances)
         {
-            if call_inference && !self.holds_inference_site(target) {
+            // A call collects candidates from its open arguments alone: the
+            // instantiated signature's applicability check owns a fixed
+            // argument's error. A candidates-only walk visits every argument.
+            if call_inference && !candidates_only && !self.holds_inference_site(target) {
                 continue;
             }
-            let related = match variance.mask {
-                Variance::CONTRAVARIANT => {
-                    self.relate_member(target, source, bindings, InferPosition::ContravariantParam)
+            let related = if candidates_only {
+                // inferFromTypeArguments walks identical reference heads
+                // even when their arguments are rigid. Only exact
+                // contravariance reverses inference; invariant, independent
+                // and uncertain variances still infer forward once.
+                if variance.mask == Variance::CONTRAVARIANT {
+                    relate(target, source, bindings, InferPosition::ContravariantParam)
+                } else {
+                    relate(source, target, bindings, InferPosition::Covariant)
                 }
-                Variance::INDEPENDENT => {
-                    // Inferred from all the same; no argument decides the
-                    // relation.
-                    let _ = self.relate_member(source, target, bindings, InferPosition::Covariant);
-                    continue;
+            } else {
+                match variance.mask {
+                    Variance::CONTRAVARIANT => {
+                        relate(target, source, bindings, InferPosition::ContravariantParam)
+                    }
+                    Variance::INDEPENDENT => {
+                        // Inferred from all the same; no argument decides the
+                        // relation.
+                        let _ = relate(source, target, bindings, InferPosition::Covariant);
+                        continue;
+                    }
+                    Variance::INVARIANT => result_and(
+                        relate(source, target, bindings, InferPosition::Covariant),
+                        relate(target, source, bindings, InferPosition::ContravariantParam),
+                    ),
+                    _ => relate(source, target, bindings, InferPosition::Covariant),
                 }
-                Variance::INVARIANT => result_and(
-                    self.relate_member(source, target, bindings, InferPosition::Covariant),
-                    self.relate_member(target, source, bindings, InferPosition::ContravariantParam),
-                ),
-                _ => self.relate_member(source, target, bindings, InferPosition::Covariant),
             };
             acc = result_and(acc, related);
-            if !matches!(acc, RelationResult::Assignable { .. }) {
+            if !candidates_only && !matches!(acc, RelationResult::Assignable { .. }) {
                 break;
             }
         }
-        if !matches!(acc, RelationResult::Assignable { .. }) {
+        if !candidates_only && !matches!(acc, RelationResult::Assignable { .. }) {
             self.relation_session_rollback(&checkpoint);
             bindings.truncate(bindings_len);
             return None;
@@ -656,7 +687,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// One marker relation of a measurement, assignability as the
     /// checker's `isTypeAssignableTo` asks it (`None` when undecided),
     /// and whether it reported an unreliable marker — computed, or replayed
-    /// from the memo, where its footprint carries the report.
+    /// from the memo, where its footprint carries the report. It relates
+    /// behind a binding barrier: a measurement is a function of the
+    /// declaration alone, so an inference session open where it was first
+    /// needed neither steers it nor receives its deposits (a method's own
+    /// type parameter the session infers is the one the marker
+    /// instantiations' methods declare).
     fn variance_marker_relation(
         &self,
         source: SemanticNodeId,
@@ -667,7 +703,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .relation
             .last_relation_unreliable = false;
         let observation = self.observe_read(|| {
-            let step = self.execute_relate(self.relate_key_for(source, target));
+            let step = self.execute_relate_without_binding(self.relate_key_for(source, target));
             let unreliable = self.dispatch_txn.borrow().relation.last_relation_unreliable;
             (step, unreliable)
         });
@@ -1031,6 +1067,70 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let declaration = self.relation_declaration_identity(declaration, node);
         let args = self.declared_application_arguments(&declaration, &args, context)?;
         Some((declaration, args))
+    }
+
+    /// Whether `left` and `right` are two references to one generic
+    /// declaration — the checker's `isTypeCloselyMatchedBy` over two
+    /// instantiations of one interface, class or alias.
+    pub(super) fn references_one_declaration(
+        &self,
+        left: SemanticNodeId,
+        right: SemanticNodeId,
+    ) -> bool {
+        let raw = |node| {
+            self.raw_generic_reference(node)
+                .map(|(declaration, _)| declaration)
+                .map(|declaration| {
+                    self.runtime_nominal_declaration(node, &declaration)
+                        .unwrap_or(declaration)
+                })
+        };
+        matches!((raw(left), raw(right)), (Some(a), Some(b)) if same_declaration(&a, &b))
+    }
+
+    /// The global declaration a runtime-nominal application (`Promise<T>`,
+    /// `Map<K, V>`) refers to: the merged global interface of that name the
+    /// project its node is written in reads
+    /// ([`Self::first_global_declaration`]) — the library's declaration, or
+    /// the program's. The application is a reference to that declaration,
+    /// as the checker's `Promise<T>` is a reference to its global `Promise`
+    /// interface, so it relates, infers and expands through the
+    /// declaration's type parameters and members. `None` for any other
+    /// identity, for the global `Function` (relations decide it by tag),
+    /// and when the project declares no such global: the carrier then stays
+    /// the terminal nominal Verter implements natively.
+    ///
+    /// A carrier with no file of its own is read in the demand's project,
+    /// which the enclosing key does not name, so that read keeps its build
+    /// out of the shared memo.
+    pub(super) fn runtime_nominal_declaration(
+        &self,
+        node: SemanticNodeId,
+        identity: &DeclIdentity,
+    ) -> Option<DeclIdentity> {
+        // The global `Function` is decided by tag: it reads no declaration,
+        // so it never needs the demanding file either.
+        if self.runtime_nominal_identity(identity)?
+            == crate::intrinsic_registry::RuntimeNominal::Function
+        {
+            return None;
+        }
+        // A node interned under the carrier's own builtin origin (an
+        // instantiation built in that origin's scope) is no more written in
+        // a file than a scope-less one.
+        let canonical = match self
+            .graph()
+            .node_scope(node)
+            .and_then(|scope| scope.canonical_file())
+            .filter(|canonical| canonical.as_ref() != identity.canonical_id.as_ref())
+        {
+            Some(canonical) => canonical,
+            None => {
+                self.fold_into_top_build_local_taint(false, true);
+                self.wrapper_demand_canonical()?
+            }
+        };
+        self.runtime_nominal_global_declaration(identity, canonical.as_ref())
     }
 
     /// The declaration reference an alias application or selected carrier

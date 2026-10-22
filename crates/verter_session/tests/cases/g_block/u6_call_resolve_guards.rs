@@ -544,6 +544,7 @@ fn type_param_decl_carries_exact_param_node_and_per_parameter_const() {
         param: SemanticNodeId(41),
         constraint: Some(SemanticNodeId(42)),
         default: Some(SemanticNodeId(43)),
+        original: None,
         is_const: true,
     };
     let TypeParamDecl {
@@ -551,6 +552,7 @@ fn type_param_decl_carries_exact_param_node_and_per_parameter_const() {
         param,
         constraint,
         default,
+        original: _,
         is_const,
     } = &decl;
     assert_eq!(name.as_ref(), "T");

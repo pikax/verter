@@ -181,26 +181,42 @@ impl CalleeParameters {
 
 impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// The contextual signature of `contextual`: its one call signature,
-    /// read as the checker reads a contextual signature. `None` when it has
-    /// none, several, or a generic one.
+    /// read as the checker reads a contextual signature. A union's arms
+    /// without a call signature contribute none (`getContextualSignature`):
+    /// the optional callback `((value: T) => R) | null | undefined` is typed
+    /// by its function arm. `None` when it has none, several, a generic one,
+    /// or union arms whose signatures differ.
     pub(super) fn contextual_signature(
         &self,
         contextual: SemanticNodeId,
     ) -> Option<ContextualSignature> {
-        let signatures = match self
-            .dispatch
-            .shared_signature_nodes(contextual, SignatureKind::Call)
-        {
-            super::super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => {
-                signatures
-            }
-            super::super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return None,
-        };
-        let [signature] = signatures.as_slice() else {
-            return None;
-        };
         let graph = self.dispatch.graph();
-        let data = graph.node_data(*signature)?;
+        let arms: Vec<SemanticNodeId> = match graph.node_data(contextual).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![contextual],
+        };
+        let mut found = None;
+        for arm in arms {
+            let signatures = match self
+                .dispatch
+                .shared_signature_nodes(arm, SignatureKind::Call)
+            {
+                super::super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => {
+                    signatures
+                }
+                super::super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
+                    return None
+                }
+            };
+            match (signatures.as_slice(), found) {
+                ([], _) => {}
+                ([signature], None) => found = Some(*signature),
+                ([signature], Some(first)) if *signature == first => {}
+                _ => return None,
+            }
+        }
+        let signature = found?;
+        let data = graph.node_data(signature)?;
         let SemanticNodeData::Signature {
             params,
             return_type,

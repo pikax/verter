@@ -67,6 +67,7 @@ fn inference_context_key_projects_every_session_setup_axis() {
         no_infer_mask: _,
         const_param_policy: _,
         contextual_inference_mode: _,
+        verdict_use: _,
     } = baseline_key.clone();
 
     let variants = [
@@ -124,6 +125,16 @@ fn inference_context_key_projects_every_session_setup_axis() {
             ConstParamPolicy::NonConst,
             ContextualInferenceMode::Contextual,
         ),
+        setup(
+            active_param,
+            VariancePhase::Covariant,
+            InferencePassKind::Ordinary,
+            InferenceCandidatePriority::Argument,
+            NoInferMask::empty(),
+            ConstParamPolicy::NonConst,
+            ContextualInferenceMode::None,
+        )
+        .reading_candidates_only(),
     ];
     for variant in &variants {
         assert_ne!(
@@ -668,10 +679,12 @@ fn nested_redischarge_restores_the_enclosing_substitution_and_occurrence() {
     let inner_occurrence = InferenceOccurrence {
         priority: InferenceCandidatePriority::ReturnType,
         variance: VariancePhase::Contravariant,
+        bivariant: true,
     };
     let deepest_occurrence = InferenceOccurrence {
         priority: InferenceCandidatePriority::NakedTypeParameter,
         variance: VariancePhase::Covariant,
+        bivariant: false,
     };
 
     let mut outer_substitution = ProvisionalSubstitution::default();

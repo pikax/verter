@@ -7653,8 +7653,8 @@ pub struct RelationRecursionFootprint {
     /// relations report it lets a failed argument check fall back to the
     /// structural comparison.
     pub unreliable: bool,
-    /// Per side, the recursion identities the computation stacked with the
-    /// most distinct instantiations of each on one path; `None` when
+    /// Per side, the recursion identities with their largest count on one
+    /// path: distinct reference instances or all function occurrences. `None` when
     /// neither side stacked one (every memo entry carries a footprint, so
     /// the rare list sits behind one pointer).
     pub identities: Option<verter_session_query::retention::owned::Owned<RecursionIdentities>>,
@@ -8562,6 +8562,10 @@ pub enum VariancePolicy {
     /// Method/function parameters relate strictly CONTRAVARIANTLY — the
     /// `strictFunctionTypes` regime with no method-bivariance exemption.
     StrictContravariance,
+    /// One target declared as a method. Its signature enters the common
+    /// relation stack with method parameter variance, independently of the
+    /// program's ordinary function regime.
+    DeclaredMethod,
 }
 
 /// Whether the relation SOURCE carries freshness — part of relation IDENTITY.
@@ -8594,7 +8598,7 @@ impl Default for FreshnessKey {
 /// A binding-producing relation runs inside the enclosing transaction's active
 /// `InferenceSession`; a judgement discharged under one session's setup must NOT
 /// warm-hit a judgement discharged under a different setup, so this projection
-/// is part of relation identity. The seven axes are exactly the fields the active
+/// is part of relation identity. The eight axes are exactly the fields the active
 /// session carries (§4.2), projected content-free onto the cache key.
 ///
 /// **Content-free (R6).** Every axis is a node-set interning identity, a closed
@@ -8622,6 +8626,9 @@ pub struct InferenceContextKey {
     /// Whether / how a contextual target drives inference in this session
     /// (§4.2).
     pub contextual_inference_mode: ContextualInferenceMode,
+    /// Whether the session's relation verdicts decide anything, or only its
+    /// candidates are read.
+    pub verdict_use: InferenceVerdictUse,
 }
 
 /// Inference algorithm selected from the relation pattern before a session
@@ -8634,6 +8641,21 @@ pub enum InferencePassKind {
     Ordinary,
     /// Candidate-local inference while deciding call applicability.
     CallApplicability,
+}
+
+/// What an inference session reads of the relations it runs. Part of
+/// relation identity: a relation run for its candidates alone relates a
+/// generic signature pair otherwise than one whose verdict is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InferenceVerdictUse {
+    /// The verdict decides the read the session serves: a conditional
+    /// type's `extends` check, a call's applicability.
+    #[default]
+    Decides,
+    /// Only the deposited candidates are read, as the checker's
+    /// `inferTypes` (which never fails) infers one signature's positions
+    /// into another's type parameters (`instantiateSignatureInContextOf`).
+    CandidatesOnly,
 }
 
 /// Content-free identity of the set of inferable (open) type parameters in an
@@ -12196,6 +12218,22 @@ pub fn split_this_receiver(params: &[FunctionParam]) -> (Option<&FunctionParam>,
     }
 }
 
+/// The declaration slot a cloned signature parameter originated from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeParamOrigin {
+    pub declaration: DeclIdentity,
+    pub index: u16,
+}
+
+impl verter_session_query::retention::owned::Measured for TypeParamOrigin {
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.declaration.canonical_id.offer(aliases) + self.declaration.decl_name.offer(aliases)
+    }
+}
+
 /// Type-parameter declaration on a [`SemanticNodeData::Signature`].
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
@@ -12204,6 +12242,10 @@ pub struct TypeParamDecl {
     /// parameter — the identity inference binds. Per-parameter policy
     /// (const-ness, binding) keys off THIS node, never the display name.
     pub param: SemanticNodeId,
+    /// The original slot of a cloned parameter. Authored parameters use
+    /// their own slot. Canonical signature comparison reads this identity;
+    /// display names and instantiated defaults are not binder identities.
+    pub original: Option<verter_session_query::retention::owned::Owned<TypeParamOrigin>>,
     pub constraint: Option<SemanticNodeId>,
     pub default: Option<SemanticNodeId>,
     /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>`
@@ -12224,6 +12266,7 @@ impl TypeParamDecl {
         Self {
             name: self.name.clone(),
             param: self.param,
+            original: self.original.clone(),
             constraint: self.constraint,
             default: self.default,
             is_const: self.is_const,

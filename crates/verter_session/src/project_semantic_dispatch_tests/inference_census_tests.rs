@@ -453,7 +453,7 @@ fn library_inference() {
             read: Read::Return(r#"l1"#),
             tsc: [r#"number"#, r#"number"#, r#"number"#, r#"number"#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [Class::Gap, Class::Gap, Class::Gap, Class::Gap],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Return(r#"l2"#),
@@ -464,7 +464,7 @@ fn library_inference() {
                 r#"Promise<number[]>"#,
             ],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [Class::Gap, Class::Gap, Class::Gap, Class::Gap],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Return(r#"l3"#),

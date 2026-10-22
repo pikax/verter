@@ -4960,6 +4960,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     param: *binder,
                     constraint,
                     default,
+                    original: None,
                     is_const: param.is_const,
                 }
             })
@@ -12786,10 +12787,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Registry classification: `name` is the global lib `Promise` type
-    /// (`IntrinsicRegistry` → [`IntrinsicImpl::PromiseGlobal`](crate::intrinsic_registry::IntrinsicImpl::PromiseGlobal)).
-    /// The registry lookup is the lib-decl-identity rail — resolver code
-    /// never matches the name string directly.
+    /// Whether `name`, within the `__builtin__` sentinel namespace the
+    /// shadowing gates mint for an unshadowed global, is the runtime
+    /// nominal `Promise` ([`RuntimeNominal`](crate::intrinsic_registry::RuntimeNominal)).
     pub(super) fn is_promise_global_name(&self, name: &str) -> bool {
         matches!(
             self.runtime_nominal_global_name(name),
@@ -12966,13 +12966,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(|decl| (decl.name.as_ref(), decl.constraint)),
             crate::semantic_query::ClauseSpelling::Bound,
         );
-        let base = |node: SemanticNodeId| {
-            self.apply_clause_base_substitution(
-                &substitution,
-                node,
-                crate::semantic_query::ClauseSpelling::Bound,
-            )
-        };
+        let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
+            graph,
+            type_parameters
+                .iter()
+                .zip(&substitution.bases)
+                .map(|(decl, base)| (decl.param, *base))
+                .collect(),
+        );
+        let base = |node| self.substitute_canonical(node, &substitution);
         let params: Arc<[crate::semantic_query::FunctionParam]> = params
             .iter()
             .map(crate::semantic_query::FunctionParam::copy)
@@ -19109,7 +19111,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// The `Instantiate` key [`Self::declaration_carrier_body`] reads for a
-    /// declaration carrier, or `None` for any other node.
+    /// declaration carrier, or `None` for any other node. A runtime nominal
+    /// the project declares (`Promise<T>`) reads the global declaration it
+    /// refers to.
     fn declaration_carrier_key(&self, carrier: SemanticNodeId) -> Option<SemanticQueryKey> {
         let (identity, args) = match self.graph().node_data(carrier).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => (
@@ -19121,6 +19125,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => return None,
         };
+        let identity = self
+            .runtime_nominal_declaration(carrier, &identity)
+            .unwrap_or(identity);
         let slot = self.type_slot_for(
             identity.canonical_id.clone(),
             identity.owner,
@@ -19732,11 +19739,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.intern_normalized_union_or_intersection(&reduced, true),
                 ))
             }
+            // Verter's own `Promise<V>`, which no declaration of the project
+            // describes: its `then`'s `onfulfilled` is the optional, nullable
+            // `((value: V) => ...) | null | undefined`, a callback union. A
+            // `Promise` the project declares is a reference to that
+            // declaration and reads its `then` like any other carrier below.
             SemanticNodeData::InstantiationRef { base, args }
-                if args.len() == 1 && self.is_promise_global_identity(base) =>
+                if args.len() == 1
+                    && self.is_promise_global_identity(base)
+                    && self.runtime_nominal_declaration(resolved, base).is_none() =>
             {
-                // `Promise<V>.then`'s `onfulfilled` is the optional, nullable
-                // `((value: V) => ...) | null | undefined`: a callback union.
                 let value = args[0];
                 drop(data);
                 LibStep::Done(self.lib_awaited_nested(value, walk, true))

@@ -880,6 +880,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         param: param_node,
                         constraint,
                         default,
+                        original: None,
                         is_const: param.is_const,
                     }
                 })

@@ -250,13 +250,7 @@ fn a_union_with_a_naked_parameter_infers_from_a_reference_it_matches() {
 /// A thenable related to another declaration's thenable infers its
 /// callback's `R` through the other's structure (the checker's
 /// `inferFromObjectTypes` between two references to different targets).
-///
-/// What the lane gives: both rows measured `0`, wrong-but-clean — the
-/// callback's `R | Thenable<R>` infers the other declaration's whole union
-/// for `R`, since only two references to ONE declaration match by their
-/// type arguments.
 #[test]
-#[ignore = "a callback returning R | Thenable<R> infers R from another declaration's thenable"]
 fn thenables_of_different_declarations_infer_through_their_structure() {
     let failures = Matrix::new(METHODS).lib(GLOBALS_LIB).types(&[
         ("Promise<2> extends MyPL<any> ? 1 : 0", "1"),

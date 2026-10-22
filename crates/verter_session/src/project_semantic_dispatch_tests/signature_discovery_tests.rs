@@ -675,6 +675,7 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
             param: t,
             constraint: None,
             default: None,
+            original: None,
             is_const: false,
         }],
         ret,
@@ -1080,6 +1081,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
                 param: binder,
                 constraint: None,
                 default: None,
+                original: None,
                 is_const: false,
             }],
             instance_a,
@@ -1256,10 +1258,177 @@ fn generic_identity(
             param: t,
             constraint,
             default: None,
+            original: None,
             is_const: false,
         }],
         t,
     )
+}
+
+#[test]
+fn contravariant_signature_inference_reads_semantic_return_operands() {
+    use verter_type_engine::semantic_query::RelationResult;
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
+    let void = prim(&d, PrimitiveKind::Void);
+    let u = d.graph().intern_node(SemanticNodeData::TypeParam {
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("U"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: "U".into(),
+    });
+    let tuple = |value| {
+        d.graph().intern_node(SemanticNodeData::Tuple {
+            elements: verter_type_engine::semantic_query::PayloadArray::from([TupleElement {
+                label: None,
+                value,
+                optional: false,
+                rest: false,
+            }]),
+            readonly: false,
+        })
+    };
+    // Return fallback must not hide a missing callback candidate.
+    let no_infer_u = d
+        .graph()
+        .intern_node(SemanticNodeData::IntrinsicApplication {
+            op: verter_type_engine::semantic_query::CompilerIntrinsicTypeOp::NoInfer,
+            args: verter_type_engine::semantic_query::PayloadArray::from([u]),
+        });
+    for kind in [
+        PrimitiveKind::Any,
+        PrimitiveKind::Void,
+        PrimitiveKind::String,
+    ] {
+        let returned = prim(&d, kind);
+        let result = if kind == PrimitiveKind::Any {
+            d.graph().intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(1.0),
+            ))
+        } else {
+            returned
+        };
+        let source_callback = signature(
+            &d,
+            "source_callback",
+            0,
+            SignatureKind::Call,
+            vec![],
+            vec![],
+            u,
+        );
+        let target_callback = signature(
+            &d,
+            "target_callback",
+            0,
+            SignatureKind::Call,
+            vec![],
+            vec![],
+            returned,
+        );
+        let source_parameter = signature(
+            &d,
+            "source_parameter",
+            0,
+            SignatureKind::Call,
+            vec![param(source_callback)],
+            vec![],
+            void,
+        );
+        let target_parameter = signature(
+            &d,
+            "target_parameter",
+            0,
+            SignatureKind::Call,
+            vec![param(target_callback)],
+            vec![],
+            void,
+        );
+        let source = signature(
+            &d,
+            "source",
+            0,
+            SignatureKind::Call,
+            vec![param(source_parameter)],
+            vec![TypeParamDecl {
+                name: "U".into(),
+                param: u,
+                constraint: None,
+                default: None,
+                original: None,
+                is_const: false,
+            }],
+            tuple(no_infer_u),
+        );
+        let target = signature(
+            &d,
+            "target",
+            0,
+            SignatureKind::Call,
+            vec![param(target_parameter)],
+            vec![],
+            tuple(result),
+        );
+        let relation = d.execute_relate_pair_as_result_for_tests(source, target);
+        assert!(
+            matches!(relation, RelationResult::Assignable { .. }),
+            "{kind:?} must infer through a contravariant callback return: {relation:?}"
+        );
+    }
+}
+
+#[test]
+fn inferred_argument_remains_free_when_inserted_into_a_generic_signature() {
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
+    let t = d.graph().intern_node(SemanticNodeData::TypeParam {
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: "T".into(),
+    });
+    let binder = d.graph().alloc_infer_binder_id();
+    let inferred = d.graph().intern_node(SemanticNodeData::Infer {
+        name: "I".into(),
+        binder: binder.clone(),
+        constraint: None,
+    });
+    let reference = d.graph().intern_node(SemanticNodeData::InferRef {
+        name: "I".into(),
+        binder,
+    });
+    let source = signature(
+        &d,
+        "inferred",
+        0,
+        SignatureKind::Call,
+        vec![],
+        vec![TypeParamDecl {
+            name: "T".into(),
+            param: t,
+            constraint: None,
+            default: None,
+            original: None,
+            is_const: false,
+        }],
+        reference,
+    );
+    let result = d.substitute_semantic_type_param(source, inferred, t);
+    let data = d.graph().node_data(result).unwrap();
+    let SemanticNodeData::Signature {
+        type_parameters,
+        return_type,
+        ..
+    } = data.as_ref()
+    else {
+        panic!("expected substituted signature: {data:?}")
+    };
+    assert_eq!(*return_type, t, "the inserted argument stays free");
+    assert_ne!(type_parameters[0].param, t, "the local clause is fresh");
 }
 
 /// Generic signatures union only on an EXACT match under the positional

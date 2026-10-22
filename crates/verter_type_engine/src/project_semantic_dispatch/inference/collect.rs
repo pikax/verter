@@ -149,7 +149,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut txn = self.dispatch_txn.borrow_mut();
         let active_id = txn.active_session().map(|session| session.id);
         let accepted = txn.active_session_mut().is_some_and(|session| {
-            session.deposit(param_node, bound, occurrence.priority, occurrence.variance)
+            session.deposit(
+                param_node,
+                bound,
+                occurrence.priority,
+                occurrence.candidate_variance(),
+            )
         });
         if !accepted {
             return false;
@@ -249,7 +254,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut txn = self.dispatch_txn.borrow_mut();
         let active_id = txn.active_session().map(|session| session.id);
         let deposited = txn.active_session_mut().is_some_and(|session| {
-            session.deposit_projection(projection, bound, occurrence.priority, occurrence.variance)
+            session.deposit_projection(
+                projection,
+                bound,
+                occurrence.priority,
+                occurrence.candidate_variance(),
+            )
         });
         if !deposited {
             return false;
@@ -278,6 +288,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// Whether an inference session is currently active.
     pub(in crate::project_semantic_dispatch) fn relation_session_active(&self) -> bool {
         self.dispatch_txn.borrow().active_session().is_some()
+    }
+
+    /// Whether this parameter belongs to the active collector. Other
+    /// signatures' local parameters remain rigid while collection is active.
+    pub(in crate::project_semantic_dispatch) fn relation_session_infers_parameter(
+        &self,
+        parameter: SemanticNodeId,
+    ) -> bool {
+        self.dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| session.infers(parameter))
     }
 
     /// Checkpoint the ACTIVE inference session's deposits (`None` when no

@@ -200,9 +200,7 @@ pub(super) async fn handle_hover(
         position.line,
         position.character
     );
-    let _timer = server
-        .statistics
-        .timer("hover", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("hover", Some(uri.as_str()));
     // The whole response settles against the request admitted before the
     // route's current-file repair, computed once.
     server
@@ -675,9 +673,7 @@ async fn handle_completion_attempt(
 ) -> Result<Option<CompletionResponse>> {
     let _hg = HandlerGuard::new(&server.handler_activity, "completion");
     let uri = &params.text_document_position.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("completion", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("completion", Some(uri.as_str()));
     let position = &params.text_document_position.position;
     let trigger_character = params
         .context
@@ -893,6 +889,16 @@ async fn handle_completion_attempt(
         })
     };
     let native_snapshot = capture_native_snapshot();
+    // The workspace component scan (auto-import tag surface) enumerates the
+    // whole host: it demands the inventory, and while that is still being
+    // built the list keeps the local items but is marked incomplete so the
+    // client asks again once the scan settles.
+    let workspace_component_scan = server.documents.semantic_analysis_enabled()
+        && native_snapshot
+            .as_ref()
+            .is_some_and(|native| !native.authored_component_ingress_captured);
+    let workspace_inventory_pending =
+        workspace_component_scan && !server.workspace_inventory_ready().await;
     // Release the typing fence before cold child/meta work and provider
     // awaits; an edit after this point is a revision change of the admitted
     // request and answers `ContentModified` at settlement.
@@ -913,8 +919,6 @@ async fn handle_completion_attempt(
             // TypeScript surface at all, so Verter is its only possible owner and
             // the resolver must be available whether or not the analysis sidebar
             // is switched on.
-            let workspace_component_scan = server.documents.semantic_analysis_enabled()
-                && !native.authored_component_ingress_captured;
             let resolve_component = |import_source: &str,
                                      component_name: Option<&str>|
              -> Option<
@@ -1042,7 +1046,12 @@ async fn handle_completion_attempt(
             (false, None)
         } else {
             verter_result
-                .map(|result| (result.is_incomplete, Some(result.items)))
+                .map(|result| {
+                    (
+                        result.is_incomplete || workspace_inventory_pending,
+                        Some(result.items),
+                    )
+                })
                 .unwrap_or((false, None))
         };
         let maybe_style_position = native_snapshot.is_some_and(|native| {

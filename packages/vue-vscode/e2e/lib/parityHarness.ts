@@ -109,12 +109,12 @@ async function closeAllEditors(): Promise<void> {
  * Start a clean provider epoch for a state-sensitive parity suite, ready for
  * what the suite asserts: its entry document's own merged diagnostics.
  *
- * Nothing workspace-wide is awaited. The restarted server certifies a document
- * while its workspace scan is still running once the document's own sync and
- * its import closure are current, so neither level 2 of the readiness ladder
- * (`typeProviderSyncComplete`, sent only after the whole scan) nor the replay
- * of every document VS Code still holds stands between the suite and its
- * entry. The entry is opened FIRST, straight after the restart. A document VS
+ * Nothing workspace-wide is awaited. The restarted server never walks the
+ * workspace on its own: it certifies a document once the document's own sync
+ * and its import closure are current, and announces level 2 of the readiness
+ * ladder (`typeProviderSyncComplete`) without a workspace scan, so neither
+ * level 2 nor the replay of every document VS Code still holds stands between
+ * the suite and its entry. The entry is opened FIRST, straight after the restart. A document VS
  * Code still holds is not re-opened — its replayed open is all the server has,
  * and nothing about that open singles it out — so the priority comes from the
  * diagnostics-status poll instead: `verter._getDiagnosticStatus` first awaits
@@ -125,9 +125,11 @@ async function closeAllEditors(): Promise<void> {
  *
  * A suite that asserts workspace-wide state (closed-file references, project
  * rename, workspace symbols) passes `workspaceWide` with the reason: the server
- * answers those requests only once its configured-project frontier is complete,
- * so level 2 is awaited too. The restart invalidated the cached level-2 fact,
- * so that wait is for the new server's own announcement.
+ * answers those requests only once its workspace inventory is built, and that
+ * scan starts on the first such demand — level 2 does not imply it. So after
+ * level 2 (the restart invalidated the cached fact, so that wait is for the
+ * new server's own announcement) the harness demands the inventory and polls
+ * until the server stops answering it as pending.
  */
 export async function restartParityReady(
   entry: string,
@@ -153,8 +155,23 @@ export async function restartParityReady(
   await waitForDiagnosticsSettled(doc.uri, { timeoutMs: remaining() });
   if (options?.workspaceWide) {
     await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
+    await awaitWorkspaceInventory();
   }
   return doc;
+}
+
+/**
+ * Demand the complete workspace inventory and wait until the server stops
+ * answering it as pending. Level 2 of the readiness ladder does not imply it:
+ * the scan starts on this demand.
+ */
+export async function awaitWorkspaceInventory(): Promise<void> {
+  await pollUntilWithin(
+    "workspace inventory built",
+    async () => vscode.commands.executeCommand<boolean>("verter._workspaceInventoryReady"),
+    (ready) => ready === true,
+    pollBudget("restartTypeProviderSync"),
+  );
 }
 
 export function tokenOffset(doc: vscode.TextDocument, anchor: TokenAnchor): number {
@@ -570,17 +587,28 @@ export async function signatureHelpAt(
   );
 }
 
+/**
+ * Document highlights are a passive surface: the server reads the document's
+ * current provider surface and never compiles or syncs for the request. A file
+ * first opened by the case is synced by the debounced coordinator, not by level
+ * 2 of the readiness ladder, so the first answer can precede that sync. Poll
+ * until the provider-merged answer (more than one region) arrives.
+ */
 export async function documentHighlightsAt(
   anchor: TokenAnchor,
 ): Promise<vscode.DocumentHighlight[]> {
   const doc = await openRelative(anchor.file);
   const position = tokenPosition(doc, anchor);
-  return (
+  const request = async () =>
     (await vscode.commands.executeCommand<vscode.DocumentHighlight[]>(
       "vscode.executeDocumentHighlights",
       doc.uri,
       position,
-    )) ?? []
+    )) ?? [];
+  return pollUntil(
+    `document highlights ${anchor.file}#${anchor.token}`,
+    request,
+    (highlights) => highlights.length >= 2,
   );
 }
 
