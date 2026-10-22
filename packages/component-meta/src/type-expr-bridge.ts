@@ -2809,25 +2809,22 @@ function inferForm(name: string, constraint: Printed | undefined): Printed {
 }
 
 /**
- * Printing state. The typed form carries one `infer` variant for a binder's
- * declaration and its references, so, as the Rust display renderer does, the
- * printer tracks which binders an `extends` clause declares and which are in
- * scope: an `infer` declares its binder only inside an `extends` clause
- * where no enclosing clause already binds that name. `graphActive` holds the
- * graph nodes being printed, so a cyclic node table cannot recurse forever.
+ * Printing state. As in the Rust display renderer, an `infer` inside an
+ * `extends` clause declares its binder (a reference to a binder is a type
+ * reference), so a nested clause redeclaring an enclosing binder's name keeps
+ * its declaration. `graphActive` holds the graph nodes being printed, so a
+ * cyclic node table cannot recurse forever.
  */
 interface PrintScope {
   inExtends: boolean;
-  bound: string[];
-  declaring: string[][];
   graphActive: Set<number>;
 }
 
 function newPrintScope(): PrintScope {
-  return { inExtends: false, bound: [], declaring: [], graphActive: new Set() };
+  return { inExtends: false, graphActive: new Set() };
 }
 
-/** A conditional: its `extends` clause binders are in scope in the true branch alone. */
+/** A conditional: an `infer` in its `extends` clause declares a binder. */
 function printConditional<N>(
   scope: PrintScope,
   print: (node: N) => Printed,
@@ -2838,28 +2835,23 @@ function printConditional<N>(
 ): Printed {
   const enclosing = scope.inExtends;
   const checkText = print(check);
-  scope.declaring.push([]);
   scope.inExtends = true;
   const extendsText = print(extendsType);
-  const boundLength = scope.bound.length;
-  scope.bound.push(...scope.declaring.pop()!);
   scope.inExtends = enclosing;
   const trueText = print(trueType);
-  scope.bound.length = boundLength;
   const falseText = print(falseType);
   return conditionalForm(checkText, extendsText, trueText, falseText);
 }
 
-/** An `infer`: a binder's declaration, or a reference to a binder in scope. */
+/** An `infer`: a declaration inside an `extends` clause; outside one, its name. */
 function printInfer(
   scope: PrintScope,
   name: string,
   constraint: () => Printed | undefined,
 ): Printed {
-  if (!scope.inExtends || scope.bound.includes(name)) {
+  if (!scope.inExtends) {
     return printed(name, PREC_PRIMARY);
   }
-  scope.declaring.at(-1)?.push(name);
   return inferForm(name, constraint());
 }
 

@@ -285,18 +285,32 @@ describe("native display text reparses to the printed tree", () => {
         property({ kind: "string", value: "a" }, infer("U")),
         conditional(
           ref("T"),
-          property({ kind: "string", value: "b" }, infer("U")),
-          infer("U"),
+          property({ kind: "string", value: "b" }, ref("U")),
+          ref("U"),
           ref("X"),
         ),
         conditional(
           ref("T"),
           property({ kind: "string", value: "c" }, infer("U")),
-          infer("U"),
+          ref("U"),
           ref("Y"),
         ),
       ),
       "T extends { a: infer U } ? T extends { b: U } ? U : X : T extends { c: infer U } ? U : Y",
+    ],
+    [
+      // Printed as a reference, `T = string` would select `never`, not `number`.
+      "a nested clause redeclaring an enclosing infer binder",
+      conditional(
+        ref("T"),
+        infer("U"),
+        conditional({ kind: "primitive", name: "number" }, infer("U"), ref("U"), {
+          kind: "primitive",
+          name: "never",
+        }),
+        { kind: "primitive", name: "never" },
+      ),
+      "T extends infer U ? number extends infer U ? U : never : never",
     ],
     [
       "a remapped mapped type with modifiers",
@@ -335,8 +349,10 @@ describe("graph display text reparses to the printed tree", () => {
   // 15: { "7": A }, 16: { 7: B }, 17: T, 18: infer U, 19: U[] (a bound U),
   // 20: T extends (infer U)[] ? U[] : A, 21: { a: infer U },
   // 22: T extends { a: infer U } ? U : A,
-  // 23: T extends { a: infer U } ? T extends { a: U } ? U : A : A,
-  // 24: { a: 25 }, 25: 24 | void (a cycle)
+  // 23: T extends { a: infer U } ? T extends { a: infer U } ? U : A : A,
+  // 24: { a: 25 }, 25: 24 | void (a cycle), 26: U (a reference), 27: { a: U },
+  // 28: T extends { a: U } ? U : A,
+  // 29: T extends { a: infer U } ? T extends { a: U } ? U : A : A
   const property = (key: GraphPropertyKeyRecord, typeNodeId: number) => ({
     kind: MEMBER_PROPERTY,
     key,
@@ -417,6 +433,22 @@ describe("graph display text reparses to the printed tree", () => {
       },
       { kind: NODE_OBJECT, members: [property({ kind: "string", nameId: 9 }, 25)] },
       { kind: NODE_UNION, typeNodeIds: [24, 10] },
+      { kind: NODE_REF, nameId: 8, typeArgumentNodeIds: [] },
+      { kind: NODE_OBJECT, members: [property({ kind: "string", nameId: 9 }, 26)] },
+      {
+        kind: NODE_CONDITIONAL,
+        checkNodeId: 17,
+        extendsNodeId: 27,
+        trueTypeNodeId: 26,
+        falseTypeNodeId: 1,
+      },
+      {
+        kind: NODE_CONDITIONAL,
+        checkNodeId: 17,
+        extendsNodeId: 21,
+        trueTypeNodeId: 28,
+        falseTypeNodeId: 1,
+      },
     ],
   );
 
@@ -431,7 +463,9 @@ describe("graph display text reparses to the printed tree", () => {
     [15, '{ "7": A }'],
     [16, "{ 7: B }"],
     [20, "T extends (infer U)[] ? U[] : A"],
-    [23, "T extends { a: infer U } ? T extends { a: U } ? U : A : A"],
+    // A nested clause redeclaring the enclosing binder keeps its declaration.
+    [23, "T extends { a: infer U } ? T extends { a: infer U } ? U : A : A"],
+    [29, "T extends { a: infer U } ? T extends { a: U } ? U : A : A"],
     // A cyclic table has no finite spelling; its back-edge prints `unknown`.
     [24, "{ a: unknown | void }"],
   ] as const) {

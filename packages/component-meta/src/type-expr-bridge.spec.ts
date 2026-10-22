@@ -40,6 +40,27 @@ function inExtendsClause(infer: NativeTypeExpr): NativeTypeExpr {
 }
 
 describe("typeExprToDescriptor", () => {
+  it("keeps a nested infer declaration that shadows an enclosing binder", () => {
+    const never: NativeTypeExpr = { kind: "primitive", name: "never" };
+    const result = typeExprToDescriptor({
+      kind: "conditional",
+      check: { kind: "ref", name: "T", typeArguments: [] },
+      extends: { kind: "infer", name: "U" },
+      trueType: {
+        kind: "conditional",
+        check: { kind: "primitive", name: "number" },
+        extends: { kind: "infer", name: "U" },
+        trueType: { kind: "ref", name: "U", typeArguments: [] },
+        falseType: never,
+      },
+      falseType: never,
+    });
+    expect(result).toEqual({
+      kind: "unknown",
+      rawType: "T extends infer U ? number extends infer U ? U : never : never",
+    });
+  });
+
   it("renders an array constraint on an unreduced infer", () => {
     const result = typeExprToDescriptor(
       inExtendsClause({

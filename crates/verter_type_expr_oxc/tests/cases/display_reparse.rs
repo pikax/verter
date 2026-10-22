@@ -106,6 +106,8 @@ fn operator_precedence_survives_the_print() {
         "T extends (U extends V ? 1 : 2) ? 3 : 4",
         "T extends [infer U extends string] ? U : never",
         "T extends (infer U extends string) | number ? U : never",
+        "T extends infer U ? number extends infer U ? U : never : never",
+        "T extends { a: infer U } ? T extends { b: U } ? U : 2 : T extends { c: infer U } ? U : never",
         "T extends A ? (B extends C ? 1 : 2) : 3",
         "`a${A | B}b`",
         "{ [K in keyof T as `get${K & string}`]?: T[K] | undefined }",

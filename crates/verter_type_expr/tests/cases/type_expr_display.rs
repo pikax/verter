@@ -422,7 +422,7 @@ fn deep_finite_structure_renders_completely_without_a_depth_cap() {
 }
 
 #[test]
-fn an_infer_bound_by_an_enclosing_clause_renders_as_a_reference() {
+fn every_infer_in_an_extends_clause_declares_and_a_reference_is_its_name() {
     let infer = |name: &str| TypeExpr::Infer {
         name: name.into(),
         constraint: None,
@@ -444,29 +444,50 @@ fn an_infer_bound_by_an_enclosing_clause_renders_as_a_reference() {
                 false_type: Arc::new(false_type),
             }
         };
-    // The nested clause in the true branch references `U`; the false branch
-    // is outside its scope, so a clause there declares `U` afresh.
-    let expression = conditional(
+    let render = |expression: &TypeExpr| {
+        render_type_expr_display(expression)
+            .expect("the conditional renders")
+            .text
+    };
+    // A nested clause in the true branch that refers to the enclosing `U`
+    // holds the reference; the false branch is outside its scope, so a clause
+    // there declares `U` afresh.
+    let referring = conditional(
         reference("T"),
         object("a", infer("U")),
         conditional(
             reference("T"),
-            object("b", infer("U")),
-            infer("U"),
+            object("b", reference("U")),
+            reference("U"),
             TypeExpr::Literal(LiteralValue::Number(2.0)),
         ),
         conditional(
             reference("T"),
             object("c", infer("U")),
-            infer("U"),
+            reference("U"),
             TypeExpr::Primitive(PrimitiveName::Never),
         ),
     );
     assert_eq!(
-        render_type_expr_display(&expression)
-            .expect("the conditional renders")
-            .text,
+        render(&referring),
         "T extends { a: infer U } ? T extends { b: U } ? U : 2 : T extends { c: infer U } ? U : never"
+    );
+    // A nested clause redeclaring the enclosing name shadows it: printed as a
+    // reference, `T = string` would select `never` instead of `number`.
+    let shadowing = conditional(
+        reference("T"),
+        infer("U"),
+        conditional(
+            TypeExpr::Primitive(PrimitiveName::Number),
+            infer("U"),
+            reference("U"),
+            TypeExpr::Primitive(PrimitiveName::Never),
+        ),
+        TypeExpr::Primitive(PrimitiveName::Never),
+    );
+    assert_eq!(
+        render(&shadowing),
+        "T extends infer U ? number extends infer U ? U : never : never"
     );
 }
 
