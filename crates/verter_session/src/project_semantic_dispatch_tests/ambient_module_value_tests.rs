@@ -12,6 +12,404 @@
 
 use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
 
+const ASSIGNED_NAMESPACE: &str = r#"
+declare module "pkg" {
+  namespace NS {
+    interface Opt { k: 99 }
+    type Box<T> = { value: T };
+    namespace Inner { interface Item { k: 7 } }
+  }
+  export = NS;
+}
+declare module "other-pkg" {
+  namespace NS { interface Opt { k: -1 } }
+  export = NS;
+}
+"#;
+
+#[test]
+fn an_ambient_assigned_namespace_exports_its_types() {
+    let files = [("assigned.d.ts", ASSIGNED_NAMESPACE)];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"
+import type { Opt, Opt as Renamed, Box, Inner } from "pkg";
+import * as Pkg from "pkg";
+import type { Opt as OtherOpt } from "other-pkg";
+"#,
+        &[
+            ("Opt[\"k\"]", "99"),
+            ("Renamed[\"k\"]", "99"),
+            ("Pkg.Opt[\"k\"]", "99"),
+            ("Box<42>[\"value\"]", "42"),
+            ("Pkg.Box<43>[\"value\"]", "43"),
+            ("Inner.Item[\"k\"]", "7"),
+            ("Pkg.Inner.Item[\"k\"]", "7"),
+            ("OtherOpt[\"k\"]", "-1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_assigned_namespace_type_tracks_contributor_edits() {
+    use super::checker_probe_lane_tests::{probe_host, upsert_probe_files, with_probe_on_host};
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
+
+    let files = [("assigned.d.ts", ASSIGNED_NAMESPACE)];
+    let project = ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    };
+    let host = probe_host(project);
+    let source = r#"import type { Opt } from "pkg"; import * as Pkg from "pkg";"#;
+    let dependent = ASSIGNED_NAMESPACE.replace(
+        "interface Opt { k: 99 }",
+        "interface Base { k: 99 } type Opt = Base;",
+    );
+    let module_dependent = ASSIGNED_NAMESPACE
+        .replace(
+            "declare module \"pkg\" {",
+            "declare module \"pkg\" { interface Root { k: 99 } type Base = Root;",
+        )
+        .replace("interface Opt { k: 99 }", "type Opt = Base;");
+    let module_edited = module_dependent.replace("k: 99", "k: 100");
+    let edited = dependent.replace("k: 99", "k: 100");
+    let retargeted = edited.replace(
+        "export = NS",
+        "namespace Other { interface Opt { k: 101 } } export = Other",
+    );
+    for probe in ["Opt[\"k\"]", "Pkg.Opt[\"k\"]"] {
+        for (ambient, expected) in [
+            (ASSIGNED_NAMESPACE, "99"),
+            (dependent.as_str(), "99"),
+            (module_dependent.as_str(), "99"),
+            (module_edited.as_str(), "100"),
+            (edited.as_str(), "100"),
+            (retargeted.as_str(), "101"),
+            (ASSIGNED_NAMESPACE, "99"),
+        ] {
+            upsert_probe_files(&host, &[("assigned.d.ts", ambient)]);
+            for _ in 0..2 {
+                with_probe_on_host(&host, project, source, probe, |dispatch, node| {
+                    assert_eq!(render_node(dispatch, node, 0), expected, "{probe}");
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn an_ambient_assigned_namespace_resolves_sibling_types() {
+    let files = [(
+        "assigned.d.ts",
+        r#"
+declare module "pkg" {
+  namespace NS {
+    interface Base { k: 99 }
+    type Opt = Base;
+    interface Holder { value: Base }
+    type Box<T> = { value: T };
+    type Wrapped<T> = Box<T>;
+    namespace Inner { type Opt = Base; }
+  }
+  export = NS;
+}
+declare module "other-pkg" {
+  namespace NS { interface Base { k: -1 } type Opt = Base; }
+  export = NS;
+}
+interface Base { k: 0 }
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { Opt, Holder, Wrapped, Inner } from "pkg";
+import * as Pkg from "pkg";
+import type { Opt as OtherOpt } from "other-pkg";"#,
+        &[
+            ("Opt[\"k\"]", "99"),
+            ("Pkg.Opt[\"k\"]", "99"),
+            ("Holder[\"value\"][\"k\"]", "99"),
+            ("Pkg.Holder[\"value\"][\"k\"]", "99"),
+            ("Wrapped<42>[\"value\"]", "42"),
+            ("Pkg.Wrapped<43>[\"value\"]", "43"),
+            ("Inner.Opt[\"k\"]", "99"),
+            ("OtherOpt[\"k\"]", "-1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_namespace_type_applies_generic_defaults() {
+    let files = [(
+        "defaults.d.ts",
+        r#"
+declare module "pkg" {
+  namespace NS { type Box<T = 41, U = T> = { value: U }; }
+  export = NS;
+}
+declare module "plain" { type Box<T = 41, U = T> = { value: U }; }
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { Box } from "pkg";
+import * as Pkg from "pkg";
+import type { Box as PlainBox } from "plain";"#,
+        &[
+            ("Box[\"value\"]", "41"),
+            ("Pkg.Box[\"value\"]", "41"),
+            ("Box<42>[\"value\"]", "42"),
+            ("Pkg.Box<42, 43>[\"value\"]", "43"),
+            ("PlainBox[\"value\"]", "41"),
+            ("PlainBox<42>[\"value\"]", "42"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_namespace_recursive_sibling_remains_projectable() {
+    let files = [(
+        "recursive.d.ts",
+        r#"
+declare module "pkg" {
+  namespace NS { interface Link { k: 99; next: Link } }
+  export = NS;
+}
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { Link } from "pkg"; import * as Pkg from "pkg";"#,
+        &[
+            ("Link[\"next\"][\"k\"]", "99"),
+            ("Pkg.Link[\"next\"][\"k\"]", "99"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_assigned_namespace_resolves_alias_consumers() {
+    use super::checker_probe_lane_tests::{mismatches_on_host, probe_host};
+
+    let files = [(
+        "assigned.d.ts",
+        r#"
+declare module "pkg" {
+  interface Root { k: 99 }
+  type RootAlias = Root;
+  namespace NS {
+    interface Base { k: 99 }
+    type Opt = Base;
+    type Scalar = 99;
+    type Alias = Scalar;
+    type RootOpt = RootAlias;
+  }
+  export = NS;
+}
+declare module "other-pkg" {
+  interface Root { k: 7 }
+  type RootAlias = Root;
+  namespace NS { type RootOpt = RootAlias; }
+  export = NS;
+}
+"#,
+    )];
+    let project = ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    };
+    let host = probe_host(project);
+    let mut failures = Vec::new();
+    for _ in 0..2 {
+        failures.extend(mismatches_on_host(
+            &host,
+            project,
+            r#"import type { Base, Opt, Alias, RootOpt } from "pkg"; import * as Pkg from "pkg";
+import type { RootOpt as OtherOpt } from "other-pkg"; import * as OtherPkg from "other-pkg";"#,
+            &[
+                ("Opt extends { k: 99 } ? true : false", "true"),
+                ("Pkg.Opt extends { k: 99 } ? true : false", "true"),
+                ("Alias", "99"),
+                ("Pkg.Alias", "99"),
+                ("Base extends { k: 99 } ? true : false", "true"),
+                ("RootOpt[\"k\"]", "99"),
+                ("Pkg.RootOpt[\"k\"]", "99"),
+                ("OtherOpt[\"k\"]", "7"),
+                ("OtherPkg.RootOpt[\"k\"]", "7"),
+            ],
+        ));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_assigned_namespace_typeof_reads_its_lexical_value() {
+    use super::checker_probe_lane_tests::{mismatches_on_host, probe_host};
+
+    let mut failures = Vec::new();
+    for global in [
+        "",
+        "declare const value: 0; declare namespace Inner { const value: 0; const obj: { k: 0 }; }",
+    ] {
+        let ambient = format!(
+            r#"
+declare module "pkg" {{
+  namespace NS {{
+    const value: 99;
+    namespace Inner {{ const value: 99; const obj: {{ k: 99 }}; }}
+    type Opt = {{ k: typeof value; nested: typeof Inner.value }};
+    type NestedTypeof = typeof Inner.value;
+    type MemberTypeof = typeof Inner.obj.k;
+  }}
+  export = NS;
+}}
+declare module "other-pkg" {{
+  namespace NS {{
+    const value: 7;
+    namespace Inner {{ const value: 7; }}
+    type Opt = {{ k: typeof value; nested: typeof Inner.value }};
+  }}
+  export = NS;
+}}
+{global}
+"#
+        );
+        let files = [("assigned.d.ts", ambient.as_str())];
+        let project = ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        };
+        let host = probe_host(project);
+        for _ in 0..2 {
+            failures.extend(mismatches_on_host(
+                &host,
+                project,
+                r#"import type { Opt, NestedTypeof, MemberTypeof } from "pkg"; import * as Pkg from "pkg";
+import type { Opt as OtherOpt } from "other-pkg";"#,
+                &[
+                    ("Opt[\"k\"]", "99"),
+                    ("Pkg.Opt[\"k\"]", "99"),
+                    ("Opt[\"nested\"]", "99"),
+                    ("Pkg.Opt[\"nested\"]", "99"),
+                    ("NestedTypeof", "99"),
+                    ("Pkg.NestedTypeof", "99"),
+                    ("MemberTypeof", "99"),
+                    ("Pkg.MemberTypeof", "99"),
+                    ("OtherOpt[\"k\"]", "7"),
+                    ("OtherOpt[\"nested\"]", "7"),
+                ],
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_assigned_namespace_exports_enum_member_types() {
+    use super::checker_probe_lane_tests::{mismatches_on_host, probe_host};
+
+    let mut failures = Vec::new();
+    for global in [
+        "",
+        "declare enum E { X = 0 }",
+        "declare namespace NS { enum E { X = 0 } }",
+    ] {
+        let ambient = format!(
+            r#"
+declare module "pkg" {{
+  namespace NS {{
+    enum E {{ X = 99 }}
+    type EnumAlias = E.X;
+    interface Holder {{ k: E.X }}
+  }}
+  export = NS;
+}}
+declare module "other-pkg" {{
+  namespace NS {{ enum E {{ X = 7 }} type EnumAlias = E.X; }}
+  export = NS;
+}}
+{global}
+"#
+        );
+        let files = [("assigned.d.ts", ambient.as_str())];
+        let project = ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        };
+        let host = probe_host(project);
+        for _ in 0..2 {
+            failures.extend(mismatches_on_host(
+                &host,
+                project,
+                r#"import type { E, EnumAlias, Holder } from "pkg"; import * as Pkg from "pkg";
+import type { E as OtherE, EnumAlias as OtherAlias } from "other-pkg"; import * as OtherPkg from "other-pkg";"#,
+                &[
+                    ("E.X extends 99 ? true : false", "true"),
+                    ("Pkg.E.X extends 99 ? true : false", "true"),
+                    ("EnumAlias extends 99 ? true : false", "true"),
+                    ("Pkg.EnumAlias extends 99 ? true : false", "true"),
+                    ("Holder[\"k\"] extends 99 ? true : false", "true"),
+                    ("Pkg.Holder[\"k\"] extends 99 ? true : false", "true"),
+                    ("OtherE.X extends 7 ? true : false", "true"),
+                    ("OtherPkg.E.X extends 7 ? true : false", "true"),
+                    ("OtherAlias extends 7 ? true : false", "true"),
+                    ("OtherPkg.EnumAlias extends 7 ? true : false", "true"),
+                ],
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_assigned_namespace_exports_class_instance_types() {
+    let files = [(
+        "assigned.d.ts",
+        r#"
+declare module "pkg" {
+  namespace NS { class Opt { k: 99 } }
+  export = NS;
+}
+declare module "explicit" {
+  namespace NS { export class Box<T = 41> { value: T } }
+  export = NS;
+}
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { Opt } from "pkg"; import * as Pkg from "pkg";
+import type { Box } from "explicit"; import * as Explicit from "explicit";"#,
+        &[
+            ("Opt[\"k\"]", "99"),
+            ("Pkg.Opt[\"k\"]", "99"),
+            ("Box<42>[\"value\"]", "42"),
+            ("Explicit.Box[\"value\"]", "41"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 const AMBIENT: &str = "\
 declare module \"amb\" {
   export function x(): \"x\";

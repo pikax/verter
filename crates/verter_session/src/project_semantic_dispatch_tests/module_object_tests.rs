@@ -272,6 +272,8 @@ fn an_ambient_module_is_its_blocks_object() {
             ("keyof typeof Q", "\"default\" | \"w\""),
             ("keyof typeof A.AN", "\"c\" | \"f\""),
             ("(typeof A)['k']", "\"k\""),
+            ("(typeof A)['AN']['c']", "\"an-c\""),
+            ("ReturnType<(typeof A)['AN']['f']>", "\"an-f\""),
             ("ReturnType<(typeof A)['default']>", "\"d\""),
             ("ReturnType<(typeof Q)['default']>", "\"q\""),
             ("(typeof Q)['w']", "\"w\""),

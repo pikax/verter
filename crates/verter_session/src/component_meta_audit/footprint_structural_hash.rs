@@ -205,8 +205,22 @@ impl StructuralEncoder<'_> {
                 self.buf.extend_from_slice(&owner.ordinal().to_le_bytes());
                 self.buf.extend_from_slice(whole_hash);
                 match local_scope {
-                    Some(s) => {
+                    Some(verter_type_engine::semantic_query::NodeLocalScopeId::Lexical(s)) => {
                         self.push_present(true);
+                        self.buf.extend_from_slice(&s.index().to_le_bytes());
+                    }
+                    Some(
+                        verter_type_engine::semantic_query::NodeLocalScopeId::AugmentationNamespace(
+                            s,
+                        ),
+                    ) => {
+                        self.buf.push(2);
+                        self.buf.extend_from_slice(&s.to_le_bytes());
+                    }
+                    Some(
+                        verter_type_engine::semantic_query::NodeLocalScopeId::AugmentationModule(s),
+                    ) => {
+                        self.buf.push(3);
                         self.buf.extend_from_slice(&s.to_le_bytes());
                     }
                     None => self.push_present(false),
@@ -762,6 +776,10 @@ impl StructuralEncoder<'_> {
             SemanticNodeData::EnumLiteral(literal) => {
                 self.buf.push(SemanticNodeTag::EnumLiteral.stable_id());
                 self.encode_decl_identity(&literal.enum_decl);
+                self.push_present(literal.module_specifier.is_some());
+                if let Some(specifier) = &literal.module_specifier {
+                    self.push_str(specifier);
+                }
                 self.push_str(&literal.member);
                 self.buf
                     .extend_from_slice(&literal.member_count.to_le_bytes());

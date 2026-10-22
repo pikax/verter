@@ -303,9 +303,17 @@ fn encode_scope(enc: &mut Recipe, scope: &NodeScopeId) {
             encode_owner(enc, *owner);
             match local_scope {
                 None => enc.u8(0),
-                Some(id) => {
+                Some(super::NodeLocalScopeId::Lexical(id)) => {
                     enc.u8(1);
-                    enc.u32(*id);
+                    enc.u32(id.index());
+                }
+                Some(super::NodeLocalScopeId::AugmentationNamespace(ordinal)) => {
+                    enc.u8(2);
+                    enc.u32(*ordinal);
+                }
+                Some(super::NodeLocalScopeId::AugmentationModule(ordinal)) => {
+                    enc.u8(3);
+                    enc.u32(*ordinal);
                 }
             }
         }
@@ -1422,6 +1430,9 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             enc.str(&literal.member);
             enc.u64(u64::from(literal.member_count));
             enc.child(literal.base);
+            if let Some(specifier) = &literal.module_specifier {
+                enc.str(specifier);
+            }
         }
         SemanticNodeData::InstantiationRef { base, args } => {
             enc.header(category::AUTHORED, subtag::INSTANTIATION_REF);

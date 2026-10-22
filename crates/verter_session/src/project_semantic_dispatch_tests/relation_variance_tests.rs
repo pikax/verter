@@ -5,8 +5,9 @@
 //! Every expected answer is TypeScript 7.0.2's, measured with
 //! `tsc --ignoreConfig --noEmit --strict` under `strictNullChecks` and
 //! `noImplicitAny` both on, both off and each alone (the settings agree on
-//! every probe) as `const s: "q" = null! as <probe>;` read off the TS2322
-//! message, each probe checked by a checker of its own.
+//! every probe). Flow probes use `const s: "q" = null! as <probe>;` read
+//! off TS2322, each checked by a checker of its own. Named-publication
+//! probes check assignments to the expected literal directly.
 
 use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host};
 
@@ -14,6 +15,286 @@ use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host};
 fn assert_answers(source: &str, rows: &[(&str, &str)]) {
     let failures = mismatches(source, rows);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn authored_variance_annotations_decide_same_generic_relations() {
+    assert_named_answers(
+        "type __Flat<T> = [T] extends [infer U] ? U : never;\n\
+         type __D<T> = T extends unknown ? T : never;\n\
+         type __Obj<T> = { [K in keyof T]: T[K] };\n\
+         interface Cell<in out T> { get(): T }\n\
+         interface Cons<in T> { set(x: T): void }\n",
+        &[
+            ("Cell<'a'> extends Cell<string> ? 1 : 0", "0"),
+            ("Cell<string> extends Cell<'a'> ? 1 : 0", "0"),
+            ("Cell<'a'> extends Cell<'a'> ? 1 : 0", "1"),
+            ("Cons<string> extends Cons<'a'> ? 1 : 0", "1"),
+            ("Cons<'a'> extends Cons<string> ? 1 : 0", "0"),
+        ],
+    );
+    for declaration in [
+        "interface Inv<in out T> { value: T }\n\
+         interface Co<out T> { tag: 0 }\n\
+         interface Contra<in T> { set(x: T): void }\n",
+        "declare class Inv<in out T> { value: T }\n\
+         declare class Co<out T> { tag: 0 }\n\
+         declare class Contra<in T> { set(x: T): void }\n",
+        "type Inv<in out T> = { value: T };\n\
+         type Co<out T> = { tag: 0 };\n\
+         type Contra<in T> = { set(x: T): void };\n",
+    ] {
+        assert_named_answers(
+            declaration,
+            &[
+                ("Inv<'a'> extends Inv<string> ? 1 : 0", "0"),
+                ("Inv<string> extends Inv<'a'> ? 1 : 0", "0"),
+                ("Inv<'a'> extends Inv<'a'> ? 1 : 0", "1"),
+                ("Co<'a'> extends Co<string> ? 1 : 0", "1"),
+                ("Co<string> extends Co<'a'> ? 1 : 0", "0"),
+                ("Contra<string> extends Contra<'a'> ? 1 : 0", "1"),
+                ("Contra<'a'> extends Contra<string> ? 1 : 0", "0"),
+            ],
+        );
+    }
+}
+
+#[test]
+fn transparent_aliases_preserve_annotated_generic_relations() {
+    assert_named_answers(
+        "interface Cell<in out T> { get(): T }\n\
+         type Alias<T> = Cell<T>;\n\
+         type Chain<T> = Alias<T>;\n\
+         type Narrow = Alias<'a'>;\n\
+         type Broad = Alias<string>;\n",
+        &[
+            ("Alias<'a'> extends Alias<string> ? 1 : 0", "0"),
+            ("Alias<string> extends Alias<'a'> ? 1 : 0", "0"),
+            ("Alias<'a'> extends Alias<'a'> ? 1 : 0", "1"),
+            ("Chain<'a'> extends Alias<string> ? 1 : 0", "0"),
+            ("Alias<'a'> extends Cell<string> ? 1 : 0", "0"),
+            ("Cell<'a'> extends Alias<string> ? 1 : 0", "0"),
+            ("Narrow extends Broad ? 1 : 0", "0"),
+            ("[Alias<'a'>] extends [Alias<string>] ? 1 : 0", "0"),
+            (
+                "{ value: Alias<'a'> } extends { value: Alias<string> } ? 1 : 0",
+                "0",
+            ),
+            ("Alias<'a'> extends { get(): string } ? 1 : 0", "1"),
+            ("{ get(): 'a' } extends Alias<string> ? 1 : 0", "1"),
+        ],
+    );
+}
+
+#[test]
+fn composite_targets_preserve_annotated_generic_relations() {
+    assert_named_answers(
+        "interface Cell<in out T> { get(): T }\n\
+         type UnionTarget = Cell<string> | number;\n\
+         type IntersectionTarget = Cell<string> & { get(): string };\n\
+         type SourceUnion = Cell<'a'> | Cell<'b'>;\n\
+         interface ValueCell<in out T> { v: T }\n\
+         interface PlainCell<T> { get(): T }\n\
+         interface IndexedSource { value: { cell: Cell<'a'> }['cell'] }\n\
+         interface RecursiveCell<in out T> { next: RecursiveCell<T> | number }\n\
+         interface DefaultRecursiveCell<in out T = string> { next: DefaultRecursiveCell | number }\n",
+        &[
+            ("Cell<'a'> extends Cell<string> | number ? 1 : 0", "0"),
+            ("Cell<'a'> extends Cell<string> & { get(): string } ? 1 : 0", "0"),
+            ("Cell<'a'> extends UnionTarget ? 1 : 0", "0"),
+            ("Cell<'a'> extends IntersectionTarget ? 1 : 0", "0"),
+            ("Cell<'a'> extends Cell<'a'> | number ? 1 : 0", "1"),
+            ("Cell<'a'> extends Cell<'a'> & { get(): string } ? 1 : 0", "1"),
+            ("Cell<'a'> extends { other?: 1 } & { more?: 2 } ? 1 : 0", "0"),
+            ("PlainCell<'a'> extends { other?: 1 } & { more?: 2 } ? 1 : 0", "0"),
+            ("{ get(): 'a' } extends { other?: 1 } & { more?: 2 } ? 1 : 0", "0"),
+            ("Cell<'a'> extends { other?: 1 } ? 1 : 0", "0"),
+            ("Cell<'a'> extends { get?: () => string } & { more?: 2 } ? 1 : 0", "1"),
+            ("Cell<'a'> extends Cell<string> | { get(): string } ? 1 : 0", "1"),
+            ("Cell<'a'> extends { get(): string } & { get(): string } ? 1 : 0", "1"),
+            ("Cell<'a'> | Cell<'b'> extends Cell<string> | number ? 1 : 0", "0"),
+            ("{ get(): 'a' } extends Cell<string> | number ? 1 : 0", "1"),
+            ("Cell<'a'> extends (Cell<string> | number) & { get(): string } ? 1 : 0", "0"),
+            ("SourceUnion extends Cell<'a'> | Cell<'b'> | number ? 1 : 0", "1"),
+            ("ValueCell<'a' | 'b'> extends ValueCell<'a'> | ValueCell<'b'> ? 1 : 0", "1"),
+            ("ValueCell<'a'> extends ValueCell<string> | number ? 1 : 0", "0"),
+            ("{ cell: Cell<'a'> }['cell'] extends Cell<string> | number ? 1 : 0", "0"),
+            ("IndexedSource extends { value: Cell<string> | number } ? 1 : 0", "0"),
+            ("RecursiveCell<'a'> extends { next: RecursiveCell<string> | number } ? 1 : 0", "0"),
+            ("DefaultRecursiveCell<'a'> extends { next: DefaultRecursiveCell<'a'> | number } ? 1 : 0", "0"),
+        ],
+    );
+}
+
+#[test]
+fn unannotated_variance_survives_named_publication() {
+    assert_named_answers(
+        "interface Co<T> { v: T }\n\
+         interface Contra<T> { f: (x: T) => void }\n\
+         interface Bi<T> { m(x: T): void }\n\
+         interface Ind<T> { n: number }\n\
+         interface Unm<T> { v: { [K in keyof T]-?: T[K] } }\n",
+        &[
+            ("Co<'a'> extends Co<string> ? 1 : 0", "1"),
+            ("Co<string> extends Co<'a'> ? 1 : 0", "0"),
+            ("Contra<string> extends Contra<'a'> ? 1 : 0", "1"),
+            ("Contra<'a'> extends Contra<string> ? 1 : 0", "0"),
+            ("Bi<'a'> extends Bi<string> ? 1 : 0", "1"),
+            ("Bi<string> extends Bi<'a'> ? 1 : 0", "1"),
+            ("Bi<string> extends Bi<number> ? 1 : 0", "0"),
+            ("Ind<string> extends Ind<number> ? 1 : 0", "1"),
+            (
+                "Unm<{ a?: number }> extends Unm<{ a: number }> ? 1 : 0",
+                "1",
+            ),
+            ("Co<'a' | 'b'> extends { v: 'a' } | { v: 'b' } ? 1 : 0", "1"),
+        ],
+    );
+}
+
+#[test]
+fn fixed_annotations_are_checked_before_inference() {
+    assert_named_answers(
+        "interface Cell<in out T> { get(): T }\n\
+         interface Mixed<in out T, U> { value: T; other: U }\n\
+         interface RestMixed<in out T, U extends unknown[]> { value: T; f: (...args: U) => void }\n\
+         type V = void;\n\
+         interface VoidCell<in out T, out U, W> { value: T; f: () => U; w: W }\n",
+        &[
+            (
+                "Cell<'a'> extends Cell<string> | { other: infer U } ? 1 : 0",
+                "0",
+            ),
+            (
+                "Cell<'a'> extends Cell<'a'> | { other: infer U } ? 1 : 0",
+                "1",
+            ),
+            ("Mixed<'a', 1> extends Mixed<string, infer U> ? U : 0", "0"),
+            ("Mixed<'a', 1> extends Mixed<'a', infer U> ? U : 0", "1"),
+            (
+                "RestMixed<'a', []> extends RestMixed<string, infer U> ? 1 : 0",
+                "1",
+            ),
+            (
+                "RestMixed<'a', []> extends RestMixed<string, [number]> ? 1 : 0",
+                "1",
+            ),
+            (
+                "RestMixed<string, []> extends RestMixed<'a', infer U> ? 1 : 0",
+                "0",
+            ),
+            (
+                "VoidCell<'a', number, 1> extends VoidCell<string, void, infer W> ? 1 : 0",
+                "1",
+            ),
+            (
+                "VoidCell<'a', number, 1> extends VoidCell<string, V, infer W> ? 1 : 0",
+                "1",
+            ),
+        ],
+    );
+}
+
+/// An alias whose body re-applies itself on a growing argument mints a
+/// fresh application at every step, so a relation unwrapping it never meets
+/// a node it has seen. The shared tail engine proves its uniform growth and
+/// returns TS2589 recovery, so the decision reads `any`. A forwarding alias
+/// whose conditional stops after one step still returns its finite value.
+#[test]
+fn a_circular_alias_operand_recovers_without_unbounded_normalization() {
+    assert_named_answers(
+        "interface Cell<in out T> { get(): T }\n\
+         type Grow<T> = T extends never ? 0 : Wrap<[T]>;\n\
+         type Wrap<T> = Grow<T>;\n\
+         type Stop<T> = T extends string ? Back<[T]> : T;\n\
+         type Back<T> = Stop<T>;\n",
+        &[
+            ("Cell<'a'> extends Wrap<'a'> ? 1 : 0", "any"),
+            ("{ x: 1 } extends Wrap<'a'> ? 1 : 0", "any"),
+            ("Back<'a'> extends ['a'] ? 1 : 0", "1"),
+        ],
+    );
+}
+
+#[test]
+fn an_argument_error_preserves_inference_from_other_type_arguments() {
+    assert_named_answers(
+        "interface Mixed<in out T, U> { value: T; other: U }\n\
+         declare const ma: Mixed<'a', 1>;\n\
+         declare function g<U>(x: Mixed<string, U>): U;\n\
+         declare function w<U>(x: Mixed<string, U>, y: U): U;\n\
+         const gr = g(ma);\n\
+         const wr = w(ma, 2);\n",
+        &[
+            ("typeof gr", "1"),
+            ("typeof wr extends 1 | 2 ? 1 : 0", "1"),
+            ("1 | 2 extends typeof wr ? 1 : 0", "1"),
+        ],
+    );
+}
+
+/// Demand aliases through the publication path used by the benchmark. Flow
+/// return probes lower their annotations as carriers and do not exercise the
+/// eager declaration-body lowering used by a named expanded demand.
+#[track_caller]
+fn assert_named_answers(source: &str, rows: &[(&str, &str)]) {
+    use std::sync::Arc;
+    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+
+    const FILE: &str = "/variance/probe.ts";
+    for strict_null_checks in [true, false] {
+        for no_implicit_any in [true, false] {
+            let config = format!(
+                r#"{{"compilerOptions":{{"strict":true,"strictNullChecks":{strict_null_checks},"noImplicitAny":{no_implicit_any}}}}}"#,
+            );
+            let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
+                crate::HostConfig::default(),
+                &[("/variance", config.as_str())],
+            );
+            let mut module = format!("type __BenchInit = 0;\n{source}\n");
+            for (index, (probe, _)) in rows.iter().enumerate() {
+                module.push_str(&format!("type __Probe{index} = {probe};\n"));
+            }
+            module.push_str("export {};\n");
+            let _ = host
+                .upsert(crate::UpsertRequest {
+                    canonical_id: Some(FILE.into()),
+                    input_id: FILE.into(),
+                    source: Arc::from(module),
+                    file_language: crate::FileLanguage::script_ts(),
+                    aliases: vec![],
+                })
+                .expect("variance fixture admitted");
+            let _init = host
+                .resolve_named_symbol_with_audit(FILE, "__BenchInit", None)
+                .into_parts()
+                .0
+                .expect("init demand completes")
+                .expect("init exists");
+            for (index, (probe, expected)) in rows.iter().enumerate() {
+                for _ in 0..2 {
+                    let node = host
+                        .resolve_named_symbol_with_audit(FILE, &format!("__Probe{index}"), None)
+                        .into_parts()
+                        .0
+                        .expect("named variance demand completes")
+                        .expect("probe exists");
+                    let bytes = host
+                        .project_node_to_type_expr_json_bytes(&node)
+                        .expect("variance answer projects");
+                    let answer: TypeExpr = serde_json::from_slice(&bytes).expect("typed answer");
+                    let expected = PrimitiveName::parse(expected).map_or_else(
+                        || TypeExpr::Literal(LiteralValue::Number(expected.parse().unwrap())),
+                        TypeExpr::Primitive,
+                    );
+                    assert_eq!(
+                        answer, expected,
+                        "{probe}; strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}; source={source}",
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A parameter read only as a property type is covariant.
