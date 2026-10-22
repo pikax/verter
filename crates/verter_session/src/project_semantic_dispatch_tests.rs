@@ -74,6 +74,7 @@ mod dispatch_txn_flow_demand_tests;
 mod divergence_certificate_tests;
 mod enum_literal_tests;
 mod equality_value_narrowing_tests;
+mod exported_alias_chain_tests;
 mod flow_narrowing_parity_tests;
 mod flow_return_accessor_tests;
 mod flow_return_class_tests;

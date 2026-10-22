@@ -100,6 +100,51 @@ impl SnapshotData for HostSourceData {
     }
 }
 
+impl HostSourceData {
+    /// The exact parse identity of this source revision under its runtime
+    /// language, without a pass over its bytes: a carrier's is the key its
+    /// framework parse recorded, a plain script's the one derived once with
+    /// this snapshot ([`Self::script_parse_key`]). The identity
+    /// [`verter_session_query::source::framework_parse::exact_source_parse_key`]
+    /// derives from the snapshot's source (`None` where that refuses).
+    pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
+        match self.framework_parse.as_deref() {
+            Some(artifact) => {
+                verter_session_query::source::framework_parse::carrier_source_parse_key(
+                    &self.file_language,
+                    verter_session_query::source::framework_parse::CarrierParseKey {
+                        adapter_id: artifact.adapter_id(),
+                        language_id: artifact.language_id(),
+                        parse_key: artifact.parse_key(),
+                    },
+                )
+            }
+            None => self.script_parse_key.clone(),
+        }
+    }
+
+    /// The exact artifact key of this source revision for `canonical` under
+    /// `parse_env_hash`. Every read of a snapshot's key goes through here, so
+    /// a read costs no pass over the source: re-hashing the whole source per
+    /// read made each one cost the file's size, and a file whose exported
+    /// names are read once each paid its size times its export count.
+    pub(crate) fn artifact_key(
+        &self,
+        canonical: Arc<str>,
+        parse_env_hash: verter_session_query::analysis::types::Hash16,
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
+        self.source_parse_key().map(|parse_key| {
+            verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
+                canonical,
+                self.parse.whole_hash,
+                parse_key,
+                self.file_language.clone(),
+                parse_env_hash,
+            )
+        })
+    }
+}
+
 /// Pre-computed Arc-wrapped views of immutable `ScriptAnalysisSnapshot` fields.
 ///
 /// Built once during `execute_analysis()` from the parse results. These fields
@@ -507,10 +552,14 @@ impl HostStageExecutor {
             refuse_unparsed(&parse_snapshot)?;
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type = imported_eval_source_type(&file_language, None);
+            // The one derivation of this revision's parse identity: every
+            // artifact key read afterwards reuses it.
             let script_parse_key =
-                verter_language::default_parse_identity_for(&content, &file_language)
-                    .ok()
-                    .map(|(_, parse_key)| parse_key);
+                verter_session_query::source::framework_parse::exact_source_parse_key(
+                    &content,
+                    &file_language,
+                    None,
+                );
             SourceSnapshot {
                 source: Arc::clone(&content),
                 whole_hash: parse_snapshot.whole_hash,

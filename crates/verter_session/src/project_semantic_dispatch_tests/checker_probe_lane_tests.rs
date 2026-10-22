@@ -613,22 +613,26 @@ pub(super) fn evaluated_render_on_host(
     source: &str,
     probe: &str,
 ) -> String {
-    with_probe_on_host(
-        host,
-        ProbeProject::default(),
-        source,
-        probe,
-        |dispatch, node| {
-            let value = dispatch
-                .normalize_node_for_structural_fact_demand(
-                    node,
-                    ProjectionReductionContext::published(ProjectionMode::Expanded),
-                )
-                .into_usable_node()
-                .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
-            render_node(dispatch, value, 0)
-        },
-    )
+    evaluated_render_in(host, ProbeProject::default(), source, probe)
+}
+
+/// [`evaluated_render_on_host`] on `host`, a host of `project`.
+pub(super) fn evaluated_render_in(
+    host: &Arc<crate::VerterHost>,
+    project: ProbeProject<'_>,
+    source: &str,
+    probe: &str,
+) -> String {
+    with_probe_on_host(host, project, source, probe, |dispatch, node| {
+        let value = dispatch
+            .normalize_node_for_structural_fact_demand(
+                node,
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            )
+            .into_usable_node()
+            .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
+        render_node(dispatch, value, 0)
+    })
 }
 
 /// The label of each element of the tuple `probe` settles on — the

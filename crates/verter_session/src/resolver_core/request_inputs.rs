@@ -275,10 +275,14 @@ impl InputArtifactLeases {
             .sources
             .entry(input.shallow_state.observation_id())
             .or_insert_with(|| Arc::clone(&serve.indexed.shallow_state));
-        retained
-            .indexed
-            .entry(input.identity.clone())
-            .or_insert(serve.indexed);
+        // A request serves one artifact many times: only its first serve
+        // copies the identity (whose parse key owns its encoded bytes) into
+        // the map.
+        if !retained.indexed.contains_key(&input.identity) {
+            retained
+                .indexed
+                .insert(input.identity.clone(), serve.indexed);
+        }
         IndexedInputServe {
             indexed: input,
             store_published: serve.store_published,

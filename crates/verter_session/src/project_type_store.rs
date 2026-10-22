@@ -250,6 +250,16 @@ pub struct IndexedReady {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SourceParseKey(std::sync::OnceLock<Option<verter_language::ParseKey>>);
 
+impl SourceParseKey {
+    /// An identity already derived for the artifact's exact source revision
+    /// (its source snapshot's, [`crate::host_executor::HostSourceData::source_parse_key`]),
+    /// so the artifact never hashes its source for it. `None` records the
+    /// same refusal a derivation would reach.
+    pub(crate) fn derived(parse_key: Option<verter_language::ParseKey>) -> Self {
+        Self(std::sync::OnceLock::from(parse_key))
+    }
+}
+
 impl IndexedReady {
     pub(crate) fn cached_source_parse_key(&self) -> Option<Option<verter_language::ParseKey>> {
         self.source_parse_key.0.get().cloned()

@@ -4085,15 +4085,19 @@ pub(crate) trait FileArtifactKeySource: Sized {
 impl FileArtifactKeySource for FileArtifactKey {
     /// Builds the exact key for an already-materialized artifact.
     fn for_indexed(canonical: Arc<str>, indexed: &IndexedReady, parse_env_hash: Hash16) -> Self {
-        Self::for_source_identity(
+        // The artifact's own parse identity, derived at most once per
+        // artifact (and seeded from its source snapshot when it has one):
+        // every insert re-hashing the whole source cost the file's size.
+        let parse_key = indexed
+            .source_parse_key()
+            .expect("IndexedReady retains a compatible runtime language and parse artifact");
+        Self::for_parse_identity(
             canonical,
             indexed.whole_hash,
-            indexed.raw_source.as_ref(),
+            parse_key,
             indexed.file_language.clone(),
-            indexed.framework_parse.as_deref(),
             parse_env_hash,
         )
-        .expect("IndexedReady retains a compatible runtime language and parse artifact")
     }
 
     /// Builds an exact key from the source-stage identity that produced an artifact.

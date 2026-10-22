@@ -112,14 +112,7 @@ pub fn exact_source_parse_key(
     carrier: Option<CarrierParseKey<'_>>,
 ) -> Option<ParseKey> {
     match carrier {
-        Some(carrier) => {
-            if carrier.adapter_id != file_language.adapter_id()?
-                || Some(carrier.language_id) != file_language.carrier_language_id()
-            {
-                return None;
-            }
-            Some(carrier.parse_key.clone())
-        }
+        Some(carrier) => carrier_source_parse_key(file_language, carrier),
         None => {
             #[cfg(feature = "test-support")]
             SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
@@ -128,6 +121,22 @@ pub fn exact_source_parse_key(
                 .map(|(_, parse_key)| parse_key)
         }
     }
+}
+
+/// The parse identity a carrier's framework parse recorded, provided the
+/// recording adapter and carrier language are the ones `file_language`
+/// names; a mismatch is `None`. It reads the recorded key and never passes
+/// over the source.
+pub fn carrier_source_parse_key(
+    file_language: &FileLanguage,
+    carrier: CarrierParseKey<'_>,
+) -> Option<ParseKey> {
+    if carrier.adapter_id != file_language.adapter_id()?
+        || Some(carrier.language_id) != file_language.carrier_language_id()
+    {
+        return None;
+    }
+    Some(carrier.parse_key.clone())
 }
 
 #[cfg(feature = "test-support")]

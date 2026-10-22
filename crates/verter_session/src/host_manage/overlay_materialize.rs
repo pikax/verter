@@ -98,19 +98,22 @@ impl OverlayArtifactIdentity {
         host: &VerterHost,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
-        let source = view.source(&self.raw_overlay_owner)?;
-        let content_hash = view.content_hash_for(&self.raw_overlay_owner)?;
         let file_language = self.file_language(host);
+        // The view owns its sources' identity: an overlay's is derived once
+        // per view, not once per read.
+        let parse_key = view.source_parse_key(&self.raw_overlay_owner, &file_language)?;
+        let content_hash = view.content_hash_for(&self.raw_overlay_owner)?;
         let parse_env_hash = view
             .overlay_artifact_discriminator(&self.raw_overlay_owner)
             .unwrap_or(verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH);
-        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-            Arc::from(self.analysis_canonical.as_str()),
-            content_hash,
-            source.as_ref(),
-            file_language,
-            None,
-            parse_env_hash,
+        Some(
+            verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
+                Arc::from(self.analysis_canonical.as_str()),
+                content_hash,
+                parse_key,
+                file_language,
+                parse_env_hash,
+            ),
         )
     }
 
