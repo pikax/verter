@@ -560,6 +560,9 @@ impl VerterLanguageServer {
     ) -> Result<ProjectOverviewResponse> {
         tracing::debug!("$/verter/getProjectOverview");
 
+        if !self.workspace_inventory_ready().await {
+            return Err(Self::workspace_inventory_pending_error());
+        }
         let file_list = self.documents.host().list_files();
 
         let mut files = Vec::new();
@@ -627,6 +630,9 @@ impl VerterLanguageServer {
     pub async fn get_route_tree(&self, _params: serde_json::Value) -> Result<serde_json::Value> {
         tracing::debug!("$/verter/getRouteTree");
 
+        if !self.workspace_inventory_ready().await {
+            return Err(Self::workspace_inventory_pending_error());
+        }
         let roots = self.workspace_roots.lock().await.clone();
         let Some(root) = roots.first() else {
             return Ok(serde_json::to_value(
@@ -804,6 +810,9 @@ impl VerterLanguageServer {
         // owner-canonicalized `c:/…` import resolution.
         let target_normalized = verter_span::path::canonicalize_path(&target_canonical);
 
+        if !self.workspace_inventory_ready().await {
+            return Err(Self::workspace_inventory_pending_error());
+        }
         let file_list = self.documents.host().list_files();
         let mut parents = Vec::new();
         let carrier_count = file_list

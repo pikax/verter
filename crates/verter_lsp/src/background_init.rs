@@ -5,20 +5,29 @@ use super::{drain_pending_snapshot_provider_sync_owned, PendingSyncDrain, PENDIN
 
 // ── Background initialization ───────────────────────────────────────────
 
-/// Spawn the heartbeat task. Sends `$/verter/heartbeat` every 5 seconds.
-/// Called first in `initialized()` so the extension always sees heartbeats,
-/// even during long background initialization.
+/// Spawn the heartbeat task when the client subscribed to it
+/// (`initializationOptions.subscriptions.heartbeat`). Sends
+/// `$/verter/heartbeat` every 5 seconds. Called first in `initialized()` so a
+/// subscribed client's watchdog sees heartbeats even during long background
+/// initialization. A client that did not subscribe gets no task and no
+/// periodic message: an editor without a watchdog only logs an unhandled
+/// notification for each one.
 ///
 /// Takes the SERVER, not loose handles: the heartbeat's view of the
 /// interactive lane is the server's own handler activity by construction —
 /// there is no call-site wiring that could substitute another activity.
 /// The active-count trace line that reads it is OPTIONAL freeze diagnosis,
 /// compiled in only under the default-off `semantic-observe` feature.
-pub(super) fn spawn_heartbeat(server: &VerterLanguageServer) {
+pub(super) fn spawn_heartbeat(
+    server: &VerterLanguageServer,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !server.subscriptions.heartbeat() {
+        return None;
+    }
     let client = server.client.clone();
     #[cfg(feature = "semantic-observe")]
     let handler_activity = Arc::clone(&server.handler_activity);
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
@@ -37,18 +46,17 @@ pub(super) fn spawn_heartbeat(server: &VerterLanguageServer) {
             client
                 .send_notification::<Heartbeat>(HeartbeatParams { timestamp: ts })
                 .await;
-            tracing::info!("heartbeat SENT ts={ts}");
+            tracing::debug!("heartbeat SENT ts={ts}");
         }
-    });
+    }))
 }
 
 /// Arguments for the background initialization task.
 /// All fields are owned or Arc-wrapped so the task can run independently.
 ///
-/// Every server-owned handle — including the server's handler activity the
-/// scanner yields behind — is taken by [`Self::from_server`], the struct's
+/// Every server-owned handle is taken by [`Self::from_server`], the struct's
 /// one constructor: the wiring holds by construction, and no caller can
-/// hand the background task another activity or another server's state.
+/// hand the background task another server's state.
 pub(super) struct BackgroundInitArgs {
     roots: Vec<String>,
     vite_opts: verter_workspace::ViteConfigOptions,
@@ -59,9 +67,6 @@ pub(super) struct BackgroundInitArgs {
     workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
     init_generation: Arc<std::sync::atomic::AtomicU64>,
-    /// The server's interactive-handler activity, handed to the scanner so
-    /// background admission waits on THIS server's handlers only.
-    handler_activity: Arc<HandlerActivity>,
     ownership_generation_fence: Arc<crate::configured_owner::OwnershipGenerationFence>,
     project_sync: Option<ProjectSync>,
     documents: Arc<DocumentRegistry>,
@@ -114,7 +119,6 @@ impl BackgroundInitArgs {
             type_provider: server.type_provider.clone(),
             workspace_scanner: Arc::clone(&server.workspace_scanner),
             init_generation: Arc::clone(&server.init_generation),
-            handler_activity: Arc::clone(&server.handler_activity),
             ownership_generation_fence: Arc::clone(&server.ownership_generation_fence),
             project_sync: server.project_sync.clone(),
             documents: Arc::clone(&server.documents),
@@ -203,7 +207,7 @@ fn build_published_workspace(
 /// 1. Exact workspace snapshot build (blocking: tsconfig discovery/materialization)
 /// 2. Type provider workspace sync (async)
 /// 3. Lint option merging
-/// 4. Workspace scanner spawn
+/// 4. Retire the previous generation's workspace scanner (a demanded scan re-arms)
 ///
 /// Generation checks before each irreversible commit ensure stale init tasks
 /// (superseded by `did_change_workspace_folders`) are discarded.
@@ -217,7 +221,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         type_provider,
         workspace_scanner,
         init_generation,
-        handler_activity,
         ownership_generation_fence,
         project_sync,
         documents,
@@ -237,7 +240,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // Release a prior generation's completion waiter without polling readiness.
     carrier_transaction_coordinator.note_pending_sync_progress();
 
-    let host = documents.host_arc();
     let tsx_profile = Arc::clone(&documents.tsx_profile);
     let canonical_roots: Vec<String> = roots
         .iter()
@@ -464,77 +466,54 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         }
     }
 
-    // Get the published snapshot for snapshot-driven scanner classification.
-    // When a snapshot is available, the scanner uses `classify_from_snapshot()`
-    // for ownership-based tier classification, eliminating the need for
-    // `collect_tsconfig_patterns()` glob patterns.
-    let scanner_snapshot = vfs_workspace
-        .read()
-        .as_ref()
-        .and_then(|ws| ws.load_published())
-        .map(|root| Arc::clone(&root.snapshot));
-
-    let root_paths: Vec<std::path::PathBuf> = roots
-        .iter()
-        .map(|uri| std::path::PathBuf::from(crate::documents::uri_to_canonical_id_from_str(uri)))
-        .collect();
-
-    let (scanner_done_tx, scanner_done_rx) = tokio::sync::oneshot::channel::<()>();
-    // The readiness ladder's level-1 latch: fired immediately after this init sends
-    // `$/verter/ready`, so the scan-complete waiter can hold level 2 behind it.
-    let (ready_announced_tx, ready_announced_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let scanner = crate::workspace_scanner::spawn_workspace_scanner(
-        crate::workspace_scanner::WorkspaceScannerConfig {
-            root_paths,
-            host: host.clone(),
-            documents: Arc::clone(&documents),
-            project_sync: project_sync.clone(),
-            vfs_workspace: Arc::clone(&vfs_workspace),
-            provider_sync_states: Arc::clone(&provider_sync_states),
-            provider_surfaces: documents.provider_surfaces().clone(),
-            is_tsgo,
-            carrier_publish_coordinator: carrier_publish_coordinator.clone(),
-            carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
-            pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
-            tsx_profile: tsx_profile.read().clone(),
-            tsconfig_patterns: Vec::new(),
-            workspace_snapshot: scanner_snapshot,
-            done_tx: Some(scanner_done_tx),
-            handler_activity,
-        },
-    );
-
+    // A scan started over a superseded generation or snapshot is retired; one
+    // this generation already started over its own published snapshot (a
+    // demand that arrived during this init) keeps running. A client-demanded
+    // scan is re-armed under this generation; otherwise nothing walks the
+    // workspace — an open document is served by its own import-dependency
+    // publication, and the complete carrier inventory is built only when a
+    // request that needs it (frontier, workspace-wide enumeration) asks.
     {
+        let published_basis = vfs_workspace
+            .read()
+            .as_ref()
+            .and_then(|ws| ws.load_published())
+            .map(|root| Arc::clone(&root.snapshot));
         let mut guard = workspace_scanner.lock().await;
-        if let Some(old) = guard.take() {
-            old.stop();
+        if guard
+            .as_ref()
+            .is_some_and(|scan| !scan.is_current_for(my_gen, published_basis.as_ref()))
+        {
+            if let Some(old) = guard.take() {
+                old.stop();
+            }
+            server
+                .sync_coordinator
+                .set_workspace_scan_in_progress(false);
+            server.workspace_scan_settled.notify_waiters();
         }
-        server.sync_coordinator.set_workspace_scan_in_progress(true);
-        *guard = Some(scanner);
+    }
+    if server
+        .workspace_scan_demanded
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        server.activate_workspace_scan().await;
     }
 
-    // Spawn waiter task: after the scanner completes, publish fresh diagnostics
-    // for all open files and send $/verter/typeProviderSyncComplete.
+    // Spawn waiter task: once level 1 is on the wire, publish fresh
+    // diagnostics for all open files and send $/verter/typeProviderSyncComplete.
+    let (ready_announced_tx, ready_announced_rx) = tokio::sync::oneshot::channel::<()>();
     {
         let pending_drain = Arc::clone(&pending_drain);
         let init_generation = Arc::clone(&init_generation);
         let server = server.clone();
         tokio::spawn(async move {
-            // Level 2 of the readiness ladder is emitted only after level 1: a fast
-            // scan on a small workspace finishes before this init reaches its ready
-            // point, and announcing "the project is fully synced" to a client that
-            // has not yet been told the server is up reads as a stale-then-ready
-            // flap. Holding here costs nothing — level 1 is already unblocked.
-            if !await_scan_complete_after_ready(scanner_done_rx, ready_announced_rx).await {
-                // Scanner or this init generation was dropped/cancelled. A newer
-                // generation re-arms the gate when it installs its own scanner;
-                // if there is none, nothing is scanning.
-                if init_generation.load(std::sync::atomic::Ordering::Acquire) == my_gen {
-                    server
-                        .sync_coordinator
-                        .set_workspace_scan_in_progress(false);
-                }
+            // Level 2 of the readiness ladder is emitted only after level 1:
+            // announcing "the project is synced" to a client that has not yet
+            // been told the server is up reads as a stale-then-ready flap.
+            if ready_announced_rx.await.is_err() {
+                // This init generation was dropped/cancelled; a newer one
+                // announces its own levels.
                 return;
             }
 
@@ -546,9 +525,31 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 return;
             }
 
-            // The scanner may enqueue owner-aware carrier retries after the
-            // pre-scan drain above. Settle those retries before announcing the
-            // provider frontier; a non-empty queue means level 2 is not true yet.
+            // A scan still running (a demanded scan re-armed for this
+            // generation) holds level 2 until it ends; a retired or
+            // superseded one releases the wait through the same wake.
+            loop {
+                let settled = server.workspace_scan_settled.notified();
+                tokio::pin!(settled);
+                settled.as_mut().enable();
+                if !server.sync_coordinator.workspace_scan_in_progress() {
+                    break;
+                }
+                if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                    return;
+                }
+                settled.await;
+            }
+            if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                tracing::info!(
+                    "init gen={my_gen} superseded before typeProviderSyncComplete, discarding"
+                );
+                return;
+            }
+
+            // Settle provider retries enqueued since the init drain before
+            // announcing the provider frontier; a non-empty queue means level 2
+            // is not true yet.
             drain_pending_snapshot_provider_sync_owned(pending_drain, PENDING_SYNC_REDRIVE, 1)
                 .await;
 
@@ -556,7 +557,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             // superseded while it ran. Never publish level 2 for the old one.
             if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
                 tracing::info!(
-                    "init gen={my_gen} superseded during post-scan provider drain, discarding"
+                    "init gen={my_gen} superseded during post-init provider drain, discarding"
                 );
                 return;
             }
@@ -603,28 +604,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     Ok(())
 }
 
-/// The readiness-ladder gate: level 2 (`$/verter/typeProviderSyncComplete`) may be
-/// released only once BOTH the workspace scan has completed AND level 1
-/// (`$/verter/ready`) has been put on the wire for the same generation.
-///
-/// Awaiting the scan alone is not enough. The scan and the remainder of background
-/// init run concurrently, so on a small (or empty) workspace the scan finishes
-/// first and level 2 races ahead of level 1 — the client then sees "fully synced"
-/// for a server it has not yet been told is ready.
-///
-/// Returns `false` when either signal is dropped (a superseded or cancelled init),
-/// in which case level 2 is NOT emitted: a generation that never announced level 1
-/// must not announce a completeness the client never saw begin.
-async fn await_scan_complete_after_ready(
-    scan_complete: tokio::sync::oneshot::Receiver<()>,
-    ready_announced: tokio::sync::oneshot::Receiver<()>,
-) -> bool {
-    if scan_complete.await.is_err() {
-        return false;
-    }
-    ready_announced.await.is_ok()
-}
-
 /// Recheck the existing completion gate after a later recovery drain. The
 /// subscription precedes the queue check, so a drain cannot be lost between
 /// that check and waiting. Park with only a weak server reference: this tail
@@ -660,6 +639,139 @@ pub(super) async fn finish_post_scan(server: std::sync::Weak<ServerCore>, my_gen
 }
 
 impl super::VerterLanguageServer {
+    /// Start the workspace scanner — idempotently — because a request needs
+    /// the complete workspace inventory: the owning project's carrier frontier
+    /// (references/rename) or a workspace-wide enumeration (workspace symbols,
+    /// auto-import candidates, project overview, route tree, component
+    /// parents, global CSS classes). Nothing else starts it: initialization,
+    /// document open and edits never walk the workspace.
+    ///
+    /// The demand is sticky for the server's lifetime: a later init
+    /// generation re-arms the scan over its own snapshot. Before the first
+    /// snapshot is published only the demand is recorded; the init that
+    /// publishes arms the scan.
+    pub(super) async fn activate_workspace_scan(&self) {
+        use std::sync::atomic::Ordering;
+        self.workspace_scan_demanded.store(true, Ordering::Release);
+        let mut guard = self.workspace_scanner.lock().await;
+        if guard.is_some() {
+            return;
+        }
+        let my_gen = self.init_generation.load(Ordering::Acquire);
+        let root_paths: Vec<std::path::PathBuf> = self
+            .workspace_roots
+            .lock()
+            .await
+            .iter()
+            .map(|uri| {
+                std::path::PathBuf::from(crate::documents::uri_to_canonical_id_from_str(uri))
+            })
+            .collect();
+        if root_paths.is_empty() {
+            return;
+        }
+        // Snapshot-driven scanner classification: ownership-based tier
+        // classification replaces glob patterns.
+        let Some(scanner_snapshot) = self
+            .vfs_workspace
+            .read()
+            .as_ref()
+            .and_then(|ws| ws.load_published())
+            .map(|root| Arc::clone(&root.snapshot))
+        else {
+            return;
+        };
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let scanner = crate::workspace_scanner::spawn_workspace_scanner(
+            crate::workspace_scanner::WorkspaceScannerConfig {
+                root_paths,
+                host: self.documents.host_arc(),
+                documents: Arc::clone(&self.documents),
+                project_sync: self.project_sync.clone(),
+                vfs_workspace: Arc::clone(&self.vfs_workspace),
+                provider_sync_states: Arc::clone(&self.provider_sync_states),
+                provider_surfaces: self.documents.provider_surfaces().clone(),
+                is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
+                carrier_publish_coordinator: self.carrier_publish_coordinator.clone(),
+                carrier_transaction_coordinator: Arc::clone(&self.carrier_transaction_coordinator),
+                pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
+                tsx_profile: self.documents.tsx_profile.read().clone(),
+                tsconfig_patterns: Vec::new(),
+                workspace_snapshot: Some(scanner_snapshot),
+                generation: my_gen,
+                done_tx: Some(done_tx),
+                handler_activity: Arc::clone(&self.handler_activity),
+            },
+        );
+        self.sync_coordinator.set_workspace_scan_in_progress(true);
+        *guard = Some(scanner);
+        drop(guard);
+
+        let server = self.clone();
+        tokio::spawn(async move {
+            if done_rx.await.is_err() {
+                // Scanner cancelled: a newer generation re-arms its own.
+                return;
+            }
+            if server.init_generation.load(Ordering::Acquire) != my_gen {
+                return;
+            }
+            // The scan may enqueue owner-aware carrier retries; settle them,
+            // then lower the scan flag BEFORE the re-arm so the re-armed
+            // documents are pulled.
+            let pending_drain = Arc::new(PendingSyncDrain {
+                project_sync: server.project_sync.clone(),
+                documents: Arc::clone(&server.documents),
+                vfs_workspace: Arc::clone(&server.vfs_workspace),
+                provider_sync_states: Arc::clone(&server.provider_sync_states),
+                pending_snapshot_provider_sync: Arc::clone(&server.pending_snapshot_provider_sync),
+                is_tsgo: matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo),
+                mru_canonical_ids: None,
+                carrier_publish_coordinator: server.carrier_publish_coordinator.clone(),
+                carrier_transaction_coordinator: Arc::clone(
+                    &server.carrier_transaction_coordinator,
+                ),
+            });
+            drain_pending_snapshot_provider_sync_owned(pending_drain, PENDING_SYNC_REDRIVE, 1)
+                .await;
+            if server.init_generation.load(Ordering::Acquire) != my_gen {
+                return;
+            }
+            server
+                .sync_coordinator
+                .set_workspace_scan_in_progress(false);
+            server.workspace_scan_settled.notify_waiters();
+            server.rearm_open_document_diagnostics();
+            server.refresh_deferred_decorations();
+        });
+    }
+
+    /// Whether the complete workspace inventory is built, demanding it as a
+    /// side effect. A workspace-wide answer built while this is `false` would
+    /// come from a partially populated host, so callers answer pending
+    /// ([`Self::workspace_inventory_pending_error`]) or mark their result
+    /// incomplete — never complete-empty. A workspace with no folders has
+    /// nothing to scan and is always complete.
+    pub(super) async fn workspace_inventory_ready(&self) -> bool {
+        self.activate_workspace_scan().await;
+        if self.workspace_roots.lock().await.is_empty() {
+            return true;
+        }
+        self.workspace_scanner.lock().await.is_some()
+            && !self.sync_coordinator.workspace_scan_in_progress()
+    }
+
+    /// The protocol answer for a workspace-wide request issued while the
+    /// inventory is still being built: LSP `RequestFailed` (-32803), retryable
+    /// once the scan settles.
+    pub(super) fn workspace_inventory_pending_error() -> tower_lsp_server::jsonrpc::Error {
+        tower_lsp_server::jsonrpc::Error {
+            code: tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
+            message: "the workspace inventory is still being built; retry once it settles".into(),
+            data: None,
+        }
+    }
+
     /// Owe every provider-settled open document a fresh diagnostics publication.
     ///
     /// The debounced coordinator is the ONE publisher that orders provider
@@ -733,7 +845,7 @@ impl super::VerterLanguageServer {
         });
     }
 
-    /// The post-scan completion tail: owe the open documents fresh diagnostics,
+    /// The post-init completion tail: owe the open documents fresh diagnostics,
     /// then announce level 2 of the readiness ladder.
     ///
     /// Returns whether `typeProviderSyncComplete` was announced.
@@ -756,11 +868,8 @@ impl super::VerterLanguageServer {
         }
 
         tracing::info!(
-            "workspace scanner complete (gen={my_gen}), re-arming open-document diagnostics"
+            "post-init drain complete (gen={my_gen}), re-arming open-document diagnostics"
         );
-        // The scan is over BEFORE the re-arm, so the re-armed documents are pulled.
-        self.sync_coordinator.set_workspace_scan_in_progress(false);
-
         self.rearm_open_document_diagnostics();
         self.refresh_deferred_decorations();
 
@@ -793,62 +902,6 @@ impl super::VerterLanguageServer {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    /// The readiness ladder is MONOTONE: a scan that completes before background
-    /// init reaches its ready point must not release level 2 early.
-    ///
-    /// Discriminating: awaiting the scan signal alone (the pre-fix shape) releases
-    /// the moment the scan reports done, so the pending assertion below fails.
-    #[tokio::test]
-    async fn scan_complete_is_held_until_ready_is_announced() {
-        let (scan_tx, scan_rx) = tokio::sync::oneshot::channel::<()>();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
-        let gate = tokio::spawn(await_scan_complete_after_ready(scan_rx, ready_rx));
-        tokio::pin!(gate);
-
-        // The scan finishes FIRST — the level-2 race the ladder must lose.
-        scan_tx.send(()).expect("scan signal delivered");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(250), &mut gate)
-                .await
-                .is_err(),
-            "level 2 must stay held while level 1 has not been announced"
-        );
-
-        ready_tx.send(()).expect("ready signal delivered");
-        assert!(
-            gate.await.expect("gate task joins"),
-            "level 2 releases once both the scan and level 1 have happened"
-        );
-    }
-
-    /// A superseded / cancelled init drops its level-1 latch. Level 2 must then be
-    /// suppressed entirely rather than announcing a completeness for a generation
-    /// the client was never told about.
-    #[tokio::test]
-    async fn dropped_ready_latch_suppresses_scan_complete() {
-        let (scan_tx, scan_rx) = tokio::sync::oneshot::channel::<()>();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
-        scan_tx.send(()).expect("scan signal delivered");
-        drop(ready_tx);
-        assert!(
-            !await_scan_complete_after_ready(scan_rx, ready_rx).await,
-            "a dropped level-1 latch must suppress level 2"
-        );
-    }
-
-    /// A cancelled scanner drops its done channel; level 2 is suppressed and the
-    /// gate never blocks forever waiting for a level 1 that is irrelevant.
-    #[tokio::test]
-    async fn dropped_scan_signal_suppresses_scan_complete() {
-        let (scan_tx, scan_rx) = tokio::sync::oneshot::channel::<()>();
-        let (_ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
-        drop(scan_tx);
-        assert!(
-            !await_scan_complete_after_ready(scan_rx, ready_rx).await,
-            "a cancelled scanner must suppress level 2"
-        );
-    }
 
     #[test]
     fn build_published_workspace_materializes_exact_snapshot_with_views() {

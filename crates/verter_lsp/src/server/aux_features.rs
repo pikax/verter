@@ -1276,6 +1276,11 @@ pub(super) async fn handle_symbol(
     params: WorkspaceSymbolParams,
 ) -> Result<Option<WorkspaceSymbolResponse>> {
     let _hg = HandlerGuard::new(&server.handler_activity, "workspace_symbol");
+    // A workspace-wide answer from a partially populated host would read as
+    // complete: demand the inventory and answer pending until it is built.
+    if !server.workspace_inventory_ready().await {
+        return Err(VerterLanguageServer::workspace_inventory_pending_error());
+    }
     let symbols = workspace_symbols(server.documents.host(), &params.query);
     Ok(if symbols.is_empty() {
         None

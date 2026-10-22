@@ -2,8 +2,9 @@
  * Multi-root VS Code workspace: Vue package + Svelte package side by side.
  */
 import * as vscode from "vscode";
-import { FIXTURE_NAME } from "../../../helpers";
+import { FIXTURE_NAME, waitForDiagnosticsSettled } from "../../../helpers";
 import { ensureParityReady, failParityGap, workspaceRoot } from "../../../lib/parityHarness";
+import { pollBudget } from "../../../lib/timeouts";
 
 function onlyMultiRoot(ctx: Mocha.Context): void {
   if (FIXTURE_NAME !== "multi-root-parity")
@@ -15,7 +16,13 @@ suite(`Multi-root workspace [${FIXTURE_NAME}]`, function () {
     this.timeout(60_000);
     onlyMultiRoot(this);
     // code-workspace mounts pkg-a as folder[0]; open relative to that folder.
-    await ensureParityReady("src/App.vue");
+    const entry = await ensureParityReady("src/App.vue");
+    // Level 2 of the readiness ladder no longer implies any document is synced:
+    // the entry's own merged diagnostics are what prove the provider route has
+    // served it, so the suite starts only once they have settled.
+    await waitForDiagnosticsSettled(entry.uri, {
+      timeoutMs: pollBudget("parityDiagnosticsSettle"),
+    });
   });
 
   test("multi-root.folders.present", async function () {

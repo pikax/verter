@@ -105,14 +105,14 @@ impl Statistics {
 
     /// Create a scoped timer that records the event when dropped.
     /// Returns `None` if statistics are disabled (zero overhead).
-    pub fn timer(&self, event_type: &'static str, uri: Option<String>) -> Option<Timer<'_>> {
+    pub fn timer(&self, event_type: &'static str, uri: Option<&str>) -> Option<Timer<'_>> {
         if !self.is_enabled() {
             return None;
         }
         Some(Timer {
             stats: self,
             event_type,
-            uri,
+            uri: uri.map(str::to_owned),
             start: Instant::now(),
         })
     }
@@ -187,6 +187,22 @@ mod tests {
         assert!(stats.timer("test", None).is_none());
     }
 
+    /// The URI is borrowed (`Option<&str>`): a disabled collector never sees
+    /// an owned copy, so a handler passes `Some(uri.as_str())` at zero cost.
+    /// The owned copy is made only once the timer is armed.
+    #[test]
+    fn timer_with_uri_is_inert_until_enabled() {
+        let stats = Statistics::new(100);
+        assert!(stats.timer("hover", Some("file:///a.vue")).is_none());
+        assert!(stats.events().is_empty());
+
+        stats.set_enabled(true);
+        drop(stats.timer("hover", Some("file:///a.vue")));
+        let events = stats.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].uri.as_deref(), Some("file:///a.vue"));
+    }
+
     #[test]
     fn records_events_when_enabled() {
         let stats = Statistics::new(100);
@@ -233,7 +249,7 @@ mod tests {
         stats.set_enabled(true);
 
         {
-            let _timer = stats.timer("slow_op", Some("file:///test.vue".to_string()));
+            let _timer = stats.timer("slow_op", Some("file:///test.vue"));
             // Deterministically force a measured interval instead of
             // sleeping and hoping. The timer's internal `start` was
             // captured inside `stats.timer(...)` above, strictly before
