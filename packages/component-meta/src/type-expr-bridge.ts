@@ -332,6 +332,27 @@ type NativePropertyKey =
   | { kind: "uniqueSymbol"; identity: { symbol: string } }
   | { kind: "computed"; expression: NativeTypeExpr };
 
+/**
+ * A member's property name as a string: its typed string or number key, or
+ * the older `name` spelling. A symbol or computed key names no string
+ * property.
+ */
+function nativeMemberStringName(member: NativeObjectMember): string | undefined {
+  const key = member.key;
+  if (!key) {
+    return member.name;
+  }
+  switch (key.kind) {
+    case "string":
+      return key.value;
+    case "number":
+      return String(key.value);
+    case "uniqueSymbol":
+    case "computed":
+      return undefined;
+  }
+}
+
 // ── Converter ────────────────────────────────────────────────────
 
 /**
@@ -420,7 +441,7 @@ export function typeExprToDescriptor(
       const props = expr.properties
         .filter((m) => m.memberKind === "property" || m.memberKind === "method")
         .map((m) => ({
-          name: m.name ?? "",
+          name: nativeMemberStringName(m) ?? "",
           type:
             m.memberKind === "method" && m.function
               ? nativeFunctionToDescriptor(m.function, nativeRegistry, visiting, graphVisiting)
@@ -1260,7 +1281,8 @@ function resolveObjectProperty(
   switch (expr.kind) {
     case "object": {
       const member = expr.properties.find(
-        (candidate) => candidate.memberKind === "property" && candidate.name === propertyName,
+        (candidate) =>
+          candidate.memberKind === "property" && nativeMemberStringName(candidate) === propertyName,
       );
       if (!member?.ty) {
         return undefined;
@@ -1832,12 +1854,10 @@ function resolveFiniteObjectEntries(
 
   switch (expr.kind) {
     case "object":
-      return expr.properties
-        .filter((member) => member.memberKind === "property" && member.name)
-        .map((member) => ({
-          name: member.name!,
-          optional: member.optional ?? false,
-        }));
+      return expr.properties.flatMap((member) => {
+        const name = member.memberKind === "property" ? nativeMemberStringName(member) : undefined;
+        return name === undefined ? [] : [{ name, optional: member.optional ?? false }];
+      });
     case "intersection": {
       const entries = expr.types
         .map((type) => resolveFiniteObjectEntries(type, nativeRegistry, visiting, graphVisiting))

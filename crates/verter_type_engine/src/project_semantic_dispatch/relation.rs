@@ -17936,19 +17936,28 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             let members = self.relation_union_members(&members);
             // A source a fixed member matches infers nothing directly to the
             // target's naked type variable: only the lower-priority whole.
-            // A source closely matching a fixed member relates to the union
-            // as any other source does.
+            // A source closely matching a fixed member also infers through
+            // that member (`inferFromMatchingTypes`), so `PL<1>` against
+            // `PL<infer U> | infer U` gives `U` the `1` and only the
+            // lower-priority whole.
             if let Some(NakedUnionInference::Matched {
                 closely,
                 source,
                 parameter,
             }) = self.union_source_inferred_to_naked_parameter(&[source], target)
             {
-                if !closely.is_empty() {
-                    results.push(self.relate_to_union_target(source, &members, bindings));
-                    return;
+                let whole = self.matched_union_inference(source, parameter, bindings);
+                if closely.is_empty() || !matches!(whole, RelationResult::Assignable { .. }) {
+                    results.push(whole);
+                } else {
+                    push_all_of(
+                        work,
+                        closely
+                            .into_iter()
+                            .map(|(member, fixed)| RelateWork::Eval(member, fixed))
+                            .collect(),
+                    );
                 }
-                results.push(self.matched_union_inference(source, parameter, bindings));
                 return;
             }
             results.push(self.relate_to_union_target(source, &members, bindings));

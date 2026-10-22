@@ -384,6 +384,67 @@ describe("typeExprToDescriptor", () => {
     expect(obj.properties[1].optional).toBe(true);
   });
 
+  it("names, indexes and enumerates members by their typed key", () => {
+    const keyed: NativeTypeExpr = {
+      kind: "object",
+      properties: [
+        {
+          memberKind: "property",
+          key: { kind: "string", value: "color" },
+          ty: { kind: "literal", literalKind: "string", value: "red" },
+          optional: false,
+        },
+        {
+          memberKind: "property",
+          key: { kind: "number", value: 7 },
+          ty: { kind: "primitive", name: "number" },
+          optional: true,
+        },
+        {
+          memberKind: "method",
+          key: { kind: "string", value: "go" },
+          function: { parameters: [], returnType: { kind: "primitive", name: "void" } },
+        },
+      ],
+    };
+
+    const obj = typeExprToDescriptor(keyed) as {
+      kind: "object";
+      properties: { name: string; optional: boolean }[];
+    };
+    expect(obj.properties.map((p) => [p.name, p.optional])).toEqual([
+      ["color", false],
+      ["7", true],
+      ["go", false],
+    ]);
+
+    expect(
+      typeExprToDescriptor(
+        {
+          kind: "indexedAccess",
+          object: { kind: "ref", name: "Keyed", typeArguments: [] },
+          index: { kind: "literal", literalKind: "string", value: "color" },
+        },
+        new Map([["Keyed", keyed]]),
+      ),
+    ).toEqual({ kind: "literal", value: "red" });
+
+    expect(
+      typeExprToDescriptor({
+        kind: "mapped",
+        parameter: "K",
+        source: { kind: "keyOf", operand: keyed },
+        value: { kind: "typeParameter", name: "K" },
+      }),
+    ).toEqual({
+      kind: "object",
+      properties: [
+        { name: "color", type: { kind: "literal", value: "color" }, optional: false },
+        { name: "7", type: { kind: "literal", value: "7" }, optional: true },
+      ],
+    });
+  });
+
   it("preserves index signatures on object types", () => {
     const result = typeExprToDescriptor({
       kind: "object",
