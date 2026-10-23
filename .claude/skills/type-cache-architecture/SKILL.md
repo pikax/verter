@@ -36,6 +36,20 @@ End-state rule:
 
 ## Cache Runtime Hard Rules
 
+Parse-artifact publication uses embedded `StoragePin` owners and charged
+`PinnedOnce` lazy cells. Any Arc record handed out independently of its
+publication cell must carry its own pin; the cell's adjacent pin cannot follow
+a raw Arc clone. Indexed/shallow input records, lowered declarations and
+registered carrier envelopes follow this rule. `FactStoragePin` restricts its
+initializer to transitive `NoTypeExpr` facts, preserving that witness through
+erased accounting metadata. `HeapSize` derives may declare an embedded-pin
+hook with `#[heap_size(pin = "path")]` while still measuring every field.
+Pinned heap walks keep one iterative worklist and attribute each deferred node
+to its owning allocation before registering shared charges. Test-only
+`PinContext::enter_for_test` scopes isolated accounting on one thread; host
+stage executors explicitly carry it to workers. Production defaults still
+share the single process account and registry.
+
 The generic final-component backing store is
 `verter_type_engine::component_meta_result_db`. The session owns its payload
 and publication policy. Production reads use the request dispatch's

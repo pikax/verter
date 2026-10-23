@@ -356,10 +356,22 @@ fn base64url_32(bytes: [u8; 32]) -> String {
 }
 
 #[derive(verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct FrameworkArtifactEnvelope {
+    storage: verter_retention::pinned_heap::StoragePin,
     id: FrameworkArtifactId,
     source: RegisteredSourceSnapshot,
     artifact: Arc<FrameworkParseArtifact>,
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for FrameworkArtifactEnvelope {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
 }
 
 impl std::fmt::Debug for FrameworkArtifactEnvelope {
@@ -1250,6 +1262,7 @@ impl CarrierPublicationStore {
                     }
                 };
                 let envelope = Arc::new(FrameworkArtifactEnvelope {
+                    storage: Default::default(),
                     id: artifact_id.clone(),
                     source: accepted.source().clone(),
                     artifact: Arc::new(artifact),
@@ -1597,6 +1610,7 @@ impl CarrierPublicationStore {
             }
         };
         let envelope = Arc::new(FrameworkArtifactEnvelope {
+            storage: Default::default(),
             id: artifact_id.clone(),
             source: accepted.source().clone(),
             artifact: rehomed,

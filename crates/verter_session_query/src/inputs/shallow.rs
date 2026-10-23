@@ -71,7 +71,9 @@ pub struct ShallowInputAssembly {
 /// its id. The id selects retained source objects and matches known inputs
 /// against indexed ones, so it never outlives the facts it was assigned to.
 #[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct ShallowInputRecord {
+    storage: verter_retention::pinned_heap::StoragePin,
     observation_id: u64,
     facts: ShallowInputAssembly,
 }
@@ -84,6 +86,7 @@ impl ShallowInputRecord {
         static NEXT_OBSERVATION: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
         Self {
+            storage: Default::default(),
             observation_id: NEXT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             facts,
         }
@@ -93,6 +96,16 @@ impl ShallowInputRecord {
     #[must_use]
     pub fn observation_id(&self) -> u64 {
         self.observation_id
+    }
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for ShallowInputRecord {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
     }
 }
 

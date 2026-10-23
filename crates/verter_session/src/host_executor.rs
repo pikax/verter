@@ -251,6 +251,8 @@ impl SnapshotData for HostArtifactData {
 /// Analysis and Artifact stages delegate back to the host facade (the scheduler
 /// provides coordination, the host provides domain logic).
 pub struct HostStageExecutor {
+    #[cfg(any(test, feature = "test-support"))]
+    pin_context: verter_retention::pinned_heap::PinContext,
     pub config: HostConfig,
     pub workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
     /// Host-owned provenance counters. The executor bumps `sfc_parses`
@@ -294,6 +296,8 @@ impl HostStageExecutor {
         >,
     ) -> Self {
         Self {
+            #[cfg(any(test, feature = "test-support"))]
+            pin_context: Default::default(),
             config,
             workspace,
             provenance,
@@ -317,6 +321,8 @@ impl HostStageExecutor {
         generation: u64,
         incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _pin_scope = self.pin_context.enter_for_test();
         // Every ingress names this host's scheduler node object as well as
         // its generation: a removed or reset file's successor restarts its
         // generation sequence, so the generation alone could repeat a
@@ -703,6 +709,8 @@ impl StageExecutor for HostStageExecutor {
         source: &SourceSnapshot,
         generation: u64,
     ) -> Result<AnalysisSnapshot, StageError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _pin_scope = self.pin_context.enter_for_test();
         // `AnalysisScope::NONE` deliberately carries no analysis payload.
         // Avoid materialising the Arc-wrapped read views for the empty
         // snapshot: bundler/stateless hosts still cross the scheduler's

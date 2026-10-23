@@ -22,6 +22,10 @@ pub struct PinContext {
 
 impl Default for PinContext {
     fn default() -> Self {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(context) = TEST_CONTEXT.with(|slot| slot.borrow().clone()) {
+            return context;
+        }
         static CONTEXT: OnceLock<PinContext> = OnceLock::new();
         CONTEXT
             .get_or_init(|| Self {
@@ -32,7 +36,35 @@ impl Default for PinContext {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_CONTEXT: RefCell<Option<PinContext>> = const { RefCell::new(None) };
+}
+
+/// Restores the previous test context, including during unwinding.
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestPinScope(
+    Option<PinContext>,
+    std::marker::PhantomData<std::rc::Rc<()>>,
+);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for TestPinScope {
+    fn drop(&mut self) {
+        TEST_CONTEXT.with(|slot| *slot.borrow_mut() = self.0.take());
+    }
+}
+
 impl PinContext {
+    /// Scope default pins on this thread to an isolated test account.
+    /// Worker owners must explicitly carry and enter the same context.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enter_for_test(&self) -> TestPinScope {
+        TestPinScope(
+            TEST_CONTEXT.with(|slot| slot.replace(Some(self.clone()))),
+            std::marker::PhantomData,
+        )
+    }
     /// An isolated accounting world for deterministic ownership tests.
     #[cfg(any(test, feature = "test-support"))]
     pub fn new(account: Arc<SemanticRetentionAccount>) -> Self {
@@ -70,7 +102,9 @@ impl PinnedHeap {
             pins: Vec::new(),
         });
         let mut handles = AliasSet::collecting();
-        let bytes = inline + value.heap_size(&mut HeapMeter::pinning(&mut handles, &collector));
+        let mut meter = HeapMeter::pinning(&mut handles, &collector);
+        let bytes = inline + value.heap_size(&mut meter);
+        meter.finish_pins();
         handles
             .take_handles()
             .pin(ChargeCtx::new(context.account()));
@@ -118,8 +152,49 @@ impl HeapSize for StoragePin {
     }
 }
 
+/// Embedded storage for a content-free fact carrier. The only initializer
+/// requires the compiler's transitive fact witness, so erased allocation
+/// holds inside this pin cannot introduce a type-expression payload.
+#[derive(Debug, Default, Clone)]
+pub struct FactStoragePin(StoragePin);
+
+impl FactStoragePin {
+    pub fn ensure<T: HeapSize + verter_no_typeexpr::NoTypeExpr>(
+        &self,
+        value: &T,
+        inline: usize,
+        context: &PinContext,
+    ) {
+        self.0.ensure(value, inline, context);
+    }
+}
+
+impl HeapSize for FactStoragePin {
+    fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
+        0
+    }
+}
+
+// The initializer above preserves the witness through the erased charge
+// metadata, just as OwnedValue preserves its typed payload's witness.
+impl verter_no_typeexpr::__private::NoTypeExprWitness for FactStoragePin {}
+
+/// Default embedded-pin hook for a record whose storage is exposed through
+/// this trait. The record's exhaustive HeapSize implementation still measures
+/// all fields; only an Arc's publication calls this hook.
+pub trait EmbeddedStorage: HeapSize {
+    fn ensure_storage(&self, context: &PinContext);
+}
+
+pub fn pin_embedded<T: EmbeddedStorage>(value: &T, context: &PinContext) {
+    value.ensure_storage(context);
+}
+
 /// A published write-once value with its pin, initialized in the same
 /// transaction as the value. Failed setters drop their provisional pin.
+/// Raw Arc children are internal to the cell. A child handed to readers must
+/// own its storage pin (or use a sealed owned handle); cloning a raw Arc does
+/// not clone the cell's adjacent charge.
 pub struct PinnedOnce<T> {
     value: OnceLock<PinnedPayload<T>>,
 }
@@ -198,6 +273,47 @@ mod tests {
         raw: Arc<str>,
         eval: Arc<str>,
         names: Arc<Vec<String>>,
+    }
+
+    #[derive(HeapSize)]
+    #[heap_size(pin = "crate::pinned_heap::pin_embedded")]
+    struct Published {
+        storage: StoragePin,
+        names: Vec<String>,
+    }
+
+    impl EmbeddedStorage for Published {
+        fn ensure_storage(&self, context: &PinContext) {
+            self.storage.ensure(
+                self,
+                crate::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+                context,
+            );
+        }
+    }
+
+    #[test]
+    fn escaping_publication_reader_retains_its_embedded_charge() {
+        let context = PinContext::new(SemanticRetentionAccount::new(RetentionLimits::defaults()));
+        let _scope = context.enter_for_test();
+        let cell = PinnedOnce::from(Arc::new(Published {
+            storage: Default::default(),
+            names: vec!["x".repeat(2 * 1024 * 1024)],
+        }));
+        let reader = cell.get().unwrap().clone();
+        let charged = context.account().snapshot().pinned_bytes;
+        assert!(charged >= reader.names[0].len());
+        let second = PinnedHeap::measure(&reader, 0, &context);
+        drop(second);
+        assert_eq!(context.account().snapshot().pinned_bytes, charged);
+        drop(cell);
+        assert_eq!(
+            context.account().snapshot().pinned_bytes,
+            charged,
+            "escaping reader keeps its charge after publication teardown"
+        );
+        drop(reader);
+        assert_eq!(context.account().snapshot().pinned_bytes, 0);
     }
 
     #[test]

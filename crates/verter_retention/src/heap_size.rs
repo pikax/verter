@@ -58,9 +58,16 @@ pub trait IterativeNode {
 pub struct HeapMeter<'h, 't> {
     handles: &'h mut AliasSet,
     raw: WordSet,
-    pending: Vec<&'t dyn IterativeNode>,
+    pending: Vec<(&'t dyn IterativeNode, Option<usize>)>,
     walking: bool,
     pins: Option<&'h std::cell::RefCell<crate::pinned_heap::Collector>>,
+    allocation: Option<usize>,
+    allocations: Vec<PendingAllocation<'t>>,
+}
+
+struct PendingAllocation<'t> {
+    bytes: usize,
+    register: Box<dyn FnOnce(usize) -> crate::shared::CallerHold + 't>,
 }
 
 impl<'h, 't> HeapMeter<'h, 't> {
@@ -72,6 +79,8 @@ impl<'h, 't> HeapMeter<'h, 't> {
             pending: Vec::new(),
             walking: false,
             pins: None,
+            allocation: None,
+            allocations: Vec::new(),
         }
     }
 
@@ -110,16 +119,31 @@ impl<'h, 't> HeapMeter<'h, 't> {
             return Some(inline + measure(value, self));
         };
         let context = pins.borrow().context.clone();
-        let mut handles = AliasSet::collecting();
-        let bytes = inline + measure(value, &mut HeapMeter::pinning(&mut handles, pins));
-        handles
-            .take_handles()
-            .pin(super::owned::ChargeCtx::new(context.account()));
-        let hold = context
-            .aliases
-            .pin_caller(context.account(), value, |_| bytes);
-        pins.borrow_mut().pins.push(hold);
+        let index = self.allocations.len();
+        self.allocations.push(PendingAllocation {
+            bytes: inline,
+            register: Box::new(move |bytes| {
+                context
+                    .aliases
+                    .pin_caller(context.account(), value, |_| bytes)
+            }),
+        });
+        let previous = self.allocation.replace(index);
+        let bytes = measure(value, self);
+        self.allocations[index].bytes += bytes;
+        self.allocation = previous;
         Some(0)
+    }
+
+    /// Settle registrations after the single iterative walk has attributed
+    /// every deferred node to the allocation that owns its backing.
+    pub(crate) fn finish_pins(self) {
+        if let Some(pins) = self.pins {
+            for allocation in self.allocations {
+                let hold = (allocation.register)(allocation.bytes);
+                pins.borrow_mut().pins.push(hold);
+            }
+        }
     }
 
     /// `true` the first time the raw allocation of `arc` is offered.
@@ -166,14 +190,23 @@ impl<'h, 't> HeapMeter<'h, 't> {
     /// counted when popped; otherwise it starts the walk and drains it.
     pub fn iterate(&mut self, node: &'t dyn IterativeNode) -> usize {
         if self.walking {
-            self.pending.push(node);
+            self.pending.push((node, self.allocation));
             return 0;
         }
         self.walking = true;
-        let mut total = node.node_heap_size(self);
-        while let Some(next) = self.pending.pop() {
-            total += next.node_heap_size(self);
+        let previous = self.allocation;
+        let mut total = 0;
+        self.pending.push((node, previous));
+        while let Some((next, owner)) = self.pending.pop() {
+            self.allocation = owner;
+            let bytes = next.node_heap_size(self);
+            if let Some(owner) = owner {
+                self.allocations[owner].bytes += bytes;
+            } else {
+                total += bytes;
+            }
         }
+        self.allocation = previous;
         self.walking = false;
         total
     }

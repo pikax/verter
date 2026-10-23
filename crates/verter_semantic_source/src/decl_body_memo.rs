@@ -3730,6 +3730,7 @@ fn lowered_type_decl_from_group(
     };
 
     LoweredTypeDecl {
+        storage: Default::default(),
         kind: primary.kind,
         contributor_facts: Arc::from(group.contributors().to_vec().into_boxed_slice()),
         body,
@@ -3861,6 +3862,7 @@ fn fold_lowered_value_decl(
         body_hash.budget_exceeded = true;
     }
     LoweredValueDecl {
+        storage: Default::default(),
         kind,
         type_annotation,
         signatures,
