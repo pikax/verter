@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 const PASS_FIXTURES: &[&str] = &[
     "owned_dependency_handoffs_are_send.rs",
+    "semantic_query_poll_consumer.rs",
     "no_typeexpr_good_carrier.rs",
     "no_storedspan_good_carrier.rs",
     "recursive_self_good_recursive_carrier.rs",

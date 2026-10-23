@@ -87,6 +87,25 @@ use verter_type_expr::PrimitiveName;
 //   - `relation`  — the authoritative semantic-node assignability engine.
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
 use crate::request_observers as observation;
+
+/// Enter, in the enclosing block, the thread's scopes of one execution of
+/// `$dispatch`: its audit attribution, its construction scope and its
+/// validity. The synchronous entry enters them for the execution's extent;
+/// a polled root enters them on each poll. A macro, not a helper taking a
+/// closure, so a nested synchronous entry adds no frame to the native stack.
+macro_rules! execution_thread_scopes {
+    ($dispatch:expr, $family:expr) => {
+        // THE shared dispatch choke point: both `execute` and `execute_read`
+        // funnel here, so this scope's inclusive time and heap traffic cover
+        // every query-time type resolution in the request.
+        verter_audit::attribute_scope!(SemanticDispatch);
+        let _node_scope = $dispatch.graph().enter_node_root_scope();
+        let _validity = crate::request_context::ExecutionValidityScope::enter();
+        #[cfg(feature = "test-support")]
+        let _family = crate::cancel_trace::enter_family($family);
+    };
+}
+
 mod arena_ops;
 mod engine_binding;
 pub mod engine_resources;
@@ -124,9 +143,10 @@ pub(crate) mod request_completions;
 #[cfg(any(test, feature = "test-support"))]
 pub use query_frames::{
     seam_need_probes_for_tests, seam_need_questions_for_tests, take_call_suspensions_for_tests,
-    CallSuspensionForTests, ContextualRouteEventForTests, OpenRequestStateForTests, SemanticTask,
+    CallSuspensionForTests, ContextualRouteEventForTests, OpenRequestStateForTests,
     TaskOutcomeForTests,
 };
+pub use query_frames::{SemanticQueryPoll, SemanticTask};
 pub mod signature_discovery;
 pub mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
@@ -4656,7 +4676,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // read's lease keep its value rooted until the read is delivered in
         // that scope, under its own lease when that lease already roots the
         // delivered value.
-        let mut read = self.execute_via_cold_build_helper_owned(key, publication, operand_evidence);
+        self.redeliver_read(self.execute_via_cold_build_helper_owned(
+            key,
+            publication,
+            operand_evidence,
+        ))
+    }
+
+    /// Re-root an execution's read in the scope it is delivered in.
+    pub(super) fn redeliver_read(
+        &self,
+        mut read: CacheRead<QueryResult<SemanticQueryValue>>,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
         let lease = std::mem::take(&mut read.lease);
         match self.graph().redeliver(
             lease,
@@ -4688,17 +4719,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
-        // THE shared dispatch choke point: both `execute` and `execute_read`
-        // funnel here, so this scope's inclusive time and heap traffic cover
-        // every query-time type resolution in the request.
-        verter_audit::attribute_scope!(SemanticDispatch);
         // The execution is one operation of this dispatcher, and its own
         // construction scope is the operation's owner.
         let _operation = self.enter_operation(false);
-        let _node_scope = self.graph().enter_node_root_scope();
-        let _validity = crate::request_context::ExecutionValidityScope::enter();
-        #[cfg(feature = "test-support")]
-        let _family = crate::cancel_trace::enter_family(key.tag());
+        execution_thread_scopes!(self, key.tag());
         if let SemanticQueryKey::Relate { .. } = &key {
             let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
             if !self.relation_raw_key_has_exact_inference_context(&relate) {

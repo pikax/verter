@@ -45,9 +45,11 @@ The driver is reached only from synchronous public entries outside the
 computation. No poll-facing value hands a computation a way to call it.
 Each synchronous entry listed below is the driver applied to the pollable
 boundary beside it, so there is one implementation of each handoff, not a
-blocking copy next to a polling one. The semantic runtime's blocking drive
-(`SemanticExecution::drive`, `SemanticTask::drive`) uses the same driver,
-with a 2 ms slice so a stop stays observable.
+blocking copy next to a polling one. The semantic runtime's synchronous
+root entry (`ProjectSemanticDispatch::drive_query`) applies the same driver,
+with a 2 ms slice so a stop stays observable, to the root the production
+poll advances ([Polled root queries](#polled-root-queries)). A semantic task
+itself has no blocking driver: `SemanticTask::poll` is its only way forward.
 
 ## Delivered boundaries
 
@@ -461,6 +463,45 @@ query::lookup}` and their semantic memo consumers. Metadata and compilation
 callers reach those nodes through dispatch and retain responsibility for their
 own resumable traversal state.
 
+### Polled root queries
+
+`ThreadDispatch::poll_query(key)` begins a root query as a
+`SemanticQueryPoll`, the production entry a consumer that must not block
+drives a query through. It borrows its dispatcher exclusively and stays on
+the dispatcher's thread. `SemanticQueryPoll::poll` returns `Ready` with the
+read `execute_read` returns for the same key, or `Pending` once the query's
+semantic task waits on another task's producer that will wake the poller.
+The entry also implements `Future`.
+
+The entry and the synchronous entry run one implementation. An
+instantiation, a `typeof` or a machinery-root flow return enters as a
+driven root: the root's connected demand, its query level and the
+dispatcher operation it runs as are opened once and held across polls,
+because the request state they live on moves into the lent task until the
+task gives it back. The thread's execution scopes (audit attribution,
+construction scope, validity) are entered for each poll. `drive_query`
+blocks on the same root with the external-boundary driver. Any other query
+answers on its first poll through `execute_read` itself.
+
+While the entry is pending, `SemanticQueryPoll::task` lends its
+`SemanticTask`. The task is `Send` and has one exclusive poller, so it may
+be advanced to readiness on another thread with `SemanticTask::poll`. It
+keeps its root's delivery, and the entry delivers the delivery on its own
+thread at its next poll. Neither value exposes the dispatcher, the resolver
+capabilities or a blocking driver. Dropping a pending entry releases the
+task's frames, flights and waits, gives the request state back within the
+execution's scopes and then closes the root's operation.
+
+Contracts: `semantic_query_poll_consumer` (positive: poll the entry, advance
+its task on another thread), `semantic_task_no_blocking_driver` and
+`semantic_query_poll_no_dispatcher` (negative). Behaviour:
+`a_polled_root_query_suspends_resumes_elsewhere_and_reads_what_the_synchronous_entry_reads`
+and `a_polled_root_query_released_while_pending_leaves_nothing_open` in the
+session's semantic-task tests.
+
+The entry is only as non-blocking as the frames below it. A query a frame
+step evaluates in place still reaches the waits listed next.
+
 ## Boundaries that still block
 
 Conditional frames retain operand preparation, absorption/distribution
@@ -486,7 +527,7 @@ incomplete in this inventory.
 | Wait | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- |
 | Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
-| Semantic task drive (`SemanticTask::drive`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
+| Synchronous root drive (`ProjectSemanticDispatch::drive_query` → `block_on`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `execute_read` and every other synchronous dispatch entry, for instantiations, `typeof` and callback-typing flow returns — including those a frame step evaluates in place | `ThreadDispatch::poll_query` → `SemanticQueryPoll`, for a root query outside any drive |
 | Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | owned artifact admission with producer transfer; dispatch callers still synchronous |
 | Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |
 | Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |

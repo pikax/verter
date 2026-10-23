@@ -2,4 +2,4 @@ error[E0599]: no method named `wait` found for struct `OwnedResolverFlight<K, V,
  --> tests/cases/compile-fail/owned_resolver_flight_no_blocking_driver.rs:4:13
   |
 4 |     handoff.wait();
-  |             ^^^^ method not found in `OwnedResolverFlight<String, usize, ()>`
+  |             ^^^^ method not found in `OwnedResolverFlight<std::string::String, usize, ()>`

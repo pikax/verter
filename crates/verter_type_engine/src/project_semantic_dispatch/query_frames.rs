@@ -518,6 +518,9 @@ pub struct SemanticTask<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilitie
     home: Arc<parking_lot::Mutex<Option<UnreturnedTask<'a, C>>>>,
     /// The root the first poll opens.
     root: Option<QueryDemand>,
+    /// The root's delivery (`Err` when a stop abandoned it), kept from the
+    /// poll that completed the task until the entry that lent it reads it.
+    finished: Option<Result<QueryDelivery, ()>>,
 }
 
 /// The per-thread accounting a task records for the computes it was lent
@@ -559,15 +562,38 @@ struct UnreturnedTask<'a, C: crate::resolver_core::ResolverCapabilities> {
 }
 
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p, 'a, C> {
-    /// Advance the task as far as it can go: `Ready` with its root's
-    /// delivery (`Err` when a stop abandoned it), or `Pending` once it
-    /// waits on a producer outside it that will wake `waker`. The selected
-    /// request or shared job's cancellation also wakes the task, so a stop
-    /// does not depend on the outside producer completing or a timer tick.
-    pub(super) fn poll(
+    /// Advance the task as far as it can go, on whichever thread its one
+    /// exclusive poller runs: `Ready` once its root completed or a stop
+    /// abandoned it, or `Pending` once it waits on a producer outside it
+    /// that will wake `waker`. The selected request or shared job's
+    /// cancellation also wakes the task, so a stop does not depend on the
+    /// outside producer completing or a timer tick.
+    ///
+    /// Polling is the task's only way forward: it has no blocking driver
+    /// and no handle on its dispatcher or resolver. Its root's answer is
+    /// read by the entry that lent it ([`SemanticQueryPoll`]).
+    pub fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<()> {
+        if self.finished.is_none() {
+            match self.advance(waker) {
+                std::task::Poll::Ready(done) => self.finished = Some(done),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+        std::task::Poll::Ready(())
+    }
+
+    /// [`Self::poll`], handing over the root's delivery once it is ready.
+    fn poll_delivery(
         &mut self,
         waker: &std::task::Waker,
     ) -> std::task::Poll<Result<QueryDelivery, ()>> {
+        match self.finished.take() {
+            Some(done) => std::task::Poll::Ready(done),
+            None => self.advance(waker),
+        }
+    }
+
+    fn advance(&mut self, waker: &std::task::Waker) -> std::task::Poll<Result<QueryDelivery, ()>> {
         // Aggregate ownership is monotonic. Once a job has accepted owners,
         // their aggregate decides: an individual request cannot stop shared
         // work, and need not wake it. Readiness is still checked by the
@@ -621,11 +647,6 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         poll
     }
 
-    /// Poll the task to completion on this thread.
-    pub(super) fn drive(&mut self) -> Result<QueryDelivery, ()> {
-        crate::semantic_execution::block_on(|waker| self.poll(waker))
-    }
-
     /// [`Self::poll`], reporting what the root answered.
     #[cfg(any(test, feature = "test-support"))]
     pub fn poll_for_tests(
@@ -645,7 +666,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         &mut self,
         waker: &std::task::Waker,
     ) -> std::task::Poll<Result<CacheRead<QueryResult<SemanticQueryValue>>, ()>> {
-        self.poll(waker)
+        self.poll_delivery(waker)
             .map(|outcome| outcome.map(|delivery| delivery.read))
     }
 
@@ -855,6 +876,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             accounting: TaskAccounting::lend(),
             home: Arc::new(parking_lot::Mutex::new(None)),
             root: Some(root),
+            finished: None,
         }
     }
 
@@ -913,6 +935,311 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Drop for LentTas
             Some(task) => self.lender.return_semantic_task(task),
             None => self.lender.reclaim_unreturned_task(&self.home),
         }
+    }
+}
+
+/// A root query on the continuation runtime, from its entry to its
+/// delivery: the one implementation the synchronous entry
+/// ([`ProjectSemanticDispatch::drive_query`]) blocks on and the production
+/// poll ([`SemanticQueryPoll`]) advances.
+///
+/// Its fields drop in order: the task gives its request state back before
+/// the entry's query level and connected demand close, as they close after
+/// the delivery on the synchronous entry's stack.
+struct DrivenRoot<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> {
+    lent: Option<LentTask<'d, 'a, C>>,
+    _query_depth: Option<super::connected_demand::ConnectedDemandGuard<'d>>,
+    isolated_root: Option<super::IsolatedRoot>,
+    connected: super::connected_demand::ConnectedDemandGuard<'d>,
+    lender: &'d ProjectSemanticDispatch<'a, C>,
+    key: SemanticQueryKey,
+}
+
+/// How a root's entry begins: answered at its entry, or a lent task.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "returned once to the entry that starts the root: the synchronous entry keeps the root on its stack as it kept the lent task, and the polled entry boxes it"
+)]
+enum RootStart<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> {
+    Answered(ValueRead),
+    Driven(DrivenRoot<'d, 'a, C>),
+}
+
+impl<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> DrivenRoot<'d, 'a, C> {
+    fn start(
+        lender: &'d ProjectSemanticDispatch<'a, C>,
+        key: SemanticQueryKey,
+    ) -> RootStart<'d, 'a, C> {
+        // The connected demand spans the whole drive; the entry itself is
+        // charged exactly as a synchronous entry is.
+        let (connected, _) = lender.enter_connected_demand(false);
+        // An isolated root whose refusal is sealed answers from it.
+        let isolated_root = lender.isolated_root_identity(&connected, &key);
+        if let Some(read) = isolated_root
+            .as_ref()
+            .and_then(|root| lender.answer_from_sealed_refusal(root))
+        {
+            return RootStart::Answered(read);
+        }
+        // The entry is one nested query level, as a synchronous entry is.
+        let (attempt, query_depth) = match lender.enter_query(&key, None, Nesting::Drive) {
+            Ok(entered) => entered,
+            Err(read) => {
+                return RootStart::Answered(
+                    lender.finish_driven_read(&key, read, None, &connected, None),
+                );
+            }
+        };
+        // The root runs as a semantic task that borrows the lender's
+        // request state and gives it back when it is done.
+        let lent = LentTask::new(lender, lender.lend_semantic_task(key.clone(), attempt));
+        RootStart::Driven(Self {
+            lent: Some(lent),
+            _query_depth: query_depth,
+            isolated_root,
+            connected,
+            lender,
+            key,
+        })
+    }
+
+    /// The lent task, while the root has not delivered.
+    fn task(&mut self) -> Option<&mut SemanticTask<'d, 'a, C>> {
+        self.lent.as_mut().and_then(|lent| lent.task.as_mut())
+    }
+
+    /// Advance the root's task; once it is ready, take back the request
+    /// state it borrowed and deliver its answer here.
+    fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<ValueRead> {
+        let Some(task) = self.task() else {
+            panic!("a root is not polled after it delivered")
+        };
+        let outcome = match task.poll_delivery(waker) {
+            std::task::Poll::Ready(outcome) => outcome,
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+        };
+        drop(self.lent.take());
+        let lender = self.lender;
+        std::task::Poll::Ready(match outcome {
+            Ok(QueryDelivery { read, carrier, .. }) => {
+                if let Some(receipt) = read.receipt.priced() {
+                    lender
+                        .connected_demand
+                        .record_prerequisite(receipt, Nesting::Drive);
+                }
+                let traced = lender.driven_root_traced.borrow_mut().take();
+                lender.finish_driven_read(
+                    &self.key,
+                    read,
+                    carrier,
+                    &self.connected,
+                    self.isolated_root.take().zip(traced),
+                )
+            }
+            Err(()) => lender.finish_driven_read(
+                &self.key,
+                crate::semantic_query_memo::cancelled_cache_read(),
+                None,
+                &self.connected,
+                None,
+            ),
+        })
+    }
+}
+
+/// A root semantic query evaluated by polling: the production entry a
+/// consumer that must not block — a metadata or compile root suspended on
+/// its scheduler — drives a query through. It reads what the synchronous
+/// entry ([`ProjectSemanticDispatch::execute_read`]) reads, through the same
+/// evaluation: an instantiation, a `typeof` or a machinery-root flow return
+/// runs as a semantic task whose frames wait on another task's producer by
+/// returning `Pending`; any other query answers on its first poll.
+///
+/// The entry holds its dispatcher exclusively
+/// ([`super::ThreadDispatch::poll_query`]) and stays on its thread. Its task
+/// ([`Self::task`]) is `Send` and may be polled to readiness on another
+/// thread; the entry delivers the answer here. Dropping the entry while it
+/// is pending releases every frame, flight and wait the task holds and
+/// gives the request state back.
+pub struct SemanticQueryPoll<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> {
+    state: RootPollState<'d, 'a, C>,
+    lender: &'d ProjectSemanticDispatch<'a, C>,
+}
+
+enum RootPollState<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> {
+    Unstarted(SemanticQueryKey),
+    /// A driven root, and — for every root but a flow return's, whose
+    /// executor drives it before entering any execution — the dispatcher
+    /// operation it runs as. The operation spans the root's polls: its
+    /// state moves with the request state the root's task borrows, so it
+    /// closes only after the task gives that state back. Declared after
+    /// the root, so it closes after the root's entry does.
+    Driven {
+        root: Box<DrivenRoot<'d, 'a, C>>,
+        operation: Option<super::DispatchOperation<'d>>,
+    },
+    Delivered,
+}
+
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// Run `body` under the thread's scopes of one execution
+    /// (`execution_thread_scopes!`): a polled root holds its operation
+    /// across its polls — the operation's state moves with the request
+    /// state its task borrows — and enters these on each.
+    fn within_execution_scopes<R>(
+        &self,
+        #[cfg_attr(not(feature = "test-support"), allow(unused_variables))]
+        family: crate::semantic_query::SemanticQueryKeyTag,
+        body: impl FnOnce() -> R,
+    ) -> R {
+        execution_thread_scopes!(self, family);
+        body()
+    }
+}
+
+impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ThreadDispatch<'a, C> {
+    /// Begin evaluating `key` as a polled root query ([`SemanticQueryPoll`]).
+    pub fn poll_query(&mut self, key: SemanticQueryKey) -> SemanticQueryPoll<'_, 'a, C> {
+        SemanticQueryPoll {
+            state: RootPollState::Unstarted(key),
+            lender: &self.dispatch,
+        }
+    }
+}
+
+impl<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> SemanticQueryPoll<'d, 'a, C> {
+    /// Advance the query: `Ready` with what the synchronous entry reads, or
+    /// `Pending` once its task waits on a producer outside it that will wake
+    /// `waker`.
+    pub fn poll(
+        &mut self,
+        waker: &std::task::Waker,
+    ) -> std::task::Poll<CacheRead<QueryResult<SemanticNodeId>>> {
+        let lender = self.lender;
+        if let RootPollState::Unstarted(_) = &self.state {
+            let RootPollState::Unstarted(key) =
+                std::mem::replace(&mut self.state, RootPollState::Delivered)
+            else {
+                unreachable!("the state was just matched")
+            };
+            if !lender.drives_on_the_runtime(&key) {
+                return std::task::Poll::Ready(lender.execute_read(key));
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            super::raise::DISPATCH_TRACE.with(|t| {
+                t.borrow_mut()
+                    .push(super::raise::query_key_discriminant(&key))
+            });
+            let operation = (!matches!(key, SemanticQueryKey::FlowReturn(_)))
+                .then(|| lender.enter_operation(false));
+            let start = match operation {
+                Some(_) => {
+                    lender.within_execution_scopes(key.tag(), || DrivenRoot::start(lender, key))
+                }
+                None => DrivenRoot::start(lender, key),
+            };
+            match start {
+                RootStart::Answered(read) => {
+                    let scoped = operation.is_some();
+                    drop(operation);
+                    return std::task::Poll::Ready(self.deliver(read, scoped));
+                }
+                RootStart::Driven(root) => {
+                    self.state = RootPollState::Driven {
+                        root: Box::new(root),
+                        operation,
+                    };
+                }
+            }
+        }
+        let (family, scoped) = match &self.state {
+            RootPollState::Driven { root, operation } => (root.key.tag(), operation.is_some()),
+            _ => panic!("a polled root query is not polled after it delivered"),
+        };
+        let state = &mut self.state;
+        let mut operation = None;
+        let mut advance = || {
+            let RootPollState::Driven { root, .. } = &mut *state else {
+                unreachable!("the state was just matched")
+            };
+            let poll = root.poll(waker);
+            // A delivered root closes its entry — its query level and its
+            // connected demand — where the synchronous entry closes it:
+            // within the execution's scopes, before its operation closes and
+            // its read is delivered.
+            if poll.is_ready() {
+                if let RootPollState::Driven {
+                    operation: open, ..
+                } = std::mem::replace(&mut *state, RootPollState::Delivered)
+                {
+                    operation = open;
+                }
+            }
+            poll
+        };
+        let poll = if scoped {
+            lender.within_execution_scopes(family, advance)
+        } else {
+            advance()
+        };
+        drop(operation);
+        poll.map(|read| self.deliver(read, scoped))
+    }
+
+    /// The query's semantic task, while it runs on the continuation runtime
+    /// and has not delivered: `Send`, so its one exclusive poller may
+    /// advance it on another thread.
+    pub fn task(&mut self) -> Option<&mut SemanticTask<'d, 'a, C>> {
+        match &mut self.state {
+            RootPollState::Driven { root, .. } => root.task(),
+            _ => None,
+        }
+    }
+
+    /// What the synchronous entry delivers for a root's read.
+    fn deliver(&self, read: ValueRead, scoped: bool) -> CacheRead<QueryResult<SemanticNodeId>> {
+        let read = if scoped {
+            self.lender.redeliver_read(read)
+        } else {
+            read
+        };
+        super::narrow_value_cache_read(read)
+    }
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> Drop for SemanticQueryPoll<'_, '_, C> {
+    fn drop(&mut self) {
+        // A root released while pending gives its request state back — its
+        // task releasing every frame, flight and wait it holds — within the
+        // execution's scopes, then closes its operation.
+        if let RootPollState::Driven { root, operation } =
+            std::mem::replace(&mut self.state, RootPollState::Delivered)
+        {
+            match operation {
+                Some(operation) => {
+                    self.lender
+                        .within_execution_scopes(root.key.tag(), move || drop(root));
+                    drop(operation);
+                }
+                None => drop(root),
+            }
+        }
+    }
+}
+
+// The entry is never structurally pinned: polling it moves nothing it owns.
+impl<C: crate::resolver_core::ResolverCapabilities> Unpin for SemanticQueryPoll<'_, '_, C> {}
+
+impl<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> std::future::Future
+    for SemanticQueryPoll<'d, 'a, C>
+{
+    type Output = CacheRead<QueryResult<SemanticNodeId>>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        SemanticQueryPoll::poll(self.get_mut(), cx.waker())
     }
 }
 
@@ -1349,54 +1676,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Evaluate `key` on the continuation runtime: the synchronous entry
-    /// of an instantiation or a `typeof`. A warm result answers without the
-    /// runtime.
+    /// of an instantiation or a `typeof`, which blocks this thread on the
+    /// same root the production poll ([`SemanticQueryPoll`]) advances. A
+    /// warm result answers without the runtime.
+    ///
+    /// Never inlined: the root and its lent task live in this frame alone,
+    /// off the stack of every nested query entry that does not drive.
+    #[inline(never)]
     pub(super) fn drive_query(&self, key: SemanticQueryKey) -> ValueRead {
-        // The connected demand spans the whole drive; the entry itself is
-        // charged exactly as a synchronous entry is.
-        let (connected_guard, _) = self.enter_connected_demand(false);
-        // An isolated root whose refusal is sealed answers from it.
-        let isolated_root = self.isolated_root_identity(&connected_guard, &key);
-        if let Some(read) = isolated_root
-            .as_ref()
-            .and_then(|root| self.answer_from_sealed_refusal(root))
-        {
-            return read;
-        }
-        // The drive runs on this native stack: its entry is one nested
-        // query level, as a synchronous entry is.
-        let (attempt, _query_depth_guard) = match self.enter_query(&key, None, Nesting::Drive) {
-            Ok(entered) => entered,
-            Err(read) => return self.finish_driven_read(&key, read, None, &connected_guard, None),
-        };
-        // The drive runs as a semantic task that borrows this dispatcher's
-        // request state and gives it back when it is done.
-        let outcome = {
-            let mut lent = LentTask::new(self, self.lend_semantic_task(key.clone(), attempt));
-            lent.task.as_mut().expect("the task is lent").drive()
-        };
-        match outcome {
-            Ok(QueryDelivery { read, carrier, .. }) => {
-                if let Some(receipt) = read.receipt.priced() {
-                    self.connected_demand
-                        .record_prerequisite(receipt, Nesting::Drive);
-                }
-                let traced = self.driven_root_traced.borrow_mut().take();
-                self.finish_driven_read(
-                    &key,
-                    read,
-                    carrier,
-                    &connected_guard,
-                    isolated_root.zip(traced),
-                )
+        match DrivenRoot::start(self, key) {
+            RootStart::Answered(read) => read,
+            RootStart::Driven(mut root) => {
+                crate::semantic_execution::block_on(|waker| root.poll(waker))
             }
-            Err(()) => self.finish_driven_read(
-                &key,
-                crate::semantic_query_memo::cancelled_cache_read(),
-                None,
-                &connected_guard,
-                None,
-            ),
         }
     }
 

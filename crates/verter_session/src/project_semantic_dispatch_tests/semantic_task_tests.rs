@@ -15,7 +15,7 @@ use verter_type_engine::project_semantic_dispatch::{
 use verter_type_engine::resolver_core::fact_validation_port::FactValidation as _;
 use verter_type_engine::semantic_query::{
     PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId,
-    SemanticNodeData, SemanticQueryKey, SemanticQueryValue, ValueRootKey,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryValue, ValueRootKey,
 };
 use verter_type_engine::semantic_query_memo::{Claim, ReadCapture};
 
@@ -1726,4 +1726,192 @@ fn a_contextual_call_released_while_suspended_leaves_nothing_open() {
             "[number, Box<3>]"
         );
     }
+}
+
+/// What a read answered, its fact status, its rails and its diagnostics:
+/// the parts of a read a consumer of a root query decides on.
+fn read_summary(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    read: &verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+) -> (String, String, bool, bool, usize) {
+    let answer = match read.value() {
+        QueryResult::Value(node) => display(
+            dispatch,
+            &QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
+        ),
+        other => format!("{other:?}"),
+    };
+    (
+        answer,
+        format!("{:?}", read.fact_status()),
+        read.cache_suppress(),
+        read.result_is_partial(),
+        read.walker_diagnostics().iter().count(),
+    )
+}
+
+/// The production polled root entry: a root whose chain reaches a value
+/// another task is producing returns `Pending` with its frames suspended,
+/// its `Send` task is advanced on other threads through its public poll —
+/// pending while the producer holds, ready once it goes away — and the
+/// entry then delivers on its own thread exactly what the synchronous
+/// entry reads on a fresh host. A warm root and a query outside the
+/// continuation runtime answer on their first poll with what the
+/// synchronous entry reads.
+#[test]
+fn a_polled_root_query_suspends_resumes_elsewhere_and_reads_what_the_synchronous_entry_reads() {
+    let synchronous = {
+        let host = chain_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let read = dispatch.execute_read(typeof_key(&dispatch, "x5"));
+        read_summary(&dispatch, &read)
+    };
+    assert_eq!(synchronous.0, "\"ok\"");
+
+    let host = chain_host();
+    let mut dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = host.project_type_store().semantic_graph();
+    let other = graph.task_registry_for_tests().register_task();
+    let mut capture = ReadCapture::default();
+    let Ok(mut attempt) = graph.begin_query_claim(
+        &*host,
+        host.request_flags(),
+        typeof_key(&dispatch, "x2"),
+        &mut capture,
+    ) else {
+        panic!("a cold typeof has no warm answer");
+    };
+    let Claim::Produce(lease) = graph.claim_query(
+        &*host,
+        host.request_flags(),
+        &mut attempt,
+        &other,
+        &mut capture,
+    ) else {
+        panic!("the other task produces the cold typeof");
+    };
+
+    let counter = Arc::new(CountingWaker::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    let key = typeof_key(&dispatch, "x5");
+    let mut entry = dispatch.poll_query(key);
+    assert!(entry.poll(&waker).is_pending(), "the root waits on x2");
+    {
+        let task = entry.task().expect("a pending root has a task");
+        assert_send(task);
+        assert_eq!(task.live_frames_for_tests(), 3, "x5, x4 and x3 wait on x2");
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| assert!(task.poll(&waker).is_pending()))
+                .join()
+                .expect("the pending poll returns");
+        });
+        drop(lease);
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the task"
+        );
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| assert!(task.poll(&waker).is_ready()))
+                .join()
+                .expect("the resumed task completes");
+        });
+    }
+    let read = match entry.poll(&waker) {
+        Poll::Ready(read) => read,
+        Poll::Pending => panic!("a ready task's entry delivers"),
+    };
+    assert!(entry.task().is_none(), "a delivered root holds no task");
+    drop(entry);
+    assert_eq!(read_summary(&dispatch, &read), synchronous);
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    drop(other);
+
+    // Warm, the root answers on its first poll, as the synchronous entry
+    // answers it.
+    let mut warm = dispatch.poll_query(typeof_key(&dispatch, "x5"));
+    let Poll::Ready(warm_read) = warm.poll(&waker) else {
+        panic!("a warm root answers on its first poll");
+    };
+    drop(warm);
+    let warm_sync = dispatch.execute_read(typeof_key(&dispatch, "x5"));
+    assert_eq!(
+        read_summary(&dispatch, &warm_read),
+        read_summary(&dispatch, &warm_sync)
+    );
+
+    // A query outside the continuation runtime answers on its first poll.
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("the root answers a type");
+    };
+    let key_of = SemanticQueryKey::KeyOf {
+        base: node,
+        context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+    };
+    let mut polled = dispatch.poll_query(key_of.clone());
+    let Poll::Ready(polled_read) = polled.poll(&waker) else {
+        panic!("a query off the runtime answers on its first poll");
+    };
+    drop(polled);
+    let sync_read = dispatch.execute_read(key_of);
+    assert_eq!(
+        format!("{:?}", polled_read.value()),
+        format!("{:?}", sync_read.value())
+    );
+    assert_eq!(polled_read.cache_suppress(), sync_read.cache_suppress());
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+}
+
+/// A polled root released while pending — its consumer abandoned — gives
+/// its dispatcher the request state back with nothing left open: its
+/// task's frames, flights and wait go, and its operation closes, so the
+/// dispatcher answers the same root afterwards as the synchronous entry
+/// does.
+#[test]
+fn a_polled_root_query_released_while_pending_leaves_nothing_open() {
+    let host = chain_host();
+    let mut dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = host.project_type_store().semantic_graph();
+    let other = graph.task_registry_for_tests().register_task();
+    let mut capture = ReadCapture::default();
+    let Ok(mut attempt) = graph.begin_query_claim(
+        &*host,
+        host.request_flags(),
+        typeof_key(&dispatch, "x2"),
+        &mut capture,
+    ) else {
+        panic!("a cold typeof has no warm answer");
+    };
+    let Claim::Produce(lease) = graph.claim_query(
+        &*host,
+        host.request_flags(),
+        &mut attempt,
+        &other,
+        &mut capture,
+    ) else {
+        panic!("the other task produces the cold typeof");
+    };
+    let waker = Waker::from(Arc::new(CountingWaker::default()));
+    let key = typeof_key(&dispatch, "x5");
+    let mut entry = dispatch.poll_query(key);
+    assert!(entry.poll(&waker).is_pending());
+    assert_eq!(
+        graph.resident_flight_keys_for_tests().len(),
+        4,
+        "the other producer's flight and the root's three"
+    );
+    drop(entry);
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    assert_eq!(
+        graph.resident_flight_keys_for_tests().len(),
+        1,
+        "only the other producer's flight remains"
+    );
+    drop(lease);
+    drop(other);
+    let read = dispatch.execute_read(typeof_key(&dispatch, "x5"));
+    assert_eq!(read_summary(&dispatch, &read).0, "\"ok\"");
 }

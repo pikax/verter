@@ -429,6 +429,7 @@ impl<P: Program> SemanticExecution<P> {
     /// the chain waits on an outside producer until that producer wakes it.
     /// A stop abandons every open demand; completed results stay for a
     /// later drive.
+    #[cfg(test)]
     pub(crate) fn drive(&mut self, program: &mut P, root: P::Demand) -> Outcome<P> {
         let mut root = Some(root);
         block_on(|waker| self.poll(program, root.take(), waker))
