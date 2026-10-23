@@ -4,6 +4,7 @@ use super::oracle;
 use super::support::*;
 use std::collections::BTreeSet;
 use verter_session_oracle_macro::oracle_row;
+use verter_type_expr::ObjectMember;
 
 fn assert_mapped_recursive_container(indexed: bool) {
     let host = make_host_with_footprint();
@@ -134,6 +135,75 @@ export type InlineProbe = { [K in 'a']: () => { a: 1 }['a'][] };
                 }
                 _ => unreachable!(),
             }
+        }
+    }
+}
+
+#[test]
+fn mapped_signature_slots_reduce_object_signature_entries() {
+    let host = make_host_with_footprint();
+    let path = "/signature-object-slots.ts";
+    upsert_ts(
+        &host,
+        path,
+        r#"
+type Slots<T extends { a: number }> = {
+    readonly [key: string]: T['a'];
+    (value: T['a']): T['a'];
+    field: T['a'];
+    new (value: T['a']): { value: T['a'] };
+    (value: { value: T['a'] }): T['a'];
+};
+type Fn<T extends { a: number }> = (value: Slots<T>) => Slots<T>;
+export type Direct = Slots<{ a: 1 }>;
+export type Probe = { [K in 'a']: Fn<{ a: 1 }> };
+"#,
+    );
+    for _ in 0..2 {
+        // Read the mapped helper first so the direct control cannot prewarm it.
+        let (mapped, record) = resolve_expr(&host, path, "Probe", &[], ProjectionMode::Expanded);
+        let verter_audit::RequestKindPayload::TypeResolution(payload) = &record.kind_payload else {
+            panic!("signature publication must retain its resolution audit");
+        };
+        assert!(
+            !payload.cache_suppress
+                && !payload.recursion_limit_reached
+                && payload.walker_diagnostics.is_empty(),
+            "finite signature slots must publish completely: {payload:?}"
+        );
+        let props = object_props(&mapped);
+        let function = function_type(&props["a"].ty);
+        let (direct, _) = resolve_expr(&host, path, "Direct", &[], ProjectionMode::Expanded);
+        for slots in [
+            function.return_type.as_deref().expect("declared return"),
+            &function.parameters[0].ty,
+            &direct,
+        ] {
+            let TypeExpr::Object(members) = slots else {
+                panic!("expected the signature-bearing object, got {slots:?}");
+            };
+            let [ObjectMember::Property(field), ObjectMember::CallSignature(call), ObjectMember::CallSignature(overload), ObjectMember::ConstructSignature(construct), ObjectMember::IndexSignature(index)] =
+                members.properties.as_slice()
+            else {
+                panic!("the public object must retain every signature entry: {members:?}");
+            };
+            assert!(index.readonly);
+            assert_primitive(&index.key_type, PrimitiveName::String);
+            assert_number_literal(&index.value_type, 1.0);
+            assert_number_literal(&call.parameters[0].ty, 1.0);
+            assert_number_literal(call.return_type.as_deref().expect("call return"), 1.0);
+            assert_number_literal(&field.ty, 1.0);
+            assert_number_literal(&construct.parameters[0].ty, 1.0);
+            assert_number_literal(
+                &object_props(construct.return_type.as_deref().expect("construct return"))["value"]
+                    .ty,
+                1.0,
+            );
+            assert_number_literal(&object_props(&overload.parameters[0].ty)["value"].ty, 1.0);
+            assert_number_literal(
+                overload.return_type.as_deref().expect("overload return"),
+                1.0,
+            );
         }
     }
 }

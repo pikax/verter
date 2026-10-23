@@ -3543,7 +3543,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(elements.iter().map(|e| e.value).collect())
             }
             SemanticNodeData::Object(surface) if whole_object => {
-                Some(surface.positive_members().iter().map(|m| m.value).collect())
+                let mut children = Vec::with_capacity(surface.entries.len());
+                for entry in surface.entries.iter() {
+                    match entry {
+                        crate::semantic_query::SurfaceEntry::Member(member) => {
+                            children.push(member.value);
+                        }
+                        crate::semantic_query::SurfaceEntry::CallSignature(signature)
+                        | crate::semantic_query::SurfaceEntry::ConstructSignature(signature) => {
+                            children.push(*signature);
+                        }
+                        crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                            children.extend([signature.key_type, signature.value_type]);
+                        }
+                    }
+                }
+                Some(children)
             }
             SemanticNodeData::Signature {
                 params,
@@ -3636,9 +3651,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticNodeData::Object(surface) => {
-                // Entries own the surface; the member list is its derived
-                // index. Rebuild the stream so both readers see the value.
+                // Select and rebuild operands in the authoritative entry order;
+                // kind-specific indexes are derived from this rewritten stream.
                 let mut values = values.iter();
+                let mut next = || {
+                    *values
+                        .next()
+                        .expect("each entry operand has an evaluated value")
+                };
                 let entries = surface
                     .entries
                     .iter()
@@ -3646,14 +3666,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::semantic_query::SurfaceEntry::Member(member) => {
                             crate::semantic_query::SurfaceEntry::Member(
                                 crate::semantic_query::SurfaceMember {
-                                    value: *values
-                                        .next()
-                                        .expect("each member has an evaluated value"),
+                                    value: next(),
                                     ..member.clone()
                                 },
                             )
                         }
-                        other => other.clone(),
+                        crate::semantic_query::SurfaceEntry::CallSignature(_) => {
+                            crate::semantic_query::SurfaceEntry::CallSignature(next())
+                        }
+                        crate::semantic_query::SurfaceEntry::ConstructSignature(_) => {
+                            crate::semantic_query::SurfaceEntry::ConstructSignature(next())
+                        }
+                        crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                            crate::semantic_query::SurfaceEntry::IndexSignature(
+                                crate::semantic_query::IndexSignature {
+                                    key_type: next(),
+                                    value_type: next(),
+                                    ..signature.clone()
+                                },
+                            )
+                        }
                     })
                     .collect();
                 SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
