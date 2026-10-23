@@ -1769,7 +1769,6 @@ mod retention_tests {
 
         let tight = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: 0,
-            active_ceiling_bytes: 0,
             max_entry_bytes: 0,
             pin_threshold_bytes: 0,
         });
