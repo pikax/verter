@@ -764,6 +764,17 @@ pub struct SemanticGraphStore {
     /// or a joined wait.
     #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
     flight_rendezvous_armed: std::sync::atomic::AtomicUsize,
+    /// The arena's teardown. Declared last: it ends after every cache above
+    /// has released what it held ([`arena::ArenaTeardown`]).
+    arena_teardown: arena::ArenaTeardown,
+}
+
+/// The teardown begins before any field drops, so the caches' root
+/// releases defer to [`SemanticGraphStore::arena_teardown`].
+impl Drop for SemanticGraphStore {
+    fn drop(&mut self) {
+        self.arena_teardown.begin();
+    }
 }
 
 /// The family memo's retention bound, chosen when a store is constructed
@@ -827,6 +838,7 @@ impl SemanticGraphStore {
         let unresolved_reach = Arc::new(release::SidecarMutex::new(
             unresolved_reach::StructureBits::new(retention_account.get()),
         ));
+        let arena_teardown = arena::ArenaTeardown::of(&arena);
         let store = Self {
             operand_identity: Default::default(),
             arena,
@@ -898,6 +910,7 @@ impl SemanticGraphStore {
             flight_rendezvous: Default::default(),
             #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
             flight_rendezvous_armed: Default::default(),
+            arena_teardown,
         };
         store.bind_destroyed_sidecar_sink();
         store
@@ -1098,15 +1111,18 @@ impl SemanticGraphStore {
     /// store before any caller can share it, so the bound is fixed before
     /// the first admission and never changes afterwards.
     #[must_use]
-    pub fn with_memo_family_bound(self, bound: MemoFamilyBound) -> Self {
+    pub fn with_memo_family_bound(
+        #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_mut))] mut self,
+        bound: MemoFamilyBound,
+    ) -> Self {
         match bound {
-            MemoFamilyBound::Production => self,
+            MemoFamilyBound::Production => {}
             #[cfg(any(test, feature = "test-support"))]
-            MemoFamilyBound::ForTest(cap) => Self {
-                memo_budget: crate::bounded_query_retention::GlobalRetentionBudget::new(cap),
-                ..self
-            },
+            MemoFamilyBound::ForTest(cap) => {
+                self.memo_budget = crate::bounded_query_retention::GlobalRetentionBudget::new(cap);
+            }
         }
+        self
     }
 
     /// Test-only — number of canonicals currently resident in the

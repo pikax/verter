@@ -2341,11 +2341,6 @@ impl CompletedRelations {
         self.members.is_empty()
     }
 
-    /// The queued members, in the order they completed.
-    pub(crate) fn iter(&self) -> std::slice::Iter<'_, CompletedSccMember> {
-        self.members.iter()
-    }
-
     /// The member queued last.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn last(&self) -> Option<&CompletedSccMember> {

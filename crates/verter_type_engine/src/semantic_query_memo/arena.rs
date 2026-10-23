@@ -73,6 +73,14 @@
 //! bound to the closed content (`release.rs`), and a node a caller still
 //! holds stays readable until that caller drops it.
 //!
+//! **A store's teardown releases its graph at once.** While the owning
+//! store drops its caches, their root releases are deferred
+//! ([`ArenaTeardown`]); once every cache is gone, an arena no one else holds
+//! drops whole — its storage charge, every payload and the dedup index go
+//! together, with no per-node release — and an arena a reader still holds
+//! releases the deferred roots as they would have released, so what that
+//! reader can reach, and only that, stays live and charged.
+//!
 //! The id space is append-only — a `SemanticNodeId` is a raw `u64` index
 //! with no generation tag, so an id is NEVER reused: a stale ordinal
 //! resolves through [`NodeArena::get`] to one shared `Opaque(Miss)`
@@ -1080,6 +1088,8 @@ impl ArenaInner {
         let chunk = self.chunks.get_mut(&key)?;
         let index = (id.0 & CHUNK_MASK) as usize;
         let payload = chunk.nodes[index].take()?;
+        #[cfg(test)]
+        SLOT_RELEASES.with(|releases| releases.set(releases.get() + 1));
         let scope = chunk.scopes[index]
             .take()
             .expect("a live slot has its scope");
@@ -1369,6 +1379,68 @@ pub(crate) struct NodeArenaCore {
     /// The account the arena's storage is pinned against: the owning
     /// store's, bound before the first allocation, or the process-local one.
     retention: OnceLock<Arc<verter_session_query::retention::SemanticRetentionAccount>>,
+    /// Whether the owning store is tearing down: set from the start of its
+    /// drop to the end ([`ArenaTeardown`]). The lock-free check of every
+    /// root release; [`Self::deferred_releases`] is its authority.
+    tearing_down: std::sync::atomic::AtomicBool,
+    /// The root releases deferred while the owning store tears down, in
+    /// release order; `None` outside a teardown.
+    deferred_releases: parking_lot::Mutex<Option<Vec<SemanticNodeId>>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Slots this thread released one by one.
+    static SLOT_RELEASES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Slots this thread has released one by one so far.
+#[cfg(test)]
+pub(super) fn slot_releases_for_tests() -> usize {
+    SLOT_RELEASES.with(std::cell::Cell::get)
+}
+
+/// The owning store's teardown of its arena: [`Self::begin`] at the start
+/// of the store's drop, this guard's own drop after every other field of the
+/// store has dropped. Between the two, the store's caches release their
+/// roots into a deferred list instead of releasing node by node. At the end,
+/// an arena only this guard still holds drops whole; one a reader still
+/// holds releases the deferred roots in order, so the graph that reader can
+/// reach is exactly the graph a node-by-node teardown leaves.
+pub(super) struct ArenaTeardown(Arc<NodeArenaCore>);
+
+impl ArenaTeardown {
+    pub(super) fn of(arena: &NodeArena) -> Self {
+        Self(Arc::clone(&arena.core))
+    }
+
+    /// Start deferring root releases.
+    pub(super) fn begin(&self) {
+        *self.0.deferred_releases.lock() = Some(Vec::new());
+        self.0
+            .tearing_down
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for ArenaTeardown {
+    fn drop(&mut self) {
+        let deferred = {
+            let mut deferred = self.0.deferred_releases.lock();
+            self.0
+                .tearing_down
+                .store(false, std::sync::atomic::Ordering::Release);
+            deferred.take()
+        };
+        // A reader that still holds the arena keeps reading it: release
+        // what the caches held, as they would have. With no reader, the
+        // arena drops with this guard, and everything with it.
+        if Arc::strong_count(&self.0) > 1 {
+            if let Some(ids) = deferred {
+                self.0.release_roots(&ids);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1404,6 +1476,8 @@ impl Default for NodeArena {
                     crate::semantic_query::QueryError::Miss,
                 )),
                 retention: OnceLock::new(),
+                tearing_down: std::sync::atomic::AtomicBool::new(false),
+                deferred_releases: parking_lot::Mutex::new(None),
             }),
             provenance: None,
         }
@@ -1678,6 +1752,12 @@ impl NodeArenaCore {
     }
 
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
+        if self.tearing_down.load(std::sync::atomic::Ordering::Acquire) {
+            if let Some(deferred) = self.deferred_releases.lock().as_mut() {
+                deferred.extend_from_slice(ids);
+                return;
+            }
+        }
         // Most releases only drop a count; the stack of dying nodes' children
         // and the retired list allocate only once a node reaches zero.
         let mut pending: Vec<SemanticNodeId> = Vec::new();
