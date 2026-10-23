@@ -390,6 +390,183 @@ fn primitive_conditional_key(
     }
 }
 
+/// A later operand demand must not repeat the preparation the decision
+/// already completed. Count the actual preparation entry on each poll's
+/// thread, and compare its answer with the synchronous entry.
+#[test]
+fn a_conditional_retains_prepared_operands_across_a_dependency_wait() {
+    use verter_type_engine::semantic_query::{
+        CacheRead, DeclIdentity, InstantiateKey, PayloadArray, SemanticNodeId,
+    };
+
+    let proof = |read: &CacheRead<QueryResult<SemanticNodeId>>| {
+        assert!(
+            read.walker_diagnostics().is_empty(),
+            "the closed conditional has no diagnostics"
+        );
+        (
+            *read.fact_status(),
+            read.cache_suppress(),
+            read.receipt()
+                .priced()
+                .expect("the complete decision has a receipt")
+                .exclusive(),
+        )
+    };
+
+    let fixture = || {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            TASK_FILE,
+            "type Later<T> = T; export {};",
+            crate::FileLanguage::script_ts(),
+        );
+        assert!(host.ensure_indexed_ready(TASK_FILE).is_some());
+        host
+    };
+    let keys =
+        |host: &crate::VerterHost,
+         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
+            let graph = dispatch.graph_arc();
+            let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            let base = DeclIdentity {
+                canonical_id: TASK_FILE.into(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: host.shallow_file_state(TASK_FILE).unwrap().whole_hash,
+                decl_name: "Later".into(),
+            };
+            let check = graph.intern_node(SemanticNodeData::InstantiationRef {
+                base,
+                args: PayloadArray::from(vec![number]),
+            });
+            let dependency = SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(
+                    TASK_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    "Later",
+                ),
+                Arc::from([number]),
+                dispatch.instantiate_context_for(
+                    TASK_FILE,
+                    ProjectionReductionContext::structural_transit(),
+                ),
+            ));
+            (
+                primitive_conditional_key(dispatch, check, number),
+                dependency,
+            )
+        };
+    let (blocking, blocking_proof) = {
+        let host = fixture();
+        let view = host.resolver_store_view_read().into_owned_view();
+        let ctx = crate::resolver_core::HostResolverContext::new(
+            &host,
+            &view,
+            Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        let _builder = dispatch.enter_construction_scope();
+        let read = dispatch.execute_read(keys(&host, &dispatch).0);
+        let QueryResult::Value(node) = read.value() else {
+            panic!("the synchronous conditional answers a type: {read:?}");
+        };
+        (
+            display(
+                &dispatch,
+                &QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
+            ),
+            proof(&read),
+        )
+    };
+    assert_eq!(blocking, "string");
+
+    let host = fixture();
+    let view = host.resolver_store_view_read().into_owned_view();
+    let ctx = crate::resolver_core::HostResolverContext::new(
+        &host,
+        &view,
+        Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&ctx);
+    let _builder = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let (key, dependency) = keys(&host, &dispatch);
+    let (other, lease) = hold_producer(&host, graph, dependency);
+    let waker = Waker::from(Arc::new(CountingWaker::default()));
+    let preparations = || {
+        ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::conditional_operand_preparations_for_tests()
+    };
+    let (answer, prepared) = dispatch
+        .with_semantic_task_for_tests(key.clone(), |slot| {
+            let task = slot.as_mut().expect("the task is lent");
+            let ready = std::sync::Barrier::new(2);
+            let (pending, prepared) = std::thread::scope(|scope| {
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let task = &mut *task;
+                let waker = &waker;
+                let ready = &ready;
+                let poller = scope.spawn(move || {
+                    ready.wait();
+                    let before = preparations();
+                    let pending = task.poll_read_for_tests(waker);
+                    let _ = tx.send((pending, preparations() - before));
+                });
+                ready.wait();
+                let observed = rx.recv_timeout(std::time::Duration::from_secs(5));
+                // Release and join even when a planted blocking poll misses
+                // the deadline or its worker panics.
+                drop(lease);
+                poller
+                    .join()
+                    .expect("the initial poll returns after release");
+                observed.expect("a held dependency must yield before release")
+            });
+            assert!(
+                pending.is_pending(),
+                "the held operand must suspend: {pending:?}"
+            );
+            assert_eq!(
+                prepared, 1,
+                "preparation finishes before the dependency waits"
+            );
+            let before = preparations();
+            let answer = task.poll_read_for_tests(&waker);
+            let resumed = preparations() - before;
+            let Poll::Ready(Ok(answer)) = answer else {
+                panic!("the released conditional answers: {answer:?}");
+            };
+            let answer = answer.map_value(|value| match value {
+                QueryResult::Value(SemanticQueryValue::TypeNode(node)) => QueryResult::Value(node),
+                other => panic!("the conditional answers a type: {other:?}"),
+            });
+            (answer, prepared + resumed)
+        })
+        .expect("the cold conditional runs as a task");
+    let QueryResult::Value(node) = answer.value() else {
+        panic!("the resumed conditional answers a type: {answer:?}");
+    };
+    assert_eq!(
+        display(
+            &dispatch,
+            &QueryResult::Value(SemanticQueryValue::TypeNode(*node))
+        ),
+        blocking
+    );
+    assert_eq!(
+        prepared, 1,
+        "completed operand preparation is never replayed"
+    );
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    assert_eq!(
+        proof(&answer),
+        blocking_proof,
+        "the resumed decision preserves diagnostics, completeness and exclusive logical cost"
+    );
+    assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    drop(other);
+}
+
 /// The free-type-variable summaries a request composes are request state
 /// like every other the semantic task borrows: the task's dispatcher starts
 /// from the summaries its lender already composed, the summaries its own

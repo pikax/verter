@@ -24,8 +24,9 @@
 //! A body projection that reaches a conditional type needs its decision as
 //! well. The decision runs as a frame whose reads of instantiations and
 //! `typeof`s are answered by the deliveries it received; one it has no
-//! answer for becomes its need, and the run that reached it is dropped and
-//! runs again once that need is delivered. A chain of conditionals each
+//! answer for becomes its need. The unfinished stage runs again once that
+//! need is delivered; completed operand preparation and its observations
+//! stay on the frame. A chain of conditionals each
 //! deciding over the one before is therefore a chain of frames too.
 //!
 //! A call an initializer's evaluation reaches resolves as a frame too,
@@ -256,15 +257,16 @@ impl From<InstantiatePoll> for FramePoll {
 /// the others its last run reached without an answer.
 ///
 /// The decision procedure is a function of its operands and of those
-/// answers. A step runs it with the answers the frame holds; every read
-/// none of them answers becomes one of the frame's needs, and the step's
-/// run is discarded — its observations with it — to run again once each of
-/// them is delivered. No read is ever evaluated in place one native level
-/// deeper, so a chain of conditionals each deciding over the one before is
+/// answers. A step advances its sequential state with the answers the frame
+/// holds. A stage that reaches an unanswered read discards that stage's
+/// observations and resumes after delivery. Completed operand preparation
+/// and its observations remain owned by the frame. No read is ever
+/// evaluated in place one native level deeper, so a chain of conditionals each deciding over the one before is
 /// a chain of frames, and a decision over a wide union runs again once
 /// for its operands, not once per member.
 #[derive(Default)]
 pub(super) struct ConditionalBuild {
+    decision: super::conditional_decision::ConditionalDecisionState,
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
     resumes: OperandResumes,
     awaiting: Option<SemanticQueryKey>,
@@ -612,10 +614,21 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         &mut self,
         waker: &std::task::Waker,
     ) -> std::task::Poll<TaskOutcomeForTests> {
-        self.poll(waker).map(|outcome| match outcome {
-            Ok(delivery) => TaskOutcomeForTests::Answered(delivery.read.value),
-            Err(()) => TaskOutcomeForTests::Stopped,
-        })
+        self.poll_read_for_tests(waker)
+            .map(|outcome| match outcome {
+                Ok(read) => TaskOutcomeForTests::Answered(read.value),
+                Err(()) => TaskOutcomeForTests::Stopped,
+            })
+    }
+
+    /// The terminal read, including its fact status, diagnostics and receipt.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn poll_read_for_tests(
+        &mut self,
+        waker: &std::task::Waker,
+    ) -> std::task::Poll<Result<CacheRead<QueryResult<SemanticQueryValue>>, ()>> {
+        self.poll(waker)
+            .map(|outcome| outcome.map(|delivery| delivery.read))
     }
 
     /// The frames the task holds suspended.
@@ -1599,10 +1612,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Carry a conditional decision's frame on: record a delivery as the
-    /// answer to the read it waited on, then run the decision with every
-    /// answer the frame holds. A read none of them answers is the frame's
-    /// next need, and the run that reached it is dropped with what it
-    /// observed; a run every read of which was answered is the decision.
+    /// answer to the read it waited on, then advance the decision's retained
+    /// stage with every answer the frame holds. A read none of them answers
+    /// is the frame's next need; only its unfinished stage is discarded.
     fn drain_conditional(
         &self,
         key: &SemanticQueryKey,
@@ -1643,43 +1655,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             nested: 0,
         }));
         verter_debug_assert!(installed.is_none(), "one decision runs per step");
-        let run = self.observe_read(|| {
-            self.build_conditional(
-                *check,
-                *extends,
-                *true_branch,
-                *false_branch,
-                *distributive,
-                pending.clone(),
-            )
-        });
+        let output = self.build_conditional_with_state(
+            *check,
+            *extends,
+            *true_branch,
+            *false_branch,
+            *distributive,
+            pending.clone(),
+            &mut build.decision,
+        );
         let seam = self
             .decision_seam
             .take()
             .expect("the decision's seam stays installed for its run");
         build.answers = seam.answers;
         build.resumes = seam.resumes;
-        let mut needs = seam.needs.into_iter();
-        let output = match needs.next() {
-            Some((need, claim)) => match run.discard() {
-                // An aborted run is the decision's answer: its abort is
-                // observed, never discarded.
-                Err(abort) => self.aborted_build_output(abort),
-                Ok(_) => {
-                    build.awaiting = Some(need.clone());
-                    build.claim = Some(claim);
-                    build.pending = needs.collect();
-                    return InstantiatePoll::Need(need);
-                }
-            },
-            None => run
-                .adopt(self)
-                .unwrap_or_else(|abort| self.aborted_build_output(abort)),
-        };
+        // Each decision stage owns its speculative observation scope. A
+        // finished stage has already joined this frame's retained taint;
+        // discarding the whole step here would lose that evidence.
+        if !matches!(
+            &output.result,
+            QueryResult::Error(QueryError::ExecutionAborted(_))
+        ) {
+            let mut needs = seam.needs.into_iter();
+            if let Some((need, claim)) = needs.next() {
+                build.awaiting = Some(need.clone());
+                build.claim = Some(claim);
+                build.pending = needs.collect();
+                return InstantiatePoll::Need(need);
+            }
+        }
         InstantiatePoll::Done(Box::new(output))
     }
 
-    fn aborted_build_output(
+    pub(super) fn aborted_build_output(
         &self,
         abort: crate::semantic_query::ExecutionAbort,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {

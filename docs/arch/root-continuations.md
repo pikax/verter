@@ -102,6 +102,15 @@ driver to `Subscription::poll`; flight cells hold only readiness wakers,
 with no separate condition-variable wait implementation. The synchronous
 join retains its bounded park for callers without task-owned stop wakes.
 
+Conditional frames retain completed operand preparation in
+`ConditionalDecisionState`. The synchronous and frame entries use the same
+preparation and selection stages. Each stage owns its speculative observation
+scope: an unanswered read discards only that unfinished stage, while completed
+preparation has already joined the frame's retained facts and taint. A later
+relation dependency therefore resumes selection without preparing the operands
+again. Incomplete preparation and selection still retry their own stage; this
+does not make the remaining nested synchronous calls pollable.
+
 ### Scheduler completions
 
 | Boundary | Owner |
