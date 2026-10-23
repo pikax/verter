@@ -77,8 +77,30 @@ back into the host for a service it was not given.
 - The root mints the one `verter_execution::TaskRegistry` and composes the
   project store over it (`ProjectTypeStore::compose`). The store returns the
   engine grants, the `OutputLease` and the `SurfaceClaimAuthority`, and keeps
-  neither. The root hands both to `SessionAttachment` alone. Scheduler adoption
-  of the same registry belongs to the parallel-execution work.
+  neither. The root hands both to `SessionAttachment` alone. It also injects
+  that registry into the scheduler's scoped cache-node handoffs, so their
+  producers and semantic producers share task identity and wait-cycle
+  detection, keeps it on the host (`VerterHost.task_registry`) for the
+  pollable roots, and hands it to every resolver flight group, whose leaders
+  and followers are tasks. A suspended follower owns its lane pin through an
+  RAII guard, releasing it together with its wake and wait edge on drop so
+  completed values drain and later independent calls start a fresh burst.
+  Final CPU-service integration remains separate;
+  see [`root-continuations.md`](../../../docs/arch/root-continuations.md).
+- Public requests that can suspend are pollable roots:
+  `begin_component_meta_output` and `begin_compile_request` return owned,
+  `Send` roots an external driver polls, which run under their creator's
+  request context, job and task, and hand their driver dependency work as
+  `RootWork`. `get_component_meta_output` and `compile_request` drive the
+  same roots at the synchronous boundary. A converted computation has one
+  (pollable) implementation; its synchronous form drives it (`drive_pending`,
+  or `complete_now` where it never waits), and a scope it holds across a
+  suspension — request context, spend log, span, fact tracer, request audit,
+  construction lane (`ProjectSemanticDispatch::suspendable`) — is owned by the
+  computation and installed per poll. Only the converted boundaries suspend:
+  nested metadata evaluation and the handed-out compile producer can still
+  block. The [delivery boundary](../../../docs/arch/root-continuations.md#current-delivery-boundary)
+  distinguishes the current API from complete root resumability.
 - `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
   is the only route by which a workspace receives it, both at construction and on
   `set_workspace`. Resident resolution state needs no service: every workspace
@@ -802,6 +824,13 @@ A document CLOSE is the moment its edited versions become unreachable, and the c
 **ACTIVE-occupancy witness.** `VerterHost::mint_active_occupancy_owner()` mints an explicit workload owner on the aggregate account, and `open_active_occupancy_window(&owner)` (both only under `test`, `test-support` or the default-off `verter_session/soak-support`) opens a measurement window on the same account `retention_snapshot()` reads and the host's semantic stores charge; the workload reserves through `reserve_as(&owner, ..)`. `finish().attributed()` gives the owner's own peak ACTIVE bytes: other identified owners are excluded, and untagged or mixed-provenance ACTIVE transitions inside the interval reject the witness. Build the soak/tooling runner with `--features verter_session/soak-support`; semantics: `/type-cache-architecture` → Aggregate retention account → ACTIVE-occupancy windows.
 
 **Held-answer charge witness.** Under the same `test`, `test-support` or default-off `verter_session/soak-support` profile (capture and `semantic-observe` off), `HeldChargeWitness::of_flow_return(&result)` observes what a flow return delivered by `get_flow_return_type_with_audit` keeps charged, allocation by allocation: its shared payload (`Retained` while a cache candidate holds it, `Pinned` with the same bytes once `close()` retires the cache, released by the last reader), and its delivery bookkeeping, pinned and charged apart. Each entry carries the bytes the allocation measures, so a consumer checks an exact transfer against the allocation itself rather than another transfer or the shared account totals. Reading it changes no charge or lifetime. Contract: `/type-resolution` → `references/counted-node-ownership.md` → Held-answer charge witness.
+
+**Resident occupancy snapshots.** Capture-summary and skeleton-name-index counts
+follow their shared allocation's lifetime through `ResidentCharge`. Each storage
+kind's ledger updates all occupancy slots and its allocation total under one
+short mutex, and snapshots copy them under that same mutex. Worker-thread
+release and recharge cannot expose a partial update. Different storage kinds
+are sampled independently; the whole host snapshot is not one atomic reading.
 
 ### Freeze Prevention (Fast Typing)
 

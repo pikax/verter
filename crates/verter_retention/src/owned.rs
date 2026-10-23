@@ -338,6 +338,28 @@ pub(crate) fn counted_in_full(node: &dyn Node, aliases: &mut AliasSet) -> usize 
 /// Charge `node` for its callers if no owner has yet. Locks parent before
 /// child, so it is safe under any ancestor's slot lock.
 pub(crate) fn pin_node(node: &dyn Node, ctx: ChargeCtx<'_>) {
+    charge_node(node, ctx, ChargeAs::Pinned);
+}
+
+/// Charge `node` as IN-FLIGHT work if no owner has yet: the bytes are the
+/// computation's working set before it publishes or hands its value to a
+/// caller, so they are charged [`ChargeClass::Active`] — unconditionally,
+/// never refused — until a cache adopts them (committing the charge to
+/// retention) or the delivery hands them to their caller (transferring the
+/// charge to a pin). Locks parent before child, so it is safe under any
+/// ancestor's slot lock.
+pub(crate) fn charge_in_flight(node: &dyn Node, ctx: ChargeCtx<'_>) {
+    charge_node(node, ctx, ChargeAs::Active);
+}
+
+/// How a first charge on an owned cell classifies its bytes.
+#[derive(Clone, Copy)]
+enum ChargeAs {
+    Pinned,
+    Active,
+}
+
+fn charge_node(node: &dyn Node, ctx: ChargeCtx<'_>, as_: ChargeAs) {
     // An owner already charged it, and the charge lasts as long as the cell.
     if node.charged().load(Ordering::Acquire) {
         return;
@@ -347,9 +369,13 @@ pub(crate) fn pin_node(node: &dyn Node, ctx: ChargeCtx<'_>) {
         return;
     }
     let (bytes, children) = measure(node, slot.block_share.is_some());
-    slot.charge = Some(ctx.account.pin(bytes));
+    let charge = match as_ {
+        ChargeAs::Pinned => ctx.account.pin(bytes),
+        ChargeAs::Active => ctx.account.reserve_in_flight(bytes),
+    };
+    slot.charge = Some(charge);
     for child in children.iter() {
-        pin_node(&**child, ctx);
+        charge_node(&**child, ctx, as_);
     }
     if !children.is_empty() {
         slot.nested = Some(Box::new(Nested {
@@ -357,9 +383,28 @@ pub(crate) fn pin_node(node: &dyn Node, ctx: ChargeCtx<'_>) {
             holds: HeldHandles::default(),
         }));
     }
-    // Published only once every child it reaches is pinned: a caller
+    // Published only once every child it reaches is charged: a caller
     // taking the lock-free return above never sees an uncharged child.
     node.charged().store(true, Ordering::Release);
+}
+
+/// Settle one owned cell's still-in-flight charge at its caller handoff,
+/// then its registered children's. Only an [`ChargeClass::Active`] charge
+/// moves: a charge a cache adopted is retained, and one its callers held
+/// all along is pinned, and the handoff changes neither.
+fn hand_off_node(node: &dyn Node) {
+    let children = {
+        let mut slot = node.slot().lock();
+        if let Some(charge) = slot.charge.as_mut() {
+            if charge.class() == ChargeClass::Active {
+                charge.transfer_to_pinned();
+            }
+        }
+        slot.children().to_vec()
+    };
+    for child in children.iter() {
+        hand_off_node(&**child);
+    }
 }
 
 /// A cache hold on each of `children`, all or nothing: a refusal drops the
@@ -522,6 +567,31 @@ impl OwnedHandles {
     pub fn pin(self, ctx: ChargeCtx<'_>) {
         for child in self.0.iter() {
             pin_node(&**child, ctx);
+        }
+    }
+
+    /// Charge each as IN-FLIGHT work if no owner has yet (see
+    /// [`charge_in_flight`]): the bytes of a delivery a computation has
+    /// produced and not yet published or handed to its caller, charged
+    /// [`ChargeClass::Active`] until one of those boundaries settles them.
+    /// By reference, so an owner that keeps the handles (a construction
+    /// collecting the cells it charged) need not copy them.
+    pub fn charge_in_flight(&self, ctx: ChargeCtx<'_>) {
+        for child in self.0.iter() {
+            charge_in_flight(&**child, ctx);
+        }
+    }
+
+    /// Settle every still-in-flight charge these allocations name at their
+    /// caller handoff: a delivery the process will not retain is complete
+    /// and its callers hold it, so each [`ChargeClass::Active`] charge
+    /// becomes [`ChargeClass::Pinned`] — never released, never charged
+    /// twice. A charge a cache already adopted (retained) or a caller
+    /// already held (pinned) keeps its class: the handoff changes only
+    /// what is still in flight.
+    pub fn hand_off_in_flight(&self) {
+        for child in self.0.iter() {
+            hand_off_node(&**child);
         }
     }
 
@@ -724,6 +794,19 @@ impl<T: Measured> Owned<T> {
     /// never refused, together with every owned child it reaches.
     pub fn pin(&self, ctx: ChargeCtx<'_>) {
         pin_node(&*self.0, ctx);
+    }
+
+    /// Charge this allocation as IN-FLIGHT work if no owner has yet
+    /// (see [`OwnedHandles::charge_in_flight`]): ACTIVE until a cache
+    /// adopts it or its delivery hands it to its caller.
+    pub fn charge_in_flight(&self, ctx: ChargeCtx<'_>) {
+        charge_in_flight(&*self.0, ctx);
+    }
+
+    /// Settle this allocation's still-in-flight charge at its caller
+    /// handoff (see [`OwnedHandles::hand_off_in_flight`]).
+    pub fn hand_off_in_flight(&self) {
+        hand_off_node(&*self.0);
     }
 
     /// The value, when this is its allocation's only handle: the value

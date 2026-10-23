@@ -317,6 +317,13 @@ pub struct ProducerLease<'s> {
     panic_guard: InflightPanicGuard<'s>,
     open: OpenProducer,
     stats: InFlightStatsGuard<'s>,
+    /// Ownership of the arena storage this producer's raw construction
+    /// allocates: its fresh payload blocks and their heap charge ACTIVE —
+    /// the producer's in-flight payload — until `settle` ends and the
+    /// delivery takes the construction over (storage pin). Opened with the
+    /// flight, so a producer abandoned before it settles (a panic, an
+    /// early return) settles its construction on the way out.
+    _construction: super::arena::ConstructionChargeGuard,
     /// Build clock for the held-time measurements; read only where they
     /// are kept.
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
@@ -709,6 +716,14 @@ impl SemanticGraphStore {
         // before it settles (a panic, an early return) closes itself and
         // releases its subscribers.
         let open = task.open_producer(prepared.clone(), inflight.site);
+        // The construction ownership is a guard with the same lifetime:
+        // the arena storage this producer's raw build allocates charges
+        // ACTIVE from its first allocation, and settles — ACTIVE→PINNED,
+        // exactly once — when `settle` ends at the delivery boundary
+        // (publication decision, caller handoff, or abort), on every exit.
+        let _construction = self
+            .arena
+            .open_construction_charge(self.retention_account());
         let panic_guard = if independent {
             InflightPanicGuard::new_independent(
                 Arc::clone(&inflight),
@@ -730,6 +745,7 @@ impl SemanticGraphStore {
             panic_guard,
             open,
             stats,
+            _construction,
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             started: super::records_telemetry::<M>().then(Instant::now),
         }
@@ -738,7 +754,10 @@ impl SemanticGraphStore {
 
 impl Subscription<'_> {
     /// Wait for the producer's completion. Blocks the calling thread: only a
-    /// synchronous entry waits this way.
+    /// synchronous entry waits this way. The thread parks with this
+    /// subscription's waker registered on the flight and on the cancellation
+    /// that stops the request, so either one wakes it; nothing re-polls on a
+    /// timer.
     pub fn wait<C: crate::resolver_core::ResolverCapabilities>(
         mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
@@ -746,6 +765,9 @@ impl Subscription<'_> {
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
+        verter_execution::blocking::enter_wait(
+            verter_execution::blocking::WaitFamily::SemanticFlight,
+        );
         let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
         // The wait time is a measurement-only counter; without the
@@ -758,18 +780,37 @@ impl Subscription<'_> {
             if let Err(WaitCycle) = self.park::<C::Observe>(&state, attempt.prepared.key()) {
                 return Joined::Recursive(Recursion::WaitCycle);
             }
-            // Cooperative wait on the flight's condvar until it completes,
-            // is aborted by a canonical-invalidation sweep, or this request
-            // is cancelled. Subscribers never busy-spin.
-            while !flight_resolved(&state, flags) {
-                // Timed parking is the cancellation observation rail. A
-                // canceled subscriber detaches by returning; it never marks
-                // the shared flight aborted, so it cannot disturb an
-                // uncancelled producer or sibling.
-                inflight
-                    .ready
-                    .wait_for(&mut state, std::time::Duration::from_millis(2));
-            }
+            drop(state);
+            // Park until the flight completes, is aborted by a
+            // canonical-invalidation sweep, or this request is cancelled.
+            // The cancellation registers before the flight is checked, so a
+            // cancellation landing between the two still wakes the thread. A
+            // cancelled subscriber detaches by returning; it never marks the
+            // shared flight aborted, so it cannot disturb an uncancelled
+            // producer or sibling.
+            let mut stop =
+                crate::resolver_core::request_ports::CancellationCheckpoint::selected_token()
+                    .map(|token| token.subscribe());
+            let parked = self
+                .parked
+                .as_mut()
+                .expect("a waiting subscriber is parked");
+            verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::SemanticFlight,
+                None,
+                |waker| {
+                    if let Some(stop) = stop.as_mut() {
+                        let _ = stop.poll(waker);
+                    }
+                    let mut state = inflight.state.lock();
+                    if flight_resolved(&state, flags) {
+                        return std::task::Poll::Ready(());
+                    }
+                    state.wakers.register(&mut parked.waker, waker);
+                    std::task::Poll::Pending
+                },
+            );
+            state = inflight.state.lock();
         }
         self.resolve(state, ctx, flags, attempt, capture, wait_start)
     }
@@ -1387,6 +1428,10 @@ impl<'s> ProducerLease<'s> {
             mut panic_guard,
             open,
             stats,
+            // Dropped at the end of `settle`, on every exit: the delivery
+            // boundary where the construction's fresh storage settles
+            // ACTIVE→PINNED into the arena's storage pin.
+            _construction,
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             started,
         } = self;
@@ -1443,18 +1488,21 @@ impl<'s> ProducerLease<'s> {
         };
         // A build that answered with a node it no longer holds cannot be
         // delivered: its flight is retired and the caller gets the typed
-        // refusal, never the destroyed node.
-        let lease = match store.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
-            &result,
-            &walker_diagnostics,
-            &dep_signature,
-        )) {
-            Ok(lease) => lease,
-            Err(error) => {
-                store.abort_inflight_for_cancellation(&prepared, &inflight, independent);
-                return Err(super::refused_operand_cache_read(error));
-            }
-        };
+        // refusal, never the destroyed node. The lease is IN-FLIGHT: its
+        // payload stays ACTIVE until the publication adopts it or
+        // `complete` hands it off to the caller.
+        let lease =
+            match store.lease_delivery_in_flight(super::delivery_lease::DeliveredAllocations::read(
+                &result,
+                &walker_diagnostics,
+                &dep_signature,
+            )) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    store.abort_inflight_for_cancellation(&prepared, &inflight, independent);
+                    return Err(super::refused_operand_cache_read(error));
+                }
+            };
         Ok(SettledProducer {
             lease,
             store,
@@ -1653,6 +1701,20 @@ impl SettledProducer<'_> {
         // a cold-built child, a warm-hit child and a joined child deliver the
         // identical fact set to their parent.
         capture.deliver_carrier(&carrier);
+
+        // The delivery reaches its caller handoff here: whatever the
+        // publication decided, the charges still in flight transfer to a
+        // pin — a published candidate already adopted its share into
+        // retention — so every holder of this lease, subscriber or caller,
+        // sees the settled classes the flight is about to complete with.
+        store.hand_off_delivered_allocations(
+            &super::delivery_lease::DeliveredAllocations::read(
+                &result,
+                &walker_diagnostics,
+                &dep_signature,
+            ),
+            &lease,
+        );
 
         // Complete the flight and wake its subscribers. An abort planted by
         // an invalidation stays: subscribers that wake on it retry rather

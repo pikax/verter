@@ -55,7 +55,9 @@ pub(in crate::project_semantic_dispatch) struct ContextualCallState {
 /// Hide an enclosing call's continuation for the entire nested resolution,
 /// including argument acquisition, candidate checks and early refusals.
 pub(super) struct ContextualCallIsolation<'a> {
-    txn: &'a std::cell::RefCell<super::super::dispatch_txn::CheckerDispatchTransaction>,
+    txn: &'a verter_execution::sync_cell::SyncRefCell<
+        super::super::dispatch_txn::CheckerDispatchTransaction,
+    >,
     outer: Option<ContextualCallState>,
 }
 

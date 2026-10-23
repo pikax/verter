@@ -53,6 +53,52 @@ pub use table::{
     SiteSample,
 };
 
+/// Attribute every poll of a suspendable computation to a work site: the
+/// form of [`attribute_scope!`] for a scope that spans a suspension. Each
+/// poll opens the site's scope on the polling thread for that poll alone,
+/// so the time a computation spends suspended is attributed to nothing and
+/// no scope stays open on a thread the computation left.
+#[cfg(feature = "semantic-observe")]
+pub fn attribute_polls<F: std::future::Future>(
+    site: WorkSite,
+    computation: F,
+) -> AttributedPolls<F> {
+    AttributedPolls {
+        site,
+        computation: Box::pin(computation),
+    }
+}
+
+/// Attribute every poll of a suspendable computation to a work site. With
+/// the `semantic-observe` feature off the computation is returned as is.
+#[cfg(not(feature = "semantic-observe"))]
+#[inline(always)]
+pub fn attribute_polls<F: std::future::Future>(_site: WorkSite, computation: F) -> F {
+    computation
+}
+
+/// A computation whose polls are attributed to a work site
+/// ([`attribute_polls`]).
+#[cfg(feature = "semantic-observe")]
+pub struct AttributedPolls<F> {
+    site: WorkSite,
+    computation: std::pin::Pin<Box<F>>,
+}
+
+#[cfg(feature = "semantic-observe")]
+impl<F: std::future::Future> std::future::Future for AttributedPolls<F> {
+    type Output = F::Output;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let this = &mut *self;
+        let _scope = ScopeGuard::enter(this.site);
+        this.computation.as_mut().poll(cx)
+    }
+}
+
 #[cfg(all(test, not(feature = "semantic-observe")))]
 mod disabled_tests;
 #[cfg(all(test, feature = "semantic-observe"))]

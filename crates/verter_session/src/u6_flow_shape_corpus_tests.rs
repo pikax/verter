@@ -1552,6 +1552,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "cb01ba30111e946baf65f4464db509350d8d20b324e41d0417ad447fdccde942",
     ),
     (
+        "X14_accessor_pair",
+        "c95bf8cff4b8c758da3f04d1c4b564f0d9a60a1b74f86524d5240af05db16f64",
+    ),
+    (
         "X15_labelled_block_return",
         "8e2e1c8361cd81914345df51e2bca7ab7504ae3679c5a0d3f95d6d0e506382aa",
     ),

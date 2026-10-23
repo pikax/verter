@@ -6,7 +6,6 @@ use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use verter_compiler::framework_common::FrameworkParseArtifact;
@@ -729,9 +728,6 @@ impl PublicationLane {
     }
 }
 
-/// How often a lane waiter observes its request's cancellation.
-const LANE_CANCELLATION_SLICE: Duration = Duration::from_millis(5);
-
 /// The waiters polling one lane for its outcome.
 ///
 /// A waiter registers only while it holds the lane's state lock and finds
@@ -1076,44 +1072,51 @@ impl CarrierPublicationStore {
             );
             drop(state);
             let mut wait = LaneWait::new(&lane.waiters);
-            verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
-                if request.cancellation.is_cancelled() {
-                    self.audit.push(
-                        &request,
-                        &artifact_id,
-                        PublicationAuditKind::WaiterDetachedCancelled,
-                    );
-                    return Poll::Ready(PublicationOutcome::Cancelled);
-                }
-                let state = lane
-                    .state
-                    .lock()
-                    .expect("publication lane lock poisoned by a worker panic");
-                match &*state {
-                    LaneState::Terminal(outcome) => {
-                        if self
-                            .grammar_authority
-                            .validate_accepted_current(&self.source_authority, accepted)
-                            .is_err()
-                        {
-                            return Poll::Ready(PublicationOutcome::Superseded(
-                                CurrentSourceEvidence {
-                                    current_source: None,
-                                },
-                            ));
+            // The request's cancellation wakes the waiter as the lane's
+            // outcome does; it registers before the lane is checked.
+            let mut stop = request.cancellation.subscribe();
+            verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::CarrierPublication,
+                None,
+                |waker| {
+                    if stop.poll(waker).is_ready() {
+                        self.audit.push(
+                            &request,
+                            &artifact_id,
+                            PublicationAuditKind::WaiterDetachedCancelled,
+                        );
+                        return Poll::Ready(PublicationOutcome::Cancelled);
+                    }
+                    let state = lane
+                        .state
+                        .lock()
+                        .expect("publication lane lock poisoned by a worker panic");
+                    match &*state {
+                        LaneState::Terminal(outcome) => {
+                            if self
+                                .grammar_authority
+                                .validate_accepted_current(&self.source_authority, accepted)
+                                .is_err()
+                            {
+                                return Poll::Ready(PublicationOutcome::Superseded(
+                                    CurrentSourceEvidence {
+                                        current_source: None,
+                                    },
+                                ));
+                            }
+                            Poll::Ready(
+                                outcome
+                                    .outcome()
+                                    .unwrap_or(PublicationOutcome::RetryExhausted),
+                            )
                         }
-                        Poll::Ready(
-                            outcome
-                                .outcome()
-                                .unwrap_or(PublicationOutcome::RetryExhausted),
-                        )
+                        LaneState::Vacant | LaneState::Producing => {
+                            wait.register(waker);
+                            Poll::Pending
+                        }
                     }
-                    LaneState::Vacant | LaneState::Producing => {
-                        wait.register(waker);
-                        Poll::Pending
-                    }
-                }
-            })
+                },
+            )
         }
     }
 
@@ -1407,35 +1410,42 @@ impl CarrierPublicationStore {
         artifact_id: &FrameworkArtifactId,
     ) -> StableShared {
         let mut wait = LaneWait::new(&lane.waiters);
-        verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
-            if request.cancellation.is_cancelled() {
-                self.audit.push(
-                    request,
-                    artifact_id,
-                    PublicationAuditKind::WaiterDetachedCancelled,
-                );
-                return Poll::Ready(StableShared::Done(PublicationOutcome::Cancelled));
-            }
-            let state = lane
-                .state
-                .lock()
-                .expect("stable-parse lane lock poisoned by a worker panic");
-            match &*state {
-                StableParseState::Ready(outcome) => Poll::Ready(match outcome.clone() {
-                    StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
-                    StableParseOutcome::Rejected(reject) => StableShared::Done(
-                        PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
-                    ),
-                    StableParseOutcome::Panicked => {
-                        StableShared::Done(PublicationOutcome::WinnerPanicked)
-                    }
-                }),
-                StableParseState::Producing => {
-                    wait.register(waker);
-                    Poll::Pending
+        // The request's cancellation wakes the waiter as the lane's outcome
+        // does; it registers before the lane is checked.
+        let mut stop = request.cancellation.subscribe();
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::CarrierPublication,
+            None,
+            |waker| {
+                if stop.poll(waker).is_ready() {
+                    self.audit.push(
+                        request,
+                        artifact_id,
+                        PublicationAuditKind::WaiterDetachedCancelled,
+                    );
+                    return Poll::Ready(StableShared::Done(PublicationOutcome::Cancelled));
                 }
-            }
-        })
+                let state = lane
+                    .state
+                    .lock()
+                    .expect("stable-parse lane lock poisoned by a worker panic");
+                match &*state {
+                    StableParseState::Ready(outcome) => Poll::Ready(match outcome.clone() {
+                        StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
+                        StableParseOutcome::Rejected(reject) => StableShared::Done(
+                            PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
+                        ),
+                        StableParseOutcome::Panicked => {
+                            StableShared::Done(PublicationOutcome::WinnerPanicked)
+                        }
+                    }),
+                    StableParseState::Producing => {
+                        wait.register(waker);
+                        Poll::Pending
+                    }
+                }
+            },
+        )
     }
 
     fn finish_stable_parse(

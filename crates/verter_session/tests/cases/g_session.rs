@@ -13,6 +13,8 @@ mod flight_rendezvous;
 #[path = "g_session/held_charge_witness.rs"]
 mod held_charge_witness;
 mod host_close_reuse;
+#[path = "g_session/in_flight_charge.rs"]
+mod in_flight_charge;
 #[path = "g_session/inline_execute_clears_all_install_tls_slots.rs"]
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]

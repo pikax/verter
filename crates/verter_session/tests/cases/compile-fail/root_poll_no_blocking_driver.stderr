@@ -1,0 +1,27 @@
+error[E0624]: method `drive` is private
+ --> tests/cases/compile-fail/root_poll_no_blocking_driver.rs:5:18
+  |
+5 |       let _ = root.drive(scheduler);
+  |                    ^^^^^ private method
+  |
+ ::: src/root_continuation.rs
+  |
+  | /     pub(crate) fn drive(
+  | |         self,
+  | |         scheduler: &verter_scheduler::scheduler::Scheduler,
+  | |     ) -> ComponentMetaOutputAnswer {
+  | |__________________________________- private method defined here
+
+error[E0624]: method `drive` is private
+ --> tests/cases/compile-fail/root_poll_no_blocking_driver.rs:9:18
+  |
+9 |       let _ = root.drive(scheduler);
+  |                    ^^^^^ private method
+  |
+ ::: src/root_continuation.rs
+  |
+  | /     pub(crate) fn drive(
+  | |         self,
+  | |         scheduler: &verter_scheduler::scheduler::Scheduler,
+  | |     ) -> CompileRequestAnswer {
+  | |_____________________________- private method defined here

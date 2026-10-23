@@ -250,6 +250,7 @@ impl SchedulerCpuPool {
         OP: FnOnce() -> R + Send,
         R: Send,
     {
+        verter_execution::blocking::enter_wait(verter_execution::blocking::WaitFamily::CpuPool);
         self.pool.install(operation)
     }
 

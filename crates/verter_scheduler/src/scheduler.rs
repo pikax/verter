@@ -63,6 +63,7 @@ use crate::job::{
 use crate::node::{AnalysisSnapshot, ArtifactSnapshot, FileNode, SourceSnapshot};
 use crate::overlay::OverlayMap;
 use verter_execution::cancellation::{CancellationOwner, CancellationToken};
+use verter_execution::tasks::{ExecutionScope, ExecutionTask, TaskRegistry};
 use verter_language::FileLanguage;
 
 use crate::source_loader::SourceLoader;
@@ -92,6 +93,10 @@ pub use submission::SchedulerSubmission;
 mod submission_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "scheduler/reset_tests.rs"]
+mod reset_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "scheduler/scoped_handoff_tests.rs"]
 mod scoped_handoff_tests;
 
@@ -102,6 +107,10 @@ use dag_lock::*;
 use dependencies::*;
 #[cfg(not(target_arch = "wasm32"))]
 use driver::*;
+// The dispatch pause hook is test instrumentation every build that carries
+// test support compiles, wasm32 included.
+#[cfg(all(target_arch = "wasm32", any(test, feature = "test-support")))]
+use driver::DispatchPauseHook;
 use identity::*;
 // `lifecycle`'s only free export is `num_cpus`, which is native-only; gating
 // the glob with it keeps the wasm32 build free of an unused-import warning.
@@ -237,7 +246,7 @@ pub enum ScopedCacheNodeError {
     Panicked,
     /// The same typed identity was used concurrently for different value types.
     TypeMismatch,
-    /// A producer synchronously requested its own active cache-node identity.
+    /// A request would wait on its own producer or close a task wait cycle.
     Reentrant,
 }
 
@@ -320,6 +329,9 @@ impl BatchHandle {
 /// Manages per-file nodes, a priority queue, and a driver thread that
 /// processes submissions and dispatches work to CPU/IO pools.
 pub struct Scheduler {
+    /// Shared with semantic producers by the host composition root. Standalone
+    /// schedulers create one registry for their own producers.
+    task_registry: TaskRegistry,
     /// Per-file nodes (concurrent access via DashMap).
     ///
     /// EXECUTION state: each [`FileNode`] holds only its CURRENT
@@ -491,6 +503,9 @@ pub struct Scheduler {
     /// from every build without it.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) reset_wake_posts: AtomicU64,
+    /// Test-only observation of a contested lifecycle acquisition or driver join.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    lifecycle_boundary: Mutex<Option<std::sync::mpsc::Sender<&'static str>>>,
     /// Test-only monotonic counter bumped once per admission-lock
     /// acquisition inside [`Self::handle_new_request_batch`] (co-located
     /// with the `dag.lock()` call via [`Self::acquire_dag_for_admission`]
@@ -584,7 +599,30 @@ impl Scheduler {
         cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
         io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
+        Self::with_executor_and_task_registry(
+            config,
+            source_loader,
+            executor,
+            cpu_pool,
+            io_pool,
+            TaskRegistry::default(),
+        )
+    }
+
+    /// Create a threaded scheduler whose scoped producers share the caller's
+    /// wait-cycle authority. A host passes this same registry to its semantic
+    /// store; nested producers then join one execution task across both layers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_executor_and_task_registry(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+        cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+        task_registry: TaskRegistry,
+    ) -> Arc<Self> {
         let scheduler = Arc::new(Self {
+            task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
@@ -619,6 +657,8 @@ impl Scheduler {
             batch_admit_seam: BatchAdmitSeamHook::default(),
             #[cfg(any(test, feature = "test-support"))]
             reset_wake_posts: AtomicU64::new(0),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            lifecycle_boundary: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -631,20 +671,8 @@ impl Scheduler {
             io_submit_attempts: std::sync::atomic::AtomicUsize::new(0),
         });
 
-        // Driver holds Weak so it doesn't prevent Drop.
-        // Also clones the receiver so it can block on it without upgrading.
-        let weak = Arc::downgrade(&scheduler);
-        let receiver = scheduler.inbox.receiver.clone();
-        let teardown = scheduler.driver_teardown.1.clone();
-        let handle = std::thread::Builder::new()
-            .name("verter-scheduler".to_string())
-            .spawn(move || {
-                Self::driver_loop_native(weak, receiver, teardown);
-            })
-            .expect("failed to spawn scheduler driver");
-
-        *scheduler.driver_thread_id.lock() = Some(handle.thread().id());
-        *scheduler.driver_handle.lock() = Some(handle);
+        let start = scheduler.spawn_native_driver();
+        let _ = start.send(());
         scheduler
     }
 
@@ -682,7 +710,31 @@ impl Scheduler {
         #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
         #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
+        Self::new_sync_with_executor_and_task_registry(
+            config,
+            source_loader,
+            executor,
+            #[cfg(not(target_arch = "wasm32"))]
+            cpu_pool,
+            #[cfg(not(target_arch = "wasm32"))]
+            io_pool,
+            TaskRegistry::default(),
+        )
+    }
+
+    /// Create an inline scheduler sharing the supplied execution-task registry.
+    /// On WASM, the embedding driver polls handoffs and runs dependencies on
+    /// the same thread; task ownership and wait-cycle detection are unchanged.
+    pub fn new_sync_with_executor_and_task_registry(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+        task_registry: TaskRegistry,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
@@ -721,6 +773,8 @@ impl Scheduler {
             batch_admit_seam: BatchAdmitSeamHook::default(),
             #[cfg(any(test, feature = "test-support"))]
             reset_wake_posts: AtomicU64::new(0),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            lifecycle_boundary: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -823,37 +877,58 @@ impl Scheduler {
     {
         let mut handoff = self.begin_scoped_cache_node(request)?;
         let mut build = Some(build);
-        verter_execution::blocking::block_on(Some(std::time::Duration::from_millis(2)), |waker| {
-            loop {
-                match handoff.poll(waker) {
-                    std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) => {
-                        return std::task::Poll::Ready(Ok(value));
-                    }
-                    std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) => {
-                        let operation = build.take().expect("only one producer is transferred");
-                        #[cfg(not(target_arch = "wasm32"))]
-                        self.cpu_pool.install(move || producer.run(operation));
-                        #[cfg(target_arch = "wasm32")]
-                        producer.run(operation);
-                    }
-                    std::task::Poll::Ready(Err(error)) => {
-                        return std::task::Poll::Ready(Err(error))
-                    }
-                    std::task::Poll::Pending => {
-                        // Execution remains outside the polling capability.
-                        #[cfg(not(target_arch = "wasm32"))]
-                        let progress = self
-                            .pump_ready(PumpReason::WaitOrDrive, caller_kind::CallerKind::current())
-                            .made_progress();
-                        #[cfg(target_arch = "wasm32")]
-                        let progress = self.drive_one();
-                        if !progress {
-                            return std::task::Poll::Pending;
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::ScopedCacheNode,
+            None,
+            |waker| {
+                loop {
+                    match handoff.poll(waker) {
+                        std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) => {
+                            return std::task::Poll::Ready(Ok(value));
+                        }
+                        std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) => {
+                            let operation = build.take().expect("only one producer is transferred");
+                            self.run_transferred_producer(move || producer.run(operation));
+                        }
+                        std::task::Poll::Ready(Err(error)) => {
+                            return std::task::Poll::Ready(Err(error))
+                        }
+                        std::task::Poll::Pending => {
+                            // Execution remains outside the polling capability.
+                            if !self.dispatch_for_pending_dependency() {
+                                return std::task::Poll::Pending;
+                            }
                         }
                     }
                 }
-            }
-        })
+            },
+        )
+    }
+
+    /// Run a dependency producer a pollable computation transferred to its
+    /// synchronous driver, where this scheduler runs producers: on its CPU
+    /// pool (natively), blocking the caller until it returns, or on the
+    /// caller itself (wasm32).
+    pub fn run_transferred_producer(&self, producer: impl FnOnce() + Send) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cpu_pool.install(producer);
+        #[cfg(target_arch = "wasm32")]
+        producer();
+    }
+
+    /// Advance this scheduler's dispatch once on behalf of a synchronous
+    /// driver whose computation waits on a dependency it admitted: dispatch
+    /// ready stages this caller may run (natively) or drive one stage
+    /// (wasm32). Answers whether anything progressed; when nothing did, the
+    /// dependency's own settlement wakes the computation.
+    pub fn dispatch_for_pending_dependency(self: &Arc<Self>) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        let progress = self
+            .pump_ready(PumpReason::WaitOrDrive, caller_kind::CallerKind::current())
+            .made_progress();
+        #[cfg(target_arch = "wasm32")]
+        let progress = self.drive_one();
+        progress
     }
 
     /// Begin a cache-node computation without waiting for inbox capacity or
@@ -1240,8 +1315,10 @@ impl Scheduler {
     /// Full reset: stop the driver, drain inbox, remove all nodes, clear
     /// all state. Call `restart_driver()` after to resume processing.
     ///
-    /// Provides a true quiesce barrier — no concurrent processing during
-    /// the clear phase because the driver thread is joined first.
+    /// External callers join the driver before clearing state. From a wake on
+    /// this scheduler's own driver, reset clears state and leaves shutdown set;
+    /// that driver exits after the wake returns. Its handle remains joinable
+    /// until an external reset or restart completes the quiesce barrier.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reset(&self) {
         let wake_deferral = self.dag.defer_wakes();
@@ -1252,15 +1329,37 @@ impl Scheduler {
         // callback must instead leave an already active reset to its joiner.
         let is_own_driver = *self.driver_thread_id.lock() == Some(std::thread::current().id());
         let _serial = if is_own_driver {
-            // Another reset may already be joining this driver, including a
-            // completion callback currently running on it. That reset owns
-            // the quiesce barrier; waiting for its hold here forms a cycle.
-            let Some(serial) = self.reset_serial.try_lock() else {
-                return;
-            };
-            serial
+            loop {
+                if let Some(serial) = self.reset_serial.try_lock() {
+                    break serial;
+                }
+                #[cfg(test)]
+                if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                    let _ = boundary.send("reset-contended");
+                }
+                // A stopping lifecycle owner may be joining this very
+                // callback. A healthy restart, however, may merely be
+                // returning without resetting anything: do not lose reset
+                // in that case. Park in bounded slices so a joiner's stop
+                // remains observable, without spinning or waiting on it.
+                if self.shutdown.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(serial) = self
+                    .reset_serial
+                    .try_lock_for(std::time::Duration::from_millis(2))
+                {
+                    break serial;
+                }
+            }
         } else {
-            self.reset_serial.lock()
+            self.reset_serial.try_lock().unwrap_or_else(|| {
+                #[cfg(test)]
+                if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                    let _ = boundary.send("reset-contended");
+                }
+                self.reset_serial.lock()
+            })
         };
         // 1. Stop the driver thread. The dedicated teardown signal — not
         //    the inbox wake, which any cooperative pump may consume first —
@@ -1270,12 +1369,13 @@ impl Scheduler {
         let _ = self.inbox.sender.try_send(Submission::Wake);
         #[cfg(any(test, feature = "test-support"))]
         self.reset_wake_posts.fetch_add(1, Ordering::Release);
-        if let Some(handle) = self.driver_handle.lock().take() {
-            if should_join_driver_thread(handle.thread().id(), std::thread::current().id()) {
+        if !is_own_driver {
+            let handle = self.driver_handle.lock().take();
+            if let Some(handle) = handle {
                 let _ = handle.join();
             }
+            *self.driver_thread_id.lock() = None;
         }
-        *self.driver_thread_id.lock() = None;
 
         // 2. Drain queued requests; cooperative admission validates their stamps.
         while let Ok(submission) = self.inbox.receiver.try_recv() {
@@ -1312,32 +1412,79 @@ impl Scheduler {
             self.shutdown_drained_submission(submission);
         }
 
-        // 6. Unset shutdown so the next driver can run.
-        self.shutdown.store(false, Ordering::Release);
+        // A self-reset cannot join its own active stack. Keep both shutdown
+        // and the join handle until an external lifecycle call observes exit;
+        // otherwise this very driver resumes pumping after its reset returns.
+        if !is_own_driver {
+            self.shutdown.store(false, Ordering::Release);
+        }
         drop(_serial);
         self.inbox.notify_space();
         drop(wake_deferral);
     }
 
     /// Restart the driver thread after a `reset()`. Must be called on
-    /// `Arc<Self>` because the driver needs a `Weak` reference.
+    /// `Arc<Self>` because the driver needs a `Weak` reference. An external
+    /// restart joins a self-reset driver before reopening work. On the driver
+    /// itself, restart reopens the retained loop without spawning a second one.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn restart_driver(self: &Arc<Self>) {
+        if *self.driver_thread_id.lock() == Some(std::thread::current().id()) {
+            // An external reset/restart may already be joining this callback.
+            // Leave its stop intact rather than waiting for the joiner.
+            let Some(_serial) = self.reset_serial.try_lock() else {
+                return;
+            };
+            while self.driver_teardown.1.try_recv().is_ok() {}
+            self.shutdown.store(false, Ordering::Release);
+            return;
+        }
+        let _serial = self.reset_serial.lock();
+        if !self.shutdown.load(Ordering::Acquire) && self.driver_handle.lock().is_some() {
+            return;
+        }
+        let handle = self.driver_handle.lock().take();
+        if let Some(handle) = handle {
+            #[cfg(test)]
+            if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                let _ = boundary.send("restart-join");
+            }
+            let _ = handle.join();
+        }
+        *self.driver_thread_id.lock() = None;
         // The outgoing driver may have exited on the shutdown flag without
         // consuming its teardown signal; a leftover signal would stop the
         // incoming driver on its first park.
         while self.driver_teardown.1.try_recv().is_ok() {}
+        self.shutdown.store(false, Ordering::Release);
+        let start = self.spawn_native_driver();
+        // A completion wake may reset immediately on startup. Its identity
+        // and join handle must already be installed, and reset must not see
+        // this startup serialization hold as an external joiner's reset.
+        drop(_serial);
+        let _ = start.send(());
+    }
+
+    /// Publish one driver's identity and handle before letting it run.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_native_driver(self: &Arc<Self>) -> crossbeam_channel::Sender<()> {
+        // Driver holds Weak so it doesn't prevent Drop. A dropped startup
+        // sender abandons the thread without executing scheduler work.
+        let (start, started) = crossbeam_channel::bounded(1);
         let weak = Arc::downgrade(self);
         let receiver = self.inbox.receiver.clone();
         let teardown = self.driver_teardown.1.clone();
         let handle = std::thread::Builder::new()
             .name("verter-scheduler".to_string())
             .spawn(move || {
-                Self::driver_loop_native(weak, receiver, teardown);
+                if started.recv().is_ok() {
+                    Self::driver_loop_native(weak, receiver, teardown);
+                }
             })
             .expect("failed to restart scheduler driver");
         *self.driver_thread_id.lock() = Some(handle.thread().id());
         *self.driver_handle.lock() = Some(handle);
+        start
     }
 
     /// Drain and discard all pending inbox submissions. Used by `close()`
@@ -1918,7 +2065,13 @@ impl Scheduler {
                     PumpReason::ShutdownDrain,
                     crate::caller_kind::CallerKind::Driver,
                 );
-                break;
+                // A drained request's completion wake can explicitly restart
+                // this retained loop. Do not leave a finished driver handle
+                // behind after that callback has reopened work.
+                if scheduler.shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                continue;
             }
 
             // Drive the pump until it reports no progress, then
@@ -1931,7 +2084,7 @@ impl Scheduler {
                     PumpReason::DriverLoop,
                     crate::caller_kind::CallerKind::Driver,
                 );
-                if !stats.made_progress() {
+                if scheduler.shutdown.load(Ordering::Acquire) || !stats.made_progress() {
                     break;
                 }
             }
@@ -2219,6 +2372,9 @@ impl Scheduler {
         handle: &crate::job::CompletionHandle<T>,
         caller_kind: crate::caller_kind::CallerKind,
     ) -> crate::job::CompletionState<T> {
+        verter_execution::blocking::enter_wait(
+            verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        );
         // `caller_kind` discriminates driver/worker/external waiters and is
         // read only on native (the driver-aware park/cooperative paths
         // below). wasm is single-threaded with no driver, so it takes the

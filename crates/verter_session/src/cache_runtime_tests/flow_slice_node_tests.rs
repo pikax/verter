@@ -1804,7 +1804,6 @@ fn a_retained_graph_bundle_charges_its_structure_until_its_eviction() {
     for source in [small_source, large_source.as_str()] {
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: 0,
-            active_ceiling_bytes: 0,
             max_entry_bytes: 0,
             pin_threshold_bytes: 0,
         });
@@ -1842,7 +1841,6 @@ fn a_graph_reader_keeps_its_payload_charge_after_store_teardown() {
     for reader_first in [false, true] {
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: 0,
-            active_ceiling_bytes: 0,
             max_entry_bytes: 0,
             pin_threshold_bytes: 0,
         });
@@ -1908,7 +1906,6 @@ fn a_kept_bundle_part_stays_charged_after_store_teardown() {
         for part_first in [false, true] {
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 aggregate_ceiling_bytes: 0,
-                active_ceiling_bytes: 0,
                 max_entry_bytes: 0,
                 pin_threshold_bytes: 0,
             });
@@ -1975,7 +1972,6 @@ fn a_kept_nested_bundle_leaf_stays_charged_after_store_teardown() {
         for leaf_first in [false, true] {
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 aggregate_ceiling_bytes: 0,
-                active_ceiling_bytes: 0,
                 max_entry_bytes: 0,
                 pin_threshold_bytes: 0,
             });
@@ -2059,7 +2055,6 @@ fn a_kept_lowered_slice_leaf_stays_charged_after_store_teardown() {
         for leaf_first in [false, true] {
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 aggregate_ceiling_bytes: 0,
-                active_ceiling_bytes: 0,
                 max_entry_bytes: 0,
                 pin_threshold_bytes: 0,
             });

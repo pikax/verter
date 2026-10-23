@@ -32,13 +32,14 @@ Attribution: a window measures one explicit owner. Owner provenance is bound to
 the account and travels with the charge; identified foreign owners are
 excluded and counted, while untagged or mixed-provenance ACTIVE transitions in
 the interval reject the witness (`UnknownProvenance`), as do the owner's own
-ACTIVE bytes at open or at close. No production ACTIVE producer reserves
-through an owner; a workload with no owned ACTIVE activity reports zero (the
-public-host control asserts that truthful zero, with no test-manufactured
-reservation standing in for a workload). UNKNOWN ACTIVE bytes charged when a
-window opens reject it (`UnknownActiveAtOpen`), and a charge that changes
-provenance (holds adoption) settles its class and attribution in one
-account-locked transaction.
+ACTIVE bytes at open or at close. Production in-flight owners reserve through
+`SemanticRetentionAccount::reserve_in_flight`, which carries the owner of the
+window open on the charging thread (installed by `open_active_window`, removed
+by `finish`/drop), so a measured workload's own semantic work attributes to
+its window; a charge reserved directly (`reserve`) stays untagged. UNKNOWN
+ACTIVE bytes charged when a window opens reject it (`UnknownActiveAtOpen`),
+and a charge that changes provenance (holds adoption) settles its class and
+attribution in one account-locked transaction.
 
 Supported build: the soak/tooling runner enables
 `verter_session/soak-support` (for example
