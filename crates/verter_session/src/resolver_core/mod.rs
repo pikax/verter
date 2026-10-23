@@ -1952,23 +1952,26 @@ where
         if !self.armed {
             return;
         }
-        // UNWINDING: the leader's `compute`/`retain` panicked before it
-        // published a terminal. Abort the lane atomically under the
-        // `flights` lock so waiters re-elect instead of blocking forever.
-        let mut flights = self.group.flights.lock();
-        let followers = self.state.terminate(FlightInner::Aborted);
-        self.state
-            .pins
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        flights.clear_live(&self.lane_key.0, self.lane_key.1, self.state);
-        if flights
-            .lanes
-            .get(self.lane_key)
-            .is_some_and(|existing| Arc::ptr_eq(existing, self.state))
-        {
-            flights.lanes.remove(self.lane_key);
-        }
-        drop(flights);
+        // UNWINDING, or dropped while suspended: the leader's `compute` /
+        // `retain` never published a terminal. Abort the lane atomically
+        // under the `flights` lock so waiters re-elect instead of waiting
+        // forever, and wake them once the lock is released.
+        let followers = {
+            let mut flights = self.group.flights.lock();
+            let followers = self.state.terminate(FlightInner::Aborted);
+            self.state
+                .pins
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            flights.clear_live(&self.lane_key.0, self.lane_key.1, self.state);
+            if flights
+                .lanes
+                .get(self.lane_key)
+                .is_some_and(|existing| Arc::ptr_eq(existing, self.state))
+            {
+                flights.lanes.remove(self.lane_key);
+            }
+            followers
+        };
         followers.wake();
     }
 }
