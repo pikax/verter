@@ -1316,16 +1316,17 @@ async fn workspace_wide_requests_demand_the_scan_and_answer_pending_until_it_set
 /// semantic completions never arrive.
 #[tokio::test(flavor = "multi_thread")]
 async fn demanded_inventory_scan_publishes_and_pings_the_editor_owned_client() {
-    let workspace_root = unique_server_ws_root("editor_scan_demand");
-    let tsconfig = format!("{workspace_root}/tsconfig.json");
-    let app_path = format!("{workspace_root}/src/App.vue");
-    std::fs::create_dir_all(format!("{workspace_root}/src")).unwrap();
-    std::fs::write(&tsconfig, "{}").unwrap();
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
     std::fs::write(
-        &app_path,
+        _temp.path().join("src/App.vue"),
         "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
     )
     .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let app_path = format!("{workspace_root}/src/App.vue");
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
@@ -1455,6 +1456,198 @@ async fn demanded_inventory_scan_publishes_and_pings_the_editor_owned_client() {
     })
     .await
     .expect("the scan's carrier publication must ping the subscribed client");
+}
+
+/// A publication a retry drain RECOVERED must refresh the subscribed client too.
+/// The demanded scan's first publication for a closed carrier can fail
+/// transiently — here the durable store dir is unwritable, so the gateway
+/// answers `Pending` and the carrier is requeued into the shared pending set;
+/// the carrier-phase drain then publishes it once the store is writable again.
+/// That recovery write is not a companion the scanner's direct pass collected,
+/// but it fills the store all the same, so the settle ping must be based on the
+/// store's own publication count: without it the editor plugin keeps its
+/// pre-publication project view despite the store having just been filled.
+#[tokio::test(flavor = "multi_thread")]
+async fn demanded_scan_retry_publication_still_pings_the_editor_owned_client() {
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        _temp.path().join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let app_canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": { "subscriptions": { "carrierStoreChanged": true } },
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    // Sabotage the durable store: a FILE where this workspace's store dir would
+    // be created. The first publication's directory creation fails before any
+    // store mutation (nothing half-applied); repairing means removing the file,
+    // after which the very next publication attempt succeeds cleanly.
+    let store_dir = crate::external_ts::carrier_store_dir_for(
+        crate::external_ts::default_carrier_store_host_version(),
+        &workspace_root,
+    );
+    std::fs::create_dir_all(store_dir.parent().expect("the store's parent dir")).unwrap();
+    std::fs::write(&store_dir, b"not a directory").unwrap();
+
+    server
+        .spawn_background_init(None, "editor-owned retry publication test")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/ready")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the server announces readiness");
+
+    // Demand the inventory scan. The direct publication attempt fails against
+    // the sabotaged store and the gateway requeues the carrier into the shared
+    // pending set — the requeue is the observable mark of that first failure.
+    let pending = tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803);
+    let overview = server
+        .get_project_overview(serde_json::Value::Null)
+        .await
+        .expect_err("the overview is pending while the demanded scan runs");
+    assert_eq!(overview.code, pending);
+    // Park drain passes at their start gates until one starts with the failed
+    // carrier queued — that pass is the scanner's own carrier-phase drain (the
+    // first drain after the direct publication failure requeues the carrier).
+    // Repairing the store under THAT park makes the carrier-phase drain's retry
+    // the publication, strictly before the scanner completes and the settle
+    // task makes its refresh decision; a pass with nothing queued is a
+    // pre-failure one, released without a repair.
+    let drain_arrived = Arc::new(tokio::sync::Notify::new());
+    let drain_release = Arc::new(tokio::sync::Notify::new());
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            *server.documents.snapshot_drain_pause.lock() =
+                Some((Arc::clone(&drain_arrived), Arc::clone(&drain_release)));
+            drain_arrived.notified().await;
+            if server
+                .pending_snapshot_provider_sync
+                .contains(&app_canonical_id)
+            {
+                return;
+            }
+            drain_release.notify_one();
+        }
+    })
+    .await
+    .expect("the failed first publication must requeue the carrier into a parked drain");
+    std::fs::remove_file(&store_dir).unwrap();
+    std::fs::create_dir_all(&store_dir).unwrap();
+    drain_release.notify_one();
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if carrier_manifest_strict(&workspace_root).is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the retried publication must fill the durable store");
+    let manifest = carrier_manifest_strict(&workspace_root).unwrap();
+    assert!(
+        manifest
+            .projects
+            .get(&tsconfig)
+            .expect("the configured project owns the carrier")
+            .ready_files
+            .keys()
+            .any(|provider| provider.ends_with(".vue.tsx")),
+        "the store must advertise the App.vue IDE companion for the editor plugin"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/carrierStoreChanged")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the recovered publication must ping the subscribed client");
 }
 
 /// Auto-import tag completion enumerates the whole host: while the workspace

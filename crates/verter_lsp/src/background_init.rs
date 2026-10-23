@@ -681,7 +681,18 @@ impl super::VerterLanguageServer {
         else {
             return;
         };
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<u64>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        // The settle ping's basis: durable store publications are counted at the
+        // coordinator's single sealed commit seam, so this snapshot sees EVERY fill
+        // the scan window causes — the scanner's direct publishes AND the recovery
+        // writes the carrier-phase / completion drains commit after a transient
+        // first failure. The scanner's own companion count cannot: a retry that
+        // publishes through a drain is invisible to it, and the ping would be
+        // suppressed even though the store just filled.
+        let store_publications_at_arm = self
+            .carrier_publish_coordinator
+            .as_ref()
+            .map(|coordinator| coordinator.store_publication_count());
         let scanner = crate::workspace_scanner::spawn_workspace_scanner(
             crate::workspace_scanner::WorkspaceScannerConfig {
                 root_paths,
@@ -709,13 +720,10 @@ impl super::VerterLanguageServer {
 
         let server = self.clone();
         tokio::spawn(async move {
-            let published_companions = match done_rx.await {
-                Ok(count) => count,
-                Err(_) => {
-                    // Scanner cancelled: a newer generation re-arms its own.
-                    return;
-                }
-            };
+            if done_rx.await.is_err() {
+                // Scanner cancelled: a newer generation re-arms its own.
+                return;
+            }
             if server.init_generation.load(Ordering::Acquire) != my_gen {
                 return;
             }
@@ -751,9 +759,15 @@ impl super::VerterLanguageServer {
             // own TypeScript service over the store and refreshes it on this
             // ping. On the editor-owned tier the scan is the ONLY publisher, so
             // without this settle ping the store's first fill stays invisible
-            // to the editor plugin. One trailing ping covers the whole batch
-            // (the client's refresh coalesces).
-            if published_companions > 0 {
+            // to the editor plugin. The decision is the coordinator's
+            // publication count diff, so a fill a retry drain recovered counts
+            // exactly like a direct publication. One trailing ping covers the
+            // whole batch (the client's refresh coalesces).
+            let store_publications_now = server
+                .carrier_publish_coordinator
+                .as_ref()
+                .map(|coordinator| coordinator.store_publication_count());
+            if store_publications_now != store_publications_at_arm {
                 server.notify_editor_carrier_store_changed().await;
             }
         });
