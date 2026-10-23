@@ -436,6 +436,83 @@ fn root_continuations_compile_root_suspends_on_another_roots_producer() {
     );
 }
 
+/// A follower compile root whose request is cancelled while it waits on
+/// another root's held producer is woken by the cancellation itself and
+/// answers it without entering a wait; the producing root, under its own
+/// request, still completes with the request's answer.
+#[test]
+fn root_continuations_cancelling_a_suspended_follower_spares_its_producer() {
+    let host = host();
+    let expected = compile_owner(&host);
+    let unpark = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producing = {
+        let _request = verter_type_engine::request_context::install_test_request_for(OWNER);
+        host.begin_compile_request(OWNER, owner_compile_request())
+    };
+    let producer = loop {
+        assert!(producing.poll(&unpark).is_pending());
+        match producing.take_work() {
+            Some(work) if work.is_producer() => break work,
+            Some(dispatch) => {
+                let _ = dispatch.run();
+            }
+            None => std::thread::park(),
+        }
+    };
+    let (mut following, cancel) = {
+        let _request = verter_type_engine::request_context::install_test_request_for(OWNER);
+        let cancel = verter_type_engine::request_context::current_request_context()
+            .expect("the follower's request is installed")
+            .cancellation_token();
+        (
+            host.begin_compile_request(OWNER, owner_compile_request()),
+            cancel,
+        )
+    };
+    let (wake_tx, wake_rx) = mpsc::channel::<()>();
+    let follower = Waker::from(Arc::new(ChannelWaker(parking_lot::Mutex::new(wake_tx))));
+    let first = {
+        let _forbid = WaitProbe::forbid();
+        following.poll(&follower)
+    };
+    assert!(
+        first.is_pending(),
+        "the follower waits on the held producer"
+    );
+    drop(following.take_work());
+    while wake_rx.try_recv().is_ok() {}
+    cancel.cancel();
+    wake_rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("cancelling the follower's request wakes it");
+    let answer = {
+        let _forbid = WaitProbe::forbid();
+        following.poll(&follower)
+    };
+    assert!(
+        matches!(
+            answer,
+            Poll::Ready(Err(crate::types::CompileRequestFailure::Host(
+                crate::types::HostError::Cancelled
+            )))
+        ),
+        "the follower answers its cancellation: {answer:?}",
+    );
+    assert!(producer.run());
+    let produced = loop {
+        if let Poll::Ready(answer) = producing.poll(&unpark) {
+            break answer;
+        }
+        if let Some(work) = producing.take_work() {
+            let _ = work.run();
+        }
+    };
+    assert_eq!(
+        compiled_texts(produced.expect("the producer's root compiles")),
+        expected
+    );
+}
+
 /// The synchronous compile entry drives the same root at its boundary: it
 /// enters the root driver's wait and runs the handed-out producer on the
 /// scheduler's CPU pool, cold or warm.
