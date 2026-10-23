@@ -3811,6 +3811,14 @@ pub struct DerivedRawState {
     /// cache across no-op reloads. `None` triggers the conservative bump that
     /// matches pre-fix behavior.
     pub(crate) evicted_whole_hash: Option<Hash16>,
+
+    /// Whether a reload has already moved the scheduler off the snapshot
+    /// this eviction left behind. Set once per eviction, under the host's
+    /// eviction-reload lock, by the first `ensure_loaded` that reloads the
+    /// file; every later caller for the same eviction joins that reload
+    /// instead of resetting the scheduler again, which would supersede the
+    /// first caller's load in flight or discard the load it integrated.
+    pub(crate) eviction_reload_started: bool,
 }
 
 impl DerivedRawState {

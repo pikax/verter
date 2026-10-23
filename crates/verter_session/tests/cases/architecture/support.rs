@@ -100,6 +100,13 @@ pub(super) fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'
         // allow-list will not surface them. Re-adding any of them to
         // `VerterHost` would fail this guard until a fresh
         // rehoming-doc rationale is added.
+        // A data-free lock, not a cache: it serialises the step of an
+        // evicted file's reload that moves the scheduler off the
+        // pre-eviction snapshot.
+        (
+            "eviction_reload_lock",
+            "Evicted-file reload regression pin (racing_ensure_loaded_after_evict_share_one_reload): Mutex<()> held only while an evicted file's reload moves the scheduler off the pre-eviction snapshot, so callers racing to reload one eviction reset it once. Holds no data. NOT a cache.",
+        ),
         (
             "query_profile",
             "phase-06b-report.md §F10: execution-policy state, not a result memoiser. Different artifact type than anything in ProjectTypeStore.",

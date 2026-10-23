@@ -611,6 +611,11 @@ pub struct VerterHost {
     /// not memoise query results. Different artifact type than anything in
     /// `ProjectTypeStore`.
     pub(crate) query_profile: parking_lot::Mutex<verter_semantic::profile::QueryProfile>,
+    /// Serialises the step of an evicted file's reload that moves the
+    /// scheduler off the pre-eviction snapshot, so callers racing to
+    /// reload one eviction perform that step once and their load requests
+    /// all follow it. Held only for that step, never across the load.
+    pub(crate) eviction_reload_lock: parking_lot::Mutex<()>,
     /// Project-global type-resolution cache root. Owns `IndexedReady`,
     /// `AnalysisReady`, and the rehomed
     /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.

@@ -1325,6 +1325,7 @@ impl VerterHost {
             let derived = derived_ref.value_mut();
             derived.evicted = true;
             derived.evicted_whole_hash = pre_evict_hash;
+            derived.eviction_reload_started = false;
             derived.cached_tsc_extract = None;
             derived.clear_raw_template_analysis();
             derived.cached_resolved_meta.clear();
@@ -1385,18 +1386,43 @@ impl VerterHost {
 
         use verter_scheduler::job::CompletionState;
 
-        let (reload_from_workspace, pre_evict_hash) = self
+        // Evicted files must force the scheduler off any stale committed
+        // snapshot before a disk-backed reload is requested — once per
+        // eviction. The reset bumps the file's scheduler generation: a
+        // second reset by a caller racing this reload would supersede the
+        // load request another caller already submitted (that caller then
+        // reports the file unloadable) or retract the source another caller
+        // already integrated (that caller reports it loaded while the host
+        // holds none). The flag check, the reset and the flag write happen
+        // under one lock, so every racing caller submits its request after
+        // the single reset and joins the same load. A file that is not
+        // evicted takes no lock: only a reload races another reload.
+        let evicted_now = self
             .derived_raw_cache()
             .get(canonical_id)
-            .filter(|d| d.evicted)
-            .map(|d| (true, d.evicted_whole_hash))
-            .unwrap_or((false, None));
-
-        if reload_from_workspace {
-            // Evicted files must force the scheduler off any stale
-            // committed snapshot before we request a disk-backed reload.
-            self.scheduler.close_file(canonical_id);
-        }
+            .is_some_and(|d| d.evicted);
+        let (reload_from_workspace, pre_evict_hash) = if !evicted_now {
+            (false, None)
+        } else {
+            let _reset = self.eviction_reload_lock.lock();
+            let evicted = self
+                .derived_raw_cache()
+                .get(canonical_id)
+                .filter(|d| d.evicted)
+                .map(|d| (d.evicted_whole_hash, d.eviction_reload_started));
+            match evicted {
+                Some((pre_evict_hash, reload_started)) => {
+                    if !reload_started {
+                        self.scheduler.close_file(canonical_id);
+                        if let Some(mut derived) = self.derived_raw_cache().get_mut(canonical_id) {
+                            derived.eviction_reload_started = true;
+                        }
+                    }
+                    (true, pre_evict_hash)
+                }
+                None => (false, None),
+            }
+        };
 
         // Submit to scheduler — it loads via WorkspaceSourceLoader.
         // Submission goes THROUGH the host's cooperative adapter: a

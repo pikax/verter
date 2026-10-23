@@ -3900,6 +3900,77 @@ mod upsert_compile_cache_tests {
         );
     }
 
+    /// Callers that race to reload one evicted file share one reload: each
+    /// sees the file loaded as soon as its call returns `true`, every call
+    /// returns `true`, and the scheduler is moved off the pre-eviction
+    /// snapshot once, so no caller's reset supersedes another caller's load
+    /// in flight or discards a load another caller already integrated.
+    #[test]
+    fn racing_ensure_loaded_after_evict_share_one_reload() {
+        const CALLERS: usize = 8;
+        const ROUNDS: usize = 4;
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+        let canonical = "/src/App.vue";
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from("<template><div>v1</div></template>"),
+        );
+        assert!(host.ensure_loaded(canonical));
+        let generation = || {
+            host.registered_source_revision_token(canonical)
+                .expect("a loaded file has a registered revision")
+                .source_version
+                .generation
+        };
+
+        // One caller's reload is the baseline a racing reload must match.
+        let before = generation();
+        host.evict(canonical);
+        assert!(host.ensure_loaded(canonical));
+        let single_caller_advance = generation() - before;
+
+        for round in 0..ROUNDS {
+            let before = generation();
+            host.evict(canonical);
+            let barrier = std::sync::Barrier::new(CALLERS);
+            let outcomes: Vec<(bool, bool)> = std::thread::scope(|scope| {
+                let callers: Vec<_> = (0..CALLERS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            let loaded = host.ensure_loaded(canonical);
+                            (
+                                loaded,
+                                host.registered_source_whole_hash(canonical).is_some(),
+                            )
+                        })
+                    })
+                    .collect();
+                callers
+                    .into_iter()
+                    .map(|caller| caller.join().expect("a reloading caller must not panic"))
+                    .collect()
+            });
+            assert!(
+                outcomes.iter().all(|(loaded, _)| *loaded),
+                "round {round}: every racing caller reloads the evicted file: {outcomes:?}"
+            );
+            assert!(
+                outcomes.iter().all(|(_, registered)| *registered),
+                "round {round}: a caller that returned loaded sees the file registered: \
+                 {outcomes:?}"
+            );
+            assert_eq!(
+                generation() - before,
+                single_caller_advance,
+                "round {round}: racing callers reload one eviction as one caller does"
+            );
+        }
+    }
+
     #[test]
     fn test_resolve_import_returns_none_for_evicted_parent() {
         let host = VerterHost::new_standalone(HostConfig::default());

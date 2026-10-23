@@ -724,6 +724,7 @@ impl VerterHost {
                 task_registry.clone(),
             ),
             query_profile: parking_lot::Mutex::new(query_profile),
+            eviction_reload_lock: parking_lot::Mutex::new(()),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "semantic-observe")]
