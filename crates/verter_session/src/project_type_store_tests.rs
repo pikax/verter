@@ -273,14 +273,15 @@ fn host_file_removal_releases_snapshot_artifact_bundle_and_memo_charges() {
         "/*{}*/ export interface CloseTarget {{ name: string; nested: {{ value: number }} }}",
         " ".repeat(2 * 1024 * 1024)
     );
-    host.upsert(crate::UpsertRequest {
-        canonical_id: None,
-        input_id: "/close.ts".into(),
-        source: Arc::from(text),
-        file_language: crate::FileLanguage::script_ts(),
-        aliases: Vec::new(),
-    })
-    .expect("open source");
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: "/close.ts".into(),
+            source: Arc::from(text),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("open source");
     let artifact = host.ensure_indexed_ready("/close.ts").expect("indexed");
     let cold = account.snapshot().pinned_bytes;
     let body = artifact
@@ -346,14 +347,15 @@ fn scheduler_snapshots_charge_variable_payloads_and_share_artifact_sources() {
             crate::FileLanguage::script_ts()
         };
         let source_len = text.len();
-        host.upsert(crate::UpsertRequest {
-            canonical_id: None,
-            input_id: canonical.into(),
-            source: Arc::from(text),
-            file_language: language,
-            aliases: Vec::new(),
-        })
-        .expect("stages complete");
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: canonical.into(),
+                source: Arc::from(text),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .expect("stages complete");
         let source = host.scheduler_source(canonical).expect("source");
         let analysis = host.scheduler_analysis(canonical).expect("analysis");
         let source_data = source
