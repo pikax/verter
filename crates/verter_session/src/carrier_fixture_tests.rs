@@ -45,6 +45,9 @@ pub(crate) fn publish_carrier_fixture(
     let store = crate::carrier_publication_store::CarrierPublicationStore::new(
         source_authority,
         grammar_authority,
+        verter_execution::tasks::ExecutionScope::current_task()
+            .map(|task| task.registry().clone())
+            .unwrap_or_default(),
     );
     let envelope = store
         .publish_or_get(

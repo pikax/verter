@@ -202,6 +202,7 @@ pub(super) enum CoreStep<K: Eq + Hash + Clone, V, E: Clone, F, R> {
     Produce(CoreProducer<K, V, E, F, R>),
     Value(SingleflightRunResult<V>),
 }
+type CorePoll<K, V, E, F, R> = Poll<Result<CoreStep<K, V, E, F, R>, ResolverFlightError<E>>>;
 
 /// A generic private core permits borrowed synchronous callbacks without a
 /// second lifecycle or a blocking method on the public polling capability.
@@ -260,7 +261,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
         }
         self.edge = None;
     }
-    fn transfer_inline(&mut self) -> Poll<Result<CoreStep<K, V, E, F, R>, ResolverFlightError<E>>> {
+    fn transfer_inline(&mut self) -> CorePoll<K, V, E, F, R> {
         // The synchronous recursion/cycle escape transfers nested work to
         // its external driver; poll never evaluates the caller's callback.
         self.release_join();
@@ -295,7 +296,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
     fn finish(
         &mut self,
         answer: Result<SingleflightRunResult<V>, ResolverFlightError<E>>,
-    ) -> Poll<Result<CoreStep<K, V, E, F, R>, ResolverFlightError<E>>> {
+    ) -> CorePoll<K, V, E, F, R> {
         self.finished = true;
         self.cleanup();
         Poll::Ready(answer.map(CoreStep::Value))
@@ -311,10 +312,7 @@ where
     F: FnOnce() -> Result<V, E>,
     R: FnOnce(&V) -> bool,
 {
-    pub(super) fn poll(
-        &mut self,
-        waker: &Waker,
-    ) -> Poll<Result<CoreStep<K, V, E, F, R>, ResolverFlightError<E>>> {
+    pub(super) fn poll(&mut self, waker: &Waker) -> CorePoll<K, V, E, F, R> {
         assert!(!self.finished, "resolver flight already completed");
         if self
             .stop

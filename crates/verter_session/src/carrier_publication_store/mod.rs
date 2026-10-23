@@ -1,12 +1,16 @@
 //! Carrier-only registered publication authority.
 
+mod owned;
 pub mod persistence;
+pub use owned::{
+    OwnedPublication, OwnedStableParse, PublicationError, PublicationProducer,
+    PublicationProducerStep, PublicationStep, PublicationWork, StableParseError,
+    StableParseProducer, StableParseStep, StableParseValue,
+};
+use owned::{PublicationLane, StableParseLane};
 
 use std::collections::{HashMap, VecDeque};
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use verter_compiler::framework_common::FrameworkParseArtifact;
@@ -35,7 +39,7 @@ pub(crate) type PublicationStoreHandle = Arc<CarrierPublicationStore>;
 
 /// Host-owned carrier publication handles: the registered-source and
 /// grammar authorities, the publication store, and the one-shot validated
-/// cross-host envelope ingest (T-B R5 §2 — entries are removed on intake;
+/// cross-host envelope ingest (entries are removed on intake;
 /// NOT a cache), grouped so the root `VerterHost` struct stays thin.
 pub(crate) struct CarrierPublicationHostHandles {
     pub(crate) source_authority: SourceAuthorityHandle,
@@ -43,8 +47,6 @@ pub(crate) struct CarrierPublicationHostHandles {
     pub(crate) publication_store: PublicationStoreHandle,
     pub(crate) envelope_ingest: RegisteredEnvelopeIngest,
 }
-
-pub const MAX_PUBLICATION_COORDINATION_RETRIES: usize = 3;
 
 /// How many distinct immutable carrier stable units one publication store
 /// keeps addressable before evicting the least recently used one.
@@ -680,12 +682,6 @@ impl PublicationAuditLog {
     }
 }
 
-enum LaneState {
-    Vacant,
-    Producing,
-    Terminal(TerminalOutcome),
-}
-
 #[derive(Clone)]
 enum TerminalOutcome {
     Published(std::sync::Weak<FrameworkArtifactEnvelope>),
@@ -715,74 +711,6 @@ impl TerminalOutcome {
     }
 }
 
-struct PublicationLane {
-    state: Mutex<LaneState>,
-    /// The waiters polling for the lane's terminal; see [`LaneWait`].
-    waiters: LaneWaiters,
-}
-
-impl PublicationLane {
-    fn vacant() -> Self {
-        Self {
-            state: Mutex::new(LaneState::Vacant),
-            waiters: LaneWaiters::default(),
-        }
-    }
-}
-
-/// How often a lane waiter observes its request's cancellation.
-const LANE_CANCELLATION_SLICE: Duration = Duration::from_millis(5);
-
-/// The waiters polling one lane for its outcome.
-///
-/// A waiter registers only while it holds the lane's state lock and finds
-/// no outcome; the producer publishes the outcome and takes the
-/// registrations under that same lock (lock order: lane state, then
-/// waiters), and wakes them once it holds neither. A publication racing a
-/// registration therefore still wakes the waiter.
-#[derive(Default)]
-struct LaneWaiters(parking_lot::Mutex<verter_execution::wake::WakerSet>);
-
-impl LaneWaiters {
-    /// Take every registration. The caller holds the lane's state lock
-    /// with the outcome just published, and wakes them after releasing it.
-    fn take(&self) -> verter_execution::wake::TakenWakers {
-        self.0.lock().take()
-    }
-}
-
-/// One waiter's registration on a lane, withdrawn when the wait ends.
-struct LaneWait<'l> {
-    waiters: &'l LaneWaiters,
-    registration: verter_execution::wake::WakeRegistration,
-}
-
-impl<'l> LaneWait<'l> {
-    fn new(waiters: &'l LaneWaiters) -> Self {
-        Self {
-            waiters,
-            registration: verter_execution::wake::WakeRegistration::default(),
-        }
-    }
-
-    /// Register `waker` for the lane's outcome. Called with the lane's
-    /// state lock held, after finding no outcome.
-    fn register(&mut self, waker: &std::task::Waker) {
-        self.waiters
-            .0
-            .lock()
-            .register(&mut self.registration, waker);
-    }
-}
-
-impl Drop for LaneWait<'_> {
-    fn drop(&mut self) {
-        if self.registration.is_registered() {
-            self.waiters.0.lock().withdraw(&mut self.registration);
-        }
-    }
-}
-
 /// One in-flight parse of one immutable stable unit, shared by every
 /// publication lane whose generation carries identical bytes.
 ///
@@ -797,40 +725,6 @@ impl Drop for LaneWait<'_> {
 enum StableParseOutcome {
     Parsed(Arc<FrameworkParseArtifact>),
     Rejected(Arc<verter_language::SyntaxReject>),
-    Panicked,
-}
-
-enum StableParseState {
-    Producing,
-    Ready(StableParseOutcome),
-}
-
-struct StableParseLane {
-    state: Mutex<StableParseState>,
-    /// The joiners polling for the shared parse; see [`LaneWait`].
-    waiters: LaneWaiters,
-}
-
-impl StableParseLane {
-    fn producing() -> Self {
-        Self {
-            state: Mutex::new(StableParseState::Producing),
-            waiters: LaneWaiters::default(),
-        }
-    }
-
-    /// Publish `outcome` and wake the joiners after releasing the lock.
-    fn publish(&self, outcome: StableParseOutcome) {
-        let joiners = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("stable-parse lane lock poisoned by a worker panic");
-            *state = StableParseState::Ready(outcome);
-            self.waiters.take()
-        };
-        joiners.wake();
-    }
 }
 
 /// What a lane leader does with a retained candidate: adopt it, or discard
@@ -840,22 +734,16 @@ enum StableAdoption {
     Discarded,
 }
 
-/// What the stable-key singleflight hands back: the shared parse product
-/// (the caller runs its own currency fence and publishes its own
-/// envelope), or an already-terminal outcome.
-enum StableShared {
-    Parsed(Arc<FrameworkParseArtifact>),
-    Done(PublicationOutcome),
-}
-
+#[derive(Clone)]
 pub struct CarrierPublicationStore {
     source_authority: Arc<RegisteredSourceAuthority>,
     grammar_authority: Arc<CarrierGrammarAuthority>,
-    lanes: Mutex<HashMap<FrameworkArtifactId, Arc<PublicationLane>>>,
-    stable_parses: Mutex<HashMap<StableUnitKey, Arc<StableParseLane>>>,
+    lanes: Arc<Mutex<HashMap<FrameworkArtifactId, Arc<PublicationLane>>>>,
+    stable_parses: Arc<Mutex<HashMap<StableUnitKey, Arc<StableParseLane>>>>,
     units: Arc<dyn CarrierStableUnitStore>,
     provenance: Arc<MetaProvenance>,
-    audit: PublicationAuditLog,
+    audit: Arc<PublicationAuditLog>,
+    task_registry: verter_execution::tasks::TaskRegistry,
 }
 
 impl std::fmt::Debug for CarrierPublicationStore {
@@ -867,15 +755,19 @@ impl std::fmt::Debug for CarrierPublicationStore {
 }
 
 impl CarrierPublicationStore {
+    /// Compose publication over the caller's execution authority. A host
+    /// supplies the same registry as its scheduler and semantic store.
     pub fn new(
         source_authority: Arc<RegisteredSourceAuthority>,
         grammar_authority: Arc<CarrierGrammarAuthority>,
+        task_registry: verter_execution::tasks::TaskRegistry,
     ) -> Self {
         Self::with_dependencies(
             source_authority,
             grammar_authority,
             Arc::new(InMemoryStableUnitStore::default()),
             Arc::new(MetaProvenance::default()),
+            task_registry,
         )
     }
 
@@ -886,12 +778,14 @@ impl CarrierPublicationStore {
         source_authority: Arc<RegisteredSourceAuthority>,
         grammar_authority: Arc<CarrierGrammarAuthority>,
         retention: usize,
+        task_registry: verter_execution::tasks::TaskRegistry,
     ) -> Self {
         Self::with_dependencies(
             source_authority,
             grammar_authority,
             Arc::new(InMemoryStableUnitStore::with_capacity(retention)),
             Arc::new(MetaProvenance::default()),
+            task_registry,
         )
     }
 
@@ -899,12 +793,14 @@ impl CarrierPublicationStore {
         source_authority: Arc<RegisteredSourceAuthority>,
         grammar_authority: Arc<CarrierGrammarAuthority>,
         provenance: Arc<MetaProvenance>,
+        task_registry: verter_execution::tasks::TaskRegistry,
     ) -> Self {
         Self::with_dependencies(
             source_authority,
             grammar_authority,
             Arc::new(InMemoryStableUnitStore::default()),
             provenance,
+            task_registry,
         )
     }
 
@@ -913,248 +809,27 @@ impl CarrierPublicationStore {
         grammar_authority: Arc<CarrierGrammarAuthority>,
         units: Arc<dyn CarrierStableUnitStore>,
         provenance: Arc<MetaProvenance>,
+        task_registry: verter_execution::tasks::TaskRegistry,
     ) -> Self {
         Self {
             source_authority,
             grammar_authority,
-            lanes: Mutex::new(HashMap::new()),
-            stable_parses: Mutex::new(HashMap::new()),
+            lanes: Arc::new(Mutex::new(HashMap::new())),
+            stable_parses: Arc::new(Mutex::new(HashMap::new())),
             units,
             provenance,
-            audit: PublicationAuditLog::default(),
+            audit: Arc::new(PublicationAuditLog::default()),
+            task_registry,
         }
     }
 
+    /// Synchronous compatibility driving the same owned publication phases.
     pub fn publish_or_get(
         &self,
         accepted: &AcceptedRegisteredCarrierSource,
         request: PublicationRequestContext,
     ) -> PublicationOutcome {
-        if request.cancellation.is_cancelled() {
-            return PublicationOutcome::Cancelled;
-        }
-        if request.expected_source != *accepted.source().snapshot_id() {
-            return PublicationOutcome::Superseded(CurrentSourceEvidence {
-                current_source: None,
-            });
-        }
-        if self
-            .grammar_authority
-            .validate_accepted_current(&self.source_authority, accepted)
-            .is_err()
-        {
-            return PublicationOutcome::Superseded(CurrentSourceEvidence {
-                current_source: None,
-            });
-        }
-        let parse_key = parse_key_for_accepted(accepted);
-        let artifact_id = FrameworkArtifactId::derive(accepted, parse_key);
-        self.audit.push(
-            &request,
-            &artifact_id,
-            PublicationAuditKind::PublicationRequested,
-        );
-
-        let (lane, leader, retired_record) = {
-            let mut lanes = self
-                .lanes
-                .lock()
-                .expect("publication lane table lock poisoned by a worker panic");
-            if let Some(lane) = lanes.get(&artifact_id) {
-                let lane = Arc::clone(lane);
-                let mut state = lane
-                    .state
-                    .lock()
-                    .expect("publication lane lock poisoned by a worker panic");
-                let retired =
-                    matches!(&*state, LaneState::Terminal(value) if value.artifact_expired());
-                if retired {
-                    *state = LaneState::Producing;
-                }
-                drop(state);
-                (lane, retired, retired)
-            } else {
-                // A new version of this file is being published, so the lanes
-                // its superseded versions left behind — a terminal record whose
-                // artifact has already been dropped by everyone, or a failure —
-                // have nothing left to serve: a request for that exact older
-                // version would re-produce anyway. Dropping them here keeps the
-                // lane map proportional to the files in the session rather than
-                // to every version ever published. Lanes still producing, or
-                // still holding a live artifact, are kept for their waiters and
-                // readers.
-                let canonical = artifact_id.source.canonical_digest();
-                lanes.retain(|id, lane| {
-                    if *id == artifact_id || id.source.canonical_digest() != canonical {
-                        return true;
-                    }
-                    match lane.state.lock() {
-                        Ok(state) => !matches!(
-                            &*state,
-                            LaneState::Terminal(outcome)
-                                if outcome.artifact_expired()
-                                    || matches!(outcome, TerminalOutcome::Other(_))
-                        ),
-                        Err(_) => true,
-                    }
-                });
-                let lane = Arc::new(PublicationLane::vacant());
-                let mut state = lane
-                    .state
-                    .lock()
-                    .expect("publication lane lock poisoned by a worker panic");
-                *state = LaneState::Producing;
-                drop(state);
-                lanes.insert(artifact_id.clone(), Arc::clone(&lane));
-                (lane, true, false)
-            }
-        };
-
-        if leader {
-            if retired_record {
-                self.audit.push(
-                    &request,
-                    &artifact_id,
-                    PublicationAuditKind::LiveRecordRetired,
-                );
-            }
-            self.audit.push(
-                &request,
-                &artifact_id,
-                PublicationAuditKind::CoordinationLaneEntered(PublicationLaneRole::Leader),
-            );
-            let outcome = match catch_unwind(AssertUnwindSafe(|| {
-                self.produce(accepted, &request, &artifact_id)
-            })) {
-                Ok(outcome) => outcome,
-                Err(_) => PublicationOutcome::WinnerPanicked,
-            };
-            if !matches!(
-                outcome,
-                PublicationOutcome::Published(_) | PublicationOutcome::Adopted(_)
-            ) {
-                self.audit.push(
-                    &request,
-                    &artifact_id,
-                    PublicationAuditKind::TerminalFailure,
-                );
-            }
-            let waiters = {
-                let mut state = lane
-                    .state
-                    .lock()
-                    .expect("publication lane lock poisoned by a worker panic");
-                *state = LaneState::Terminal(TerminalOutcome::from_outcome(&outcome));
-                lane.waiters.take()
-            };
-            waiters.wake();
-            outcome
-        } else {
-            let state = lane
-                .state
-                .lock()
-                .expect("publication lane lock poisoned by a worker panic");
-            if let LaneState::Terminal(outcome) = &*state {
-                if self
-                    .grammar_authority
-                    .validate_accepted_current(&self.source_authority, accepted)
-                    .is_err()
-                {
-                    return PublicationOutcome::Superseded(CurrentSourceEvidence {
-                        current_source: None,
-                    });
-                }
-                self.audit
-                    .push(&request, &artifact_id, PublicationAuditKind::LiveHit);
-                return outcome
-                    .outcome()
-                    .unwrap_or(PublicationOutcome::RetryExhausted);
-            }
-            self.audit.push(
-                &request,
-                &artifact_id,
-                PublicationAuditKind::CoordinationLaneEntered(PublicationLaneRole::Waiter),
-            );
-            drop(state);
-            let mut wait = LaneWait::new(&lane.waiters);
-            verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
-                if request.cancellation.is_cancelled() {
-                    self.audit.push(
-                        &request,
-                        &artifact_id,
-                        PublicationAuditKind::WaiterDetachedCancelled,
-                    );
-                    return Poll::Ready(PublicationOutcome::Cancelled);
-                }
-                let state = lane
-                    .state
-                    .lock()
-                    .expect("publication lane lock poisoned by a worker panic");
-                match &*state {
-                    LaneState::Terminal(outcome) => {
-                        if self
-                            .grammar_authority
-                            .validate_accepted_current(&self.source_authority, accepted)
-                            .is_err()
-                        {
-                            return Poll::Ready(PublicationOutcome::Superseded(
-                                CurrentSourceEvidence {
-                                    current_source: None,
-                                },
-                            ));
-                        }
-                        Poll::Ready(
-                            outcome
-                                .outcome()
-                                .unwrap_or(PublicationOutcome::RetryExhausted),
-                        )
-                    }
-                    LaneState::Vacant | LaneState::Producing => {
-                        wait.register(waker);
-                        Poll::Pending
-                    }
-                }
-            })
-        }
-    }
-
-    fn produce(
-        &self,
-        accepted: &AcceptedRegisteredCarrierSource,
-        request: &PublicationRequestContext,
-        artifact_id: &FrameworkArtifactId,
-    ) -> PublicationOutcome {
-        let language = accepted.source().resolved_file_language();
-        let Some(adapter_id) = language.adapter_id() else {
-            return PublicationOutcome::Unsupported(
-                RegisteredCarrierUnsupported::NoRegisteredProducer,
-            );
-        };
-        let Some(carrier_language_id) = language.carrier_language_id() else {
-            return PublicationOutcome::Unsupported(
-                RegisteredCarrierUnsupported::NoRegisteredProducer,
-            );
-        };
-        if verter_compiler::framework_common::registered_carrier_projection::registered_frontend_for(
-            adapter_id,
-            carrier_language_id,
-        )
-        .is_none()
-        {
-            return PublicationOutcome::Unsupported(
-                RegisteredCarrierUnsupported::NoRegisteredProducer,
-            );
-        }
-        if let Some(candidate) = self.units.retained(artifact_id, accepted) {
-            match self.adopt_retained(candidate, accepted, request, artifact_id) {
-                StableAdoption::Adopted(outcome) => {
-                    return self.fence_adopted(outcome, accepted, request, artifact_id);
-                }
-                StableAdoption::Discarded => {}
-            }
-        }
-
-        self.produce_fresh(accepted, request, artifact_id)
+        owned::drive(self.clone(), accepted.clone(), request)
     }
 
     /// An adopted envelope is served under the SAME publish fence as a
@@ -1279,182 +954,6 @@ impl CarrierPublicationStore {
         StableAdoption::Discarded
     }
 
-    /// Run the parser exactly once per stable unit across concurrent lanes.
-    /// The first lane leader to insert the stable key parses; every other
-    /// lane leader with identical bytes waits for that product and then runs
-    /// its own currency fence and envelope publication below.
-    fn shared_parse(
-        &self,
-        key: &StableUnitKey,
-        accepted: &AcceptedRegisteredCarrierSource,
-        request: &PublicationRequestContext,
-        artifact_id: &FrameworkArtifactId,
-    ) -> StableShared {
-        let lane = {
-            let mut inflight = self
-                .stable_parses
-                .lock()
-                .expect("stable-parse table lock poisoned by a worker panic");
-            if let Some(lane) = inflight.get(key) {
-                Arc::clone(lane)
-            } else {
-                let lane = Arc::new(StableParseLane::producing());
-                inflight.insert(key.clone(), Arc::clone(&lane));
-                drop(inflight);
-                return self.lead_stable_parse(&lane, key, accepted, request, artifact_id);
-            }
-        };
-        self.await_stable_parse(&lane, request, artifact_id)
-    }
-
-    fn lead_stable_parse(
-        &self,
-        lane: &Arc<StableParseLane>,
-        key: &StableUnitKey,
-        accepted: &AcceptedRegisteredCarrierSource,
-        request: &PublicationRequestContext,
-        artifact_id: &FrameworkArtifactId,
-    ) -> StableShared {
-        // Double-checked retained read: `produce` missed before the insert
-        // above, but a previous leader may have retained and unlisted
-        // between that miss and this leader's insert. Adopt the retained
-        // unit instead of parsing it a second time. Guarded by the same
-        // catch_unwind discipline as the parse/publish steps below: a
-        // panic here must still reach `finish_stable_parse`, or this
-        // stable key is left listed forever against a dead `Producing`
-        // lane and every later publication of this unit joins it and
-        // blocks until its own request cancellation.
-        let double_check = catch_unwind(AssertUnwindSafe(|| {
-            self.units
-                .retained(artifact_id, accepted)
-                .map(|candidate| self.adopt_retained(candidate, accepted, request, artifact_id))
-        }));
-        match double_check {
-            Ok(Some(StableAdoption::Adopted(outcome))) => {
-                if let PublicationOutcome::Adopted(envelope) = &outcome {
-                    self.finish_stable_parse(
-                        lane,
-                        key,
-                        StableParseOutcome::Parsed(Arc::clone(envelope.artifact())),
-                    );
-                } else {
-                    self.finish_stable_parse(lane, key, StableParseOutcome::Panicked);
-                }
-                // The retained product is currency-independent and still
-                // serves joiners above; only this lane's envelope is fenced.
-                return StableShared::Done(self.fence_adopted(
-                    outcome,
-                    accepted,
-                    request,
-                    artifact_id,
-                ));
-            }
-            Ok(Some(StableAdoption::Discarded)) | Ok(None) => {}
-            Err(_) => {
-                self.finish_stable_parse(lane, key, StableParseOutcome::Panicked);
-                return StableShared::Done(PublicationOutcome::WinnerPanicked);
-            }
-        }
-        let shared = match catch_unwind(AssertUnwindSafe(|| {
-            self.parse_stable_unit(accepted, request, artifact_id)
-        })) {
-            Ok(shared) => shared,
-            Err(_) => StableParseOutcome::Panicked,
-        };
-        match shared {
-            StableParseOutcome::Parsed(artifact) => {
-                // Publish before unlisting so joiners observe the product,
-                // but keep the entry listed until this leader retains below:
-                // a newcomer in between either joins this lane or lands on
-                // the double-checked retained read — never on a second
-                // parse of the same unit.
-                lane.publish(StableParseOutcome::Parsed(Arc::clone(&artifact)));
-                let outcome = match catch_unwind(AssertUnwindSafe(|| {
-                    self.publish_shared(&artifact, accepted, request, artifact_id)
-                })) {
-                    Ok(outcome) => outcome,
-                    Err(payload) => {
-                        // Never leak the in-flight key when publication
-                        // panics: the outer `publish_or_get` converts the
-                        // resumed unwind into `WinnerPanicked`.
-                        self.finish_stable_parse(lane, key, StableParseOutcome::Parsed(artifact));
-                        std::panic::resume_unwind(payload);
-                    }
-                };
-                self.stable_parses
-                    .lock()
-                    .expect("stable-parse table lock poisoned by a worker panic")
-                    .remove(key);
-                StableShared::Done(outcome)
-            }
-            StableParseOutcome::Rejected(reject) => {
-                let outcome = PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(
-                    Arc::clone(&reject),
-                ));
-                self.finish_stable_parse(lane, key, StableParseOutcome::Rejected(reject));
-                StableShared::Done(outcome)
-            }
-            StableParseOutcome::Panicked => {
-                self.finish_stable_parse(lane, key, StableParseOutcome::Panicked);
-                StableShared::Done(PublicationOutcome::WinnerPanicked)
-            }
-        }
-    }
-
-    fn await_stable_parse(
-        &self,
-        lane: &Arc<StableParseLane>,
-        request: &PublicationRequestContext,
-        artifact_id: &FrameworkArtifactId,
-    ) -> StableShared {
-        let mut wait = LaneWait::new(&lane.waiters);
-        verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
-            if request.cancellation.is_cancelled() {
-                self.audit.push(
-                    request,
-                    artifact_id,
-                    PublicationAuditKind::WaiterDetachedCancelled,
-                );
-                return Poll::Ready(StableShared::Done(PublicationOutcome::Cancelled));
-            }
-            let state = lane
-                .state
-                .lock()
-                .expect("stable-parse lane lock poisoned by a worker panic");
-            match &*state {
-                StableParseState::Ready(outcome) => Poll::Ready(match outcome.clone() {
-                    StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
-                    StableParseOutcome::Rejected(reject) => StableShared::Done(
-                        PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
-                    ),
-                    StableParseOutcome::Panicked => {
-                        StableShared::Done(PublicationOutcome::WinnerPanicked)
-                    }
-                }),
-                StableParseState::Producing => {
-                    wait.register(waker);
-                    Poll::Pending
-                }
-            }
-        })
-    }
-
-    fn finish_stable_parse(
-        &self,
-        lane: &Arc<StableParseLane>,
-        key: &StableUnitKey,
-        outcome: StableParseOutcome,
-    ) {
-        // Publish before unlisting: a newcomer that misses the entry must
-        // land on the double-checked retained read (or a fresh in-flight
-        // lane), never on a removed-but-unpublished parse.
-        lane.publish(outcome);
-        self.stable_parses
-            .lock()
-            .expect("stable-parse table lock poisoned by a worker panic")
-            .remove(key);
-    }
-
     /// The one parser run for this stable unit: provenance counters and the
     /// `ParserStarted`/`ParserFinished` bracket fire once here, on the
     /// stable leader only.
@@ -1489,20 +988,6 @@ impl CarrierPublicationStore {
         self.audit
             .push(request, artifact_id, PublicationAuditKind::ParserFinished);
         StableParseOutcome::Parsed(artifact)
-    }
-
-    fn produce_fresh(
-        &self,
-        accepted: &AcceptedRegisteredCarrierSource,
-        request: &PublicationRequestContext,
-        artifact_id: &FrameworkArtifactId,
-    ) -> PublicationOutcome {
-        let key = StableUnitKey::new(artifact_id, accepted);
-        let artifact = match self.shared_parse(&key, accepted, request, artifact_id) {
-            StableShared::Parsed(artifact) => artifact,
-            StableShared::Done(outcome) => return outcome,
-        };
-        self.publish_shared(&artifact, accepted, request, artifact_id)
     }
 
     /// Per-lane publication of a shared stable-unit product: this lane's own
@@ -1667,121 +1152,3 @@ fn parse_key_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseKe
 pub struct GrammarMismatch;
 
 fn _acceptance_error_is_closed(_: CarrierAcceptanceError) {}
-
-#[cfg(test)]
-mod lane_wait_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Counts its wakes and, at each wake, whether the lane state lock was
-    /// free, so a wake under the lane lock is observable.
-    struct LaneProbe {
-        lane: Arc<StableParseLane>,
-        wakes: AtomicUsize,
-        locked_wakes: AtomicUsize,
-    }
-
-    impl std::task::Wake for LaneProbe {
-        fn wake(self: Arc<Self>) {
-            self.wake_by_ref();
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.wakes.fetch_add(1, Ordering::SeqCst);
-            if self.lane.state.try_lock().is_err() {
-                self.locked_wakes.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    }
-
-    fn probe(lane: &Arc<StableParseLane>) -> (Arc<LaneProbe>, std::task::Waker) {
-        let probe = Arc::new(LaneProbe {
-            lane: Arc::clone(lane),
-            wakes: AtomicUsize::new(0),
-            locked_wakes: AtomicUsize::new(0),
-        });
-        (Arc::clone(&probe), std::task::Waker::from(probe))
-    }
-
-    /// One poll of a joiner: `Ready` once the lane has an outcome, else
-    /// registered and `Pending`.
-    fn poll(lane: &StableParseLane, wait: &mut LaneWait<'_>, waker: &std::task::Waker) -> Poll<()> {
-        let state = lane.state.lock().unwrap();
-        match &*state {
-            StableParseState::Ready(_) => Poll::Ready(()),
-            StableParseState::Producing => {
-                wait.register(waker);
-                Poll::Pending
-            }
-        }
-    }
-
-    #[test]
-    fn a_lane_joiner_is_woken_once_after_the_lane_lock_is_released() {
-        let lane = Arc::new(StableParseLane::producing());
-        let (counter, waker) = probe(&lane);
-        let mut wait = LaneWait::new(&lane.waiters);
-        assert!(poll(&lane, &mut wait, &waker).is_pending());
-        assert!(poll(&lane, &mut wait, &waker).is_pending());
-        assert_eq!(
-            lane.waiters.0.lock().len(),
-            1,
-            "a re-poll keeps one registration"
-        );
-        lane.publish(StableParseOutcome::Panicked);
-        assert_eq!(counter.wakes.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            counter.locked_wakes.load(Ordering::SeqCst),
-            0,
-            "the joiner was woken under the lane lock"
-        );
-        assert!(poll(&lane, &mut wait, &waker).is_ready());
-    }
-
-    #[test]
-    fn dropping_a_lane_wait_withdraws_only_its_own_registration() {
-        let lane = Arc::new(StableParseLane::producing());
-        let (counter, waker) = probe(&lane);
-        let mut dropped = LaneWait::new(&lane.waiters);
-        let mut kept = LaneWait::new(&lane.waiters);
-        assert!(poll(&lane, &mut dropped, &waker).is_pending());
-        assert!(poll(&lane, &mut kept, &waker).is_pending());
-        drop(dropped);
-        assert_eq!(
-            lane.waiters.0.lock().len(),
-            1,
-            "drop withdraws its registration"
-        );
-        lane.publish(StableParseOutcome::Panicked);
-        assert_eq!(counter.wakes.load(Ordering::SeqCst), 1);
-        assert!(poll(&lane, &mut kept, &waker).is_ready());
-    }
-
-    /// A publication racing a joiner's registration is never lost: either
-    /// the registering poll sees the outcome, or its waker fires.
-    #[test]
-    fn a_lane_publication_racing_registration_never_loses_the_wake() {
-        for round in 0..256u32 {
-            let lane = Arc::new(StableParseLane::producing());
-            let start = Arc::new(std::sync::Barrier::new(2));
-            let producer = {
-                let (lane, start) = (Arc::clone(&lane), Arc::clone(&start));
-                std::thread::spawn(move || {
-                    start.wait();
-                    lane.publish(StableParseOutcome::Panicked);
-                })
-            };
-            let (counter, waker) = probe(&lane);
-            let mut wait = LaneWait::new(&lane.waiters);
-            start.wait();
-            let answered_at_poll = poll(&lane, &mut wait, &waker).is_ready();
-            producer.join().expect("the producer publishes");
-            assert!(
-                answered_at_poll || counter.wakes.load(Ordering::SeqCst) == 1,
-                "round {round}: a pending joiner must be woken by the publication"
-            );
-            assert!(poll(&lane, &mut wait, &waker).is_ready());
-            assert!(lane.waiters.0.lock().is_empty());
-        }
-    }
-}

@@ -158,6 +158,59 @@ the driver, and lets scheduler workers use the existing cooperative pump and
 bounded park cadence. Inline drivers retain typed `NoProgress` when no work
 can advance. These driving operations are absent from the handoff capability.
 
+### Carrier publication and stable parse
+
+`CarrierPublicationStore::begin_publication` takes owned accepted source and
+request context plus a waiter task, and returns `OwnedPublication`. Its poll
+transfers `PublicationStep::Produce(PublicationProducer)` or returns a terminal
+`Outcome`. The independent producer polls a retained continuation: it transfers
+`PublicationProducerStep::Work(PublicationWork)` for the initial retained-unit
+read/adoption, the nested stable producer, and envelope finishing, then returns
+`Complete`. Only external `Work::run` performs backend reads, validation of
+retained payloads, parsing, rehoming or retention. No poll drives another
+computation synchronously. `publish_or_get` externally drives these same states.
+
+`begin_stable_parse` returns `OwnedStableParse`. Its `Produce` step transfers
+one `StableParseProducer`; `run` performs the double-checked retained read or
+one parser attempt. `Parsed(StableParseValue)` owns the complete immutable
+product and a retirement interest. A publication producer waits on this child
+under its own P task, giving W → P → S in the host's single task registry.
+Every store constructor takes its composition root's `TaskRegistry`. Host
+construction supplies the same registry as scheduling and semantic evaluation;
+standalone callers supply their execution authority explicitly. P/S always
+belong to that registry, including synchronous production and reentrant backend
+calls. Foreign pending waiters receive `Cycle`; an immediately ready answer
+needs no edge. Registry binding cannot be replaced on an existing cloned store.
+The synchronous wrapper inherits an ambient task only from that store's
+registry; an unrelated host scope does not prevent independent publication.
+
+Request cancellation stops only its subscriber, including the initiating
+subscriber after producer transfer. P and S install independent task and stop
+scopes during external work, restore them before notifications, and may move
+between threads. Another subscriber can claim an unclaimed producer after its
+initiator detaches. Terminal/drop cleanup releases its own edge, stop and wake
+registrations and task pins. `ProducerDropped` is explicit abandonment;
+after existing subscribers drain, the exact failed lane retires so unchanged
+source can retry. It cannot remove a successor lane or invalidate another
+subscriber's terminal.
+`WinnerPanicked` remains distinct, and stable rejection carries `SyntaxReject`.
+Source or grammar invalidation fences every snapshot-bound envelope, including
+adopted and shared products; a verified stable unit remains reusable despite a
+losing generation. Retention denial still returns the complete envelope.
+
+Successful publication delivery stays strong while attached consumers remain,
+then returns to the existing weak terminal retention. Stable lanes stay listed
+through each registered consumer's envelope finishing. The retirement interest
+moves into the actual Finish Work and survives dropping the P continuation;
+retirement rechecks consumer/producer state under table → lane locks and removes
+only the identical lane instance. Backend callbacks and wakes run after owner
+locks release. Adoption provenance, parser counters and snapshot rehoming use
+the existing helpers.
+
+Callers above these boundaries belong to DISPATCH for the scheduler Source
+stage and shared base/overlay indexing, META for metadata traversal, and COMPILE
+for compile hydration. Their conversion is separate from these dependency APIs.
+
 ### Scheduler request admission
 
 `Scheduler::begin_submit_request` returns an owned
@@ -435,6 +488,33 @@ query::lookup}` and their semantic memo consumers. Metadata and compilation
 callers reach those nodes through dispatch and retain responsibility for their
 own resumable traversal state.
 
+### Higher-caller conversion inventory
+
+These assignments cover traversal above the dependency owner. Conversion must
+retain the exact view, source and project validation and resume saved work.
+A synchronous compatibility call is not a suspension boundary.
+
+| Direct caller or caller group | Conversion owner |
+| --- | --- |
+| `host_executor.rs::source_snapshot`, `host_manage/overlay_materialize.rs::registered_overlay_structure` → carrier publication | DISPATCH |
+| `host_lifecycle.rs::resolve_import_outcome_in`, `host_executor.rs::extract_deps`, `program_order.rs` → workspace resolution | DISPATCH; COMPILE owns compile traversal above program ordering |
+| `host_manage/{prepared_decl,eval_program,eval_env,overlay_priority}.rs`, `host_resolve/frontier_engine.rs`, `resolver_core/request_bound.rs` → host loading | DISPATCH |
+| `resolver_core/component_meta_query_engine/{mod,registry_cache_producers,registry_decl}.rs`, `component_meta_host.rs`, `meta.rs` → host loading | META |
+| `host_compile_audit.rs`, `host_resolve/virtual_file_pipeline.rs` → host loading | COMPILE |
+| `host_construction.rs` → initial program-member host loading | DISPATCH |
+| `host_manage/{component_meta_entry,component_meta_entry_resolution}.rs`, `meta.rs`, `meta/output_api.rs` → fixed store-view capture | META |
+| `host_manage/analysis_io.rs` → fixed store-view capture | DISPATCH |
+| `host_resolve/virtual_file_pipeline.rs` → fixed store-view capture | COMPILE |
+| `host_manage/overlay_materialize.rs` → lease acquisition and leased lowering; `host_manage/prepared_decl.rs` → lease acquisition with lowering | DISPATCH |
+| `typeinfo/vue_macro_codegen.rs` → scoped cache-node execution | COMPILE |
+| `host_upsert.rs::UpsertBatchTxn::finish` and atomic batch submission reached by `compile_many` | COMPILE |
+
+Resolver request-flight callers are enumerated beside their owned interface
+above. Artifact and query-candidate cache consumers, semantic memo joins and
+semantic task driving belong to DISPATCH. META and COMPILE retain their
+traversal above those shared semantic operations. Host CPU batch coordination
+is the executor boundary; it is not another dependency service.
+
 ## Boundaries that still block
 
 These are the production waits a component-meta or compile root can reach
@@ -443,8 +523,9 @@ reaches it, so a root that reaches one is not yet pollable. Semantic memo
 flights and scoped cache-node handoffs register shared-registry wait edges.
 Completion, cache admission and declaration-lowering subscriptions offer
 explicit task-owned adapters; their synchronous callers still require
-conversion. Workspace, carrier publication and host index ownership remain
-incomplete in this inventory.
+conversion. Workspace flight leases still lack shared task ownership and an
+owned production entry. Their thread-scoped direct-resolution escape and
+synchronous driver remain to be converted at the dependency owner.
 
 | Wait | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- |
@@ -454,12 +535,12 @@ incomplete in this inventory.
 | Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |
 | Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |
 | Store-view capture (`StoreViewManager::base_view`) | `verter_session/src/store_view_handoff.rs` | `capture_batch_fixed_view` at every component-meta entry | `VerterHost::begin_store_view` with owned build/maintenance producer; callers still synchronous |
-| Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
+| Carrier publication and stable parse | `verter_session/src/carrier_publication_store/owned.rs` | scheduler Source stage; base/overlay structure | `OwnedPublication` → external Work and owned S subscription; `OwnedStableParse` → external stable producer; callers still synchronous |
 | Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; synchronous callers externally drive and integrate |
 | Batch upsert completion (`Scheduler::wait_batch`) | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
 | Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
 | Scheduler inbox submission (`send_submission`) | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
-| Workspace import-resolution flight (`FlightSubscription::wait`) | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` registers a waker; callers still synchronous |
+| Workspace import-resolution flight (`FlightSubscription::wait`) | `verter_workspace/src/resolution_flights.rs` | DISPATCH: host loading, analysis-stage dependencies and shared resolver import/route demands; META: metadata's import traversal; COMPILE: hydration and compile traversal | `FlightSubscription::poll` registers a waker; borrowed thread-scoped producer leases and cancellation sampling still need an owned dependency entry |
 | Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) | `verter_session/src/host_batch_coordinator.rs` | `compile_many`, `get_component_meta_batch` | none; the batch topology itself is the executor's to replace |
 
 The declaration-lowering waits that used to be on this list are now the

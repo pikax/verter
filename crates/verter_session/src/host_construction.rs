@@ -460,11 +460,13 @@ impl VerterHost {
             .unwrap_or_else(|error| {
                 panic!("register composed capability-catalog carrier grammars: {error:?}")
             });
+        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let carrier_publication_store = Arc::new(
             crate::carrier_publication_store::CarrierPublicationStore::with_provenance(
                 Arc::clone(&registered_source_authority),
                 Arc::clone(&carrier_grammar_authority),
                 Arc::clone(&provenance),
+                task_registry.clone(),
             ),
         );
         let registered_envelope_ingest = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
@@ -505,7 +507,6 @@ impl VerterHost {
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
-        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),

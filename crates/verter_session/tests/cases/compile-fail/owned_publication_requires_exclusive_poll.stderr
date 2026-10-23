@@ -1,0 +1,9 @@
+error[E0596]: cannot borrow `*handoff` as mutable, as it is behind a `&` reference
+ --> tests/cases/compile-fail/owned_publication_requires_exclusive_poll.rs:5:5
+  |
+5 |     handoff.poll(waker);
+  |     ^^^^^^^ `handoff` is a `&` reference, so it cannot be borrowed as mutable
+help: consider changing this to be a mutable reference
+  |
+4 | fn cannot_share(handoff: &mut OwnedPublication, waker: &Waker) {
+  |                           +++

@@ -90,19 +90,11 @@ enum Attempt {
     Fenced(HostStoreView, StoreViewReturnOnlyReason),
     Read(StoreViewRead),
 }
+#[derive(Default)]
 struct Reply {
     result: Option<Result<Attempt, StoreViewError>>,
     failure: Option<StoreViewError>,
     wakers: WakerSet,
-}
-impl Default for Reply {
-    fn default() -> Self {
-        Self {
-            result: None,
-            failure: None,
-            wakers: WakerSet::default(),
-        }
-    }
 }
 /// Immutable identity and owner; its reply and execution bit are private to
 /// the claim protocol. Physical execution remains serialized across reset.
@@ -662,7 +654,7 @@ pub(super) fn drive(manager: &StoreViewManager, host: &VerterHost) -> StoreViewR
     let scope = host.scheduler.enter_execution_scope();
     let mut core = Core::new(host, scope.task().clone(), CancellationToken::new(), true);
     // The shared manager must be the host's exact cache owner.
-    debug_assert!(Arc::ptr_eq(
+    verter_debug_assert::verter_debug_assert!(Arc::ptr_eq(
         &manager.state,
         &core.manager.as_ref().expect("manager").state
     ));
