@@ -759,6 +759,27 @@ pub(crate) fn carrier_parse_key(
     }
 }
 
+/// The exact parse identity of `source` read as a file of `file_language`,
+/// with no parse of it in hand: a carrier's is the identity its
+/// registered-grammar publication records (delimiters and custom elements
+/// included), so it equals the key a carrier parse of the same bytes
+/// records; any other file's is its default-options identity. `None` where
+/// the language has no such identity.
+pub(crate) fn source_parse_key_for(
+    source: &str,
+    file_language: &verter_language::FileLanguage,
+) -> Option<verter_language::ParseKey> {
+    if file_language.is_framework_carrier() {
+        crate::carrier_publication_store::registered_carrier_parse_key(source, file_language)
+    } else {
+        verter_session_query::source::framework_parse::exact_source_parse_key(
+            source,
+            file_language,
+            None,
+        )
+    }
+}
+
 /// The parser-owned non-script mode inputs carried by a neutral parse artifact.
 ///
 /// Svelte captures `<svelte:options runes={...}>` during its single carrier

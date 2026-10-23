@@ -31,9 +31,6 @@ impl crate::project_type_store::IndexedReady {
     #[allow(clippy::let_and_return)]
     pub(crate) fn input_record(&self) -> Arc<IndexedInputRecord> {
         self.input_projection.get_or_init(|| {
-            // The record's identity always carries the artifact's parse
-            // identity (seeded, or derived here once per artifact).
-            let source_parse_key = self.source_parse_key();
             let record = IndexedInputRecord::new(
                 IndexedInputIdentity {
                     source: self.shallow_state.source_identity.clone(),
@@ -43,7 +40,9 @@ impl crate::project_type_store::IndexedReady {
                         NEXT_ARTIFACT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     },
                     file_language: self.file_language.clone(),
-                    parse_key: source_parse_key.clone(),
+                    // Always the artifact's parse identity (seeded, or
+                    // derived here once per artifact).
+                    parse_key: self.source_parse_key(),
                 },
                 self.whole_hash,
                 self.file_language.clone(),
@@ -56,7 +55,6 @@ impl crate::project_type_store::IndexedReady {
                     .map(crate::parse::framework_parse_facts),
                 self.script_analysis.clone(),
                 Arc::clone(&self.snapshot),
-                Some(source_parse_key),
             );
             #[cfg(any(test, feature = "test-support"))]
             let record =

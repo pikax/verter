@@ -74,6 +74,13 @@ pub struct HostSourceData {
     /// `framework_parse` key). `None` for carriers, and for a language
     /// with no default parse identity.
     pub(crate) script_parse_key: Option<verter_language::ParseKey>,
+    /// This revision's parse identity read as a file of ANOTHER language
+    /// than its own ([`Self::parse_key_under`]): a runtime script analysed
+    /// through its declaration companion keys its bytes under the
+    /// companion's language. Derived on first demand, at most once per
+    /// revision for the language it records.
+    pub(crate) companion_parse_key:
+        std::sync::OnceLock<(FileLanguage, Option<verter_language::ParseKey>)>,
     /// Sole registered envelope owner for carrier sources.
     pub(crate) structure: Option<crate::carrier_publication_store::RegisteredFileStructure>,
     pub(crate) revision_token: crate::carrier_publication_store::HostSourceRevisionToken,
@@ -116,6 +123,30 @@ impl HostSourceData {
                 )
             }
             None => self.script_parse_key.clone(),
+        }
+    }
+
+    /// The exact parse identity of this revision's bytes (`source`, the
+    /// snapshot's own) read as a file of `file_language`: its own identity
+    /// under its own language, otherwise
+    /// [`crate::parse::source_parse_key_for`], derived once per revision for
+    /// the language it first records.
+    pub(crate) fn parse_key_under(
+        &self,
+        source: &str,
+        file_language: &FileLanguage,
+    ) -> Option<verter_language::ParseKey> {
+        if *file_language == self.file_language {
+            return self.source_parse_key();
+        }
+        let derive = || crate::parse::source_parse_key_for(source, file_language);
+        let (language, parse_key) = self
+            .companion_parse_key
+            .get_or_init(|| (file_language.clone(), derive()));
+        if language == file_language {
+            parse_key.clone()
+        } else {
+            derive()
         }
     }
 
@@ -528,6 +559,7 @@ impl HostStageExecutor {
                     parse: parse_snapshot,
                     framework_parse: Some(framework_parse),
                     script_parse_key: None,
+                    companion_parse_key: std::sync::OnceLock::new(),
                     structure: Some(structure),
                     revision_token,
                     file_language,
@@ -564,6 +596,7 @@ impl HostStageExecutor {
                     parse: parse_snapshot,
                     framework_parse: None,
                     script_parse_key,
+                    companion_parse_key: std::sync::OnceLock::new(),
                     structure: None,
                     revision_token,
                     file_language,

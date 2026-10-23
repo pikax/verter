@@ -103,26 +103,21 @@ pub trait SessionView: Send + Sync {
     fn content_hash_for(&self, canonical: &str) -> Option<Hash16>;
 
     /// The exact parse identity of the overlay source this view holds for
-    /// `canonical` (one [`Self::overlay_content_hash_for`] reports), read as
-    /// a plain source under `file_language` (no carrier parse): the identity
-    /// [`verter_session_query::source::framework_parse::exact_source_parse_key`]
-    /// derives from those bytes, `None` where the view holds no overlay
-    /// source or that refuses. A canonical the view does not overlay is keyed
-    /// from the base host's source snapshot, never through this method.
+    /// `canonical` (one [`Self::overlay_content_hash_for`] reports), read as a
+    /// file of `file_language` ([`crate::parse::source_parse_key_for`]: a
+    /// carrier's under its registered grammar), `None` where the view holds
+    /// no overlay source for it or that refuses. A canonical the view does
+    /// not overlay is keyed from the base host's source snapshot, never
+    /// through this method; a view without overlay sources holds none.
     ///
     /// An overlay-bearing view's overlay sources are immutable for its
     /// lifetime, so it derives each overlay's identity at most once.
     fn overlay_source_parse_key(
         &self,
-        canonical: &str,
-        file_language: &verter_language::FileLanguage,
+        _canonical: &str,
+        _file_language: &verter_language::FileLanguage,
     ) -> Option<verter_language::ParseKey> {
-        let source = self.source(canonical)?;
-        verter_session_query::source::framework_parse::exact_source_parse_key(
-            &source,
-            file_language,
-            None,
-        )
+        None
     }
 
     /// Content hash of the **explicit overlay** covering `canonical`,
@@ -481,44 +476,46 @@ type OverlayParseKeyCell = std::sync::OnceLock<(
     Option<verter_language::ParseKey>,
 )>;
 
-/// An overlay-bearing view's parse identities of its overlay sources: one
-/// cell per overlay canonical, built with the view, so a read is lock-free
-/// and each overlay is derived exactly once (concurrent first readers wait
-/// for the one derivation).
+/// An overlay-bearing view's parse identities of its overlay sources, one
+/// cell per overlay source.
+///
+/// The cell table is built on the first read (a view that never keys an
+/// overlay builds nothing) and keyed by the address of the overlay's source
+/// allocation, which the view's overlay map holds for the view's lifetime,
+/// so no canonical is copied. A read after that is lock-free, and each
+/// overlay is derived exactly once (concurrent first readers wait for the
+/// one derivation).
 ///
 /// Sound because a view's overlay map never changes for its lifetime (R17:
 /// a session edit builds a new view over new maps), so an overlay's identity
 /// can never go stale inside one view; base-passthrough reads never enter it.
-struct OverlayParseKeys<K>(FxHashMap<K, OverlayParseKeyCell>);
+#[derive(Default)]
+struct OverlayParseKeys(std::sync::OnceLock<FxHashMap<usize, OverlayParseKeyCell>>);
 
-impl<K: Eq + std::hash::Hash + std::borrow::Borrow<str>> OverlayParseKeys<K> {
-    fn new(canonicals: impl Iterator<Item = K>) -> Self {
-        Self(
-            canonicals
-                .map(|canonical| (canonical, OverlayParseKeyCell::new()))
-                .collect(),
-        )
+impl OverlayParseKeys {
+    fn address(source: &Arc<str>) -> usize {
+        Arc::as_ptr(source).cast::<u8>() as usize
     }
 
-    /// The parse identity of the overlay `source` held for `canonical`
-    /// under `file_language`: derived on the first read, reused after. A
-    /// read under another language than the cell's derives without caching.
+    /// The parse identity of `source`, one of `overlays`' sources, under
+    /// `file_language` ([`crate::parse::source_parse_key_for`]): derived on
+    /// the first read, reused after. A read under another language than the
+    /// cell's derives without caching.
     fn get(
         &self,
-        canonical: &str,
-        source: &str,
+        overlays: &FxHashMap<String, Arc<str>>,
+        source: &Arc<str>,
         file_language: &verter_language::FileLanguage,
     ) -> Option<verter_language::ParseKey> {
-        let derive = || {
-            verter_session_query::source::framework_parse::exact_source_parse_key(
-                source,
-                file_language,
-                None,
-            )
-        };
-        let (language, parse_key) = self
-            .0
-            .get(canonical)?
+        let derive = || crate::parse::source_parse_key_for(source, file_language);
+        let cells = self.0.get_or_init(|| {
+            overlays
+                .values()
+                .map(|overlay| (Self::address(overlay), OverlayParseKeyCell::new()))
+                .collect()
+        });
+        let (language, parse_key) = cells
+            .get(&Self::address(source))?
             .get_or_init(|| (file_language.clone(), derive()));
         if language == file_language {
             parse_key.clone()
@@ -586,7 +583,7 @@ pub struct OverlaidView {
     /// Each overlay source's parse identity, derived once for the view's
     /// lifetime ([`SessionView::overlay_source_parse_key`]); clones share it
     /// with the overlay map.
-    overlay_parse_keys: Arc<OverlayParseKeys<String>>,
+    overlay_parse_keys: Arc<OverlayParseKeys>,
 }
 
 impl OverlaidView {
@@ -604,7 +601,6 @@ impl OverlaidView {
             overlay_hashes.insert(canonical.clone(), hash);
         }
         let env_hashes = base.host_view_env_hashes();
-        let overlay_parse_keys = Arc::new(OverlayParseKeys::new(overlays.keys().cloned()));
         Self {
             overlays: Arc::new(overlays),
             overlay_hashes: Arc::new(overlay_hashes),
@@ -615,7 +611,7 @@ impl OverlaidView {
             // single shared algorithm, then memoized. A view that never
             // reads the fingerprint never pays the collect + sort + hash.
             overlay_set_fingerprint: std::sync::OnceLock::new(),
-            overlay_parse_keys,
+            overlay_parse_keys: Arc::default(),
         }
     }
 
@@ -627,7 +623,6 @@ impl OverlaidView {
         overlay_hashes: Arc<FxHashMap<String, Hash16>>,
         env_hashes: EnvHashes,
     ) -> Self {
-        let overlay_parse_keys = Arc::new(OverlayParseKeys::new(overlays.keys().cloned()));
         Self {
             overlays,
             overlay_hashes,
@@ -636,7 +631,7 @@ impl OverlaidView {
             key_env_override: Some(env_hashes),
             // Lazy: see `Self::new`.
             overlay_set_fingerprint: std::sync::OnceLock::new(),
-            overlay_parse_keys,
+            overlay_parse_keys: Arc::default(),
         }
     }
 
@@ -681,7 +676,7 @@ impl SessionView for OverlaidView {
     ) -> Option<verter_language::ParseKey> {
         let overlay_source = self.overlays.get(canonical)?;
         self.overlay_parse_keys
-            .get(canonical, overlay_source, file_language)
+            .get(&self.overlays, overlay_source, file_language)
     }
 
     fn overlay_artifact_discriminator(&self, canonical: &str) -> Option<Hash16> {
@@ -902,7 +897,7 @@ pub struct OverlaidViewRef<'a> {
     overlay_set_fingerprint: std::sync::OnceLock<u64>,
     /// Each overlay source's parse identity, derived once for the view's
     /// lifetime ([`SessionView::overlay_source_parse_key`]).
-    overlay_parse_keys: OverlayParseKeys<&'a str>,
+    overlay_parse_keys: OverlayParseKeys,
     /// The session's overlay authority, when the view is a session's
     /// request — see [`SessionView::resolution_authority`].
     resolution_authority: Option<verter_workspace::OverlayAuthority>,
@@ -935,7 +930,7 @@ impl<'a> OverlaidViewRef<'a> {
             // paths read it once on first use. The O(N²) per-query
             // recompute the batch path paid is gone either way.
             overlay_set_fingerprint: std::sync::OnceLock::new(),
-            overlay_parse_keys: OverlayParseKeys::new(overlays.keys().map(String::as_str)),
+            overlay_parse_keys: OverlayParseKeys::default(),
             resolution_authority: None,
         }
     }
@@ -1009,7 +1004,7 @@ impl SessionView for OverlaidViewRef<'_> {
         }
         let overlay_source = self.overlays.get(canonical)?;
         self.overlay_parse_keys
-            .get(canonical, overlay_source, file_language)
+            .get(self.overlays, overlay_source, file_language)
     }
 
     fn overlay_artifact_discriminator(&self, canonical: &str) -> Option<Hash16> {

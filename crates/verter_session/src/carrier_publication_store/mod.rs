@@ -1642,16 +1642,45 @@ impl CarrierPublicationStore {
 }
 
 fn parse_key_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseKey {
+    carrier_parse_key_under(
+        accepted.source().bytes(),
+        accepted.source().resolved_file_language(),
+        accepted.grammar().canonical_config(),
+    )
+    .expect("accepted carrier source has a supported parse identity")
+}
+
+/// The parse identity a carrier publication records for `source` of
+/// `file_language` under the carrier's registered grammar: the same
+/// derivation as an accepted source's ([`parse_key_for_accepted`]), its
+/// delimiters and custom elements included, without registering the
+/// source. `None` for a carrier with no registered grammar.
+pub(crate) fn registered_carrier_parse_key(
+    source: &str,
+    file_language: &verter_language::FileLanguage,
+) -> Option<ParseKey> {
+    let grammar =
+        verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+            file_language.adapter_id()?,
+            file_language.carrier_language_id()?,
+        )?;
+    carrier_parse_key_under(source, file_language, grammar)
+}
+
+/// The parse identity of carrier `source` under `grammar`'s parse options.
+fn carrier_parse_key_under(
+    source: &str,
+    file_language: &verter_language::FileLanguage,
+    grammar: &verter_language::carrier_grammar::CarrierGrammarConfig,
+) -> Option<ParseKey> {
     use verter_language::carrier_grammar::CarrierGrammarConfig;
-    let options = match accepted.grammar().canonical_config() {
+    let options = match grammar {
         CarrierGrammarConfig::Vue { delimiters, .. } => verter_language::ParseOptions {
             delimiters: (
                 delimiters.open().to_string(),
                 delimiters.close().to_string(),
             ),
-            custom_elements: accepted
-                .grammar()
-                .canonical_config()
+            custom_elements: grammar
                 .custom_element_names()
                 .into_iter()
                 .map(str::to_string)
@@ -1661,15 +1690,11 @@ fn parse_key_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseKe
         CarrierGrammarConfig::Svelte => verter_language::ParseOptions::default(),
     };
     // The language crate owns the (language, options) → compatibility
-    // domain/epoch selection: an accepted carrier of any adapter keys under
-    // its OWN domain, never another framework's.
-    let (_, parse_key) = verter_language::parse_identity_for(
-        accepted.source().bytes(),
-        accepted.source().resolved_file_language(),
-        &options,
-    )
-    .expect("accepted carrier source has a supported parse identity");
-    parse_key
+    // domain/epoch selection: a carrier of any adapter keys under its OWN
+    // domain, never another framework's.
+    verter_language::parse_identity_for(source, file_language, &options)
+        .ok()
+        .map(|(_, parse_key)| parse_key)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

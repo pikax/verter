@@ -22,6 +22,7 @@ mod abstract_construct_tests;
 mod accessor_property_tests;
 mod ambient_module_value_tests;
 mod apparent_type_tests;
+mod artifact_parse_identity_tests;
 mod augmentation_scale_tests;
 mod base_signature_tests;
 mod broad_runtime_tests;

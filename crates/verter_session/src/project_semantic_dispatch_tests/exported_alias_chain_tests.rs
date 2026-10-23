@@ -1,8 +1,8 @@
 //! Exported alias chains read each exported name once, and each read keys
 //! the declaring file's artifact. That key's parse identity belongs to the
-//! source revision: it is derived once with the source snapshot (or, for a
-//! session overlay, once per view) and every read reuses it, so the
-//! whole-source derivations an answer makes do not grow with the chain.
+//! source revision: it is derived once with the source snapshot and every
+//! read reuses it, so the whole-source derivations an answer makes do not
+//! grow with the chain.
 //!
 //! The derivations are counted across every thread of the process (the
 //! source stage derives on the scheduler's workers), so each counting test
@@ -10,14 +10,11 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-
 use super::checker_probe_lane_tests::{
     evaluated_render_in as evaluated, in_a_fresh_process, probe_host, test_path,
     upsert_probe_files, ProbeProject,
 };
 use crate::file_artifact_store::FileArtifactKeySource;
-use crate::session_view::OverlaidViewRef;
 use verter_session_query::source::artifact_key::{FileArtifactKey, BASE_PARSE_ENV_HASH};
 use verter_session_query::source::framework_parse::source_parse_identity_derivations_in_process_for_tests as derivations;
 
@@ -169,85 +166,5 @@ fn an_edit_to_an_exported_chain_rekeys_it_and_changes_the_answer() {
     assert_eq!(
         evaluated(&host, project, &module, &probe),
         "Union(\"ok\" | undefined)"
-    );
-}
-
-/// A session overlay's artifact key derives the overlay's parse identity
-/// once per view, however often it is read, and that identity is exactly
-/// the one the overlay bytes derive; a view over edited overlay bytes keys
-/// them anew. A file the view does not overlay is keyed from the base
-/// snapshot, exactly as the host keys it, with no derivation at all.
-#[test]
-fn an_overlay_key_derives_its_parse_identity_once_per_view() {
-    in_a_fresh_process(test_path!(), overlay_key_derives_once_per_view);
-}
-
-fn overlay_key_derives_once_per_view() {
-    let base = chain(10, true);
-    let files = [("chain.ts", base.as_str())];
-    let host = probe_host(ProbeProject {
-        files: &files,
-        ..ProbeProject::default()
-    });
-    let identity = host.overlay_artifact_identity(CHAIN_FILE);
-    let tombstones = std::collections::HashSet::new();
-    let overlay_key = |overlay: &str| {
-        let mut sources = FxHashMap::default();
-        sources.insert(CHAIN_FILE.to_owned(), Arc::<str>::from(overlay));
-        let mut hashes = FxHashMap::default();
-        hashes.insert(
-            CHAIN_FILE.to_owned(),
-            verter_semantic_source::source_hash::hash_16(overlay.as_bytes()),
-        );
-        let view = OverlaidViewRef::new(&host, &sources, &hashes, &tombstones);
-        let before = derivations();
-        let key = identity
-            .current_read_key(&host, &view)
-            .expect("the overlay has a key");
-        for _ in 0..50 {
-            assert_eq!(identity.current_read_key(&host, &view).as_ref(), Some(&key));
-        }
-        assert_eq!(
-            derivations() - before,
-            1,
-            "fifty-one reads of one view's overlay key derive its identity once"
-        );
-        let from_bytes = verter_session_query::source::framework_parse::exact_source_parse_key(
-            overlay,
-            &key.file_language_id,
-            None,
-        );
-        assert_eq!(Some(&key.parse_key), from_bytes.as_ref());
-        key
-    };
-    let first = overlay_key(&chain(20, true));
-    let edited = overlay_key(&chain_from(20, true, "T | null"));
-    assert_ne!(
-        first.parse_key, edited.parse_key,
-        "a view over edited overlay bytes must not reuse the earlier identity"
-    );
-    assert_eq!(overlay_key(&chain(20, true)), first);
-
-    // A view overlaying another file reads the chain file from the base.
-    let mut sources = FxHashMap::default();
-    sources.insert("/wb/other.ts".to_owned(), Arc::<str>::from("export {};\n"));
-    let mut hashes = FxHashMap::default();
-    hashes.insert(
-        "/wb/other.ts".to_owned(),
-        verter_semantic_source::source_hash::hash_16(b"export {};\n"),
-    );
-    let view = OverlaidViewRef::new(&host, &sources, &hashes, &tombstones);
-    let before = derivations();
-    for _ in 0..50 {
-        assert_eq!(
-            identity.current_read_key(&host, &view),
-            host.authoritative_current_artifact_key(CHAIN_FILE),
-            "a base read keys the chain file as the host does"
-        );
-    }
-    assert_eq!(
-        derivations() - before,
-        0,
-        "base reads take the snapshot's identity without a derivation"
     );
 }
