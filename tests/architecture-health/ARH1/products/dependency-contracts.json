@@ -339,6 +339,7 @@
           "crates/verter_session/src/prepared_surface_intersection_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs",
           "crates/verter_session/src/public_api_batch_fixed_view_tests.rs",
+          "crates/verter_session/src/root_continuation.rs",
           "crates/verter_session/src/test_worker_pools.rs",
           "crates/verter_session/src/tests/meta/mod.rs",
           "crates/verter_session/src/typeinfo/vue_macro_codegen.rs",
@@ -538,6 +539,8 @@
           "new_sync_with_executor_and_task_registry",
           "execute_scoped_cache_node",
           "begin_scoped_cache_node",
+          "run_transferred_producer",
+          "dispatch_for_pending_dependency",
           "submit_request",
           "begin_submit_request",
           "submit_batch_atomic",
@@ -1049,6 +1052,7 @@
       "allowedImportDirection": {
         "verter": [
           "verter_audit",
+          "verter_execution",
           "verter_retention",
           "verter_session_query",
           "verter_span",
