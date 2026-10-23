@@ -138,14 +138,13 @@ fn props_of(answer: ComponentMetaOutputAnswer) -> Vec<String> {
     names
 }
 
-/// The owner's runtime client and IDE companion through the single-request
-/// compile root, as text.
-fn compile_owner(host: &VerterHost) -> Vec<String> {
+/// The owner's runtime client and IDE companion demand.
+fn owner_compile_request() -> verter_compiler::compile_request::CompileRequest {
     use verter_compiler::compile_request::{
         CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
         RuntimeProductRequest, VueBackendRequest, VueCompileRequest,
     };
-    let request = CompileRequest::new(
+    CompileRequest::new(
         vec![
             CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
             CompileProduct::IdeCompanion(IdeProductRequest::default()),
@@ -162,10 +161,65 @@ fn compile_owner(host: &VerterHost) -> Vec<String> {
         false,
         false,
     )
-    .expect("the demand constructs");
-    let response = host
-        .compile_request(OWNER, request)
-        .expect("the owner compiles");
+    .expect("the demand constructs")
+}
+
+/// The owner's runtime client and IDE companion through the synchronous
+/// compile entry, as text.
+fn compile_owner(host: &VerterHost) -> Vec<String> {
+    compiled_texts(
+        host.compile_request(OWNER, owner_compile_request())
+            .expect("the owner compiles"),
+    )
+}
+
+/// What the work a compile root handed its driver reached, by kind.
+#[derive(Default)]
+struct HandedOut {
+    producers: usize,
+    dispatch_steps: usize,
+}
+
+/// Drive the owner's compile root on this thread: every poll runs under
+/// `probe`, and the work it hands out runs outside it — a producer on a
+/// thread of its own, a dispatch step here.
+fn compile_owner_through_root(
+    host: &VerterHost,
+    probe: fn() -> WaitProbe,
+) -> (Vec<String>, HandedOut) {
+    let mut root = host.begin_compile_request(OWNER, owner_compile_request());
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut handed = HandedOut::default();
+    loop {
+        let polled = {
+            let _probe = probe();
+            root.poll(&waker)
+        };
+        if let Poll::Ready(answer) = polled {
+            return (compiled_texts(answer.expect("the owner compiles")), handed);
+        }
+        match root.take_work() {
+            Some(work) if work.is_producer() => {
+                handed.producers += 1;
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(move || work.run())
+                        .join()
+                        .expect("the producer runs")
+                });
+            }
+            Some(work) => {
+                handed.dispatch_steps += 1;
+                if !work.run() {
+                    std::thread::park();
+                }
+            }
+            None => std::thread::park(),
+        }
+    }
+}
+
+fn compiled_texts(response: crate::types::CompileRequestResponse) -> Vec<String> {
     response
         .products
         .iter()
@@ -205,6 +259,7 @@ fn compile_owner_batch(host: &VerterHost) -> String {
 /// Every family a component-meta or compile root can reach, as listed in
 /// `docs/arch/root-continuations.md`.
 const ROOT_INVENTORY: &[WaitFamily] = &[
+    WaitFamily::Root,
     WaitFamily::SemanticFlight,
     WaitFamily::SemanticDrive,
     WaitFamily::CacheFlight,
@@ -317,8 +372,73 @@ fn root_continuations_mixed_component_meta_inventory() {
 }
 
 /// The single-request compile root, cold then warm, over the same
-/// dependencies. Its Vue macro codegen drives a scoped cache node, on the
-/// scheduler's CPU pool, warm or cold.
+/// dependencies, polled under a forbidding probe: its polls enter no wait.
+/// Its macro bundle's scoped cache node elects it producer, and the root
+/// hands that producer to its driver instead of running it, cold or warm;
+/// the producer's own macro traversal runs where the driver runs it. The
+/// answer is the synchronous entry's.
+#[test]
+fn root_continuations_compile_root_hands_its_producer_to_its_driver() {
+    let host = host();
+    let (cold_code, cold) = compile_owner_through_root(&host, WaitProbe::forbid);
+    let (warm_code, warm) = compile_owner_through_root(&host, WaitProbe::forbid);
+    assert_eq!(cold_code, warm_code);
+    assert!(cold_code.iter().any(|code| code.contains("caption")));
+    assert_eq!((cold.producers, warm.producers), (1, 1));
+    assert_eq!(compile_owner(&host), cold_code);
+}
+
+/// A compile root whose macro bundle another root is producing suspends on
+/// it: its poll answers `Pending` without entering a wait while the other
+/// root's handed-out producer is held, and running that producer wakes it
+/// to the same answer.
+#[test]
+fn root_continuations_compile_root_suspends_on_another_roots_producer() {
+    let host = host();
+    let expected = compile_owner(&host);
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
+    let producer = loop {
+        assert!(producing.poll(&waker).is_pending());
+        match producing.take_work() {
+            Some(work) if work.is_producer() => break work,
+            Some(dispatch) => {
+                let _ = dispatch.run();
+            }
+            None => std::thread::park(),
+        }
+    };
+    let following = host.begin_compile_request(OWNER, owner_compile_request());
+    let answer = pending_before_release(
+        POLL_DEADLINE,
+        following,
+        |root, waker| root.poll(waker),
+        || {
+            assert!(producer.run());
+            loop {
+                if let Poll::Ready(answer) = producing.poll(&waker) {
+                    assert_eq!(
+                        compiled_texts(answer.expect("the owner compiles")),
+                        expected
+                    );
+                    break;
+                }
+                if let Some(work) = producing.take_work() {
+                    let _ = work.run();
+                }
+            }
+        },
+    )
+    .expect("the follower suspends until the producer runs");
+    assert_eq!(
+        compiled_texts(answer.expect("the owner compiles")),
+        expected
+    );
+}
+
+/// The synchronous compile entry drives the same root at its boundary: it
+/// enters the root driver's wait and runs the handed-out producer on the
+/// scheduler's CPU pool, cold or warm.
 #[test]
 fn root_continuations_compile_inventory() {
     let host = host();
@@ -327,11 +447,7 @@ fn root_continuations_compile_inventory() {
     assert_eq!(cold_code, warm_code);
     assert!(cold_code.iter().any(|code| code.contains("caption")));
     for (path, families) in [("cold compile", &cold), ("warm compile", &warm)] {
-        assert_reaches(
-            path,
-            families,
-            &[WaitFamily::ScopedCacheNode, WaitFamily::CpuPool],
-        );
+        assert_reaches(path, families, &[WaitFamily::Root, WaitFamily::CpuPool]);
     }
 }
 

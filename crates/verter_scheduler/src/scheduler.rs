@@ -877,26 +877,14 @@ impl Scheduler {
                         }
                         std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) => {
                             let operation = build.take().expect("only one producer is transferred");
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.cpu_pool.install(move || producer.run(operation));
-                            #[cfg(target_arch = "wasm32")]
-                            producer.run(operation);
+                            self.run_transferred_producer(move || producer.run(operation));
                         }
                         std::task::Poll::Ready(Err(error)) => {
                             return std::task::Poll::Ready(Err(error))
                         }
                         std::task::Poll::Pending => {
                             // Execution remains outside the polling capability.
-                            #[cfg(not(target_arch = "wasm32"))]
-                            let progress = self
-                                .pump_ready(
-                                    PumpReason::WaitOrDrive,
-                                    caller_kind::CallerKind::current(),
-                                )
-                                .made_progress();
-                            #[cfg(target_arch = "wasm32")]
-                            let progress = self.drive_one();
-                            if !progress {
+                            if !self.dispatch_for_pending_dependency() {
                                 return std::task::Poll::Pending;
                             }
                         }
@@ -904,6 +892,32 @@ impl Scheduler {
                 }
             },
         )
+    }
+
+    /// Run a dependency producer a pollable computation transferred to its
+    /// synchronous driver, where this scheduler runs producers: on its CPU
+    /// pool (natively), blocking the caller until it returns, or on the
+    /// caller itself (wasm32).
+    pub fn run_transferred_producer(&self, producer: impl FnOnce() + Send) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cpu_pool.install(producer);
+        #[cfg(target_arch = "wasm32")]
+        producer();
+    }
+
+    /// Advance this scheduler's dispatch once on behalf of a synchronous
+    /// driver whose computation waits on a dependency it admitted: dispatch
+    /// ready stages this caller may run (natively) or drive one stage
+    /// (wasm32). Answers whether anything progressed; when nothing did, the
+    /// dependency's own settlement wakes the computation.
+    pub fn dispatch_for_pending_dependency(self: &Arc<Self>) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        let progress = self
+            .pump_ready(PumpReason::WaitOrDrive, caller_kind::CallerKind::current())
+            .made_progress();
+        #[cfg(target_arch = "wasm32")]
+        let progress = self.drive_one();
+        progress
     }
 
     /// Begin a cache-node computation without waiting for inbox capacity or

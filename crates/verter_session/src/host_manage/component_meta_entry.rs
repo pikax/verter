@@ -419,7 +419,8 @@ impl VerterHost {
     > {
         // The synchronous entry drives the request's pollable root
         // ([`Self::begin_component_meta_output`]) to its answer.
-        self.begin_component_meta_output(canonical_or_alias).drive()
+        self.begin_component_meta_output(canonical_or_alias)
+            .drive(self.scheduler())
     }
 
     /// Output-bearing VIEW entry pinned to a caller-captured

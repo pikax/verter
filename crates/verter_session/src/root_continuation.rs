@@ -98,10 +98,88 @@ impl RootAmbient {
     }
 }
 
+/// Dependency work a pending root hands its driver: run it, then poll the
+/// root again.
+///
+/// A root never runs a dependency's producer inside its own poll, and it
+/// never drives the scheduler that dispatches its dependencies. When it
+/// needs either, its poll returns `Pending` and the work waits in the root
+/// ([`ComponentMetaOutputRoot::take_work`], [`CompileRequestRoot::take_work`])
+/// for its driver. The driver runs it on whichever thread it chooses —
+/// [`Self::is_producer`] tells CPU work apart from a dispatch step — and
+/// polls the root again; nothing else wakes a root that handed out work.
+/// Dropping the work instead abandons the dependency it carried, and the
+/// root's next poll answers that abandonment.
+#[must_use = "a root that handed out work waits for it to run"]
+pub struct RootWork<'h>(RootWorkKind<'h>);
+
+enum RootWorkKind<'h> {
+    /// A dependency's sole producer, transferred out of the root's poll.
+    Produce(Box<dyn FnOnce() + Send + 'h>),
+    /// One dispatch step of the scheduler a dependency the root admitted
+    /// waits in; answers whether it dispatched anything.
+    Dispatch(Box<dyn FnOnce() -> bool + Send + 'h>),
+}
+
+impl<'h> RootWork<'h> {
+    pub(crate) fn produce(producer: impl FnOnce() + Send + 'h) -> Self {
+        Self(RootWorkKind::Produce(Box::new(producer)))
+    }
+
+    pub(crate) fn dispatch(step: impl FnOnce() -> bool + Send + 'h) -> Self {
+        Self(RootWorkKind::Dispatch(Box::new(step)))
+    }
+
+    /// Whether this is a dependency's producer — CPU work a driver places
+    /// on a worker — rather than a scheduler dispatch step.
+    #[must_use]
+    pub fn is_producer(&self) -> bool {
+        matches!(self.0, RootWorkKind::Produce(_))
+    }
+
+    /// Run the work on this thread. Answers whether it made progress: a
+    /// producer always does; a dispatch step only when it dispatched
+    /// something, and otherwise the dependency's own settlement wakes the
+    /// root.
+    pub fn run(self) -> bool {
+        match self.0 {
+            RootWorkKind::Produce(producer) => {
+                producer();
+                true
+            }
+            RootWorkKind::Dispatch(step) => step(),
+        }
+    }
+}
+
+/// Where a root's computation leaves the work it hands its driver.
+#[derive(Clone)]
+pub(crate) struct RootWorkSlot<'h>(Arc<parking_lot::Mutex<Option<RootWork<'h>>>>);
+
+impl<'h> RootWorkSlot<'h> {
+    fn new() -> Self {
+        Self(Arc::new(parking_lot::Mutex::new(None)))
+    }
+
+    /// Hand `work` to the driver; the computation then returns `Pending`.
+    pub(crate) fn offer(&self, work: RootWork<'h>) {
+        let previous = self.0.lock().replace(work);
+        verter_debug_assert!(
+            previous.is_none(),
+            "a root hands out one piece of work per poll"
+        );
+    }
+
+    fn take(&self) -> Option<RootWork<'h>> {
+        self.0.lock().take()
+    }
+}
+
 /// One root computation and the ambient state it runs under.
 pub(crate) struct RootTask<'h, T> {
     computation: Option<Pin<Box<dyn Future<Output = T> + Send + 'h>>>,
     ambient: RootAmbient,
+    work: RootWorkSlot<'h>,
 }
 
 impl<'h, T> RootTask<'h, T> {
@@ -111,10 +189,29 @@ impl<'h, T> RootTask<'h, T> {
         registry: &TaskRegistry,
         computation: impl Future<Output = T> + Send + 'h,
     ) -> Self {
+        Self::with_work(registry, |_| computation)
+    }
+
+    /// [`Self::new`] for a computation that hands its driver dependency
+    /// work through the slot `computation` is built with.
+    pub(crate) fn with_work<F>(
+        registry: &TaskRegistry,
+        computation: impl FnOnce(RootWorkSlot<'h>) -> F,
+    ) -> Self
+    where
+        F: Future<Output = T> + Send + 'h,
+    {
+        let work = RootWorkSlot::new();
         Self {
-            computation: Some(Box::pin(computation)),
+            computation: Some(Box::pin(computation(work.clone()))),
             ambient: RootAmbient::capture(registry),
+            work,
         }
+    }
+
+    /// The dependency work the root's last pending poll handed out.
+    pub(crate) fn take_work(&mut self) -> Option<RootWork<'h>> {
+        self.work.take()
     }
 
     /// Advance the root: `Ready` with its answer, or `Pending` once it waits
@@ -139,12 +236,32 @@ impl<'h, T> RootTask<'h, T> {
     }
 
     /// Drive the root to its answer on this thread: the synchronous public
-    /// entry's external boundary.
-    pub(crate) fn drive(mut self) -> T {
+    /// entry's external boundary. Dependency producers the root hands out
+    /// run where `scheduler` runs producers (its CPU pool), and dispatch
+    /// steps run here.
+    pub(crate) fn drive(mut self, scheduler: &verter_scheduler::scheduler::Scheduler) -> T {
         verter_execution::blocking::block_on(
             verter_execution::blocking::WaitFamily::Root,
             None,
-            |waker| self.poll(waker),
+            |waker| loop {
+                if let Poll::Ready(answer) = self.poll(waker) {
+                    return Poll::Ready(answer);
+                }
+                let Some(work) = self.take_work() else {
+                    return Poll::Pending;
+                };
+                let progressed = if work.is_producer() {
+                    scheduler.run_transferred_producer(move || {
+                        work.run();
+                    });
+                    true
+                } else {
+                    work.run()
+                };
+                if !progressed {
+                    return Poll::Pending;
+                }
+            },
         )
     }
 }
@@ -183,10 +300,10 @@ pub struct ComponentMetaOutputRoot<'h> {
     task: RootTask<'h, ComponentMetaOutputAnswer>,
 }
 
-impl ComponentMetaOutputRoot<'_> {
+impl<'h> ComponentMetaOutputRoot<'h> {
     /// Advance the request: `Ready` with its answer, or `Pending` once it
-    /// waits on a dependency that will wake `waker`. A wake only schedules
-    /// a later poll.
+    /// waits on a dependency that will wake `waker`, or on work it handed
+    /// out ([`Self::take_work`]). A wake only schedules a later poll.
     ///
     /// # Panics
     ///
@@ -195,9 +312,66 @@ impl ComponentMetaOutputRoot<'_> {
         self.task.poll(waker)
     }
 
+    /// The dependency work the last pending poll handed the driver, if any:
+    /// run it, then poll again.
+    pub fn take_work(&mut self) -> Option<RootWork<'h>> {
+        self.task.take_work()
+    }
+
     /// Drive the request to its answer on this thread.
-    pub(crate) fn drive(self) -> ComponentMetaOutputAnswer {
-        self.task.drive()
+    pub(crate) fn drive(
+        self,
+        scheduler: &verter_scheduler::scheduler::Scheduler,
+    ) -> ComponentMetaOutputAnswer {
+        self.task.drive(scheduler)
+    }
+}
+
+/// What a compile root answers: the same result
+/// [`VerterHost::compile_request`] returns.
+pub type CompileRequestAnswer =
+    Result<crate::types::CompileRequestResponse, crate::types::CompileRequestFailure>;
+
+/// One caller-supplied canonical compile request, as a pollable root
+/// ([`VerterHost::begin_compile_request`]).
+///
+/// The root borrows only the host and owns the request and every input it
+/// captures. It suspends on the store-view build its macro bundle reads and
+/// on the scoped cache node that produces the bundle: while another caller
+/// produces the node, while the node waits for dispatch (handing its driver
+/// a dispatch step), and while its own producer runs — the producer is
+/// handed to the driver ([`Self::take_work`]), never run in the root's
+/// poll. The macro traversal inside that producer still enters its own
+/// dependency waits synchronously; see `docs/arch/root-continuations.md`.
+#[must_use = "a root does nothing until it is polled"]
+pub struct CompileRequestRoot<'h> {
+    task: RootTask<'h, CompileRequestAnswer>,
+}
+
+impl<'h> CompileRequestRoot<'h> {
+    /// Advance the request: `Ready` with its answer, or `Pending` once it
+    /// waits on a dependency that will wake `waker`, or on work it handed
+    /// out ([`Self::take_work`]). A wake only schedules a later poll.
+    ///
+    /// # Panics
+    ///
+    /// When the root already answered.
+    pub fn poll(&mut self, waker: &Waker) -> Poll<CompileRequestAnswer> {
+        self.task.poll(waker)
+    }
+
+    /// The dependency work the last pending poll handed the driver, if any:
+    /// run it, then poll again.
+    pub fn take_work(&mut self) -> Option<RootWork<'h>> {
+        self.task.take_work()
+    }
+
+    /// Drive the request to its answer on this thread.
+    pub(crate) fn drive(
+        self,
+        scheduler: &verter_scheduler::scheduler::Scheduler,
+    ) -> CompileRequestAnswer {
+        self.task.drive(scheduler)
     }
 }
 
@@ -223,6 +397,26 @@ impl VerterHost {
                     &fixed,
                     false,
                 )
+            }),
+        }
+    }
+
+    /// Begin the caller-supplied canonical compile request for
+    /// `canonical_id` as a pollable root, without running any of it.
+    ///
+    /// The root answers what [`Self::compile_request`] answers, under the
+    /// request context and scheduler job current here, whichever thread
+    /// polls it.
+    pub fn begin_compile_request(
+        &self,
+        canonical_id: &str,
+        request: verter_compiler::compile_request::CompileRequest,
+    ) -> CompileRequestRoot<'_> {
+        let canonical_id = canonical_id.to_owned();
+        CompileRequestRoot {
+            task: RootTask::with_work(&self.task_registry, move |work| async move {
+                self.compile_request_pollable(&canonical_id, request, &work)
+                    .await
             }),
         }
     }

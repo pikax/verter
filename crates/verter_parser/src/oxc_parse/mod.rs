@@ -49,7 +49,7 @@ mod stack;
 pub use nesting::Nesting;
 #[cfg(any(test, feature = "stack-fault-injection"))]
 pub use stack::faults;
-pub use stack::{refusals_within, StackUnavailable};
+pub use stack::{refusals_within, refusals_within_pollable, RefusalsWithin, StackUnavailable};
 
 /// The most native stack oxc 0.151's parser, or a walk of oxc's over what
 /// it parsed, spends per level of [`nesting`]'s bound, with twice the
