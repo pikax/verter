@@ -606,6 +606,128 @@ fn root_continuations_dropping_a_suspended_component_meta_root_withdraws_its_wai
     });
 }
 
+// ── Single-thread external driver ──────────────────────────────────────
+
+/// Wakes a root by queueing its index for a later poll of the driver.
+struct QueueWaker {
+    index: usize,
+    queue: Arc<parking_lot::Mutex<std::collections::VecDeque<usize>>>,
+    /// Set while the driver polls a root or runs its work.
+    driving: Arc<std::sync::atomic::AtomicBool>,
+    /// Wakes that arrived while the driver was polling or running work:
+    /// where a waker that drove its root would have re-entered the driver.
+    woken_while_driving: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Wake for QueueWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if self.driving.load(std::sync::atomic::Ordering::SeqCst) {
+            self.woken_while_driving
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.queue.lock().push_back(self.index);
+    }
+}
+
+/// What a single-thread driver run produced.
+struct DriverRun {
+    answers: Vec<Vec<String>>,
+    producers: usize,
+    polls: usize,
+    woken_while_driving: usize,
+}
+
+/// Poll every root on this one thread until all answer, under a forbidding
+/// probe for each poll. A wake only queues its root; handed-out work runs
+/// here, between polls, and its root is polled again after it. No root is
+/// begun once driving starts.
+fn drive_on_one_thread(mut roots: Vec<crate::CompileRequestRoot<'_>>) -> DriverRun {
+    let queue = Arc::new(parking_lot::Mutex::new(
+        (0..roots.len()).collect::<std::collections::VecDeque<_>>(),
+    ));
+    let driving = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let woken_while_driving = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wakers: Vec<Waker> = (0..roots.len())
+        .map(|index| {
+            Waker::from(Arc::new(QueueWaker {
+                index,
+                queue: Arc::clone(&queue),
+                driving: Arc::clone(&driving),
+                woken_while_driving: Arc::clone(&woken_while_driving),
+            }))
+        })
+        .collect();
+    let mut answers: Vec<Option<Vec<String>>> = roots.iter().map(|_| None).collect();
+    let (mut producers, mut polls) = (0, 0);
+    while answers.iter().any(Option::is_none) {
+        let index = queue
+            .lock()
+            .pop_front()
+            .expect("a pending root is woken or holds work: no wake is lost");
+        if answers[index].is_some() {
+            continue;
+        }
+        polls += 1;
+        driving.store(true, std::sync::atomic::Ordering::SeqCst);
+        let polled = {
+            let _forbid = WaitProbe::forbid();
+            roots[index].poll(&wakers[index])
+        };
+        if let Poll::Ready(answer) = polled {
+            answers[index] = Some(compiled_texts(answer.expect("the root compiles")));
+        } else if let Some(work) = roots[index].take_work() {
+            producers += usize::from(work.is_producer());
+            if work.run() {
+                queue.lock().push_back(index);
+            }
+        }
+        driving.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    DriverRun {
+        answers: answers.into_iter().map(Option::unwrap).collect(),
+        producers,
+        polls,
+        woken_while_driving: woken_while_driving.load(std::sync::atomic::Ordering::SeqCst),
+    }
+}
+
+/// One thread drives three compile roots — two of the same request and one
+/// of the child component — begun before driving starts, with no other
+/// pool: every poll answers or suspends without entering a wait, each
+/// shared macro bundle is produced once, by the work its first root hands
+/// out while the other root of the request waits suspended, and every
+/// answer is the synchronous entry's. A follower's wake arrives while the
+/// driver runs its producer's work — where a waker that drove the root
+/// would re-enter the driver — and only queues a later poll.
+#[test]
+fn root_continuations_one_thread_drives_several_suspended_roots() {
+    let host = host();
+    let (owner, child) = (
+        compile_owner(&host),
+        compiled_texts(
+            host.compile_request(CHILD, owner_compile_request())
+                .expect("the child compiles"),
+        ),
+    );
+    let roots = vec![
+        host.begin_compile_request(OWNER, owner_compile_request()),
+        host.begin_compile_request(OWNER, owner_compile_request()),
+        host.begin_compile_request(CHILD, owner_compile_request()),
+    ];
+    let run = drive_on_one_thread(roots);
+    assert_eq!(run.answers, vec![owner.clone(), owner, child]);
+    assert_eq!(run.producers, 2, "one producer per distinct macro bundle");
+    assert!(run.polls > 3, "a root suspended and was resumed");
+    assert!(
+        run.woken_while_driving > 0,
+        "the follower is woken while the driver runs its producer"
+    );
+}
+
 // ── Pending-before-release harness ─────────────────────────────────────
 
 /// Why a poll did not suspend on its held dependency.
