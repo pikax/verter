@@ -175,7 +175,7 @@ pub(crate) struct ResolutionOperation<'a> {
     /// concurrent identical query's flight: a cancelled caller detaches
     /// from the flight (the producer runs on for its other subscribers)
     /// and returns a typed `Cancelled` refusal.
-    cancelled: Option<&'a dyn Fn() -> bool>,
+    cancelled: Option<&'a verter_execution::cancellation::CancellationToken>,
     project: Option<&'a verter_session_query::resolution::ProjectOwnership>,
 }
 
@@ -232,7 +232,10 @@ impl<'a> ResolutionOperation<'a> {
     /// Let the caller's cancellation detach this operation from a flight it
     /// waits on.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn cancelled_by(mut self, cancelled: &'a dyn Fn() -> bool) -> Self {
+    pub(crate) fn cancelled_by(
+        mut self,
+        cancelled: &'a verter_execution::cancellation::CancellationToken,
+    ) -> Self {
         self.cancelled = Some(cancelled);
         self
     }

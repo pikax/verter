@@ -546,7 +546,8 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
             let (result_bound, view_bound, live_pinned_bound) = live_reader_bounds(3);
             assert!(
                 lone_result > 0 && lone_result <= result_bound,
-                "{order}: a lone held result keeps a charge no larger than its live one"
+                "{order}: a lone held result keeps a charge no larger than its live one \
+                 ({lone_result} vs {result_bound})"
             );
             assert!(
                 lone_view >= view_bound && lone_view <= live_pinned_bound,

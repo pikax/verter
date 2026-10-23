@@ -20,7 +20,6 @@ const WORKERS: usize = 4;
 fn unbounded() -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: usize::MAX,
-        active_ceiling_bytes: usize::MAX,
         pin_threshold_bytes: usize::MAX,
         max_entry_bytes: usize::MAX,
     })

@@ -137,24 +137,30 @@ instead of each claiming it independently.
 
 **Limits** (`RetentionLimits::defaults()`, the ratified aggregate
 semantic-memory budget): 1 GiB `aggregate_ceiling_bytes`, 512 MiB
-`pin_threshold_bytes`, 4 MiB `max_entry_bytes`, and a 512 MiB
-process-wide `active_ceiling_bytes`. They are constants, not a config
-surface; a test injects a private account
+`pin_threshold_bytes`, 4 MiB `max_entry_bytes`. They are constants, not a
+config surface; a test injects a private account
 (`ProjectTypeStore::with_retention_account`,
 `ComponentMetaResultDb::with_account_for_test`,
 `DeclLoweringService::new_with_account`) rather than mutating them.
 
-**Three charge classes.** `Retained` (warm cache-entry bytes) and
-`Active` (in-flight bytes, additionally sub-limited) are REFUSABLE;
-`Pinned` (bytes a live handle obliges the process to keep — the
-lease-pinned parse snapshots in `decl_lowering`) is charged
-UNCONDITIONALLY. Refusing a pin would force a live artifact to re-parse
-or revoke a live handle, so pins consume headroom instead of being
-refused, and crossing `pin_threshold_bytes` is REPORTED
+**Three charge classes.** Only `Retained` (warm cache-entry bytes) is
+REFUSABLE — the discretionary class. `Active` (in-flight computation
+bytes: a flight's storage, a delivery's payload before its publication or
+caller handoff, an SCC member's held value before its batch) and `Pinned`
+(bytes a live handle obliges the process to keep — the lease-pinned parse
+snapshots in `decl_lowering`) are charged UNCONDITIONALLY: admitted
+computation is never refused or truncated for bytes, and refusing a pin
+would force a live artifact to re-parse or revoke a live handle. Both
+still consume aggregate headroom, so discretionary retention is refused
+while they are held, and crossing `pin_threshold_bytes` is REPORTED
 (`under_pin_pressure()`) rather than enforced. The hard invariant is
-therefore over the refusable classes: `active + retained` never exceeds
-`aggregate_ceiling_bytes − pinned`, under any concurrent interleaving
-(the admission is a CAS, never a check-then-reserve).
+therefore over the discretionary class: `retained` never exceeds
+`aggregate_ceiling_bytes − pinned − active`, under any concurrent
+interleaving (the admission is a CAS, never a check-then-reserve);
+production in-flight owners charge through
+`SemanticRetentionAccount::reserve_in_flight`, which attributes the
+charge to a measurement owner when an ACTIVE-occupancy window is open on
+the thread.
 
 **Reserve / commit / release.** `reserve` hands back a
 `RetentionCharge`, an RAII token whose `Drop` is the ONLY release path —
@@ -354,8 +360,8 @@ entries, `DeclBodyMemo`, scheduler snapshots) stays outside the account;
 a prepared-declaration bundle counts what it reaches of it while it lives
 and charges none of the layer's own storage.
 
-**Refusal routing.** `RetentionRefusal::{Oversized, Pressure,
-ActiveExhausted}` all map to `NonAdmissionReason::RetentionPressure`,
+**Refusal routing.** `RetentionRefusal::{Oversized, Pressure}` both map
+to `NonAdmissionReason::RetentionPressure`,
 whose propagation is `LocalOnly`: the value is complete and correct, so
 only the refusing family declines to store it and an enclosing
 derivation may still cache its own result. This is deliberately DISTINCT

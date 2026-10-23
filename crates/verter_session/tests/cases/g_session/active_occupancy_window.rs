@@ -1,10 +1,11 @@
 //! The public host's ACTIVE-occupancy window reads the one aggregate
 //! account the host's semantic workload charges: a genuine request's
 //! retained charges land on the account the window and the host's retention
-//! snapshot read, its truthful ACTIVE peak is zero (no production producer
-//! charges ACTIVE bytes through an owner), and an open window changes no
-//! answer. Owned, foreign and untagged ACTIVE attribution is proven by the
-//! retention owner's unit tests and, through the host's account, below.
+//! snapshot read, its in-flight work charges REAL ACTIVE bytes through the
+//! window's owner (a positive attributable peak and live transitions, not a
+//! zero measurement window), and an open window changes no answer. Owned,
+//! foreign and untagged ACTIVE attribution is proven by the retention
+//! owner's unit tests and, through the host's account, below.
 
 use std::sync::{Arc, Mutex};
 
@@ -69,9 +70,12 @@ fn a_host_window_measures_the_account_its_semantic_workload_charges() {
         after_workload.retained_bytes > before.retained_bytes,
         "the workload charged the account the window reads"
     );
-    // No production producer charges ACTIVE bytes through an owner, so the
-    // genuine request's truthful ACTIVE peak is zero: the window reports it
-    // as attributable zero, never a total or lifetime figure.
+    // The request's real in-flight work — its flight storage, its delivery
+    // payload before publication or caller handoff — charged ACTIVE bytes
+    // through the window's owner: the window reports a positive
+    // attributable peak with live transitions, never a fabricated or zero
+    // measurement. A producer that stopped charging in-flight work would
+    // collapse this peak back to zero and fail here.
     let report = window.finish();
     assert_eq!(
         report.active_at_open + report.rise_bytes - report.fall_bytes,
@@ -80,8 +84,24 @@ fn a_host_window_measures_the_account_its_semantic_workload_charges() {
     let peak = report
         .attributed()
         .expect("a workload alone on the account is attributable");
-    assert_eq!(peak.peak_active_bytes, 0);
-    assert!(!peak.crossed(1));
+    assert!(
+        peak.crossed(1),
+        "the genuine request charged real ACTIVE bytes, peak {}",
+        peak.peak_active_bytes
+    );
+    assert!(report.rise_bytes > 0, "the workload rose ACTIVE bytes");
+    assert!(
+        report.fall_bytes > 0,
+        "the workload settled its ACTIVE bytes"
+    );
+    assert!(
+        report.transitions > 0,
+        "the window observed real ACTIVE transitions"
+    );
+    assert_eq!(
+        report.active_at_close, 0,
+        "the completed request left no ACTIVE bytes behind"
+    );
 
     assert_eq!(
         request_icon_box(&self::host()),
@@ -111,7 +131,6 @@ fn a_host_window_excludes_foreign_work_and_rejects_unknown_provenance() {
             .admitted()
             .expect("active admitted"),
     );
-    let _ = request_icon_box(&host);
     let report = window.finish();
     let peak = report
         .attributed()

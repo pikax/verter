@@ -277,7 +277,6 @@ mod tests {
     fn pool_with_ceiling(aggregate_ceiling_bytes: usize) -> IdentityInterner {
         IdentityInterner::new(SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes,
-            active_ceiling_bytes: aggregate_ceiling_bytes,
             pin_threshold_bytes: aggregate_ceiling_bytes,
             max_entry_bytes: aggregate_ceiling_bytes,
         }))
@@ -286,7 +285,6 @@ mod tests {
     fn unbounded() -> Arc<SemanticRetentionAccount> {
         SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: usize::MAX,
-            active_ceiling_bytes: usize::MAX,
             pin_threshold_bytes: usize::MAX,
             max_entry_bytes: usize::MAX,
         })

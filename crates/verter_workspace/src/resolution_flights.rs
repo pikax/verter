@@ -28,7 +28,10 @@
 //!   still owed to its own demand and to the other subscribers, runs on;
 //! - a thread that holds a lease never subscribes to another flight: it
 //!   resolves directly instead. No thread waits while it owes a flight, and
-//!   no wait happens under any Engine lock.
+//!   no wait happens under any Engine lock. A lease belongs to the thread
+//!   that claimed it and is not `Send`: a computation that suspends cannot
+//!   hold one across the suspension, so the thread's lease count is exactly
+//!   the leases the computation polling it owes.
 
 use std::cell::Cell;
 use std::hash::Hash;
@@ -44,9 +47,6 @@ thread_local! {
     /// Leases the current thread holds.
     static LEASES_HELD: Cell<usize> = const { Cell::new(0) };
 }
-
-/// How often a waiting subscriber with a cancellation check observes it.
-const CANCELLATION_SLICE: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// The registry of in-flight cold queries.
 pub(crate) struct ResolutionFlights<K, T> {
@@ -90,12 +90,16 @@ pub(crate) enum FlightClaim<'a, K: Hash + Eq + Clone, T> {
     Direct,
 }
 
-/// The producer's obligation to settle one flight.
+/// The producer's obligation to settle one flight. It is settled on the
+/// thread that claimed it, within one poll of whatever computation claimed
+/// it.
 pub(crate) struct FlightLease<'a, K: Hash + Eq + Clone, T> {
     registry: &'a ResolutionFlights<K, T>,
     key: K,
     flight: Arc<Flight<T>>,
     settled: bool,
+    /// The claiming thread's lease count holds this lease.
+    _thread: std::marker::PhantomData<*const ()>,
 }
 
 /// One subscriber's interest in a flight.
@@ -143,6 +147,7 @@ impl<K: Hash + Eq + Clone, T> ResolutionFlights<K, T> {
             key: key.clone(),
             flight,
             settled: false,
+            _thread: std::marker::PhantomData,
         })
     }
 
@@ -217,19 +222,30 @@ impl<T> FlightSubscription<T> {
         }
     }
 
-    /// Wait for the flight to settle, observing `cancelled` at least every
-    /// few milliseconds; a cancelled subscriber detaches and the flight
-    /// runs on. This is [`Self::poll`] driven by the external blocking
-    /// driver.
-    pub(crate) fn wait(mut self, cancelled: Option<&dyn Fn() -> bool>) -> FlightOutcome<T> {
-        let slice = cancelled.map(|_| CANCELLATION_SLICE);
-        verter_execution::blocking::block_on(slice, |waker| match self.poll(waker) {
-            Poll::Pending if cancelled.is_some_and(|cancelled| cancelled()) => {
-                self.detach();
-                Poll::Ready(FlightOutcome::Detached)
-            }
-            answer => answer,
-        })
+    /// Wait for the flight to settle; a subscriber whose `cancelled` token
+    /// cancels first detaches and the flight runs on. The waiter is
+    /// registered on the flight and on the token, so either wakes it. This
+    /// is [`Self::poll`] driven by the external blocking driver.
+    pub(crate) fn wait(
+        mut self,
+        cancelled: Option<&verter_execution::cancellation::CancellationToken>,
+    ) -> FlightOutcome<T> {
+        let mut stop = cancelled.map(verter_execution::cancellation::CancellationToken::subscribe);
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::WorkspaceResolution,
+            None,
+            |waker| match self.poll(waker) {
+                Poll::Pending
+                    if stop
+                        .as_mut()
+                        .is_some_and(|stop| stop.poll(waker).is_ready()) =>
+                {
+                    self.detach();
+                    Poll::Ready(FlightOutcome::Detached)
+                }
+                answer => answer,
+            },
+        )
     }
 
     /// Stop waiting: withdraw this subscription's registration and leave
@@ -283,6 +299,19 @@ mod tests {
     fn wakes(counter: &CountingWake) -> usize {
         counter.0.load(Ordering::SeqCst)
     }
+
+    /// A lease cannot cross a suspension point: it is not `Send`, so a
+    /// suspending computation that held one across an await would not be
+    /// either. This fails to compile once a lease is `Send`.
+    const _: fn() = || {
+        trait AmbiguousIfSend<A> {
+            fn some_item() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        struct Sendable;
+        impl<T: ?Sized + Send> AmbiguousIfSend<Sendable> for T {}
+        let _ = <FlightLease<'static, u32, u32> as AmbiguousIfSend<_>>::some_item;
+    };
 
     /// Subscribe to `key`'s running flight from another thread, since the
     /// thread leading it resolves directly instead.
@@ -383,7 +412,8 @@ mod tests {
         };
         let cancelled = join(&flights, 1);
         let mut sibling = join(&flights, 1);
-        let stop = || true;
+        let stop = verter_execution::cancellation::CancellationToken::new();
+        stop.cancel();
         assert!(matches!(
             cancelled.wait(Some(&stop)),
             FlightOutcome::Detached

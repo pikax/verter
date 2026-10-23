@@ -25,7 +25,9 @@ pub(super) struct ScopedCacheFlightState {
     pub(super) owners: HashMap<u64, ScopedFlightOwner>,
     pub(super) aggregate: Option<CancellationToken>,
     pub(super) dispatched: bool,
-    pub(super) builder_claimed: bool,
+    /// The transferred producer's execution task and the handoff that claimed
+    /// it. Followers retain their own tasks and register edges to this one.
+    pub(super) producer: Option<(ExecutionTask, u64)>,
     pub(super) terminal: Option<ScopedCacheTerminal>,
     pub(super) wakers: WakerSet,
 }
@@ -52,6 +54,7 @@ impl ScopedCacheFlight {
                 Some(registration) => Some(registration),
                 None => {
                     state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                    state.producer = None;
                     state.owners.clear();
                     self.delivery.deliver(vec![state.wakers.take()]);
                     return false;
@@ -84,6 +87,7 @@ impl ScopedCacheFlight {
         for owner in state.owners.values_mut() {
             let Some(registration) = aggregate.register_owner(owner.request.clone()) else {
                 state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                state.producer = None;
                 state.owners.clear();
                 self.delivery.deliver(vec![state.wakers.take()]);
                 return false;
@@ -112,6 +116,7 @@ impl ScopedCacheFlight {
             return false;
         }
         state.terminal = Some(ScopedCacheTerminal::Cancelled);
+        state.producer = None;
         state.owners.clear();
         self.delivery.deliver(vec![state.wakers.take()]);
         true
@@ -125,6 +130,7 @@ impl ScopedCacheFlight {
         if state.terminal.is_some() || aggregate.is_cancelled() {
             if state.terminal.is_none() {
                 state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                state.producer = None;
                 state.owners.clear();
                 self.delivery.deliver(vec![state.wakers.take()]);
             }
@@ -147,6 +153,7 @@ impl ScopedCacheFlight {
             return false;
         }
         state.terminal = Some(terminal);
+        state.producer = None;
         state.owners.clear();
         self.delivery.deliver(vec![state.wakers.take()]);
         true

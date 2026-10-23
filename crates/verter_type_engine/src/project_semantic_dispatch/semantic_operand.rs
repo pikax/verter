@@ -57,7 +57,8 @@ fn empty_projection_path() -> verter_type_expr::OwnedSlice<PathSegment> {
 }
 
 struct OperandEvidenceGuard<'a> {
-    stack: &'a std::cell::RefCell<smallvec::SmallVec<[OperandEvidenceEntry; 2]>>,
+    stack:
+        &'a verter_execution::sync_cell::SyncRefCell<smallvec::SmallVec<[OperandEvidenceEntry; 2]>>,
     previous_len: usize,
 }
 
@@ -105,7 +106,9 @@ impl<'a> OperandEvidenceGuard<'a> {
     /// the cold build whose key equals `target`, so a nested build the
     /// target key's own construction triggers never inherits it.
     fn push(
-        stack: &'a std::cell::RefCell<smallvec::SmallVec<[OperandEvidenceEntry; 2]>>,
+        stack: &'a verter_execution::sync_cell::SyncRefCell<
+            smallvec::SmallVec<[OperandEvidenceEntry; 2]>,
+        >,
         target: &SemanticQueryKey,
         evidence: impl IntoIterator<Item = SemanticOperandEvidence>,
     ) -> Self {

@@ -1632,13 +1632,33 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         owner_canonical: &str,
         compute: impl FnOnce() -> R,
     ) -> (R, ComponentMetaTrace) {
+        verter_execution::blocking::complete_now(std::pin::pin!(
+            self.traced_component_meta_compute_pollable(owner_canonical, async move { compute() })
+        ))
+    }
+
+    /// [`Self::traced_component_meta_compute`] over a compute that may
+    /// suspend. The compute owns its tracer, its spend log and its span
+    /// across its suspensions; each of its polls installs them on the
+    /// polling thread for the poll alone.
+    pub async fn traced_component_meta_compute_pollable<R>(
+        &self,
+        owner_canonical: &str,
+        compute: impl std::future::Future<Output = R>,
+    ) -> (R, ComponentMetaTrace) {
         let generation = self.current_project_generation();
         let external_fingerprint = self.ctx.publication_input_fingerprint();
         let request = crate::request_context::current_request_budget();
         let entry_snapshot = request.as_ref().map(|budget| budget.capture_entry());
-        let spend = crate::request_budget::ThreadSpendGuard::enter();
-        let span = super::connected_demand::ComponentMetaSpanGuard::enter();
-        let (value, finalise) = self.traced_compute(|| {
+        let mut spend = crate::request_budget::ComputeSpendLog::default();
+        let mut span = super::connected_demand::ComputeSpan::default();
+        let mut tracer = crate::resolver_core::resolver_context::OwnedFactTracer::fanning_out(
+            verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
+                &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+                &self.snapshot.clocks().live(),
+            ),
+        );
+        let mut compute = std::pin::pin!(async {
             if let Some(hash) = self.ctx.authoritative_current_content_hash(owner_canonical) {
                 crate::resolver_core::resolver_context::observe_fan_out(
                     FactVersionRef::FileWholeHash {
@@ -1647,8 +1667,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                     },
                 );
             }
-            compute()
+            compute.await
         });
+        // The scopes are lent to each poll exclusively, so a compute that
+        // moves between threads moves them with it.
+        let (spend_lent, span_lent, tracer_lent) = (&mut spend, &mut span, &mut tracer);
+        let value = std::future::poll_fn(move |cx| {
+            let _spend = spend_lent.install();
+            let _span = span_lent.install();
+            let _tracer = tracer_lent.install();
+            std::future::Future::poll(compute.as_mut(), cx)
+        })
+        .await;
+        let finalise = tracer.into_read_set().finalise();
         let (operations, paid) = spend.finish();
         let span = span.finish();
         let (request_spent, spent_alone) = match (request.as_ref(), entry_snapshot.as_ref()) {

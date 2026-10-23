@@ -311,6 +311,8 @@ fn completion_wakes_run_after_admission_completion_and_retirement_locks_release(
 fn a_driver_reset_does_not_wait_for_the_reset_that_may_be_joining_it() {
     let scheduler = scheduler();
     let serial = scheduler.reset_serial.lock();
+    // A real external reset posts shutdown before joining its driver.
+    scheduler.shutdown.store(true, Ordering::Release);
     let (done, completed) = std::sync::mpsc::channel();
     let resetting = Arc::clone(&scheduler);
     let driver = std::thread::spawn(move || {

@@ -162,9 +162,20 @@ fn scoped_handoff_cancellation_detaches_only_its_follower() {
     let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
         panic!("dispatch transfers the producer");
     };
+    // With the producer held and no timer, the cancellation alone wakes the
+    // pending follower, and its next poll ends it.
+    let counter = Arc::new(CountWake::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    assert!(follower.poll(&waker).is_pending());
+    let before = counter.0.load(Ordering::SeqCst);
     token.cancel();
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        before + 1,
+        "cancelling the request wakes its pending follower once"
+    );
     assert!(matches!(
-        follower.poll(Waker::noop()),
+        follower.poll(&waker),
         Poll::Ready(Err(ScopedCacheNodeError::Cancelled))
     ));
     producer.run(|token| {
@@ -329,4 +340,166 @@ fn a_higher_priority_scoped_follower_upgrades_the_admitted_job() {
     assert!(
         matches!(follower.poll(Waker::noop()), Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 47)
     );
+}
+
+#[test]
+fn producer_election_wakes_followers_to_register_task_waits() {
+    let scheduler = scheduler();
+    let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+    assert!(root.poll(Waker::noop()).is_pending());
+    scheduler.drive_all();
+    // A late follower can remain behind capacity even though the shared
+    // flight was dispatched. Election must wake that subscriber as well.
+    for _ in 0..crate::driver::SUBMISSION_INBOX_CAPACITY {
+        scheduler.inbox.sender.try_send(Submission::Wake).unwrap();
+    }
+    let mut follower = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+    let counter = Arc::new(CountWake::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    assert!(follower.poll(&waker).is_pending());
+    assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+    assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+    let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
+        panic!("one handoff receives the producer");
+    };
+    assert_eq!(counter.0.load(Ordering::SeqCst), 1, "election wake");
+    assert!(root.poll(Waker::noop()).is_pending());
+    assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+    for _ in 0..3 {
+        assert!(follower.poll(&waker).is_pending());
+        assert_eq!(scheduler.task_registry.wait_count_for_tests(), 1);
+    }
+    producer.run(|_| 47);
+    assert_eq!(counter.0.load(Ordering::SeqCst), 2, "settlement wake");
+    assert!(matches!(
+        follower.poll(Waker::noop()),
+        Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 47
+    ));
+    assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+    assert!(matches!(
+        root.poll(Waker::noop()),
+        Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 47
+    ));
+    drop((root, follower));
+    scheduler.quiesce();
+    assert_eq!(scheduler.task_registry.active_task_count_for_tests(), 0);
+}
+
+#[test]
+fn suspended_same_task_reentry_is_refused_on_another_thread() {
+    let scheduler = scheduler();
+    let task = scheduler.task_registry.register_task();
+    let (mut root, mut nested) = {
+        let _scope = ExecutionScope::install(&scheduler.task_registry, &task);
+        (
+            scheduler.begin_scoped_cache_node::<u64>(request()).unwrap(),
+            scheduler.begin_scoped_cache_node::<u64>(request()).unwrap(),
+        )
+    };
+    assert!(root.poll(Waker::noop()).is_pending());
+    scheduler.drive_all();
+    let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
+        panic!("the task owns the transferred producer");
+    };
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let unrelated = ExecutionScope::enter(&scheduler.task_registry);
+                assert_ne!(unrelated.task().id(), task.id());
+                assert!(matches!(
+                    nested.poll(Waker::noop()),
+                    Poll::Ready(Err(ScopedCacheNodeError::Reentrant))
+                ));
+                assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+            })
+            .join()
+            .unwrap();
+    });
+    producer.run(|_| 53);
+    assert!(matches!(
+        root.poll(Waker::noop()),
+        Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 53
+    ));
+    drop((root, nested, task));
+    assert_eq!(scheduler.task_registry.active_task_count_for_tests(), 0);
+}
+
+#[test]
+fn scoped_task_waits_release_on_follower_drop_cancellation_reset_and_producer_failure() {
+    #[derive(Clone, Copy)]
+    enum Terminal {
+        FollowerDrop,
+        FollowerCancel,
+        Reset,
+        ProducerPanic,
+        ProducerDrop,
+    }
+    for terminal in [
+        Terminal::FollowerDrop,
+        Terminal::FollowerCancel,
+        Terminal::Reset,
+        Terminal::ProducerPanic,
+        Terminal::ProducerDrop,
+    ] {
+        let scheduler = scheduler();
+        let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+        let (context, token) = super::tests::scoped_test_context(23);
+        let mut joined = request();
+        joined.request_context = Some(context);
+        let mut follower = scheduler.begin_scoped_cache_node::<u64>(joined).unwrap();
+        assert!(root.poll(Waker::noop()).is_pending());
+        scheduler.drive_all();
+        let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop())
+        else {
+            panic!("the root receives the producer");
+        };
+        assert!(follower.poll(Waker::noop()).is_pending());
+        assert_eq!(scheduler.task_registry.wait_count_for_tests(), 1);
+        match terminal {
+            Terminal::FollowerDrop => {
+                drop(follower);
+                assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+                producer.run(|_| 59);
+            }
+            Terminal::FollowerCancel => {
+                token.cancel();
+                assert!(matches!(
+                    follower.poll(Waker::noop()),
+                    Poll::Ready(Err(ScopedCacheNodeError::Cancelled))
+                ));
+                assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+                producer.run(|_| 59);
+            }
+            Terminal::Reset => {
+                scheduler.reset();
+                assert!(matches!(
+                    follower.poll(Waker::noop()),
+                    Poll::Ready(Err(ScopedCacheNodeError::Shutdown))
+                ));
+                assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+                drop(producer);
+            }
+            Terminal::ProducerPanic => {
+                producer.run(|_| panic!("producer failure"));
+                assert!(matches!(
+                    follower.poll(Waker::noop()),
+                    Poll::Ready(Err(ScopedCacheNodeError::Panicked))
+                ));
+            }
+            Terminal::ProducerDrop => {
+                drop(producer);
+                assert!(matches!(
+                    follower.poll(Waker::noop()),
+                    Poll::Ready(Err(ScopedCacheNodeError::Cancelled))
+                ));
+            }
+        }
+        assert_eq!(scheduler.task_registry.wait_count_for_tests(), 0);
+        if matches!(terminal, Terminal::FollowerDrop | Terminal::FollowerCancel) {
+            assert!(matches!(
+                root.poll(Waker::noop()),
+                Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 59
+            ));
+        }
+    }
 }

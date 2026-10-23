@@ -249,35 +249,47 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-/// Pushes a spend log for the current thread. Nested computes each keep
-/// their own log, and a spend is recorded on every log still on the stack
-/// so an outer compute includes the inner one's request effects.
-pub(crate) struct ThreadSpendGuard {
-    log: Rc<RefCell<ThreadSpendLog>>,
+/// The spend log of one component-meta compute, which the compute owns
+/// across its suspensions. Each step of the compute pushes it on the
+/// running thread's stack ([`Self::install`]); nested computes each keep
+/// their own log, and a spend is recorded on every log on the stack, so an
+/// outer compute includes the inner one's request effects.
+#[derive(Default)]
+pub(crate) struct ComputeSpendLog {
+    log: ThreadSpendLog,
 }
 
-impl ThreadSpendGuard {
-    pub(crate) fn enter() -> Self {
-        let log = Rc::new(RefCell::new(ThreadSpendLog::default()));
-        THREAD_SPEND_LOGS.with(|logs| logs.borrow_mut().push(Rc::clone(&log)));
-        Self { log }
+impl ComputeSpendLog {
+    /// Push the log on this thread until the returned installation drops,
+    /// unwinding included.
+    pub(crate) fn install(&mut self) -> ComputeSpendInstall<'_> {
+        let installed = Rc::new(RefCell::new(std::mem::take(&mut self.log)));
+        THREAD_SPEND_LOGS.with(|logs| logs.borrow_mut().push(Rc::clone(&installed)));
+        ComputeSpendInstall {
+            owner: self,
+            installed,
+        }
     }
 
     pub(crate) fn finish(self) -> (usize, Vec<CostIdentity>) {
-        let out = {
-            let log = self.log.borrow();
-            (log.operations, log.paid.clone())
-        };
-        drop(self);
-        out
+        (self.log.operations, self.log.paid)
     }
 }
 
-impl Drop for ThreadSpendGuard {
+/// One step's installation of a [`ComputeSpendLog`]; dropping it takes the
+/// log off the thread and back into its compute.
+pub(crate) struct ComputeSpendInstall<'c> {
+    owner: &'c mut ComputeSpendLog,
+    installed: Rc<RefCell<ThreadSpendLog>>,
+}
+
+impl Drop for ComputeSpendInstall<'_> {
     fn drop(&mut self) {
         THREAD_SPEND_LOGS.with(|logs| {
-            logs.borrow_mut().retain(|log| !Rc::ptr_eq(log, &self.log));
+            logs.borrow_mut()
+                .retain(|log| !Rc::ptr_eq(log, &self.installed));
         });
+        self.owner.log = std::mem::take(&mut *self.installed.borrow_mut());
     }
 }
 
@@ -285,9 +297,12 @@ impl Drop for ThreadSpendGuard {
 /// a component-meta compute's spend log records them.
 #[cfg(any(test, feature = "test-support"))]
 pub fn with_request_spend_capture_for_tests<R>(body: impl FnOnce() -> R) -> (R, usize, usize) {
-    let guard = ThreadSpendGuard::enter();
-    let result = body();
-    let (operations, paid) = guard.finish();
+    let mut log = ComputeSpendLog::default();
+    let result = {
+        let _installed = log.install();
+        body()
+    };
+    let (operations, paid) = log.finish();
     (result, operations, paid.len())
 }
 

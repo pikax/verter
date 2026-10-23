@@ -599,11 +599,15 @@ impl SemanticGraphStore {
         let result = QueryResult::Value(value);
         let walker_diagnostics = super::empty_diagnostics();
         Ok(MemoEntry {
-            lease: self.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
-                &result,
-                &walker_diagnostics,
-                dispatch_dep_signature,
-            ))?,
+            // The staged member is in-flight work until the batch's
+            // reservation adopts its charges or the batch is refused.
+            lease: self.lease_delivery_in_flight(
+                super::delivery_lease::DeliveredAllocations::read(
+                    &result,
+                    &walker_diagnostics,
+                    dispatch_dep_signature,
+                ),
+            )?,
             result,
             read_set_signature: carrier.clone(),
             dispatch_dep_signature: dispatch_dep_signature.clone(),

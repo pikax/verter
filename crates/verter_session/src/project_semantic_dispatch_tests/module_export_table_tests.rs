@@ -459,7 +459,6 @@ fn export_tables_under_retention_pressure_answer_without_admission() {
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: ceiling,
             max_entry_bytes: ceiling,
-            active_ceiling_bytes: ceiling,
             pin_threshold_bytes: ceiling,
         });
         let leaf = format!("export const {name} = 1 as const;");

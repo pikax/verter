@@ -21,6 +21,16 @@ reset additionally defers them through its serialization hold and driver join.
 Directly owned standalone DAGs deliver immediately. A reset already joining
 its own driver permits that driver's callback to return instead of waiting
 for its joiner; another scheduler's driver retains the normal reset barrier.
+An own-driver reset that acquires the lifecycle hold clears state, retains
+the driver's identity and join handle, and leaves shutdown set until the
+loop exits. External restart joins that outgoing driver before reopening
+work. Reset followed by restart on the driver itself reuses the same loop;
+it never spawns an overlapping driver. A healthy restart's serialization
+hold cannot swallow an own-driver reset: reset parks in bounded slices until
+it acquires the hold or observes another lifecycle owner's shutdown. Startup
+is gated until identity/handle publication and lifecycle unlock, so an
+immediate completion wake can safely reset. `scheduler::reset_tests` covers
+exit, retained-handle recovery, startup, and same-driver reset/restart.
 
 `Scheduler::begin_scoped_cache_node<T>` similarly exposes a poll-only
 `ScopedCacheNodeHandoff<T>`. Admission/result waits yield; dispatch transfers
@@ -29,8 +39,15 @@ resuming the handoff. `execute_scoped_cache_node` is the synchronous driver over
 the same state, using the existing CPU pool. Scoped-flight dispatch/settlement
 wakes use the lifecycle deferral rail through flight and incarnation holds.
 Dropping a producer settles cancellation; dropping a subscriber detaches only
-its own owner. Cancellation-only wake subscriptions and shared wait-graph edges
-are still missing. See the root-continuations reference for the full contract.
+its own owner. The host supplies its existing `TaskRegistry` through
+`with_executor_and_task_registry` / `new_sync_with_executor_and_task_registry`,
+sharing the semantic store's cycle authority. Handoffs capture their execution
+task, transferred producers install it on their running thread, and followers
+hold RAII wait edges until terminal/drop. Election wakes pre-existing followers
+to register their edges; self-dependency and mixed semantic/cache task cycles
+take the existing `Reentrant` refusal without cancelling siblings.
+Cancellation-only wake subscriptions are still missing. See the
+root-continuations reference for the full contract.
 
 Each `FileNode` keeps four shards for its small per-profile artifact map,
 independent of the host CPU count. Source-only scripts still allocate that

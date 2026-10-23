@@ -117,7 +117,7 @@ pub(super) struct LiteralUnionIndex {
 }
 
 pub(super) type LiteralUnionIndexes =
-    std::cell::RefCell<FxHashMap<SemanticNodeId, Arc<LiteralUnionIndex>>>;
+    verter_execution::sync_cell::SyncRefCell<FxHashMap<SemanticNodeId, Arc<LiteralUnionIndex>>>;
 
 #[derive(Hash, PartialEq, Eq)]
 struct LiteralUnionIndexKey(SemanticNodeId);
