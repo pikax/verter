@@ -1130,43 +1130,39 @@ describe("one crash-recovery authority", () => {
     lifetime.dispose();
   });
 
-  it("demands the workspace inventory when the serving server reports its carrier store", async () => {
+  it("negotiates the store-fill demand at initialize and sends no warm-up request", async () => {
     mocks.state.startShouldFail = false;
     const lifetime = new StartAttemptScope();
     const server = await startAttempt(makeContext(), lifetime);
 
-    const overviewDemands = () =>
-      mocks.state.clientRequests.filter(
-        (request) => request.type === "$/verter/getProjectOverview",
-      );
+    // This extension wires VS Code's own TypeScript service over the carrier
+    // store. The demand that keeps that store filled is NEGOTIATED once at
+    // initialize — the `carrierStoreFill` subscription — not re-issued as a
+    // request on every carrier-store report.
+    type ClientOptions = {
+      initializationOptions: { subscriptions: Record<string, boolean> };
+    };
+    const initial = mocks.state.createdClientOptions[0] as ClientOptions;
+    expect(initial.initializationOptions.subscriptions.carrierStoreFill).toBe(true);
+    expect(initial.initializationOptions.subscriptions.carrierStoreChanged).toBe(true);
 
-    // The serving server names its carrier store: this extension wires VS Code's
-    // own TypeScript service over that store, and the store only fills once the
-    // server's inventory scan runs. The overview request IS that demand, so it
-    // must ride the SAME client the notification arrived on.
-    mocks.state.projectOverviewError = -32803;
+    // The store report itself is inert on the wire: no inventory request rides
+    // it (the former warm-up `getProjectOverview` demand is gone), whatever the
+    // server generation, and a replaced client's report forwards nothing.
     fireNotificationOn(0, "$/verter/carrierStoreReady", { carrierStoreDir: "/store" });
-    expect(overviewDemands()).toHaveLength(1);
-    expect(overviewDemands()[0].clientIndex).toBe(0);
-    // The pending (-32803) answer is the expected answer while the demanded scan
-    // runs: swallowed, so no unhandled rejection and no retry churn.
-    await vi.advanceTimersByTimeAsync(0);
-
-    // One notification is one demand: every carrier-store report of a live
-    // server generation carries its own request (a re-report means the server
-    // re-resolved the store, e.g. after a workspace switch).
     fireNotificationOn(0, "$/verter/carrierStoreReady", { carrierStoreDir: "/store" });
-    expect(overviewDemands()).toHaveLength(2);
-
-    // A replaced client's report never demands anything for the replacement.
     await server.restart(false);
     fireNotificationOn(0, "$/verter/carrierStoreReady", { carrierStoreDir: "/stale" });
-    expect(overviewDemands()).toHaveLength(2);
-
-    // The replacement's own report demands on ITS client.
     fireNotificationOn(1, "$/verter/carrierStoreReady", { carrierStoreDir: "/store" });
-    expect(overviewDemands()).toHaveLength(3);
-    expect(overviewDemands()[2].clientIndex).toBe(1);
+    expect(
+      mocks.state.clientRequests.filter(
+        (request) => request.type === "$/verter/getProjectOverview",
+      ),
+    ).toHaveLength(0);
+
+    // A restart re-negotiates the same subscription on the replacement client.
+    const restarted = mocks.state.createdClientOptions[1] as ClientOptions;
+    expect(restarted.initializationOptions.subscriptions.carrierStoreFill).toBe(true);
 
     lifetime.dispose();
   });

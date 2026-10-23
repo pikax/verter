@@ -23,6 +23,16 @@ pub struct Subscriptions {
     /// `$/verter/carrierStoreChanged` after every carrier publication — for a
     /// client running its own TypeScript service over the carrier store.
     pub carrier_store_changed: bool,
+    /// `carrierStoreFill` — the client runs a consumer over the durable carrier
+    /// store (VS Code's own TypeScript service via the tsserver plugin) and
+    /// asks the server to KEEP that store filled: the negotiated demand that
+    /// starts the workspace inventory scan whose publications fill it, through
+    /// the same idempotent scanner lifecycle a request's demand uses. Distinct
+    /// from `carrier_store_changed` (the refresh NOTIFICATION the filled store's
+    /// consumer also wants). Off, like every subscription: a session whose store
+    /// would otherwise fill only when a request needs the complete inventory
+    /// stays lazy, and a session with no carrier publisher treats it as inert.
+    pub carrier_store_fill: bool,
 }
 
 impl Subscriptions {
@@ -37,6 +47,7 @@ impl Subscriptions {
         Self {
             heartbeat: declared("heartbeat"),
             carrier_store_changed: declared("carrierStoreChanged"),
+            carrier_store_fill: declared("carrierStoreFill"),
         }
     }
 }
@@ -100,6 +111,7 @@ impl LspDemandPlan {
 pub struct ClientSubscriptions {
     heartbeat: AtomicBool,
     carrier_store_changed: AtomicBool,
+    carrier_store_fill: AtomicBool,
 }
 
 impl ClientSubscriptions {
@@ -108,6 +120,8 @@ impl ClientSubscriptions {
             .store(subscriptions.heartbeat, Ordering::Release);
         self.carrier_store_changed
             .store(subscriptions.carrier_store_changed, Ordering::Release);
+        self.carrier_store_fill
+            .store(subscriptions.carrier_store_fill, Ordering::Release);
     }
 
     pub fn heartbeat(&self) -> bool {
@@ -116,6 +130,10 @@ impl ClientSubscriptions {
 
     pub fn carrier_store_changed(&self) -> bool {
         self.carrier_store_changed.load(Ordering::Acquire)
+    }
+
+    pub fn carrier_store_fill(&self) -> bool {
+        self.carrier_store_fill.load(Ordering::Acquire)
     }
 }
 
@@ -170,6 +188,7 @@ mod tests {
                 subscriptions: Subscriptions {
                     heartbeat: false,
                     carrier_store_changed: true,
+                    carrier_store_fill: false,
                 },
                 refreshes_semantic_tokens: true,
                 refreshes_inlay_hints: false,
@@ -185,9 +204,11 @@ mod tests {
         gate.install(Subscriptions {
             heartbeat: true,
             carrier_store_changed: true,
+            carrier_store_fill: true,
         });
         assert!(gate.heartbeat() && gate.carrier_store_changed());
         gate.install(Subscriptions::default());
         assert!(!gate.heartbeat() && !gate.carrier_store_changed());
+        assert!(!gate.carrier_store_fill());
     }
 }

@@ -472,7 +472,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // scan is re-armed under this generation; otherwise nothing walks the
     // workspace — an open document is served by its own import-dependency
     // publication, and the complete carrier inventory is built only when a
-    // request that needs it (frontier, workspace-wide enumeration) asks.
+    // request that needs it (frontier, workspace-wide enumeration) asks or the
+    // client negotiated the store-fill demand (`carrierStoreFill`): a client
+    // running a consumer over the durable carrier store subscribed to keep it
+    // filled. That subscription is fulfilled only where a carrier publisher
+    // exists — every tsserver-store tier, including the editor-owned plugin
+    // route and managed TSGO — and through this same idempotent lifecycle, so
+    // it re-arms per generation exactly like a request's demand; a session
+    // with no publisher has no store to fill and the demand stays inert.
     {
         let published_basis = vfs_workspace
             .read()
@@ -493,9 +500,12 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             server.workspace_scan_settled.notify_waiters();
         }
     }
+    let store_fill_demanded =
+        server.subscriptions.carrier_store_fill() && server.carrier_publish_coordinator.is_some();
     if server
         .workspace_scan_demanded
         .load(std::sync::atomic::Ordering::Acquire)
+        || store_fill_demanded
     {
         server.activate_workspace_scan().await;
     }
@@ -639,12 +649,14 @@ pub(super) async fn finish_post_scan(server: std::sync::Weak<ServerCore>, my_gen
 }
 
 impl super::VerterLanguageServer {
-    /// Start the workspace scanner — idempotently — because a request needs
-    /// the complete workspace inventory: the owning project's carrier frontier
-    /// (references/rename) or a workspace-wide enumeration (workspace symbols,
-    /// auto-import candidates, project overview, route tree, component
-    /// parents, global CSS classes). Nothing else starts it: initialization,
-    /// document open and edits never walk the workspace.
+    /// Start the workspace scanner — idempotently — because the complete
+    /// workspace inventory is demanded: either a request needs it (the owning
+    /// project's carrier frontier for references/rename, or a workspace-wide
+    /// enumeration: workspace symbols, auto-import candidates, project
+    /// overview, route tree, component parents, global CSS classes) or the
+    /// client negotiated the store-fill demand (`carrierStoreFill`) and a
+    /// carrier publisher exists. Absent both, initialization, document open
+    /// and edits never walk the workspace.
     ///
     /// The demand is sticky for the server's lifetime: a later init
     /// generation re-arms the scan over its own snapshot. Before the first

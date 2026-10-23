@@ -1216,10 +1216,12 @@ async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
 }
 
 /// Initialization and opening a document never walk the workspace: the scan
-/// exists only once a request demands the complete inventory, and then it runs
+/// exists only once the complete inventory is demanded, and then it runs
 /// to completion without re-announcing level 2. The demand arrives through the
 /// real request routes — the references/rename frontier here, the
-/// workspace-wide enumerations below — never through the starter itself.
+/// workspace-wide enumerations below — never through the starter itself; the
+/// one starter-side demand is the NEGOTIATED `carrierStoreFill` subscription,
+/// which this fixture does not declare.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_workspace_scan_starts_only_on_frontier_demand() {
     let fixture = scan_publication_fixture(true).await;
@@ -1648,6 +1650,271 @@ async fn demanded_scan_retry_publication_still_pings_the_editor_owned_client() {
     })
     .await
     .expect("the recovered publication must ping the subscribed client");
+}
+
+/// The store-fill demand is NEGOTIATED, not requested: a client that
+/// subscribed `carrierStoreFill` runs a consumer over the durable carrier
+/// store and asks at initialize time that the server keep it filled. On the
+/// editor-owned tier — where a carrier publisher exists — the init's own
+/// arming fulfils that subscription through the same idempotent scan a
+/// request's demand uses: the scan publishes the carriers into the store and
+/// the settle pings the subscribed client, with no inventory request from the
+/// client at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn subscribed_store_fill_demand_scans_and_pings_the_editor_owned_client() {
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        _temp.path().join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "subscriptions": { "carrierStoreChanged": true, "carrierStoreFill": true }
+                },
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    server
+        .spawn_background_init(None, "subscribed store-fill demand test")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/ready")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the server announces readiness");
+
+    // No inventory request is issued anywhere in this test: the negotiated
+    // subscription alone must fill the store.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if carrier_manifest_strict(&workspace_root).is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the subscribed store-fill demand must run the inventory scan");
+    let manifest = carrier_manifest_strict(&workspace_root).unwrap();
+    assert!(
+        manifest
+            .projects
+            .get(&tsconfig)
+            .expect("the configured project owns the carrier")
+            .ready_files
+            .keys()
+            .any(|provider| provider.ends_with(".vue.tsx")),
+        "the store must advertise the App.vue IDE companion for the editor plugin"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/carrierStoreChanged")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the subscription-driven scan's publications must ping the subscribed client");
+}
+
+/// The store-fill subscription is inert without a carrier publisher: a
+/// session whose tier creates no carrier publish coordinator has no durable
+/// store to fill, so the init must not arm the workspace scanner for it —
+/// the subscription is a demand for a FILL, not for a walk.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_fill_subscription_does_not_activate_a_scan_without_a_publisher() {
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        _temp.path().join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                // No provider and a managed-tsserver kind: the coordinator
+                // match builds NO carrier publisher for this configuration.
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                type_provider_topology: crate::TypeProviderTopology::implied_by(
+                    crate::TypeProviderKind::Tsserver,
+                ),
+                mcp_port: None,
+                type_provider_reason: None,
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "subscriptions": { "carrierStoreChanged": true, "carrierStoreFill": true }
+                },
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+    assert!(
+        service.inner().carrier_publish_coordinator.is_none(),
+        "the fixture must model a tier with no carrier publisher"
+    );
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    server
+        .spawn_background_init(None, "store-fill demand without a publisher")
+        .await;
+    // Level 2 is announced by the waiter task the init spawns AFTER its
+    // scan-arming gate, so observing it proves the gate has run and decided.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/typeProviderSyncComplete")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the init completes and announces level 2");
+
+    assert!(
+        server.workspace_scanner.lock().await.is_none(),
+        "a subscribed store-fill demand must not arm the scanner on a tier with \
+         no carrier publisher"
+    );
+    assert!(!server.sync_coordinator.workspace_scan_in_progress());
+    assert!(
+        carrier_manifest_strict(&workspace_root).is_none(),
+        "no store exists to fill on a tier with no carrier publisher"
+    );
 }
 
 /// Auto-import tag completion enumerates the whole host: while the workspace
