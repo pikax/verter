@@ -574,7 +574,9 @@ impl OwnedHandles {
     /// [`charge_in_flight`]): the bytes of a delivery a computation has
     /// produced and not yet published or handed to its caller, charged
     /// [`ChargeClass::Active`] until one of those boundaries settles them.
-    pub fn charge_in_flight(self, ctx: ChargeCtx<'_>) {
+    /// By reference, so an owner that keeps the handles (a construction
+    /// collecting the cells it charged) need not copy them.
+    pub fn charge_in_flight(&self, ctx: ChargeCtx<'_>) {
         for child in self.0.iter() {
             charge_in_flight(&**child, ctx);
         }

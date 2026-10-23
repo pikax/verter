@@ -410,6 +410,418 @@ fn a_cold_construction_charges_its_fresh_payload_active_until_it_settles() {
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
+/// A plain build output whose value is an already-interned node: no
+/// diagnostics, so the construction's own storage is the only charge in
+/// flight.
+fn plain_output(
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+) -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<
+    verter_type_engine::semantic_query::SemanticNodeId,
+> {
+    (QueryResult::Value(node), empty_signature()).into()
+}
+
+/// The bound a parked producer's coordination waits obey: a failing test
+/// unwinds past its channels, so the producer's wait ends and its thread
+/// joins instead of hanging the runner.
+const HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Releasing an OLDER node's storage while a construction is open pays the
+/// freed allocation's OWN charge — the settled storage pin — never the open
+/// construction's ACTIVE bytes: a still-live fresh payload stays ACTIVE
+/// until ITS construction settles, whatever older storage is released
+/// around it. A release that paid the open construction first would drain
+/// ACTIVE to flight storage while the fresh payload is live.
+#[test]
+fn releasing_an_older_node_keeps_a_live_constructions_active_charge() {
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
+
+    let host = host();
+    let account = account(usize::MAX / 2);
+    let harness = Arc::new(GraphFixture::with_account(StoreAccount::new(Arc::clone(
+        &account,
+    ))));
+    let old_payload = "o".repeat(PAYLOAD_LEN);
+    // An older node charged to the arena's settled storage, held past the
+    // fixture scope by a lease on its payload: dropping the lease releases
+    // the node's storage wherever it happens — here inside a fresh
+    // construction's build.
+    let held = harness.run(|store| {
+        let node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(old_payload)));
+        store
+            .read_in_scope(node)
+            .expect("the fresh node is live under the fixture scope")
+    });
+    let (allocated_tx, allocated_rx) = std::sync::mpsc::channel::<()>();
+    let (drop_gate_tx, drop_gate_rx) = std::sync::mpsc::channel::<()>();
+    let (dropped_tx, dropped_rx) = std::sync::mpsc::channel::<()>();
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel::<()>();
+    let payload = "p".repeat(PAYLOAD_LEN);
+    let producer = {
+        let harness = Arc::clone(&harness);
+        std::thread::spawn(move || {
+            harness.run(|store| {
+                store.execute_cooperative(
+                    &host,
+                    key(),
+                    || panic!("no recursion"),
+                    move || {
+                        let fresh = store
+                            .intern_node(SemanticNodeData::Literal(LiteralValue::String(payload)));
+                        allocated_tx.send(()).expect("the driver waits");
+                        drop_gate_rx
+                            .recv_timeout(HANG_BOUND)
+                            .expect("the driver releases the older node");
+                        drop(held);
+                        dropped_tx.send(()).expect("the driver waits");
+                        finish_rx
+                            .recv_timeout(HANG_BOUND)
+                            .expect("the driver releases");
+                        plain_output(fresh)
+                    },
+                )
+            })
+        })
+    };
+    allocated_rx
+        .recv_timeout(HANG_BOUND)
+        .expect("the construction interned its fresh payload");
+    assert!(
+        account.snapshot().active_bytes >= PAYLOAD_LEN,
+        "the fresh payload charged ACTIVE while only its construction owns it"
+    );
+    drop_gate_tx
+        .send(())
+        .expect("the producer is parked at its drop gate");
+    dropped_rx
+        .recv_timeout(HANG_BOUND)
+        .expect("the older node released inside the build");
+    assert!(
+        account.snapshot().active_bytes >= PAYLOAD_LEN,
+        "the older node's release paid the settled storage pin, not the \
+         live construction's ACTIVE charge: {}",
+        account.snapshot().active_bytes
+    );
+    finish_tx
+        .send(())
+        .expect("the producer is parked in its build");
+    let read = producer
+        .join()
+        .expect("the producer completes its build after the release");
+    assert!(matches!(read.value(), QueryResult::Value(_)));
+    drop(read);
+    drop(harness);
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        0,
+        "the isolated owner's teardown drains every class"
+    );
+}
+
+/// Two producers with constructions open on one shared store: whichever
+/// opened LAST must not own the FIRST's fresh allocations. The neighbor B
+/// settles first here while A's build is parked with a live fresh payload —
+/// B's settle must settle only B's own bytes, leaving A's payload ACTIVE
+/// until A itself settles.
+#[test]
+fn a_settling_neighbor_cannot_drain_a_parked_producers_construction() {
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
+
+    let host = Arc::new(host());
+    let account = account(usize::MAX / 2);
+    let harness = Arc::new(GraphFixture::with_account(StoreAccount::new(Arc::clone(
+        &account,
+    ))));
+    let (entered_a_tx, entered_a_rx) = std::sync::mpsc::channel::<()>();
+    let (alloc_gate_tx, alloc_gate_rx) = std::sync::mpsc::channel::<()>();
+    let (allocated_tx, allocated_rx) = std::sync::mpsc::channel::<()>();
+    let (release_a_tx, release_a_rx) = std::sync::mpsc::channel::<()>();
+    let (release_b_tx, release_b_rx) = std::sync::mpsc::channel::<()>();
+    let payload = "a".repeat(PAYLOAD_LEN);
+    let producer_a = {
+        let harness = Arc::clone(&harness);
+        let host = Arc::clone(&host);
+        std::thread::spawn(move || {
+            harness.run(|store| {
+                store.execute_cooperative(
+                    &*host,
+                    named_key("OverlapA"),
+                    || panic!("no recursion"),
+                    move || {
+                        entered_a_tx.send(()).expect("the driver waits");
+                        alloc_gate_rx
+                            .recv_timeout(HANG_BOUND)
+                            .expect("the driver releases the allocation");
+                        let fresh = store
+                            .intern_node(SemanticNodeData::Literal(LiteralValue::String(payload)));
+                        allocated_tx.send(()).expect("the driver waits");
+                        release_a_rx
+                            .recv_timeout(HANG_BOUND)
+                            .expect("the driver releases the build");
+                        plain_output(fresh)
+                    },
+                )
+            })
+        })
+    };
+    entered_a_rx
+        .recv_timeout(HANG_BOUND)
+        .expect("producer A opened its construction");
+    let producer_b = {
+        let harness = Arc::clone(&harness);
+        let host = Arc::clone(&host);
+        std::thread::spawn(move || {
+            harness.run(|store| {
+                store.execute_cooperative(
+                    &*host,
+                    named_key("OverlapB"),
+                    || panic!("no recursion"),
+                    || {
+                        release_b_rx
+                            .recv_timeout(HANG_BOUND)
+                            .expect("the driver releases the build");
+                        build_with_payload(store, "neighbor")
+                    },
+                )
+            })
+        })
+    };
+    alloc_gate_tx
+        .send(())
+        .expect("producer A is parked at its allocation gate");
+    allocated_rx
+        .recv_timeout(HANG_BOUND)
+        .expect("producer A interned its fresh payload");
+    assert!(
+        account.snapshot().active_bytes >= PAYLOAD_LEN,
+        "the fresh payload charged ACTIVE in flight"
+    );
+    release_b_tx
+        .send(())
+        .expect("producer B is parked in its build");
+    let read_b = producer_b
+        .join()
+        .expect("the neighbor producer completes its build");
+    assert!(
+        account.snapshot().active_bytes >= PAYLOAD_LEN,
+        "the neighbor's settle left the parked construction's fresh payload \
+         ACTIVE — it charged the payload to whichever construction opened \
+         last: {}",
+        account.snapshot().active_bytes
+    );
+    release_a_tx
+        .send(())
+        .expect("producer A is parked in its build");
+    let read_a = producer_a
+        .join()
+        .expect("the parked producer completes its build");
+    assert!(matches!(
+        (read_a.value(), read_b.value()),
+        (QueryResult::Value(_), QueryResult::Value(_))
+    ));
+    drop((read_a, read_b));
+    drop(harness);
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        0,
+        "the isolated owner's teardown drains every class"
+    );
+}
+
+/// The other settle order of the same overlap: producer A settles first,
+/// while neighbor B stays parked with an EMPTY construction. A's settle
+/// must settle A's own fresh payload — not leave it ACTIVE inside B's
+/// charge until the unrelated B finishes.
+#[test]
+fn a_producer_settling_first_settles_its_own_construction_not_its_neighbors() {
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
+
+    let host = Arc::new(host());
+    let account = account(usize::MAX / 2);
+    let harness = Arc::new(GraphFixture::with_account(StoreAccount::new(Arc::clone(
+        &account,
+    ))));
+    let (entered_a_tx, entered_a_rx) = std::sync::mpsc::channel::<()>();
+    let (alloc_gate_tx, alloc_gate_rx) = std::sync::mpsc::channel::<()>();
+    let (allocated_tx, allocated_rx) = std::sync::mpsc::channel::<()>();
+    let (release_a_tx, release_a_rx) = std::sync::mpsc::channel::<()>();
+    let (release_b_tx, release_b_rx) = std::sync::mpsc::channel::<()>();
+    let payload = "a".repeat(PAYLOAD_LEN);
+    let producer_a = {
+        let harness = Arc::clone(&harness);
+        let host = Arc::clone(&host);
+        std::thread::spawn(move || {
+            harness.run(|store| {
+                store.execute_cooperative(
+                    &*host,
+                    named_key("OverlapA"),
+                    || panic!("no recursion"),
+                    move || {
+                        entered_a_tx.send(()).expect("the driver waits");
+                        alloc_gate_rx
+                            .recv_timeout(HANG_BOUND)
+                            .expect("the driver releases the allocation");
+                        let fresh = store
+                            .intern_node(SemanticNodeData::Literal(LiteralValue::String(payload)));
+                        allocated_tx.send(()).expect("the driver waits");
+                        release_a_rx
+                            .recv_timeout(HANG_BOUND)
+                            .expect("the driver releases the build");
+                        plain_output(fresh)
+                    },
+                )
+            })
+        })
+    };
+    entered_a_rx
+        .recv_timeout(HANG_BOUND)
+        .expect("producer A opened its construction");
+    let producer_b = {
+        let harness = Arc::clone(&harness);
+        let host = Arc::clone(&host);
+        std::thread::spawn(move || {
+            harness.run(|store| {
+                store.execute_cooperative(
+                    &*host,
+                    named_key("OverlapB"),
+                    || panic!("no recursion"),
+                    || {
+                        release_b_rx
+                            .recv_timeout(HANG_BOUND)
+                            .expect("the driver releases the build");
+                        build_with_payload(store, "neighbor")
+                    },
+                )
+            })
+        })
+    };
+    alloc_gate_tx
+        .send(())
+        .expect("producer A is parked at its allocation gate");
+    allocated_rx
+        .recv_timeout(HANG_BOUND)
+        .expect("producer A interned its fresh payload");
+    release_a_tx
+        .send(())
+        .expect("producer A is parked in its build");
+    let read_a = producer_a
+        .join()
+        .expect("the producer completes its build while its neighbor parks");
+    assert!(
+        account.snapshot().active_bytes < PAYLOAD_LEN,
+        "the settling producer's own payload settled with it — not left \
+         ACTIVE inside the still-parked neighbor's construction: {}",
+        account.snapshot().active_bytes
+    );
+    release_b_tx
+        .send(())
+        .expect("producer B is parked in its build");
+    let read_b = producer_b
+        .join()
+        .expect("the parked neighbor completes its build");
+    assert!(matches!(
+        (read_a.value(), read_b.value()),
+        (QueryResult::Value(_), QueryResult::Value(_))
+    ));
+    drop((read_a, read_b));
+    drop(harness);
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        0,
+        "the isolated owner's teardown drains every class"
+    );
+}
+
+/// A fresh construction's OWNED payload cells — the quasis of a template
+/// literal, charged by their own cells rather than the arena's granular
+/// storage — charge ACTIVE while only the construction owns them, and
+/// settle with it. A construction that first-charged them PINNED would
+/// never show the payload in an ACTIVE window; flight storage and delivery
+/// metadata (a few KiB) cannot cross the payload rail.
+#[test]
+fn a_fresh_owned_payload_cell_charges_active_under_its_construction() {
+    use verter_type_engine::semantic_query::{PayloadArray, SemanticNodeData, SemanticNodeId};
+    use verter_type_expr::{OwnedSlice, OwnedStr};
+
+    let host = host();
+    let account = account(usize::MAX / 2);
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
+    let quasi = "q".repeat(PAYLOAD_LEN);
+    let template_build =
+        |store: &SemanticGraphStore,
+         text: &str|
+         -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<
+            SemanticNodeId,
+        > {
+            let node = store.intern_node(SemanticNodeData::TemplateLiteral {
+                quasis: OwnedSlice::from(vec![OwnedStr::from(text)]),
+                expressions: PayloadArray::from(Vec::new()),
+            });
+            plain_output(node)
+        };
+    let owner = account.mint_active_owner();
+    let window = account.open_active_window(&owner);
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            named_key("Quasi"),
+            || panic!("no recursion"),
+            || template_build(store, &quasi),
+        )
+    });
+    let report = window.finish();
+    let peak = report
+        .attributed()
+        .expect("a workload alone on its private account is attributable");
+    assert!(
+        peak.crossed(PAYLOAD_LEN),
+        "the fresh owned quasi charged ACTIVE before publication — flight \
+         storage and delivery metadata (a few KiB) cannot cross \
+         {PAYLOAD_LEN}: peak {}",
+        peak.peak_active_bytes
+    );
+    assert!(
+        report.rise_bytes >= PAYLOAD_LEN,
+        "the quasi's own cell rose ACTIVE inside the window"
+    );
+    assert_eq!(report.active_at_close, 0, "the settle handed it over");
+    assert!(matches!(read.value(), QueryResult::Value(_)));
+
+    // Reused-node control: a second construction of the SAME template
+    // structurally reuses the live node, so no fresh owned cell charges.
+    let second_owner = account.mint_active_owner();
+    let second_window = account.open_active_window(&second_owner);
+    let second = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            named_key("Quasi2"),
+            || panic!("no recursion"),
+            || template_build(store, &quasi),
+        )
+    });
+    let second_report = second_window.finish();
+    let second_peak = second_report
+        .attributed()
+        .expect("the second workload is attributable to its own owner");
+    assert!(
+        !second_peak.crossed(PAYLOAD_LEN),
+        "a construction that reuses the live template charges no fresh \
+         owned payload: peak {}",
+        second_peak.peak_active_bytes
+    );
+    assert!(
+        second_peak.crossed(1),
+        "the second read's own flight is still real work"
+    );
+    drop((read, second));
+    drop(harness);
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        0,
+        "the isolated owner's teardown drains every class"
+    );
+}
+
 /// A producer whose request is cancelled mid-flight returns on the
 /// cancellation rail and its flight's in-flight charge releases with the
 /// retired flight: the claimed flight's storage was charged ACTIVE from

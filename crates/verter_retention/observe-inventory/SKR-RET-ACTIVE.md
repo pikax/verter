@@ -22,7 +22,7 @@ gated them.
 | Producer-protocol deliveries charged in flight (`lease_delivery_in_flight` for a settled producer value and a staged candidate's `lease_candidate`; `DeliveryPhase::InFlight` vs `Settled` in `delivery_lease.rs`), handed off at `SettledProducer::complete` (`hand_off_delivered_allocations`: ACTIVE→PINNED for what no publication adopted) | every cold semantic request | REQUIRED |
 | `InlineMemberFlight.hold_value` holds its decided value through `CallerHold::in_flight` until the batched publish or abort ends the hold | SCC batched members | REQUIRED |
 | `Owned`/`OwnedHandles` in-flight first charge (`charge_in_flight`) and caller-handoff settle (`hand_off_in_flight`) | delivered payload cells | REQUIRED |
-| Fresh CONSTRUCTION ownership (`GranularInFlight` in `granular.rs`; the arena's open construction scopes and `ConstructionChargeGuard` in `arena.rs`, opened by `open_producer`): the payload blocks, payload heap and slot storage a producer's raw build freshly allocates charge ACTIVE while only the construction owns them, and the producer's settle hands the remainder ACTIVE→PINNED into the arena's storage pin — one granule at a time, exactly once, on every exit | every cold semantic construction | REQUIRED |
+| Fresh CONSTRUCTION ownership (`GranularInFlight` in `granular.rs`, with a running charged figure so filling a construction stays linear in granule count; the arena's open construction scopes and `ConstructionChargeGuard` in `arena.rs`, opened by `open_producer`): the payload blocks, payload heap and slot storage a producer's raw build freshly allocates charge ACTIVE while only the construction owns them — charged to the construction the ALLOCATING THREAD's producer opened (a thread-local construction token keyed by the arena's charge lock), never to whichever construction on the shared arena opened last; every charged allocation records its charging construction (`NodePayload::charge_owner`, the chunk's and each shared-heap entry's owner), so a release pays exactly the freed allocation's owner — the still-open construction, or the settled storage pin once its settlement folded the remainder in — and the producer's settle hands the remainder ACTIVE→PINNED into the arena's storage pin, one granule at a time, exactly once, on every exit. Owned payload cells a construction freshly reaches (template quasis, owned names) charge ACTIVE by their own cells through the construction and settle with it | every cold semantic construction | REQUIRED |
 | `commit_retained` no longer moves in-flight bytes into RETAINED: an ACTIVE input is a contract violation in every build, and in-flight charges reach retention only through the refusable `try_adopt_retained` / `CallerHold::adopt` | cache-hold minting (`CacheHold::from_retained`) | REQUIRED |
 
 ### OPTIONAL measurement attribution (unchanged gate)
@@ -41,7 +41,11 @@ any close order, account or thread). Engine and public-host owner tests:
 complete and uncached, small-ceiling crossing cannot abort the admitted read,
 cancelled producer and aborted member release their in-flight charge, a cold
 construction's fresh payload charges ACTIVE with a reused-node control, an
-inline member's held value charges beyond its flight storage) and
+older node's release inside a live construction keeps its ACTIVE charge,
+overlapping producers on one store own their constructions separately through
+both settle orders, a fresh owned payload cell charges ACTIVE with a
+reuse control,
+an inline member's held value charges beyond its flight storage) and
 `crates/verter_session/tests/cases/g_session/in_flight_charge.rs` (a producer
 parked through the flight rendezvous holds real ACTIVE bytes while genuinely
 in flight; a reopened host's window opens at zero and attributes fresh work —

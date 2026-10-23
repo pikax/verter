@@ -95,6 +95,20 @@ impl GranularPin {
         }
     }
 
+    /// Lower the charge to EXACTLY the declared convention over
+    /// `self.used` — the granule-rounded live total — releasing every
+    /// granule of slack in one step. [`Self::trim`] keeps up to two
+    /// granules to spare the account's lock on hot paths; this is the
+    /// settle a construction's handoff pays, where the figure must not
+    /// depend on how many roundings got absorbed on the way.
+    fn trim_to_live(&mut self) {
+        let keep = self.used.div_ceil(self.granule) * self.granule;
+        if self.charge.bytes() > keep {
+            let surplus = self.charge.bytes() - keep;
+            drop(self.charge.split_off(surplus));
+        }
+    }
+
     /// The live total.
     #[must_use]
     pub fn used(&self) -> usize {
@@ -156,6 +170,11 @@ impl RetentionCharge {
 pub struct GranularInFlight {
     granule: usize,
     used: usize,
+    /// The bytes `charges` hold, kept as a running figure: a construction
+    /// of S bytes holds S/granule charges, and every add and release reads
+    /// the total, so summing the charges each time would make filling the
+    /// construction quadratic in granule count.
+    charged_total: usize,
     /// Whole granule charges, oldest first; in-flight charges never merge,
     /// so a crossing is one reservation and a shrink drops whole ones.
     charges: Vec<RetentionCharge>,
@@ -173,6 +192,7 @@ impl GranularInFlight {
         Self {
             granule,
             used: 0,
+            charged_total: 0,
             charges: Vec::new(),
         }
     }
@@ -181,8 +201,10 @@ impl GranularInFlight {
     pub fn add(&mut self, account: &Arc<SemanticRetentionAccount>, bytes: usize) {
         self.used += bytes;
         let target = self.used.div_ceil(self.granule) * self.granule;
-        while self.charged() < target {
-            self.charges.push(account.reserve_in_flight(self.granule));
+        while self.charged_total < target {
+            let charge = account.reserve_in_flight(self.granule);
+            self.charged_total += charge.bytes();
+            self.charges.push(charge);
         }
     }
 
@@ -197,11 +219,16 @@ impl GranularInFlight {
             .checked_sub(bytes)
             .expect("freed no more construction storage than was added");
         let keep = self.used.div_ceil(self.granule) * self.granule;
-        while self.charged() >= keep + 2 * self.granule {
-            self.charges.pop();
+        while self.charged_total >= keep + 2 * self.granule {
+            let dropped = self
+                .charges
+                .pop()
+                .expect("a charge above the kept figure exists");
+            self.charged_total -= dropped.bytes();
         }
         if self.used == 0 {
             self.charges.clear();
+            self.charged_total = 0;
         }
     }
 
@@ -210,13 +237,19 @@ impl GranularInFlight {
     /// ACTIVE→PINNED — the caller handoff transition — and folds into the
     /// pin, so the bytes stay charged exactly once throughout and the
     /// pin's live total grows by exactly the construction's remainder.
+    /// The pin's charge then settles to its convention-minimal figure over
+    /// the new live total: every construction hands off a whole number of
+    /// granules, and without this the pin would carry each handoff's
+    /// rounding as charge slack — up to two granules, wherever the last
+    /// handoff left it — so equal live storage could read differently
+    /// pinned depending on how many constructions built it.
     pub fn settle_into(mut self, pin: &mut GranularPin) {
         pin.used += self.used;
         for mut charge in std::mem::take(&mut self.charges) {
             charge.transfer_to_pinned();
             pin.charge.absorb(charge);
         }
-        pin.trim();
+        pin.trim_to_live();
     }
 
     /// The live total.
@@ -229,7 +262,7 @@ impl GranularInFlight {
     /// two granules.
     #[must_use]
     pub fn charged(&self) -> usize {
-        self.charges.iter().map(RetentionCharge::bytes).sum()
+        self.charged_total
     }
 }
 
