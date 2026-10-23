@@ -246,8 +246,8 @@ impl ComponentMetaRequestHost for VerterHost {
         resolved_meta_cache_key(canonical, mode)
     }
 
-    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-        self.resolver_store_view_with_currentness()
+    async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+        self.resolver_store_view_with_currentness_pollable().await
     }
 
     fn current_view_supersession_fingerprint(&self) -> u64 {
@@ -297,8 +297,11 @@ impl ComponentMetaRequestHost for VerterHost {
         );
         let owner_eval_source = Arc::clone(&facts.eval_source);
         let direct_import_started = audit_enabled.then(Instant::now);
-        let direct_dependency_candidates =
-            self.cache_dependency_candidates_from_snapshot(canonical, &snapshot);
+        let direct_dependency_candidates = self.cache_dependency_candidates_from_captured_snapshot(
+            canonical,
+            &snapshot,
+            Some(&facts),
+        );
         let direct_import_proof_ms = direct_import_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -464,7 +467,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         resolved_meta_cache_key_with_view_fingerprint(canonical, mode, self.view.fingerprint())
     }
 
-    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+    async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
         // Overlay-root the per-attempt snapshot ONCE here so the view the
         // executor hands to `try_get_cached` / `compute` is already
         // overlay-aware. This is the NON-fixed (interactive, N=1) path: the
@@ -475,7 +478,10 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         // copy-on-write per snapshot, and makes the `compute_component_meta`
         // `Some(view)` arm uniform: the view is overlay-aware whether it came
         // from the per-attempt read or the shared fixed view.
-        let (base, is_current) = self.host.resolver_store_view_with_currentness();
+        let (base, is_current) = self
+            .host
+            .resolver_store_view_with_currentness_pollable()
+            .await;
         (base.with_session_overlay(self.host, self.view), is_current)
     }
 

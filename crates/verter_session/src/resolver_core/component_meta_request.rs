@@ -55,7 +55,9 @@ pub(crate) trait ComponentMetaRequestHost {
     /// but forgets the override silently launder every snapshot as
     /// proven-current. Hosts that own no manager and never churn
     /// (test/stub hosts) state that explicitly by returning `(view, true)`.
-    fn snapshot_store_view_read(&self) -> (Self::View, bool);
+    /// A reader joining an in-progress build suspends rather than driving
+    /// the external blocking adapter inside the request's poll.
+    async fn snapshot_store_view_read(&self) -> (Self::View, bool);
     /// Live `u64` fold of the host's EXTERNAL-supersession token
     /// dimensions (epoch / project-generation / env-hash / identity /
     /// overlay — the same set
@@ -272,7 +274,7 @@ where
             // as a coherent warm-peek snapshot even if the external
             // fingerprint happens to match.
             let snapshot_fp = self.host.current_view_supersession_fingerprint();
-            let (view, is_current) = self.host.snapshot_store_view_read();
+            let (view, is_current) = self.host.snapshot_store_view_read().await;
             let captured_inputs = self
                 .host
                 .capture_component_meta_inputs(&self.canonical, &view)
@@ -297,7 +299,7 @@ where
         // the result is returned-only, never promoted. The same condition
         // also forbids the warm preflight hit (`snapshot_view_current`).
         let snapshot_fp = self.host.current_view_supersession_fingerprint();
-        let (view, is_current) = self.host.snapshot_store_view_read();
+        let (view, is_current) = self.host.snapshot_store_view_read().await;
         self.captured_inputs = self
             .host
             .capture_component_meta_inputs(&self.canonical, &view)
@@ -607,7 +609,7 @@ mod tests {
 
         // Owns no `StoreViewManager`; after applying the synthetic churn
         // below, the returned stub view itself is current by construction.
-        fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+        async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
             // Model a concurrent external mutation landing DURING the
             // snapshot: the live fingerprint advances as the view is taken,
             // so any pre/post comparison straddling this build diverges.

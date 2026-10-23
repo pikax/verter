@@ -417,7 +417,12 @@ defineProps<{ foo: string }>()
         .unwrap();
 
     let original_props = vec!["foo".to_string()];
-    let view = <VerterHost as ComponentMetaRequestHost>::snapshot_store_view_read(project.host()).0;
+    let view = project
+        .host()
+        .drive_for_tests(
+            <VerterHost as ComponentMetaRequestHost>::snapshot_store_view_read(project.host()),
+        )
+        .0;
     let captured = project
         .host()
         .drive_for_tests(

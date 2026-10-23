@@ -843,11 +843,12 @@ impl VerterHost {
         // scheduler stays untouched (R17).
         let overlay_facts = if view.overlay_content_hash_for(canonical).is_some() {
             Some(
-                self.materialize_overlay_indexed_ready_serve_with_view_in::<M>(
+                self.materialize_overlay_indexed_ready_serve_with_view_in_pollable::<M>(
                     observation,
                     canonical,
                     view,
-                )?
+                )
+                .await?
                 .indexed,
             )
         } else {
@@ -860,8 +861,7 @@ impl VerterHost {
             // shallow state for canonicals the overlay does not cover.
             let store_read_started = audit_enabled.then(Instant::now);
             let mut snapshot = (*facts.snapshot).clone();
-            self.resolve_snapshot_imports_pollable::<M>(observation, canonical, &mut snapshot)
-                .await;
+            self.resolve_captured_snapshot_imports_in::<M>(observation, canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
             if self.template_analysis_required() {
                 // Template inputs from the overlay artifact's OWN
@@ -897,8 +897,12 @@ impl VerterHost {
                 .unwrap_or(0.0);
             let owner_eval_source = Arc::clone(&facts.eval_source);
             let direct_import_started = audit_enabled.then(Instant::now);
-            let direct_dependency_candidates =
-                self.cache_dependency_candidates_from_snapshot(canonical, &snapshot);
+            let direct_dependency_candidates = self
+                .cache_dependency_candidates_from_captured_snapshot(
+                    canonical,
+                    &snapshot,
+                    Some(&facts),
+                );
             let direct_import_proof_ms = direct_import_started
                 .map(|started| started.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);

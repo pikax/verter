@@ -729,6 +729,189 @@ fn root_continuations_component_meta_root_suspends_behind_a_held_store_view_buil
     assert_eq!(host.store_view_manager().build_release_registrations(), 0);
 }
 
+/// Both request adapters must suspend when their per-attempt snapshot joins
+/// another builder. The public output root's fixed snapshot bypasses this
+/// path, so exercising that root alone cannot catch a blocking adapter here.
+#[test]
+fn component_meta_request_snapshot_suspends_behind_a_held_store_view_build() {
+    use crate::resolver_core::{run_component_meta_request_pollable, RequestSource};
+    use crate::session_view::SessionView;
+    use verter_type_engine::semantic_query::ProjectionMode;
+
+    let host = Arc::new(host());
+    let view = crate::session_view::HostViewRef::new(&host);
+    let overlaid = crate::session_view::OverlaidView::new(
+        Arc::clone(&host),
+        rustc_hash::FxHashMap::from_iter([(
+            PROPS.to_owned(),
+            Arc::from("export interface Props { overlayOnly: boolean }"),
+        )]),
+    );
+    let mode = ProjectionMode::Expanded;
+    for session_view in [None, Some(&view as &dyn SessionView), Some(&overlaid)] {
+        let expected = match session_view {
+            Some(view) => host.resolve_component_meta_with_view(OWNER, mode, view),
+            None => host.resolve_component_meta(OWNER, mode),
+        }
+        .expect("warm resolution");
+        let answer = std::thread::scope(|scope| {
+            // Release even if an assertion or poll panics, before scope joins.
+            let _release = Hold(Some(|| crate::resolver_store::TEST_BUILD_GATE.release()));
+            let builder = hold_store_view_build(scope, &host);
+            let request = async {
+                let flights = host.resolver_runtime().component_meta.singleflight();
+                if let Some(view) = session_view {
+                    let adapter =
+                        crate::host_manage::component_meta_request_impl::ViewBoundRequestHost {
+                            host: &host,
+                            view,
+                            overlay: Arc::new(
+                                crate::resolver_core::CanonicalCompletionOverlay::new(),
+                            ),
+                        };
+                    run_component_meta_request_pollable(&adapter, flights, OWNER, mode, None, 3)
+                        .await
+                } else {
+                    run_component_meta_request_pollable(
+                        host.as_ref(),
+                        flights,
+                        OWNER,
+                        mode,
+                        None,
+                        3,
+                    )
+                    .await
+                }
+            };
+            pending_before_release(
+                POLL_DEADLINE,
+                crate::root_continuation::RootTask::new(&host.task_registry, request),
+                |root, waker| root.poll(waker),
+                || {
+                    crate::resolver_store::TEST_BUILD_GATE.release();
+                    builder.join().expect("the held build publishes");
+                },
+            )
+        });
+        let answer = answer.expect("the per-attempt snapshot suspends until build release");
+        // Base and passthrough warm reads retain their cache path. An
+        // overlay may serve a complete return-only value instead.
+        if session_view.is_none_or(|view| view.fingerprint() == 0) {
+            assert!(matches!(answer.request.source, RequestSource::Cache));
+        }
+        assert_eq!(
+            answer.request.attempts, 1,
+            "resumption keeps the current attempt"
+        );
+        let actual = answer
+            .request
+            .value
+            .expect("the warmed resolution remains available");
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        assert_eq!(host.store_view_manager().build_release_registrations(), 0);
+    }
+    assert_eq!(owner_props(&host), ["label", "tone"]);
+}
+
+/// An overlay's own index build yields on the retained parse's owner,
+/// keeping the finished index work rather than starting it again on resume.
+#[test]
+fn overlay_input_capture_suspends_without_repeating_index_work() {
+    use crate::session_view::SessionView;
+
+    let host = Arc::new(host());
+    let source: Arc<str> = Arc::from("export interface Props { overlayOnly: boolean }");
+    let view = crate::session_view::OverlaidView::new(
+        Arc::clone(&host),
+        rustc_hash::FxHashMap::from_iter([(PROPS.to_owned(), Arc::clone(&source))]),
+    );
+    #[cfg(feature = "semantic-observe")]
+    let before = {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            host.provenance
+                .decl_lowering
+                .eval_program_parses
+                .load(Relaxed),
+            host.provenance
+                .decl_lowering
+                .decl_bodies_lowered
+                .load(Relaxed),
+            host.provenance.shallow_state_builds.load(Relaxed),
+        )
+    };
+    let mut held = host.decl_lowering.hold_workers_for_tests();
+    let root = crate::root_continuation::RootTask::new(
+        &host.task_registry,
+        host.capture_component_meta_inputs_with_view(PROPS, &view),
+    );
+    let captured = pending_before_release(
+        POLL_DEADLINE,
+        root,
+        |root, waker| root.poll(waker),
+        || held.release(),
+    )
+    .expect("overlay capture suspends until its index owner is released")
+    .expect("the overlay's input is captured");
+    assert_eq!(Some(captured.whole_hash), view.content_hash_for(PROPS));
+    assert_eq!(captured.owner_eval_source.as_deref(), Some(source.as_ref()));
+    #[cfg(feature = "semantic-observe")]
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        assert_eq!(
+            host.provenance
+                .decl_lowering
+                .eval_program_parses
+                .load(Relaxed)
+                - before.0,
+            1
+        );
+        assert_eq!(
+            host.provenance
+                .decl_lowering
+                .decl_bodies_lowered
+                .load(Relaxed)
+                - before.1,
+            0
+        );
+        assert_eq!(
+            host.provenance.shallow_state_builds.load(Relaxed) - before.2,
+            1
+        );
+    }
+}
+
+#[test]
+fn dropping_a_component_meta_request_withdraws_its_pending_snapshot() {
+    let host = host();
+    let view = crate::session_view::HostViewRef::new(&host);
+    std::thread::scope(|scope| {
+        let _release = Hold(Some(|| crate::resolver_store::TEST_BUILD_GATE.release()));
+        let builder = hold_store_view_build(scope, &host);
+        let mut root = crate::root_continuation::RootTask::new(
+            &host.task_registry,
+            host.resolve_component_meta_with_view_and_fixed_admission_pollable(
+                OWNER,
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                &view,
+                None,
+            ),
+        );
+        let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+        let pending = {
+            let _forbid = WaitProbe::forbid();
+            root.poll(&waker)
+        };
+        let registered = host.store_view_manager().build_release_registrations();
+        drop(root);
+        let after_drop = host.store_view_manager().build_release_registrations();
+        crate::resolver_store::TEST_BUILD_GATE.release();
+        builder.join().expect("the held build publishes");
+        assert!(pending.is_pending());
+        assert_eq!((registered, after_drop), (1, 0));
+    });
+}
+
 /// The synchronous store-view capture behind the same held build enters
 /// the store-view wait, which the harness refuses: the planted blocking
 /// form of the boundary the root suspends on fails the same check.

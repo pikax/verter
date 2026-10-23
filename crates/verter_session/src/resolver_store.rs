@@ -4741,7 +4741,21 @@ impl VerterHost {
     /// [`StoreViewRead::Current`] read.
     #[track_caller]
     pub(crate) fn resolver_store_view_with_currentness(&self) -> (HostStoreView, bool) {
-        view_with_currentness(HostStoreView::from_host_read(self))
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::StoreViewBuild,
+            std::pin::pin!(self.resolver_store_view_with_currentness_pollable()),
+        )
+    }
+
+    /// [`Self::resolver_store_view_with_currentness`] without driving a
+    /// pending build. Both forms preserve the same current/return-only
+    /// distinction; callers apply session overlays after this one read.
+    #[track_caller]
+    pub(crate) fn resolver_store_view_with_currentness_pollable(
+        &self,
+    ) -> impl std::future::Future<Output = (HostStoreView, bool)> + Send + '_ {
+        let read = self.resolver_store_view_read_pollable();
+        async move { view_with_currentness(read.await) }
     }
 
     /// Capture ONE coherent [`BatchFixedView`] for a whole component-meta

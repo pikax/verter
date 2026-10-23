@@ -1540,6 +1540,7 @@
           "crates/verter_session/src/resolver_core/shallow_file_state.rs",
           "crates/verter_session/src/resolver_core/surface_projector_tests.rs",
           "crates/verter_session/src/resolver_core_tests/bare_name_resolve_namespace_tests.rs",
+          "crates/verter_session/src/root_continuations_tests.rs",
           "crates/verter_session/src/semantic_graph_self_root_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/allocation_ownership_tests.rs",

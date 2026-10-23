@@ -504,8 +504,8 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         self.inner.cache_key(canonical, mode)
     }
 
-    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-        self.inner.snapshot_store_view_read()
+    async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+        self.inner.snapshot_store_view_read().await
     }
 
     fn resolution_completeness(
@@ -668,7 +668,10 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
         overlay: Arc::new(CanonicalCompletionOverlay::new()),
     };
     let key = probe_host.cache_key(&canonical, mode);
-    let token = probe_host.snapshot_store_view_read().0.compat_token();
+    let token = host
+        .drive_for_tests(probe_host.snapshot_store_view_read())
+        .0
+        .compat_token();
 
     let sf = host.resolver_runtime().component_meta.singleflight();
     let follower_parked = sf.subscribe_joiner_park();
@@ -1557,8 +1560,8 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
             self.inner.cache_key(canonical, mode)
         }
-        fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-            self.inner.snapshot_store_view_read()
+        async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+            self.inner.snapshot_store_view_read().await
         }
         fn resolution_completeness(
             &self,

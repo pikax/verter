@@ -2162,7 +2162,6 @@ impl VerterHost {
         snapshot: &mut FileAnalysisSnapshot,
     ) {
         let _ = observation;
-        verter_session_query::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
         // Establish the owner's canonical post-parse artifact FIRST. The
         // snapshot being enriched here is the owner's, and its authored
         // import inventory is that artifact's shallow surface — so the
@@ -2181,6 +2180,19 @@ impl VerterHost {
             .ensure_indexed_ready_serve_in_pollable::<M>(observation, parent_canonical_id)
             .await;
 
+        self.resolve_captured_snapshot_imports_in::<M>(observation, parent_canonical_id, snapshot);
+    }
+
+    /// Resolve an already captured owner's authored imports. Callers that
+    /// established an overlay index must not demand the base owner again.
+    /// Each route lookup still uses its synchronous adapter.
+    pub(crate) fn resolve_captured_snapshot_imports_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        parent_canonical_id: &str,
+        snapshot: &mut FileAnalysisSnapshot,
+    ) {
+        verter_session_query::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
         let mut resolved_imports = Vec::new();
         for (index, import) in snapshot.imports.iter().enumerate() {
             if import.resolved_canonical_id.is_none() {

@@ -500,6 +500,17 @@ and `VerterHost::capture_batch_fixed_view_pollable` are its pollable callers;
 the component-metadata root captures its fixed view through them, and the
 compile root's macro bundle reads its cold seed through them.
 
+The component-meta request executor's non-fixed path also awaits this
+read, through `ComponentMetaRequestHost::snapshot_store_view_read` and
+`VerterHost::resolver_store_view_with_currentness_pollable`. Both the base
+host and the view-bound adapter yield behind a held build, in the coherence
+loop and its fallback. The view-bound adapter applies its session overlay
+once after the read completes. A suspension retains the pre-read external
+supersession fingerprint; the existing post-capture comparison still
+rejects a snapshot straddling an edit, and a return-only read still blocks
+warm reuse and stable promotion. The synchronous currentness accessor
+drives this same computation outside a poll.
+
 - **Lifetime and cancellation.** Dropping a pending read withdraws its
   registration and its test-only parked-reader count. A claim is never held
   across a suspension, so the self-await refusal keeps its thread identity.
@@ -508,6 +519,42 @@ compile root's macro bundle reads its cold seed through them.
   poll answers `Pending` under a forbidding probe, the release wakes it, and
   it completes warm without entering a wait. Replacing the pollable wait
   with the synchronous park fails it with `EnteredWait(StoreViewBuild)`.
+  `component_meta_request_snapshot_suspends_behind_a_held_store_view_build`
+  exercises the per-attempt path separately for base, passthrough and
+  overlaid requests, since a fixed snapshot bypasses that boundary. It
+  checks the same resolution without retrying the attempt and preserves
+  the base answer after the overlay request.
+  `dropping_a_component_meta_request_withdraws_its_pending_snapshot` drops
+  the request before build release and checks that its registration is gone.
+
+### Overlay input capture
+
+`capture_component_meta_inputs_with_view_in` awaits
+`materialize_overlay_indexed_ready_serve_with_view_in_pollable`. That
+materializer joins the existing indexed flight asynchronously and retains
+the cold build's identity, generation stamps, parse lease and index result
+across owner-shard submission and reply waits. Parse-stack refusal recording
+is installed per poll. Its synchronous entry drives this same computation
+under the host's shared execution task registry. Publication and follower
+validation keep the existing fenced/return-only behavior. Carrier structure
+acquisition at the start of a cold carrier overlay still uses its synchronous
+adapter. SFC owner-overlay capture also reaches synchronous template-class
+semantic-fact lookups after the index completes. This conversion does not
+make every overlay dependency pollable.
+
+Import enrichment and direct-dependency collection consume the captured
+overlay index and snapshot. They do not demand the base owner's index as
+a side effect of enriching an overlay, so a cold overlay capture does not
+parse an unrequested base version. Base captures reuse their captured index
+for direct-dependency collection as well. Import route lookups themselves
+remain synchronous.
+
+`overlay_input_capture_suspends_without_repeating_index_work` holds the
+declaration-lowering workers while an ordinary script overlay is captured.
+Its first poll returns `Pending` before release and its later polls enter
+no blocking adapter. It checks the captured source and hash; the observation
+build also checks one eval parse, zero eager declaration bodies and one
+shallow walk across resumption.
 
 ### Parse-stack refusal recording
 
@@ -628,9 +675,8 @@ What is already in place for that:
 What stays synchronous inside a cold component-meta poll: the request
 host's `compute_component_meta` (macro resolution through
 `ProjectSemanticDispatch`), `extract_component_meta_from_resolved`
-(including fallthrough into imported components), the output
-materialization, and the per-attempt store-view read the non-fixed request
-path takes (`snapshot_store_view_read`). The next callers to convert are
+(including fallthrough into imported components), and output
+materialization. The next callers to convert are
 `compute_component_meta` and the semantic task drive it reaches, under the
 same carries.
 
