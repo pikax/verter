@@ -906,7 +906,8 @@ pub fn numeric_literal_values_disjoint(a: f64, b: f64) -> bool {
 }
 
 /// Whether an intersection's object-type arms declare one property whose
-/// types intersect to `never` while some of them is a literal — the
+/// types intersect to `never` while some of them is a literal (including
+/// `boolean`, the implicit union of `false` and `true`) — the
 /// checker's `isNeverReducedProperty` (`isDiscriminantWithNeverType`),
 /// which reduces the whole intersection to `never` (`{ a: 1 } & { a: 2 }`,
 /// `{ k: "x" } & { k: "y" }`). A property optional in some arm is left to
@@ -932,7 +933,11 @@ pub(crate) fn object_arms_conflict_on_a_literal_property<M: verter_audit::observ
     let is_literal = |value: SemanticNodeId| {
         matches!(
             graph.node_data(value).as_deref(),
-            Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
+            Some(
+                SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::Primitive(PrimitiveKind::Boolean)
+            )
         )
     };
     for (index, view) in views.iter().enumerate() {

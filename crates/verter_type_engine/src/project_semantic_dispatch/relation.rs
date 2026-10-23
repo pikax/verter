@@ -8322,18 +8322,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 return Some(assignable(bindings));
             }
-            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Never))) => {
-                return Some(RelationResult::NotAssignable);
-            }
             (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Object))) => {
                 return Some(assignable(bindings));
             }
-            // After dynamic operands are handled, an object construction cannot
-            // satisfy a primitive target.
+            // Generic construction types can reduce to bottom even though
+            // their runtime value is an object. Decide through the same
+            // evaluated authority diagnostic preparation reads.
             (
                 _,
                 Some(SemanticNodeData::Primitive(
-                    PrimitiveKind::String
+                    PrimitiveKind::Never
+                    | PrimitiveKind::String
                     | PrimitiveKind::Number
                     | PrimitiveKind::Boolean
                     | PrimitiveKind::BigInt
@@ -8342,7 +8341,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     | PrimitiveKind::Undefined
                     | PrimitiveKind::Void,
                 )),
-            ) if source_is_program => return Some(RelationResult::NotAssignable),
+            ) if source_is_program => {
+                return Some(match self.evaluated_object_spread_type(source) {
+                    Some(evaluated) => {
+                        self.relate_member(evaluated, target, bindings, InferPosition::Covariant)
+                    }
+                    None => RelationResult::Unknown,
+                });
+            }
+            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Never))) => {
+                return Some(RelationResult::NotAssignable);
+            }
             _ => {}
         }
         let Some(source_branches) = self.projected_relation_branches(source) else {
