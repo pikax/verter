@@ -384,7 +384,7 @@ std::thread_local! {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MappedHelperHeadKind {
     Signature,
-    Sequence,
+    Container,
 }
 
 /// Shell evaluation follows only operator operands. A selected result also
@@ -2624,7 +2624,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Keep the caller's publication context while consuming mapped helpers
     /// and signature slots. Container interiors remain addressable under this
-    /// demand's own memo identity.
+    /// demand's own memo identity; under Expanded publication a helper with a
+    /// container head reads its closed operators as a published answer does.
     pub(super) fn evaluate_mapped_member_value_outcome(
         &self,
         node: SemanticNodeId,
@@ -2767,13 +2768,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         } else {
                             match self.mapped_helper_head_contains(
                                 child.node,
-                                MappedHelperHeadKind::Sequence,
+                                MappedHelperHeadKind::Container,
                             ) {
                                 Ok(true) => {
-                                    // Navigate keeps a sequence's self-edge as an
-                                    // ordinary application. The shared Expanded
-                                    // instantiator owns its recursive back-edge;
-                                    // demand that result before visiting elements.
+                                    // Navigate keeps a container's closed operators
+                                    // and self-edges as written. The shared Expanded
+                                    // instantiator reads those operators as a
+                                    // published answer does and owns the recursive
+                                    // back-edges; demand that result before
+                                    // visiting elements.
                                     let read = self.execute_read(SemanticQueryKey::Instantiate(
                                         crate::semantic_query::InstantiateKey::new(
                                             self.type_slot_for(
@@ -3587,8 +3590,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::Signature { .. } if kind == MappedHelperHeadKind::Signature => {
                     return Ok(true)
                 }
-                SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. }
-                    if kind == MappedHelperHeadKind::Sequence =>
+                SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Object(_)
+                    if kind == MappedHelperHeadKind::Container =>
                 {
                     return Ok(true)
                 }

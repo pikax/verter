@@ -17398,7 +17398,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Bind one mapped key with its original literal kind, then consume
     /// the selected value through the same typed evaluator as path reads.
     /// Helper aliases and scoped self-references reduce through shared
-    /// queries; object interiors stay addressable. Operational partiality
+    /// queries; object interiors stay addressable, though Expanded
+    /// publication reads their closed operators. Operational partiality
     /// retains its completion and cache-suppression evidence. An opaque
     /// result keeps the substituted carrier, never the free mapper binder.
     pub(super) fn materialize_mapped_member_value_for_key(
