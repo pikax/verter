@@ -182,3 +182,62 @@ fn stopping_or_dropping_a_wait_does_not_pin_its_tasks() {
     assert_eq!(registry.wait_graph_occupancy().edges, 0);
     assert!(slot.0.lock().1.is_empty());
 }
+
+#[test]
+fn dependency_cleanup_releases_its_edge_before_dropping_the_handoff() {
+    struct NotifyOnDrop {
+        waiter: crate::tasks::ExecutionTask,
+        producer: crate::tasks::ExecutionTask,
+        observed: Arc<AtomicUsize>,
+    }
+    impl DependencyPoll for NotifyOnDrop {
+        type Output = ();
+        fn poll_dependency(&mut self, _: &Waker) -> Poll<()> {
+            Poll::Pending
+        }
+    }
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            self.observed.store(
+                if self.producer.wait_for(&self.waiter).is_ok() {
+                    1
+                } else {
+                    2
+                },
+                Ordering::SeqCst,
+            );
+        }
+    }
+    for cancel in [false, true] {
+        let registry = TaskRegistry::default();
+        let waiter = registry.register_task();
+        let producer = registry.register_task();
+        let observed = Arc::new(AtomicUsize::new(0));
+        let stop = CancellationToken::new();
+        let mut dependency = OwnedDependency::new(
+            NotifyOnDrop {
+                waiter: waiter.clone(),
+                producer: producer.clone(),
+                observed: observed.clone(),
+            },
+            waiter,
+            producer,
+            stop.clone(),
+        );
+        assert!(dependency.poll(Waker::noop()).is_pending());
+        if cancel {
+            stop.cancel();
+            assert_eq!(
+                dependency.poll(Waker::noop()),
+                Poll::Ready(Err(DependencyStop::Cancelled))
+            );
+        }
+        drop(dependency);
+        assert_eq!(
+            observed.load(Ordering::SeqCst),
+            1,
+            "handoff cleanup may notify a task that waits back on this former waiter"
+        );
+        assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    }
+}

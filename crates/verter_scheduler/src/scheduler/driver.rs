@@ -72,6 +72,10 @@ pub(super) fn dispatch_ready_job_to_executor(
     source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     cancellation: &CancellationToken,
 ) -> Option<Submission> {
+    let _execution = verter_execution::tasks::ExecutionScope::install(
+        job.execution_task.registry(),
+        &job.execution_task,
+    );
     let _cancellation_guard =
         verter_execution::cancellation::JobCancellationGuard::install(cancellation.clone());
     match (&job.kind, &job.identity) {

@@ -50,4 +50,5 @@ tracing = "0.1.44"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [dev-dependencies]
+verter_retention = { path = "../verter_retention", features = ["test-support"] }
 verter_session_query = { workspace = true, features = ["test-support"] }

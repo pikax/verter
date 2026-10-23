@@ -15,6 +15,16 @@ admission state from outside the computation. See
 [`root-continuations.md`](../../../docs/arch/root-continuations.md) for the
 ownership, drop, backpressure and error contract.
 
+`Scheduler::begin_owned_request` combines inbox admission and completion under
+the host's shared task registry. `CompletionSubscription::owned_producer`
+uses the scheduler-stamped execution task, following the first admitted
+prerequisite of a gated stage until that prerequisite completes. Multiple
+prerequisites are followed in deterministic key order; each release moves the
+subscription to the next producer and wakes it. Reverse dependency indexes
+propagate admission, failure, cancellation and scoped-task replacement to
+affected ancestor requests, including Analysis dependencies still awaiting
+Source. No additional task registry or multiwait authority is introduced.
+
 Completion state still publishes under the scheduler DAG lifecycle hold.
 `scheduler/dag_lock.rs` retains polling wakes and delivers them after unlock;
 reset additionally defers them through its serialization hold and driver join.

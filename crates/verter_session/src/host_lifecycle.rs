@@ -33,7 +33,6 @@ use crate::{
     meta_provenance::MetaProvenance,
     types::{HostMetricsSnapshot, HostRetentionSnapshot},
 };
-use verter_type_engine::instant::Instant;
 
 impl VerterHost {
     /// Read the two selected host work counters without enabling full capture.
@@ -467,15 +466,19 @@ impl VerterHost {
     /// set, exacts are re-applied via `set_exact_resolutions` from
     /// preserved `cc.import_routes` so the workspace mirrors host
     /// bundler state.
-    pub(crate) fn integrate_scheduler_snapshot(&self, canonical_id: &str) -> bool {
+    pub(crate) fn integrate_scheduler_snapshot(
+        &self,
+        canonical_id: &str,
+        fence: &crate::host_load::HostLoadFence,
+    ) -> Result<bool, crate::HostLoadError> {
         use crate::host_executor::HostSourceData;
 
         let snap = match self.scheduler.try_get_source(canonical_id) {
             Some(s) => s,
-            None => return false,
+            None => return Err(crate::HostLoadError::Superseded),
         };
         let Some(hd) = snap.downcast_data::<HostSourceData>() else {
-            return false;
+            return Ok(false);
         };
 
         let parsed_edges = Self::build_parsed_edges_from_analysis(
@@ -529,9 +532,12 @@ impl VerterHost {
         // set_import_dependencies before source was loaded. Cloning
         // here so we can re-apply to workspace below without holding the
         // entry lock.
+        #[cfg(test)]
+        self.test_force.host_load_publish_seam_hook.fire_once();
         let preserved_routes = {
             let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
             let derived = derived_ref.value_mut();
+            fence.check(self, canonical_id, derived.eviction_revision())?;
             let preserved_routes = derived.import_routes.clone();
             derived.evicted = false;
             // derived.import_routes is NOT cleared (preserves bundler
@@ -568,7 +574,7 @@ impl VerterHost {
                 exact_resolutions,
             );
         }
-        true
+        Ok(true)
     }
 
     /// Clear compile caches (compile slots, template analysis, type
@@ -1307,8 +1313,7 @@ impl VerterHost {
         {
             let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
             let derived = derived_ref.value_mut();
-            derived.evicted = true;
-            derived.evicted_whole_hash = pre_evict_hash;
+            derived.mark_evicted(pre_evict_hash);
             derived.cached_tsc_extract = None;
             derived.clear_raw_template_analysis();
             derived.cached_resolved_meta.clear();
@@ -1328,205 +1333,27 @@ impl VerterHost {
     /// commit, then materializes native-side lifecycle state from the
     /// committed scheduler snapshots without re-submitting the source.
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.provenance.ensure_loaded_calls.fetch_add(1, Relaxed);
-        let normalized_canonical = self.normalized_analysis_canonical(canonical_id);
-        let canonical_id = normalized_canonical.as_ref();
-        // Fast path: already in host and not evicted. Also verify the
-        // scheduler still has the source — `set_import_dependencies`
-        // may create an empty derived_raw_cache stub before the file is
-        // loaded into the scheduler; in that case we must proceed to
-        // submit a load request. The `evicted` flag lives on
-        // DerivedRawState (D48 split). The fast path requires the
-        // committed ANALYSIS snapshot, not just Source: a drive that
-        // stopped between stages (a withdrawn/cancelled cooperative
-        // drive) leaves Source published with no Analysis, and
-        // reporting loaded from that leftover would expose a
-        // half-committed snapshot. Source-without-Analysis
-        // falls through to the submit/drive seam, which resumes the
-        // load through Analysis + integrate before answering.
-        //
-        // Committed scheduler snapshots alone are not "loaded" either:
-        // a cancelled drive skips `integrate_scheduler_snapshot`, and
-        // the driver (or a resumed drive) can still commit Analysis
-        // afterwards. The host-side marker of an integrated load is
-        // the `DependencyState` entry, written only by the integrate
-        // step and by `upsert`; without it the compile, dependency,
-        // alias and edge state was never materialized, so the load
-        // must go through the submit/drive/integrate seam again.
-        let evicted_flag = self
-            .derived_raw_cache()
-            .get(canonical_id)
-            .map(|d| d.evicted)
-            .unwrap_or(false);
-        if !evicted_flag
-            && self.dependency_cache().contains_key(canonical_id)
-            && self.scheduler.try_get_source(canonical_id).is_some()
-            && self.scheduler.try_get_analysis(canonical_id).is_some()
-        {
-            return true;
+        let scope = self.scheduler.enter_execution_scope();
+        let mut load = self.begin_load(
+            canonical_id,
+            scope.task().clone(),
+            self.cooperative_drive.cancellation().clone(),
+        );
+        let awaiting_scheduler = load.awaiting_scheduler();
+        let wait_start = verter_type_engine::instant::Instant::now();
+        let outcome = self
+            .cooperative_drive
+            .drive_load(&self.scheduler, &mut load);
+        if awaiting_scheduler {
+            self.provenance.ensure_loaded_wait_ns.fetch_add(
+                wait_start.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
-
-        use verter_scheduler::job::CompletionState;
-
-        let (reload_from_workspace, pre_evict_hash) = self
-            .derived_raw_cache()
-            .get(canonical_id)
-            .filter(|d| d.evicted)
-            .map(|d| (true, d.evicted_whole_hash))
-            .unwrap_or((false, None));
-
-        if reload_from_workspace {
-            // Evicted files must force the scheduler off any stale
-            // committed snapshot before we request a disk-backed reload.
-            self.scheduler.close_file(canonical_id);
-        }
-
-        // Submit to scheduler — it loads via WorkspaceSourceLoader.
-        // Submission goes THROUGH the host's cooperative adapter: a
-        // cancelled drive refuses admission at its BeforeSubmit point,
-        // so a cancelled host admits no scheduler work at all (no
-        // inbox entry, no handle to strand) instead of admitting an
-        // Analysis request a later cancelled drive would abandon.
-        // Thread the current-thread's `OpaqueRequestContext` (if any)
-        // into the request so worker threads install it before running
-        // stages — that way fan-out events from `workspace.read_file`
-        // during `SourceStage` carry the outer request_id and the
-        // session-side `SessionVfsSink` picks them up.
-        let handle = match self.cooperative_drive.submit(
-            &self.scheduler,
-            verter_scheduler::scheduler::Request {
-                file_id: canonical_id.to_string(),
-                target: verter_scheduler::stage::TargetStage::Analysis,
-                priority: verter_scheduler::stage::Priority::Interactive,
-                source: None,
-                file_language: None,
-                request_context: verter_execution::request_context::current_context(),
-            },
-        ) {
-            crate::cooperative_scheduler::CooperativeSubmit::Submitted(handle) => handle,
-            crate::cooperative_scheduler::CooperativeSubmit::Refused(_) => return false,
-        };
-
-        // Wait for the scheduler to reach Analysis. The drive runs
-        // through the host's cooperative adapter so a single-threaded
-        // embedding runtime can cancel or withdraw at the cooperative
-        // points — before the first driven stage and between stages
-        // (one `drive_one` stage per iteration while this thread is
-        // the pump); uncancellable (the default adapter state) it is
-        // behaviourally `wait_or_drive` exactly — driving stages
-        // inline on WASM (no driver thread) and parking through
-        // `wait_or_drive` on native when the driver thread is
-        // installed (the driver owns the pump; the host thread never
-        // inline-executes scheduler stages). A cancelled or withdrawn
-        // drive is a not-loaded outcome: no partial result is
-        // integrated. Split
-        // wait (scheduler drive) vs work (integrate_scheduler_snapshot)
-        // so diagnosis can tell load-path contention from post-load
-        // processing.
-        let wait_start = Instant::now();
-        let driven = self.cooperative_drive.drive(&self.scheduler, &handle);
-        let ready = match driven {
-            crate::cooperative_scheduler::CooperativeDrive::Driven(CompletionState::Ready(_)) => {
-                true
-            }
-            crate::cooperative_scheduler::CooperativeDrive::Driven(_) => false,
-            crate::cooperative_scheduler::CooperativeDrive::Cancelled(_) => false,
-        };
-        self.provenance
-            .ensure_loaded_wait_ns
-            .fetch_add(wait_start.elapsed().as_nanos() as u64, Relaxed);
-        if !ready {
-            return false;
-        }
-
-        let work_start = Instant::now();
-        let loaded = self.integrate_scheduler_snapshot(canonical_id);
-        self.provenance
-            .ensure_loaded_work_ns
-            .fetch_add(work_start.elapsed().as_nanos() as u64, Relaxed);
-        // Every successful load — first-time additive OR reload — publishes
-        // source state visible through a store view's captured scheduler root.
-        // A manager-cached base view captured BEFORE this load does not track
-        // the newly-loaded canonical, so the token MUST advance or the manager
-        // could hand the stale pre-load root back to the next caller.
-        // `integrate_scheduler_snapshot` does NOT publish into
-        // `FileArtifactStore`, so `artifact_generation` does not cover it.
-        //
-        // The dimension that advances depends on the load KIND:
-        //
-        // - FIRST-TIME additive load → `bump_load_generation()`. This is
-        //   the compute's OWN work (a cold compute loads its dependencies),
-        //   not an external content/project/env mutation, so it advances a
-        //   DEDICATED `load_generation` dimension that the `StoreViewManager`
-        //   reuse oracle includes (invalidating the cached base view) but
-        //   that the publish fence's `externally_superseded_by` EXCLUDES —
-        //   exactly like `artifact_generation`. Otherwise a scalar/batch
-        //   cold compute that loads a dependency would self-fence its own
-        //   result promotion. It also does NOT clear thread-local caches.
-        //
-        // - RELOAD (after evict) with CHANGED content → `bump_store_view_epoch()`.
-        //   That is a genuine content change to an already-known file
-        //   (an external-supersession class, like an upsert): older views'
-        //   facts about that file are now stale, so it advances the epoch.
-        //   `pre_evict_hash == None` (an evict with no prior scheduler
-        //   snapshot) falls back to the conservative epoch bump.
-        //
-        // - RELOAD (after evict) with BYTE-IDENTICAL content →
-        //   `bump_load_generation()`. The content is unchanged (R1: no
-        //   epoch bump, the warm type-context cache survives the
-        //   load→evict→ensure_loaded cycle), BUT the evict→present
-        //   VISIBILITY transition IS validator-visible: `evict()` bumped
-        //   the epoch and the canonical went invisible, so a concurrent
-        //   `resolver_store_view()` built DURING the evict window caches a
-        //   base snapshot that does NOT track the file under the
-        //   post-evict token. Without a token advance on the reload, that
-        //   mid-evict snapshot's token still matches the live token after
-        //   the file is restored, so the manager keeps handing back a view
-        //   that omits the reloaded canonical. The additive
-        //   `load_generation` dimension covers this: it invalidates the
-        //   manager-cached base view (it is in the reuse oracle) WITHOUT
-        //   counting as an external supersession (excluded from
-        //   `externally_superseded_by`), consistent with the
-        //   bump-on-genuine-transition rule — an evict→reload IS a
-        //   transition even when the bytes match.
-        //
-        // The within-wave churn the first-time-load bump introduces is
-        // bounded: the batch engine acquires its fixed snapshot AFTER its
-        // prefetch wave completes (so the token is stable then) and the
-        // cold store-view build singleflights, so a load burst rebuilds the
-        // manager cache at most once per wave rather than per load.
-        if loaded {
-            if reload_from_workspace {
-                let post_reload_hash = self
-                    .scheduler
-                    .try_get_source(canonical_id)
-                    .map(|s| s.whole_hash);
-                let content_changed = match (pre_evict_hash, post_reload_hash) {
-                    // Byte-identical reload — content no-op.
-                    (Some(pre), Some(post)) => pre != post,
-                    // Unknown pre/post hash — conservative content-change.
-                    _ => true,
-                };
-                if content_changed {
-                    self.bump_store_view_epoch();
-                } else {
-                    // Byte-identical reload-after-evict: no content change,
-                    // but the evict→present visibility transition must
-                    // advance the additive load_generation so a snapshot
-                    // built mid-evict is invalidated.
-                    self.bump_load_generation();
-                }
-            } else {
-                // First-time additive load — advances the dedicated
-                // load-generation dimension (own-work, excluded from the
-                // publish fence's external-supersession check).
-                self.bump_load_generation();
-            }
-        }
-        loaded
+        outcome
+            .and_then(|commit| commit.apply(self))
+            .unwrap_or(false)
     }
-
     /// Resolve an alias to its canonical ID, or normalize the ID if no
     /// alias exists.
     ///

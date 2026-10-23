@@ -597,6 +597,13 @@ impl RouteDb {
         }
     }
 
+    pub(crate) fn bind_task_registry(&self, registry: verter_execution::tasks::TaskRegistry) {
+        self.module_export_singleflight
+            .bind_task_registry(registry.clone());
+        self.route_singleflight.bind_task_registry(registry.clone());
+        self.barrel_singleflight.bind_task_registry(registry);
+    }
+
     // -----------------------------------------------------------------------
     // Barrel surface lookups
     // -----------------------------------------------------------------------

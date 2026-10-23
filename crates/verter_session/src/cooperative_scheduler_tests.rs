@@ -38,6 +38,425 @@ fn standalone_host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
 }
 
+#[test]
+fn owned_load_cancellation_admits_no_source_and_transfer_integrates_externally() {
+    use std::task::{Poll, Waker};
+    use verter_execution::cancellation::CancellationToken;
+    use verter_execution::tasks::TaskRegistry;
+    let host = standalone_host();
+    let stop = CancellationToken::new();
+    stop.cancel();
+    let mut load = host.begin_load("/cancel.ts", TaskRegistry::default().register_task(), stop);
+    assert!(matches!(
+        load.poll(Waker::noop()),
+        Poll::Ready(Err(crate::HostLoadError::Cancelled))
+    ));
+    assert!(host.scheduler.try_get_source("/cancel.ts").is_none());
+
+    register_ts_source(&host, "/ready.ts", "export const n = 1;");
+    let mut load = host.begin_load(
+        "/ready.ts",
+        TaskRegistry::default().register_task(),
+        CancellationToken::new(),
+    );
+    let Poll::Ready(Ok(commit)) = load.poll(Waker::noop()) else {
+        panic!("an already integrated load is immediately ready");
+    };
+    assert!(commit.apply(&host).expect("same host accepts its commit"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn owned_load_transfers_integration_and_rejects_another_host() {
+    use verter_execution::cancellation::CancellationToken;
+    fn assert_send<T: Send>() {}
+    assert_send::<crate::HostLoadHandoff>();
+    assert_send::<crate::HostLoadCommit>();
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    workspace.inject_file("/cold.ts".into(), Arc::from("export const n = 1;"));
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    let scope = host.scheduler.enter_execution_scope();
+    let before = host.current_validation_token();
+    let mut load = host.begin_load("/cold.ts", scope.task().clone(), CancellationToken::new());
+    let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
+        .expect("scheduler dependency completes");
+    assert!(
+        !host.dependency_cache().contains_key("/cold.ts"),
+        "polling never integrates host state"
+    );
+    assert!(commit.apply(&host).expect("matching host"));
+    assert!(host.dependency_cache().contains_key("/cold.ts"));
+    assert_ne!(before, host.current_validation_token());
+
+    let mut warm = host.begin_load("/cold.ts", scope.task().clone(), CancellationToken::new());
+    let commit = verter_execution::blocking::block_on(None, |waker| warm.poll(waker)).unwrap();
+    let other = standalone_host();
+    assert!(matches!(
+        commit.apply(&other),
+        Err(crate::HostLoadError::WrongHost)
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn owned_load_commit_revalidates_after_reset_and_same_content_replacement() {
+    use std::task::{Poll, Waker};
+    use verter_execution::cancellation::CancellationToken;
+    for replace in [false, true] {
+        let host = standalone_host();
+        register_ts_source(&host, "/old.ts", "export const n = 1;");
+        let scope = host.scheduler.enter_execution_scope();
+        let mut load = host.begin_load("/old.ts", scope.task().clone(), CancellationToken::new());
+        let Poll::Ready(Ok(commit)) = load.poll(Waker::noop()) else {
+            panic!("warm load");
+        };
+        host.scheduler.reset();
+        if replace {
+            register_ts_source(&host, "/old.ts", "export const n = 1;");
+        }
+        assert!(
+            matches!(commit.apply(&host), Err(crate::HostLoadError::Superseded)),
+            "a retained commit cannot adopt a removed or replacement incarnation"
+        );
+    }
+}
+
+#[test]
+fn owned_load_rechecks_cancellation_after_a_continuing_yield() {
+    use verter_execution::cancellation::CancellationToken;
+    use verter_scheduler::execution::executor::DefaultExecutor;
+    use verter_scheduler::scheduler::{Scheduler, SchedulerConfig};
+    let mut host = standalone_host();
+    let registry = host
+        .scheduler
+        .enter_execution_scope()
+        .task()
+        .registry()
+        .clone();
+    let config = SchedulerConfig {
+        cpu_threads: 1,
+        io_threads: 1,
+        ..SchedulerConfig::default()
+    };
+    let loader = Arc::new(verter_scheduler::source_loader::MemorySourceLoader::new());
+    loader.insert("/yield.ts".into(), Arc::from("export const n = 1;"));
+    // This discriminator controls stage execution itself. A threaded driver
+    // could execute Source independently of the adapter's yield decision.
+    host.scheduler = Scheduler::new_sync_with_executor_and_registry(
+        config.clone(),
+        loader,
+        Arc::new(DefaultExecutor),
+        #[cfg(not(target_arch = "wasm32"))]
+        verter_scheduler::SchedulerCpuPool::new(1, config.resolved_dag_budget().cpu as usize),
+        #[cfg(not(target_arch = "wasm32"))]
+        verter_scheduler::SchedulerIoPool::new(1, config.resolved_dag_budget().io as usize),
+        registry,
+    );
+    let stop = CancellationToken::new();
+    let adapter = CooperativeSchedulerAdapter::with_yield_hook_and_cancellation(
+        Arc::new(CancelTokenAtFirstOffer {
+            cancellation: stop.clone(),
+        }),
+        stop.clone(),
+    );
+    let scope = host.scheduler.enter_execution_scope();
+    let mut load = host.begin_load("/yield.ts", scope.task().clone(), stop);
+    assert!(matches!(
+        adapter.drive_load(&host.scheduler, &mut load),
+        Err(crate::HostLoadError::Cancelled)
+    ));
+    assert!(
+        host.scheduler.try_get_source("/yield.ts").is_none(),
+        "cancellation at the yield forbids executing Source"
+    );
+    assert!(
+        host.scheduler.drive_one(),
+        "the external driver stopped before executing the queued Source stage"
+    );
+    assert!(host.scheduler.try_get_source("/yield.ts").is_some());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn owned_load_commit_rejects_eviction_before_external_integration() {
+    use verter_execution::cancellation::CancellationToken;
+    for warm in [false, true] {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+        workspace.inject_file("/evicted.ts".into(), Arc::from("export const n = 1;"));
+        let host = VerterHost::new(HostConfig::default(), workspace);
+        if warm {
+            assert!(host.ensure_loaded("/evicted.ts"));
+        }
+        let scope = host.scheduler.enter_execution_scope();
+        let mut load = host.begin_load(
+            "/evicted.ts",
+            scope.task().clone(),
+            CancellationToken::new(),
+        );
+        let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
+            .expect("Analysis completes");
+        host.evict("/evicted.ts");
+        assert!(
+            matches!(commit.apply(&host), Err(crate::HostLoadError::Superseded)),
+            "a transferred commit cannot reverse a later eviction (warm={warm})"
+        );
+        assert!(
+            host.derived_raw_cache()
+                .get("/evicted.ts")
+                .expect("evicted state")
+                .evicted
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn owned_load_commit_survives_unrelated_eviction() {
+    use verter_execution::cancellation::CancellationToken;
+    for warm in [false, true] {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+        workspace.inject_file("/kept.ts".into(), Arc::from("export const kept = 1;"));
+        workspace.inject_file("/other.ts".into(), Arc::from("export const other = 1;"));
+        let host = VerterHost::new(HostConfig::default(), workspace);
+        assert!(host.ensure_loaded("/other.ts"));
+        if warm {
+            assert!(host.ensure_loaded("/kept.ts"));
+        }
+        let scope = host.scheduler.enter_execution_scope();
+        let mut load = host.begin_load("/kept.ts", scope.task().clone(), CancellationToken::new());
+        let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
+            .expect("Analysis completes");
+        host.evict("/other.ts");
+        assert!(commit
+            .apply(&host)
+            .expect("another file's eviction cannot supersede this load"));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn owned_reload_commit_distinguishes_its_original_eviction_from_a_later_one() {
+    use verter_execution::cancellation::CancellationToken;
+    for evict_again in [false, true] {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+        workspace.inject_file("/reload.ts".into(), Arc::from("export const n = 1;"));
+        let host = VerterHost::new(HostConfig::default(), workspace);
+        assert!(host.ensure_loaded("/reload.ts"));
+        host.evict("/reload.ts");
+        let scope = host.scheduler.enter_execution_scope();
+        let mut load =
+            host.begin_load("/reload.ts", scope.task().clone(), CancellationToken::new());
+        let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
+            .expect("reload completes");
+        if evict_again {
+            host.evict("/reload.ts");
+        }
+        let result = commit.apply(&host);
+        if evict_again {
+            assert!(matches!(result, Err(crate::HostLoadError::Superseded)));
+        } else {
+            assert!(result.expect("the original eviction is the reload's input"));
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn owned_reload_commit_observes_cancellation_at_the_visibility_write() {
+    use verter_execution::cancellation::CancellationToken;
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    workspace.inject_file("/cancelled.ts".into(), Arc::from("export const n = 1;"));
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    assert!(host.ensure_loaded("/cancelled.ts"));
+    host.evict("/cancelled.ts");
+    let scope = host.scheduler.enter_execution_scope();
+    let stop = CancellationToken::new();
+    let mut load = host.begin_load("/cancelled.ts", scope.task().clone(), stop.clone());
+    let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
+        .expect("reload completes");
+    *host.test_force.host_load_publish_seam_hook.0.lock() = Some(Arc::new(move || stop.cancel()));
+    assert!(matches!(
+        commit.apply(&host),
+        Err(crate::HostLoadError::Cancelled)
+    ));
+    assert!(
+        host.derived_raw_cache()
+            .get("/cancelled.ts")
+            .unwrap()
+            .evicted
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn owned_load_commit_rechecks_its_fence_at_the_visibility_write() {
+    use verter_execution::cancellation::CancellationToken;
+    #[derive(Clone, Copy)]
+    enum Mutation {
+        Evict,
+        Replace,
+        ResetProject,
+    }
+    for mutation in [Mutation::Evict, Mutation::Replace, Mutation::ResetProject] {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+        workspace.inject_file("/publish.ts".into(), Arc::from("export const n = 1;"));
+        let host = Arc::new(VerterHost::new(HostConfig::default(), workspace));
+        let scope = host.scheduler.enter_execution_scope();
+        let mut load = host.begin_load(
+            "/publish.ts",
+            scope.task().clone(),
+            CancellationToken::new(),
+        );
+        let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker))
+            .expect("Analysis completes");
+        let weak = Arc::downgrade(&host);
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fired_hook = fired.clone();
+        *host.test_force.host_load_publish_seam_hook.0.lock() = Some(Arc::new(move || {
+            let host = weak.upgrade().expect("fixture owns host");
+            fired_hook.store(true, Ordering::SeqCst);
+            match mutation {
+                Mutation::Evict => host.evict("/publish.ts"),
+                Mutation::Replace => {
+                    register_ts_source(&host, "/publish.ts", "export const n = 2;")
+                }
+                Mutation::ResetProject => {
+                    host.project_type_store.bump_project_generation_and_evict();
+                }
+            }
+        }));
+        let result = commit.apply(&host);
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the mutation landed after preflight"
+        );
+        assert!(matches!(result, Err(crate::HostLoadError::Superseded)));
+        if matches!(mutation, Mutation::Evict) {
+            assert!(
+                host.derived_raw_cache().get("/publish.ts").unwrap().evicted,
+                "a racing eviction remains hidden"
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_warm_load_commit_rejects_project_reset_with_unchanged_scheduler_version() {
+    use std::task::{Poll, Waker};
+    use verter_execution::cancellation::CancellationToken;
+    let host = standalone_host();
+    register_ts_source(&host, "/authority.ts", "export const n = 1;");
+    let version = host
+        .scheduler
+        .try_get_source("/authority.ts")
+        .unwrap()
+        .version();
+    let scope = host.scheduler.enter_execution_scope();
+    let mut load = host.begin_load(
+        "/authority.ts",
+        scope.task().clone(),
+        CancellationToken::new(),
+    );
+    let Poll::Ready(Ok(commit)) = load.poll(Waker::noop()) else {
+        panic!("warm commit");
+    };
+    host.project_type_store.bump_project_generation_and_evict();
+    assert_eq!(
+        host.scheduler
+            .try_get_source("/authority.ts")
+            .unwrap()
+            .version(),
+        version
+    );
+    assert!(matches!(
+        commit.apply(&host),
+        Err(crate::HostLoadError::Superseded)
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn owned_load_driver_pumps_a_dependency_on_the_only_cpu_worker() {
+    use verter_execution::cancellation::CancellationToken;
+    use verter_scheduler::execution::executor::{StageError, StageExecutor};
+    use verter_scheduler::node::{AnalysisSnapshot, SourceSnapshot};
+    use verter_scheduler::scheduler::{Scheduler, SchedulerConfig};
+    struct NestedLoad {
+        host: Arc<parking_lot::Mutex<Option<std::sync::Weak<VerterHost>>>>,
+        stop: CancellationToken,
+        result: std::sync::mpsc::Sender<Result<(), crate::HostLoadError>>,
+    }
+    impl StageExecutor for NestedLoad {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn execute_analysis(
+            &self,
+            canonical: &str,
+            _: &SourceSnapshot,
+            generation: u64,
+        ) -> Result<AnalysisSnapshot, StageError> {
+            if canonical == "/outer.ts" {
+                let host = self.host.lock().as_ref().unwrap().upgrade().unwrap();
+                let scope = host.scheduler.enter_execution_scope();
+                let mut load =
+                    host.begin_load("/nested.ts", scope.task().clone(), self.stop.clone());
+                let adapter = CooperativeSchedulerAdapter::with_yield_hook_and_cancellation(
+                    Arc::new(super::InlineYield),
+                    self.stop.clone(),
+                );
+                let _ = self
+                    .result
+                    .send(adapter.drive_load(&host.scheduler, &mut load).map(|_| ()));
+            }
+            Ok(AnalysisSnapshot::new_empty(generation))
+        }
+    }
+    let mut host = standalone_host();
+    let registry = host
+        .scheduler
+        .enter_execution_scope()
+        .task()
+        .registry()
+        .clone();
+    let config = SchedulerConfig {
+        cpu_threads: 1,
+        io_threads: 1,
+        ..SchedulerConfig::default()
+    };
+    let loader = Arc::new(verter_scheduler::source_loader::MemorySourceLoader::new());
+    loader.insert("/outer.ts".into(), Arc::from("export const outer = 1;"));
+    loader.insert("/nested.ts".into(), Arc::from("export const nested = 1;"));
+    let slot = Arc::new(parking_lot::Mutex::new(None));
+    let stop = CancellationToken::new();
+    let (send, receive) = std::sync::mpsc::channel();
+    host.scheduler = Scheduler::with_executor_and_registry(
+        config.clone(),
+        loader,
+        Arc::new(NestedLoad {
+            host: slot.clone(),
+            stop: stop.clone(),
+            result: send,
+        }),
+        verter_scheduler::SchedulerCpuPool::new(1, config.resolved_dag_budget().cpu as usize),
+        verter_scheduler::SchedulerIoPool::new(1, config.resolved_dag_budget().io as usize),
+        registry,
+    );
+    let host = Arc::new(host);
+    *slot.lock() = Some(Arc::downgrade(&host));
+    let outer = host.scheduler.submit_request(analysis_request("/outer.ts"));
+    let completed = receive.recv_timeout(std::time::Duration::from_secs(2));
+    // Always wake a parked regression before awaiting or asserting, so the
+    // sole worker and its scheduler are released even when pumping is broken.
+    stop.cancel();
+    let terminal = outer.wait();
+    assert!(matches!(terminal, CompletionState::Ready(_)));
+    assert!(
+        matches!(completed, Ok(Ok(()))),
+        "the held CPU worker must run its nested Analysis before cancellation: {completed:?}"
+    );
+}
+
 fn analysis_request(canonical: &str) -> Request {
     Request {
         file_id: canonical.to_string(),

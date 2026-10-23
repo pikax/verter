@@ -231,6 +231,12 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
 
 impl<T: Send + Sync + 'static> Drop for ScopedCacheNodeHandoff<T> {
     fn drop(&mut self) {
+        // Last-owner detach can synchronously notify the producer. Retire
+        // this subscriber's graph and stop interests before that callback.
+        self.edge = None;
+        self.stop = None;
+        self.waiter = None;
+        self.admission = None;
         let Some(flight) = self.flight.take() else {
             return;
         };
