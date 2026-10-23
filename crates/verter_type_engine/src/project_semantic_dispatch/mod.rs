@@ -728,6 +728,49 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> std::ops::Deref for Thre
     }
 }
 
+/// A dispatcher a suspendable computation owns
+/// ([`ProjectSemanticDispatch::suspendable`]). Unlike a [`ThreadDispatch`]
+/// it is bound to no thread: the computation it runs ([`Self::run`]) holds
+/// its graph's construction lane on the polling thread for each poll alone.
+/// A lane owns nothing, so between polls nothing of the dispatcher stays on
+/// any thread, and each of its operations ends within the poll that
+/// entered it.
+pub struct SuspendableDispatch<'a, C: crate::resolver_core::ResolverCapabilities> {
+    /// Taken only to drop it inside its lane.
+    dispatch: Option<ProjectSemanticDispatch<'a, C>>,
+    arena: Arc<crate::semantic_query_memo::arena::NodeArenaCore>,
+}
+
+impl<'a, C: crate::resolver_core::ResolverCapabilities> SuspendableDispatch<'a, C> {
+    /// The dispatcher, for the computation [`Self::run`] polls.
+    pub fn dispatch(&self) -> &ProjectSemanticDispatch<'a, C> {
+        self.dispatch
+            .as_ref()
+            .expect("a suspendable dispatcher holds its dispatcher until it drops")
+    }
+
+    /// Poll `computation` to its answer, holding the dispatcher's
+    /// construction lane on the polling thread for each poll.
+    pub async fn run<F: std::future::Future>(&self, computation: F) -> F::Output {
+        let mut computation = std::pin::pin!(computation);
+        std::future::poll_fn(|cx| {
+            let _lane = crate::semantic_query_memo::node_roots::DispatchConstructionLane::enter(
+                &self.arena,
+            );
+            computation.as_mut().poll(cx)
+        })
+        .await
+    }
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> Drop for SuspendableDispatch<'_, C> {
+    fn drop(&mut self) {
+        let _lane =
+            crate::semantic_query_memo::node_roots::DispatchConstructionLane::enter(&self.arena);
+        drop(self.dispatch.take());
+    }
+}
+
 /// The connected-demand entry of a query decided in place
 /// ([`ProjectSemanticDispatch::enter_in_place_query`]): its nested level
 /// is released before its demand, as a query's are.
@@ -1141,6 +1184,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     )]
     pub fn new(ctx: &'a dyn ResolverContext<C>) -> ThreadDispatch<'a, C> {
         Self::bind(ctx, None)
+    }
+
+    /// Create a dispatcher bound to a sealed request context for a
+    /// computation that may suspend and resume on another thread
+    /// ([`SuspendableDispatch`]).
+    #[must_use]
+    pub fn suspendable(ctx: &'a dyn ResolverContext<C>) -> SuspendableDispatch<'a, C> {
+        let ThreadDispatch {
+            dispatch,
+            _construction: lane,
+        } = Self::bind(ctx, None);
+        let arena = Arc::clone(dispatch.binding.construction.arena());
+        let dispatch = SuspendableDispatch {
+            dispatch: Some(dispatch),
+            arena,
+        };
+        drop(lane);
+        dispatch
     }
 
     fn bind(

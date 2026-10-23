@@ -395,17 +395,26 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
     ) -> ComponentMetaOutputRoot<'_> {
-        let canonical_or_alias = canonical_or_alias.to_owned();
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        // A root begun outside any request runs as a request of its own,
+        // whose budget arms every raise of its output: the root carries it
+        // as its ambient request.
+        let _request = self.install_request_budget_context_if_none(
+            self.next_request_id(),
+            canonical.as_str(),
+            self.config.audit_timing_capture && self.config.audit_enabled,
+        );
         ComponentMetaOutputRoot {
             task: RootTask::new(&self.task_registry, async move {
                 let view = crate::session_view::HostViewRef::new(self);
                 let fixed = self.capture_batch_fixed_view_pollable(&view).await;
-                self.get_component_meta_output_via_view_with_fixed_store_view(
-                    &canonical_or_alias,
+                self.get_component_meta_output_via_view_with_fixed_store_view_pollable(
+                    canonical.as_str(),
                     &view,
                     &fixed,
                     false,
                 )
+                .await
             }),
         }
     }
@@ -428,6 +437,19 @@ impl VerterHost {
                     .await
             }),
         }
+    }
+}
+
+#[cfg(test)]
+impl VerterHost {
+    /// Drive a pollable host computation to its answer on this thread, as
+    /// one task of the host's registry.
+    pub(crate) fn drive_for_tests<F: Future>(&self, computation: F) -> F::Output {
+        let _task = ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::Root,
+            std::pin::pin!(computation),
+        )
     }
 }
 

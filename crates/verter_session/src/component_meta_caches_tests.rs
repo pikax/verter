@@ -519,13 +519,14 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         self.inner.current_view_supersession_fingerprint()
     }
 
-    fn capture_component_meta_inputs(
+    async fn capture_component_meta_inputs(
         &self,
         canonical: &str,
         store_view: &Self::View,
     ) -> Option<Self::CapturedInputs> {
         self.inner
             .capture_component_meta_inputs(canonical, store_view)
+            .await
     }
 
     fn try_get_cached_component_meta(
@@ -1568,13 +1569,14 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         fn current_view_supersession_fingerprint(&self) -> u64 {
             self.inner.current_view_supersession_fingerprint()
         }
-        fn capture_component_meta_inputs(
+        async fn capture_component_meta_inputs(
             &self,
             canonical: &str,
             store_view: &Self::View,
         ) -> Option<Self::CapturedInputs> {
             self.inner
                 .capture_component_meta_inputs(canonical, store_view)
+                .await
         }
         fn try_get_cached_component_meta(
             &self,

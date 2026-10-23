@@ -261,13 +261,17 @@ pub fn note_pending(family: WaitFamily) {
 /// Each poll that returns `Pending` enters the wait of the family its
 /// pending boundary noted ([`note_pending`]), or `fallback` when none did,
 /// and parks until the computation's waker fires. A computation that
-/// answers without waiting enters no wait.
+/// answers without waiting enters no wait. The caller pins the computation
+/// where it builds it (`std::pin::pin!`), so its state is never copied
+/// into the driver's frame.
 ///
 /// # Panics
 ///
 /// Under a forbidding `WaitProbe`, once a poll is pending.
-pub fn drive_pending<F: std::future::Future>(fallback: WaitFamily, computation: F) -> F::Output {
-    let mut computation = std::pin::pin!(computation);
+pub fn drive_pending<F: std::future::Future + ?Sized>(
+    fallback: WaitFamily,
+    mut computation: std::pin::Pin<&mut F>,
+) -> F::Output {
     PARK_WAKER.with(|waker| {
         let mut cx = std::task::Context::from_waker(waker);
         loop {
@@ -279,6 +283,31 @@ pub fn drive_pending<F: std::future::Future>(fallback: WaitFamily, computation: 
             std::thread::park();
         }
     })
+}
+
+/// The computation `build` returns, placed on the heap from a frame that
+/// ends here. For a computation whose state is large: the frame that builds
+/// it does not stay on the stack while it runs, so neither does the state.
+#[inline(never)]
+pub fn on_heap<F>(build: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(build())
+}
+
+/// The answer of a computation that never suspends: one written in the
+/// pollable form whose every step here runs synchronously, so its first
+/// poll answers.
+///
+/// # Panics
+///
+/// If the computation's first poll is pending: it reached a dependency
+/// that suspends, which a caller of this function cannot wait on.
+pub fn complete_now<F: std::future::Future + ?Sized>(
+    computation: std::pin::Pin<&mut F>,
+) -> F::Output {
+    match computation.poll(&mut std::task::Context::from_waker(Waker::noop())) {
+        Poll::Ready(outcome) => outcome,
+        Poll::Pending => panic!("a computation completed in place suspended"),
+    }
 }
 
 /// Poll `poll` to completion on this thread, entering the `family` wait only
@@ -473,7 +502,10 @@ mod tests {
             }
         }
         let probe = WaitProbe::record();
-        assert_eq!(drive_pending(WaitFamily::CpuPool, std::future::ready(1)), 1);
+        assert_eq!(
+            drive_pending(WaitFamily::CpuPool, std::pin::pin!(std::future::ready(1))),
+            1
+        );
         assert!(
             probe.reached().is_empty(),
             "a ready computation waits on nothing"
@@ -482,16 +514,30 @@ mod tests {
             noted: Some(WaitFamily::DeclLowering),
             polls: 0,
         };
-        assert_eq!(drive_pending(WaitFamily::CpuPool, noted), 2);
+        assert_eq!(drive_pending(WaitFamily::CpuPool, std::pin::pin!(noted)), 2);
         let unnoted = PendingOnce {
             noted: None,
             polls: 0,
         };
-        assert_eq!(drive_pending(WaitFamily::CpuPool, unnoted), 2);
+        assert_eq!(
+            drive_pending(WaitFamily::CpuPool, std::pin::pin!(unnoted)),
+            2
+        );
         assert_eq!(
             probe.reached(),
             [WaitFamily::DeclLowering, WaitFamily::CpuPool]
         );
+    }
+
+    /// A computation completed in place answers its first poll, and one
+    /// that suspends instead fails rather than being left unpolled.
+    #[test]
+    fn a_computation_completed_in_place_must_answer_its_first_poll() {
+        assert_eq!(complete_now(std::pin::pin!(async { 7 })), 7);
+        let suspended = std::panic::catch_unwind(|| {
+            complete_now(std::pin::pin!(std::future::pending::<()>()));
+        });
+        assert!(suspended.is_err(), "a suspending computation is refused");
     }
 
     /// A probe observes its own thread only.

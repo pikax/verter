@@ -254,7 +254,7 @@ impl ComponentMetaRequestHost for VerterHost {
         self.current_external_supersession_fingerprint()
     }
 
-    fn capture_component_meta_inputs(
+    async fn capture_component_meta_inputs(
         &self,
         canonical: &str,
         _view: &Self::View,
@@ -266,7 +266,7 @@ impl ComponentMetaRequestHost for VerterHost {
             "capture_component_meta_inputs",
             format!("owner={} store_view=true", canonical),
         );
-        let snapshot = self.get_raw_analysis_snapshot(canonical)?;
+        let snapshot = self.get_raw_analysis_snapshot_pollable(canonical).await?;
         component_meta_trace_custom!(
             "capture_component_meta_snapshot",
             format!(
@@ -278,7 +278,10 @@ impl ComponentMetaRequestHost for VerterHost {
                 snapshot.template.is_some(),
             ),
         );
-        let facts = self.ensure_indexed_ready_serve(canonical)?.indexed;
+        let facts = self
+            .ensure_indexed_ready_serve_pollable(canonical)
+            .await?
+            .indexed;
         let whole_hash = facts.whole_hash;
         let store_read_ms = store_read_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -480,7 +483,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         self.host.current_external_supersession_fingerprint()
     }
 
-    fn capture_component_meta_inputs(
+    async fn capture_component_meta_inputs(
         &self,
         canonical: &str,
         _view: &Self::View,
@@ -497,6 +500,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         // snapshot.
         self.host
             .capture_component_meta_inputs_with_view(canonical, self.view)
+            .await
     }
 
     fn try_get_cached_component_meta(

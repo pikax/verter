@@ -2276,6 +2276,18 @@ impl VerterHost {
         })
     }
 
+    /// [`Self::ensure_indexed_ready_serve`] as a pollable computation.
+    pub(crate) async fn ensure_indexed_ready_serve_pollable(
+        &self,
+        canonical_id: &str,
+    ) -> Option<IndexedReadyServe> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let observation = verter_type_engine::request_observers::CaptureTargets::installed::<M>();
+            self.ensure_indexed_ready_serve_in_pollable::<M>(&observation, canonical_id)
+                .await
+        })
+    }
+
     /// Compiled for the calling execution unit's capture mode `M`; a
     /// unit outside one calls the plain form, which adopts the installed
     /// request's mode.
@@ -2287,7 +2299,9 @@ impl VerterHost {
         let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
         verter_execution::blocking::drive_pending(
             verter_execution::blocking::WaitFamily::DeclLowering,
-            self.ensure_indexed_ready_serve_in_pollable::<M>(observation, canonical_id),
+            std::pin::pin!(
+                self.ensure_indexed_ready_serve_in_pollable::<M>(observation, canonical_id)
+            ),
         )
     }
 
@@ -2444,11 +2458,11 @@ impl VerterHost {
         let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
         verter_execution::blocking::drive_pending(
             verter_execution::blocking::WaitFamily::DeclLowering,
-            self.ensure_indexed_ready_serve_located_pollable::<M>(
+            std::pin::pin!(self.ensure_indexed_ready_serve_located_pollable::<M>(
                 observation,
                 canonical_id,
                 held_source,
-            ),
+            )),
         )
     }
 

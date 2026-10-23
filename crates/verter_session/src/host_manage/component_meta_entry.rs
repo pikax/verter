@@ -469,6 +469,28 @@ impl VerterHost {
         .map(|output| output.map(|output| output.output))
     }
 
+    /// [`Self::get_component_meta_output_via_view_with_fixed_store_view`] as
+    /// a pollable computation, under its caller's request context.
+    pub(crate) async fn get_component_meta_output_via_view_with_fixed_store_view_pollable(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+        with_resolution: bool,
+    ) -> Result<
+        Option<crate::meta_resolve::ComponentMetaOutput>,
+        crate::meta_resolve::ComponentMetaFailure,
+    > {
+        self.get_component_meta_output_via_view_with_publication_evidence_pollable(
+            canonical_or_alias,
+            view,
+            fixed,
+            with_resolution,
+        )
+        .await
+        .map(|output| output.map(|output| output.output))
+    }
+
     /// Evidence-bearing core of
     /// [`Self::get_component_meta_output_via_view_with_fixed_store_view`].
     /// The public output path discards this evidence; the background
@@ -487,7 +509,6 @@ impl VerterHost {
         if view.is_tombstoned(canonical.as_str()) {
             return Ok(None);
         }
-
         // Budget context spans the warm-path materialization AND the cold
         // resolve+extract+materialize — the projection-op fuse is armed for
         // every output raise. Install-if-none so a batch / outer caller
@@ -497,6 +518,39 @@ impl VerterHost {
             canonical.as_str(),
             self.config.audit_timing_capture && self.config.audit_enabled,
         );
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::ResolverFlight,
+            verter_execution::blocking::on_heap(|| {
+                self.get_component_meta_output_via_view_with_publication_evidence_pollable(
+                    canonical_or_alias,
+                    view,
+                    fixed,
+                    with_resolution,
+                )
+            })
+            .as_mut(),
+        )
+    }
+
+    /// [`Self::get_component_meta_output_via_view_with_publication_evidence`]
+    /// as a pollable computation: a cold component's resolve suspends where
+    /// capturing its inputs waits. It runs under its caller's request
+    /// context, whose budget arms every output raise.
+    pub(crate) async fn get_component_meta_output_via_view_with_publication_evidence_pollable(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+        with_resolution: bool,
+    ) -> Result<
+        Option<ComponentMetaOutputWithPublicationEvidence>,
+        crate::meta_resolve::ComponentMetaFailure,
+    > {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        if view.is_tombstoned(canonical.as_str()) {
+            return Ok(None);
+        }
 
         // Warm probe against the capture's proven-current overlaid view.
         if let Some((cache_key, cached_entry)) =
@@ -645,22 +699,31 @@ impl VerterHost {
                 overlay,
             );
             let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &session_ctx;
-            let dispatch =
-                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            // The cold body suspends where capturing the owner's inputs
+            // waits, so its dispatcher is one a suspended computation owns.
+            let suspendable =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::suspendable(
+                    ctx,
+                );
+            let dispatch = suspendable.dispatch();
+            suspendable.run(async {
             let Some(ComponentMetaColdResult {
                 resolved,
                 analysis: meta,
                 completeness,
                 admitted,
-            }) = self.component_meta_via_view_cold(
-                canonical.as_str(),
-                view,
-                fixed,
-                ctx,
-                dispatch,
-                &seed_fence,
-                validated_at_generation,
-            )?
+            }) = verter_execution::blocking::on_heap(|| {
+                self.component_meta_via_view_cold_pollable(
+                    canonical.as_str(),
+                    view,
+                    fixed,
+                    ctx,
+                    dispatch,
+                    &seed_fence,
+                    validated_at_generation,
+                )
+            })
+            .await?
             else {
                 return Ok(None);
             };
@@ -703,6 +766,8 @@ impl VerterHost {
                 output,
                 publication_evidence,
             }))
+            })
+            .await
         })
     }
 
@@ -938,6 +1003,43 @@ impl VerterHost {
         validated_at_generation: u64,
     ) -> Result<Option<ComponentMetaColdResult>, verter_type_engine::semantic_query::ExecutionAbort>
     {
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::ResolverFlight,
+            verter_execution::blocking::on_heap(|| {
+                self.component_meta_via_view_cold_pollable(
+                    canonical,
+                    view,
+                    fixed,
+                    ctx,
+                    dispatch,
+                    seed_fence,
+                    validated_at_generation,
+                )
+            })
+            .as_mut(),
+        )
+    }
+
+    /// [`Self::component_meta_via_view_cold`] as a pollable computation: the
+    /// resolve suspends where capturing the owner's inputs waits, and the
+    /// compute keeps its trace across that suspension.
+    pub(crate) async fn component_meta_via_view_cold_pollable<
+        M: verter_audit::observe::ObserveExec,
+    >(
+        &self,
+        canonical: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+        ctx: &dyn crate::resolver_core::HostRequestContext<M>,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities<M>,
+        >,
+        seed_fence: &ColdSeedFence,
+        validated_at_generation: u64,
+    ) -> Result<Option<ComponentMetaColdResult>, verter_type_engine::semantic_query::ExecutionAbort>
+    {
         #[cfg(test)]
         run_cold_body_pre_resolve_hook();
         // Pin the request executor to the caller's fixed view (FENCED), so
@@ -948,18 +1050,25 @@ impl VerterHost {
             dispatch,
             self.project_type_store().component_meta_results(),
         );
-        let refusal_query = dispatch.component_meta_refusal_query(canonical);
-        let ((resolved_opt, meta_opt), admitted) = results.compute_and_admit_with_entry(
+        let refusal_query = &dispatch.component_meta_refusal_query(canonical);
+        let results = &results;
+        // The compute and its resolve are built on the heap: a cold compute
+        // nests deep, and a synchronous caller drives it on its own stack.
+        let ((resolved_opt, meta_opt), admitted) = verter_execution::blocking::on_heap(move || {
+            results.compute_and_admit_with_entry_pollable(
             canonical,
             "view-aware path",
-            || {
-                let (mut resolved, admission) = match self
-                    .resolve_component_meta_with_view_and_fixed_admission(
+            async move {
+                let (mut resolved, admission) = match verter_execution::blocking::on_heap(move || {
+                    self.resolve_component_meta_with_view_and_fixed_admission_pollable(
                         canonical,
                         verter_type_engine::semantic_query::ProjectionMode::Expanded,
                         view,
                         executor_fixed,
-                    ) {
+                    )
+                })
+                .await
+                {
                     Some(pair) => pair,
                     None => return (None, None),
                 };
@@ -985,13 +1094,13 @@ impl VerterHost {
                     )),
                 )
             },
-            |computed, evidence| {
+            move |computed, evidence| {
                 let (Some(resolved), Some((meta, extract_completeness))) = computed else {
                     return crate::component_meta_result_db::ComponentMetaPublishDecision::no_value(
                     );
                 };
                 let final_completeness = resolved.completeness.merge(*extract_completeness);
-                let admission = dispatch.component_meta_admission_proof(&refusal_query, evidence);
+                let admission = dispatch.component_meta_admission_proof(refusal_query, evidence);
                 self.component_meta_publish_decision_with_view(
                     canonical,
                     view,
@@ -1000,11 +1109,13 @@ impl VerterHost {
                     validated_at_generation,
                     seed_fence,
                     final_completeness,
-                    &refusal_query,
+                    refusal_query,
                     admission,
                 )
             },
-        );
+        )
+        })
+        .await;
         let (Some(resolved), Some((meta, extract_completeness))) = (resolved_opt, meta_opt) else {
             return absent_unless_aborted(ctx);
         };

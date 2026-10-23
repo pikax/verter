@@ -367,30 +367,38 @@ thread_local! {
     static COMPONENT_META_SPAN_OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Opens one component-meta span on this thread. Nested computes each keep
-/// their own frame, and a charge is recorded on every frame still open.
-pub(crate) struct ComponentMetaSpanGuard {
-    armed: bool,
+/// The component-meta span of one compute, which the compute owns across
+/// its suspensions. Each step of the compute opens it on the running
+/// thread ([`Self::install`]); nested computes each keep their own frame,
+/// and a charge is recorded on every frame open.
+#[derive(Default)]
+pub(crate) struct ComputeSpan {
+    span: ComponentMetaSpan,
 }
 
-impl ComponentMetaSpanGuard {
-    pub(crate) fn enter() -> Self {
-        COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().push(ComponentMetaSpan::default()));
+impl ComputeSpan {
+    /// Open the span on this thread until the returned installation drops,
+    /// unwinding included.
+    pub(crate) fn install(&mut self) -> ComputeSpanInstall<'_> {
+        COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().push(self.span));
         COMPONENT_META_SPAN_OPEN.with(|open| open.set(true));
-        Self { armed: true }
+        ComputeSpanInstall { owner: self }
     }
 
-    pub(crate) fn finish(mut self) -> ComponentMetaSpan {
-        self.armed = false;
-        pop_component_meta_span()
+    pub(crate) fn finish(self) -> ComponentMetaSpan {
+        self.span
     }
 }
 
-impl Drop for ComponentMetaSpanGuard {
+/// One step's installation of a [`ComputeSpan`]; dropping it closes the
+/// frame on the thread and keeps its charges in the compute.
+pub(crate) struct ComputeSpanInstall<'c> {
+    owner: &'c mut ComputeSpan,
+}
+
+impl Drop for ComputeSpanInstall<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = pop_component_meta_span();
-        }
+        self.owner.span = pop_component_meta_span();
     }
 }
 
@@ -399,9 +407,12 @@ impl Drop for ComponentMetaSpanGuard {
 /// capture uses its existing scoped telemetry and panic cleanup.
 #[cfg(any(test, feature = "test-support"))]
 pub fn with_connected_work_capture_for_tests<R>(body: impl FnOnce() -> R) -> (R, DemandUsage) {
-    let guard = ComponentMetaSpanGuard::enter();
-    let result = body();
-    let span = guard.finish();
+    let mut span = ComputeSpan::default();
+    let result = {
+        let _installed = span.install();
+        body()
+    };
+    let span = span.finish();
     (
         result,
         DemandUsage {

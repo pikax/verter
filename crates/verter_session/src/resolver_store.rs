@@ -4725,6 +4725,15 @@ impl VerterHost {
         HostStoreView::from_host_read(self)
     }
 
+    /// [`Self::resolver_store_view_read`] as a pollable computation: it
+    /// suspends where the read would wait behind another thread's build.
+    #[track_caller]
+    pub(crate) fn resolver_store_view_read_pollable(
+        &self,
+    ) -> impl std::future::Future<Output = StoreViewRead> + Send + '_ {
+        HostStoreView::from_host_read_pollable(self)
+    }
+
     /// Read the host's base store view together with the manager's
     /// currentness proof, for the stable-request executors whose warm
     /// preflight peek must be suppressed on a known-stale snapshot.

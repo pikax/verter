@@ -2144,7 +2144,11 @@ impl VerterHost {
         let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
         verter_execution::blocking::drive_pending(
             verter_execution::blocking::WaitFamily::DeclLowering,
-            self.resolve_snapshot_imports_pollable::<M>(observation, parent_canonical_id, snapshot),
+            std::pin::pin!(self.resolve_snapshot_imports_pollable::<M>(
+                observation,
+                parent_canonical_id,
+                snapshot
+            )),
         );
     }
 

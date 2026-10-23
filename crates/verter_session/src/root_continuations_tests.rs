@@ -637,6 +637,46 @@ fn root_continuations_component_meta_root_resumes_after_its_entry_returns() {
     assert_eq!(polled, synchronous);
 }
 
+/// A cold component-metadata root suspends on its owner's index build: with
+/// the declaration-lowering shards held, its first poll answers `Pending`
+/// without entering a wait. Once the shards are released the same root
+/// resumes to the props a fresh host resolves, and to the answer its own
+/// host then gives synchronously.
+#[test]
+fn root_continuations_cold_component_meta_root_suspends_on_its_owners_index_build() {
+    let expected_props = owner_props(&host());
+    let host = host();
+    let mut held = host.decl_lowering.hold_workers_for_tests();
+    let mut root = host.begin_component_meta_output(OWNER);
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let first = {
+        let _forbid = WaitProbe::forbid();
+        root.poll(&waker)
+    };
+    assert!(
+        first.is_pending(),
+        "the cold root waits on its owner's held index build"
+    );
+    held.release();
+    let answer = poll_to_answer(root);
+    let resumed = format!(
+        "{:?}",
+        answer
+            .as_ref()
+            .expect("the owner's metadata resolves")
+            .as_ref()
+            .expect("the owner is a component")
+    );
+    assert_eq!(props_of(answer), expected_props);
+    let synchronous = format!(
+        "{:?}",
+        host.get_component_meta_output(OWNER)
+            .expect("the owner's metadata resolves")
+            .expect("the owner is a component")
+    );
+    assert_eq!(resumed, synchronous);
+}
+
 /// A thread holding the host's next store-view build at the test gate,
 /// with the build claim taken.
 fn hold_store_view_build<'s>(
@@ -991,4 +1031,71 @@ where
             (None, Err(panic)) => std::panic::resume_unwind(panic),
         }
     })
+}
+
+#[test]
+fn zz_scratch_future_sizes() {
+    let host = host();
+    let view = crate::session_view::HostViewRef::new(&host);
+    let fixed = host.capture_batch_fixed_view(&view);
+    let observation = verter_type_engine::request_observers::CaptureTargets::installed::<
+        verter_audit::observe::Uncaptured,
+    >();
+    let f1 = host.get_component_meta_output_via_view_with_publication_evidence_pollable(
+        OWNER, &view, &fixed, false,
+    );
+    eprintln!("SIZE output_evidence {}", std::mem::size_of_val(&f1));
+    drop(f1);
+    let f2 = host.resolve_component_meta_with_view_and_fixed_admission_pollable(
+        OWNER,
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        &view,
+        None,
+    );
+    eprintln!("SIZE resolve {}", std::mem::size_of_val(&f2));
+    drop(f2);
+    let f3 = host.ensure_indexed_ready_serve_in_pollable::<verter_audit::observe::Uncaptured>(
+        &observation,
+        OWNER,
+    );
+    eprintln!("SIZE ensure_in {}", std::mem::size_of_val(&f3));
+    drop(f3);
+    let f4 = host.get_raw_analysis_snapshot_in_pollable::<verter_audit::observe::Uncaptured>(
+        &observation,
+        OWNER,
+    );
+    eprintln!("SIZE raw_snapshot {}", std::mem::size_of_val(&f4));
+    drop(f4);
+    let root = host.begin_component_meta_output(OWNER);
+    eprintln!("SIZE root {}", std::mem::size_of_val(&root));
+    drop(root);
+    let seed_fence = crate::host_manage::component_meta_entry::ColdSeedFence::new(
+        fixed.captured_validation_token(),
+        fixed.is_current(),
+    );
+    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let session_ctx = crate::resolver_core::SessionResolverContext::<
+        '_,
+        verter_audit::observe::Uncaptured,
+    >::from_cold_seed(&host, &view, fixed.cold_seed(), overlay);
+    eprintln!("SIZE session_ctx {}", std::mem::size_of_val(&session_ctx));
+    let ctx: &dyn crate::resolver_core::HostRequestContext<verter_audit::observe::Uncaptured> =
+        &session_ctx;
+    let suspendable =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::suspendable(ctx);
+    eprintln!(
+        "SIZE dispatch {}",
+        std::mem::size_of_val(suspendable.dispatch())
+    );
+    let f5 = host.component_meta_via_view_cold_pollable(
+        OWNER,
+        &view,
+        &fixed,
+        ctx,
+        suspendable.dispatch(),
+        &seed_fence,
+        0,
+    );
+    eprintln!("SIZE cold {}", std::mem::size_of_val(&f5));
+    drop(f5);
 }
