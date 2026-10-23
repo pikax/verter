@@ -273,7 +273,7 @@ struct Parked {
     #[cfg(feature = "semantic-observe")]
     since: Option<Instant>,
     /// The subscription's own waker registration on the flight.
-    waker: Option<super::inflight::WakeRegistration>,
+    waker: verter_execution::wake::WakeRegistration,
     /// The subscriber registration an armed rendezvous of this flight took,
     /// retired when the wait resolves or the subscription drops.
     #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
@@ -284,8 +284,14 @@ impl Drop for Subscription<'_> {
     fn drop(&mut self) {
         // A subscriber abandoned while parked (its execution stopped or was
         // dropped) takes its waker off the flight; the edge drops with it.
-        if let Some(registration) = self.parked.take().and_then(|parked| parked.waker) {
-            self.inflight.state.lock().withdraw_waker(registration);
+        if let Some(mut parked) = self.parked.take() {
+            if parked.waker.is_registered() {
+                self.inflight
+                    .state
+                    .lock()
+                    .wakers
+                    .withdraw(&mut parked.waker);
+            }
         }
     }
 }
@@ -748,7 +754,10 @@ impl SemanticGraphStore {
 
 impl Subscription<'_> {
     /// Wait for the producer's completion. Blocks the calling thread: only a
-    /// synchronous entry waits this way.
+    /// synchronous entry waits this way. The thread parks with this
+    /// subscription's waker registered on the flight and on the cancellation
+    /// that stops the request, so either one wakes it; nothing re-polls on a
+    /// timer.
     pub fn wait<C: crate::resolver_core::ResolverCapabilities>(
         mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
@@ -756,6 +765,9 @@ impl Subscription<'_> {
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
+        verter_execution::blocking::enter_wait(
+            verter_execution::blocking::WaitFamily::SemanticFlight,
+        );
         let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
         // The wait time is a measurement-only counter; without the
@@ -768,18 +780,37 @@ impl Subscription<'_> {
             if let Err(WaitCycle) = self.park::<C::Observe>(&state, attempt.prepared.key()) {
                 return Joined::Recursive(Recursion::WaitCycle);
             }
-            // Cooperative wait on the flight's condvar until it completes,
-            // is aborted by a canonical-invalidation sweep, or this request
-            // is cancelled. Subscribers never busy-spin.
-            while !flight_resolved(&state, flags) {
-                // Timed parking is the cancellation observation rail. A
-                // canceled subscriber detaches by returning; it never marks
-                // the shared flight aborted, so it cannot disturb an
-                // uncancelled producer or sibling.
-                inflight
-                    .ready
-                    .wait_for(&mut state, std::time::Duration::from_millis(2));
-            }
+            drop(state);
+            // Park until the flight completes, is aborted by a
+            // canonical-invalidation sweep, or this request is cancelled.
+            // The cancellation registers before the flight is checked, so a
+            // cancellation landing between the two still wakes the thread. A
+            // cancelled subscriber detaches by returning; it never marks the
+            // shared flight aborted, so it cannot disturb an uncancelled
+            // producer or sibling.
+            let mut stop =
+                crate::resolver_core::request_ports::CancellationCheckpoint::selected_token()
+                    .map(|token| token.subscribe());
+            let parked = self
+                .parked
+                .as_mut()
+                .expect("a waiting subscriber is parked");
+            verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::SemanticFlight,
+                None,
+                |waker| {
+                    if let Some(stop) = stop.as_mut() {
+                        let _ = stop.poll(waker);
+                    }
+                    let mut state = inflight.state.lock();
+                    if flight_resolved(&state, flags) {
+                        return std::task::Poll::Ready(());
+                    }
+                    state.wakers.register(&mut parked.waker, waker);
+                    std::task::Poll::Pending
+                },
+            );
+            state = inflight.state.lock();
         }
         self.resolve(state, ctx, flags, attempt, capture, wait_start)
     }
@@ -828,15 +859,7 @@ impl Subscription<'_> {
             .parked
             .as_mut()
             .expect("a pending subscriber is parked");
-        let registered = parked
-            .waker
-            .is_some_and(|registration| state.holds_waker(registration, waker));
-        if !registered {
-            if let Some(previous) = parked.waker.take() {
-                state.withdraw_waker(previous);
-            }
-            parked.waker = Some(state.register_waker(waker.clone()));
-        }
+        state.wakers.register(&mut parked.waker, waker);
         std::task::Poll::Pending
     }
 
@@ -879,7 +902,7 @@ impl Subscription<'_> {
             _edge: edge,
             #[cfg(feature = "semantic-observe")]
             since: super::records_telemetry::<M>().then(Instant::now),
-            waker: None,
+            waker: verter_execution::wake::WakeRegistration::default(),
             #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
             rendezvous,
         });
@@ -905,14 +928,12 @@ impl Subscription<'_> {
         // and wait-for edge are spent.
         if let Some(parked) = self.parked.take() {
             let Parked {
-                waker,
+                mut waker,
                 #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
                 mut rendezvous,
                 ..
             } = parked;
-            if let Some(registration) = waker {
-                state.withdraw_waker(registration);
-            }
+            state.wakers.withdraw(&mut waker);
             // Retire a rendezvous's subscriber registration before any
             // further engine work on this request, with the flight unlocked
             // — retirement only removes the token, so it needs no ordering

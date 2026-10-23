@@ -132,6 +132,8 @@ impl<E: Fn(u64) -> Vec<u64>> Program for ChainProgram<E> {
             .filter(|limit| self.steps >= *limit)
             .map(|_| "stopped")
     }
+
+    fn wake_on_stop(&mut self, _: &Waker) {}
 }
 
 fn on_small_stack<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
@@ -327,6 +329,8 @@ fn a_tail_transition_replaces_the_frame_in_place() {
         fn stop(&self) -> Option<()> {
             None
         }
+
+        fn wake_on_stop(&mut self, _: &Waker) {}
     }
     let mut execution = SemanticExecution::new();
     assert_eq!(execution.drive(&mut Tail, ()), Ok(1_000_000));
@@ -390,6 +394,8 @@ fn a_drive_inside_a_step_is_refused() {
         fn stop(&self) -> Option<()> {
             None
         }
+
+        fn wake_on_stop(&mut self, _: &Waker) {}
     }
     let mut execution = SemanticExecution::new();
     let _ = execution.drive(&mut Nesting, 0);
@@ -449,6 +455,8 @@ impl Program for Spawner {
     fn stop(&self) -> Option<()> {
         None
     }
+
+    fn wake_on_stop(&mut self, _: &Waker) {}
 }
 
 /// Spawned children are the caller's own sub-computations held as frames: a
@@ -569,6 +577,8 @@ impl Program for Joins {
             .is_some_and(|limit| self.subscribes >= limit)
             .then_some(())
     }
+
+    fn wake_on_stop(&mut self, _: &Waker) {}
 }
 
 /// Joining outside producers in turn inspects one subscription per wait,
@@ -757,6 +767,8 @@ impl Program for Outside {
     fn stop(&self) -> Option<()> {
         self.stop.then_some(())
     }
+
+    fn wake_on_stop(&mut self, _: &Waker) {}
 }
 
 /// Counts its wakes.

@@ -587,25 +587,46 @@ impl Drop for TracerScope {
 /// A fact tracer whose cell a suspendable compute owns: it is installed on
 /// the thread only while one of the compute's steps runs
 /// ([`Self::install`]), and yields its read set once, when the compute
-/// completes. Its owner delivers that read set to the scope that consumes
-/// the compute, so it is installed as a delivering scope
-/// ([`tracer_stack::install_delivering`]).
+/// completes. A tracer made by [`Self::new`] is installed as a delivering
+/// scope ([`tracer_stack::install_delivering`]): its owner delivers the
+/// read set to the scope that consumes the compute. One made by
+/// [`Self::fanning_out`] is installed as an ordinary scope, so each
+/// observation also reaches the scopes below it on the running thread, as
+/// [`with_fact_tracer_cell`]'s does.
 pub(crate) struct OwnedFactTracer {
     cell: Box<verter_session_query::facts::fact_read_set::FactReadSetCell>,
+    delivers: bool,
 }
 
 impl OwnedFactTracer {
     pub(crate) fn new(
         basis: verter_session_query::facts::fact_cache::AggregateGenerations,
     ) -> Self {
+        Self::with_installation(basis, true)
+    }
+
+    pub(crate) fn fanning_out(
+        basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+    ) -> Self {
+        Self::with_installation(basis, false)
+    }
+
+    fn with_installation(
+        basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+        delivers: bool,
+    ) -> Self {
         let cell = Box::new(verter_session_query::facts::fact_read_set::FactReadSetCell::new());
         cell.set_aggregate_basis(basis);
-        Self { cell }
+        Self { cell, delivers }
     }
 
     /// Install the cell until the returned scope drops, unwinding included.
     pub(crate) fn install(&self) -> OwnedTracerScope<'_> {
-        tracer_stack::install_delivering(&self.cell);
+        if self.delivers {
+            tracer_stack::install_delivering(&self.cell);
+        } else {
+            tracer_stack::install(&self.cell);
+        }
         OwnedTracerScope {
             _tracer: std::marker::PhantomData,
         }

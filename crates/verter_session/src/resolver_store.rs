@@ -643,8 +643,8 @@ pub(crate) enum StoreViewReturnOnlyReason {
     /// The reading thread ALREADY HOLDS this manager's singleflight build
     /// claim: a store-view build re-entered
     /// [`StoreViewManager::base_view`] on the claim-holding thread.
-    /// The `built` condvar such a caller would park on can only be
-    /// signalled by its own `BuildClaimGuard::drop`, so parking is a
+    /// The claim release such a caller would wait for can only be
+    /// performed by its own `BuildClaimGuard::drop`, so parking is a
     /// one-thread deadlock. The manager refuses to park and hands the
     /// re-entrant caller a fail-closed return-only read instead —
     /// `StoreViewRead::current()` yields `None`, so the caller declines
@@ -1283,7 +1283,7 @@ thread_local! {
     /// builder-panic-must-not-leave-the-claim-stuck regression: a panic
     /// unwinding past the claim-clear statements must still release the
     /// `StoreViewManager` build claim (RAII guard), so subsequent
-    /// callers do not block forever on the `built` condvar.
+    /// callers do not wait forever for the claim to be released.
     pub(crate) static FORCE_BUILD_PANIC: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
@@ -1389,9 +1389,9 @@ thread_local! {
     /// [`StoreViewManager::base_view`] and reaches the would-park arm.
     /// The knob arms exactly that.
     ///
-    /// Without the claim-ownership backstop the nested read parks on the
-    /// `built` condvar that only its own `BuildClaimGuard::drop` can
-    /// signal, and the whole store-view path is dead at zero CPU.
+    /// Without the claim-ownership backstop the nested read waits for the
+    /// claim release that only its own `BuildClaimGuard::drop` can
+    /// perform, and the whole store-view path is dead at zero CPU.
     pub(crate) static FORCE_REENTRANT_STORE_VIEW_READ_ONCE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
@@ -1560,6 +1560,25 @@ impl HostStoreView {
     /// that falls to the cold path.
     #[track_caller]
     pub(crate) fn from_host_read(host: &VerterHost) -> StoreViewRead {
+        Self::record_host_read(host);
+        host.store_view_manager().base_view(host)
+    }
+
+    /// [`Self::from_host_read`] as a pollable computation: it returns
+    /// `Pending` where the read would wait behind another thread's
+    /// store-view build, with its waker registered for that build's
+    /// release.
+    #[track_caller]
+    pub(crate) fn from_host_read_pollable(
+        host: &VerterHost,
+    ) -> impl std::future::Future<Output = StoreViewRead> + Send + '_ {
+        Self::record_host_read(host);
+        host.store_view_manager().base_view_pollable(host)
+    }
+
+    /// Count one host store-view read, by call site and per host.
+    #[track_caller]
+    fn record_host_read(host: &VerterHost) {
         record_from_host_call(Location::caller());
         // Per-host measurement rail: hermetic counterpart of the
         // process-global per-call-site attribution table above. O(1)-read
@@ -1576,7 +1595,6 @@ impl HostStoreView {
                 .host_store_view_from_host_builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         });
-        host.store_view_manager().base_view(host)
     }
 
     /// Build a coherent root-backed base snapshot or report supersession
@@ -3569,7 +3587,7 @@ pub(crate) fn check_parse_fact(
 ///
 /// `cached` is the published token-keyed base view. `building` is the
 /// singleflight claim: while it is set, a builder owns the in-flight
-/// root capture and concurrent token-miss callers WAIT on `built` rather
+/// root capture and concurrent token-miss callers WAIT for its release rather
 /// than launching parallel builds.
 /// Structural confinement for the [`StoreViewManager`] singleflight build
 /// claim, and the self-await backstop built on it.
@@ -3579,8 +3597,8 @@ pub(crate) fn check_parse_fact(
 /// self-awaits**"*. The coherent build runs OUTSIDE the manager lock and
 /// can be re-entered by a future claim-holding helper. Such a thread observes
 /// its OWN claim and would
-/// park on the `built` condvar that only its own [`BuildClaimGuard`]'s
-/// `Drop` can signal — a wait-for cycle of length one, at zero CPU,
+/// wait for a claim release that only its own [`BuildClaimGuard`]'s
+/// `Drop` can perform — a wait-for cycle of length one, at zero CPU,
 /// forever, taking the host's whole store-view path with it.
 ///
 /// The invariant is now STRUCTURAL, not documented:
@@ -3651,12 +3669,13 @@ mod build_claim {
     ///
     /// Armed by [`Self::claim`] the moment the claim is taken. Its `Drop`
     /// deregisters this thread as the claim owner, re-acquires the manager
-    /// mutex, clears the claim, and wakes every parked joiner on the
-    /// `built` condvar — on EVERY exit path, including a panic unwinding
-    /// out of `build_coherent`. parking_lot mutexes do NOT poison, so
-    /// without this guard a panicking builder would leave the claim set
-    /// forever and every current joiner AND every future caller would
-    /// block permanently on `built` (a total hang of the store-view path).
+    /// mutex, clears the claim, records the release, and wakes every
+    /// waiting joiner once the mutex is released — on EVERY exit path,
+    /// including a panic unwinding out of `build_coherent`. parking_lot
+    /// mutexes do NOT poison, so without this guard a panicking builder
+    /// would leave the claim set forever and every current joiner AND every
+    /// future caller would wait permanently (a total hang of the
+    /// store-view path).
     ///
     /// The publish path drops the manager lock BEFORE this guard drops
     /// (parking_lot is not reentrant), so the guard's `Drop` re-locks
@@ -3701,20 +3720,24 @@ mod build_claim {
                     held.remove(pos);
                 }
             });
-            let mut state = self.manager.state.lock();
-            state.building.0 = false;
-            // Wake every parked joiner: on a published `Coherent` view they
-            // re-probe and (when tokens match) warm-hit the freshly-published
-            // view; on `Superseded` (or a panic that published nothing) one of
-            // them re-claims the build.
-            self.manager.built.notify_all();
+            let joiners = {
+                let mut state = self.manager.state.lock();
+                state.building.0 = false;
+                state.build_releases = state.build_releases.wrapping_add(1);
+                state.build_waiters.take()
+            };
+            // Wake every waiting joiner, after unlocking: on a published
+            // `Coherent` view they re-probe and (when tokens match) warm-hit
+            // the freshly-published view; on `Superseded` (or a panic that
+            // published nothing) one of them re-claims the build.
+            joiners.wake();
         }
     }
 
     /// Whether the CURRENT thread holds `manager`'s build claim.
     ///
-    /// `true` means the `built` condvar can only be signalled by this very
-    /// thread's own guard, so parking on it would deadlock.
+    /// `true` means the claim can only be released by this very thread's
+    /// own guard, so waiting for its release would deadlock.
     pub(super) fn claim_held_by_current_thread(manager: &StoreViewManager) -> bool {
         let key = manager_key(manager);
         HELD_CLAIMS.with(|held| held.borrow().contains(&key))
@@ -3727,10 +3750,16 @@ use build_claim::BuildClaimGuard;
 struct StoreViewManagerState {
     cached: Option<(StoreViewValidationToken, HostStoreView)>,
     /// Claimed while a builder is running `build_coherent` outside the
-    /// lock. A single in-flight build at a time; joiners block on the
-    /// condvar. Only [`BuildClaimGuard`] can move this flag — see
-    /// [`build_claim`].
+    /// lock. A single in-flight build at a time; joiners wait for its
+    /// release ([`BuildRelease`]). Only [`BuildClaimGuard`] can move this
+    /// flag — see [`build_claim`].
     building: build_claim::ClaimFlag,
+    /// How many build claims have been released. A joiner records it when
+    /// it starts waiting and is ready once it changes.
+    build_releases: u64,
+    /// The joiners polling for the in-flight claim's release; taken, and
+    /// woken after unlocking, when the claim is released.
+    build_waiters: verter_execution::wake::WakerSet,
     /// Monotonic reset generation. Advanced by every [`StoreViewManager::clear`]
     /// (a host-lifecycle reset: `close` / `set_workspace` /
     /// `configure_projects`). A builder claims the build under the
@@ -3743,7 +3772,7 @@ struct StoreViewManagerState {
     /// publish/return invariant (the token half is the live-token re-read
     /// in `base_view`).
     reset_generation: u64,
-    /// Test-only: number of callers currently parked on `built.wait`.
+    /// Test-only: number of callers currently waiting for a build claim release.
     /// The woken-waiter regression polls this so it can deterministically
     /// line a waiter up behind the gated builder before advancing the
     /// token.
@@ -3765,21 +3794,101 @@ struct StoreViewManagerState {
 /// takes `state` from inside either registry would close the cycle.
 pub(crate) struct StoreViewManager {
     state: parking_lot::Mutex<StoreViewManagerState>,
-    /// Signalled when a builder publishes (or abandons) the in-flight
-    /// build, waking joiners that parked on `building`.
-    built: parking_lot::Condvar,
+}
+
+/// One joiner's wait for the in-flight store-view build claim to be
+/// released (published or abandoned).
+///
+/// [`Self::poll`] checks the manager's release count under its lock and,
+/// while the claim it started waiting behind is still held, registers the
+/// poll's waker there; [`BuildClaimGuard`]'s release takes the
+/// registrations under the same lock and wakes them after unlocking, so a
+/// release racing the registration still wakes the joiner. Dropping the
+/// wait withdraws its registration.
+struct BuildRelease<'m> {
+    manager: &'m StoreViewManager,
+    /// The release count when the wait began.
+    seen: u64,
+    registration: verter_execution::wake::WakeRegistration,
+}
+
+impl<'m> BuildRelease<'m> {
+    /// A wait behind the claim held as of `state`.
+    fn new(manager: &'m StoreViewManager, state: &mut StoreViewManagerState) -> Self {
+        #[cfg(test)]
+        {
+            state.parked_waiters += 1;
+        }
+        Self {
+            manager,
+            seen: state.build_releases,
+            registration: verter_execution::wake::WakeRegistration::default(),
+        }
+    }
+
+    /// `Ready` once the claim was released, else `Pending` with `waker`
+    /// registered for its release.
+    fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<()> {
+        let mut state = self.manager.state.lock();
+        if state.build_releases != self.seen {
+            return std::task::Poll::Ready(());
+        }
+        state.build_waiters.register(&mut self.registration, waker);
+        verter_execution::blocking::note_pending(
+            verter_execution::blocking::WaitFamily::StoreViewBuild,
+        );
+        std::task::Poll::Pending
+    }
+}
+
+impl Drop for BuildRelease<'_> {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        {
+            let mut state = self.manager.state.lock();
+            state.parked_waiters = state.parked_waiters.saturating_sub(1);
+            state.build_waiters.withdraw(&mut self.registration);
+        }
+        #[cfg(not(test))]
+        if self.registration.is_registered() {
+            self.manager
+                .state
+                .lock()
+                .build_waiters
+                .withdraw(&mut self.registration);
+        }
+    }
+}
+
+impl std::future::Future for BuildRelease<'_> {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        BuildRelease::poll(&mut self, cx.waker())
+    }
+}
+
+/// What one round of a store-view read does after deciding its role under
+/// the manager lock: build under the claim it took, or wait for the release
+/// of another thread's claim.
+enum BuildRole<'m> {
+    Build(BuildClaimGuard<'m>, u64),
+    Join(BuildRelease<'m>),
 }
 
 /// Outcome of the [`StoreViewManager`]'s single park chokepoint,
 /// [`StoreViewManager::park_for_build`].
 #[must_use]
-enum ParkDecision {
-    /// The caller parked cooperatively on the `built` condvar and has since
-    /// been woken. It must restart its round and re-decide its role against
-    /// a freshly re-read live token.
-    Woken,
+enum ParkDecision<'m> {
+    /// A builder on another thread holds the claim: wait for its release,
+    /// with the manager unlocked, then restart the round and re-decide the
+    /// role against a freshly re-read live token.
+    Park(BuildRelease<'m>),
     /// The CURRENT thread already holds this manager's build claim, so the
-    /// `built` condvar can only be signalled by this thread's own
+    /// claim can only be released by this thread's own
     /// `BuildClaimGuard::drop`. Parking would be a one-thread deadlock, so
     /// the park was REFUSED and the chokepoint produced the fail-closed
     /// read the caller must return WITHOUT parking and WITHOUT claiming.
@@ -3787,7 +3896,7 @@ enum ParkDecision {
 }
 
 impl StoreViewManager {
-    /// The SOLE site at which this manager parks on the `built` condvar.
+    /// The SOLE site at which this manager waits for a build claim release.
     ///
     /// ## Cross-thread cooperation is UNCHANGED
     ///
@@ -3826,10 +3935,7 @@ impl StoreViewManager {
     /// `tracing::error!` in every build, and a `debug_assert!` that turns
     /// any dev/test occurrence into an immediate, fully-symbolised failure
     /// at the exact frame. Never a hang.
-    fn park_for_build(
-        &self,
-        state: &mut parking_lot::MutexGuard<'_, StoreViewManagerState>,
-    ) -> ParkDecision {
+    fn park_for_build(&self, state: &mut StoreViewManagerState) -> ParkDecision<'_> {
         if build_claim::claim_held_by_current_thread(self) {
             // Fail closed. Prefer the (stale) cached base view so a cold
             // seed still has real workspace data to work from; an empty view
@@ -3871,25 +3977,16 @@ impl StoreViewManager {
             );
             return ParkDecision::RefusedSelfAwait(Box::new(read));
         }
-        // A builder on ANOTHER thread owns the in-flight cold build: park
-        // cooperatively until it publishes or abandons.
-        #[cfg(test)]
-        {
-            state.parked_waiters += 1;
-        }
-        self.built.wait(state);
-        #[cfg(test)]
-        {
-            state.parked_waiters = state.parked_waiters.saturating_sub(1);
-        }
-        ParkDecision::Woken
+        // A builder on ANOTHER thread owns the in-flight cold build: the
+        // caller waits, with the manager unlocked, until it publishes or
+        // abandons.
+        ParkDecision::Park(BuildRelease::new(self, state))
     }
 
     #[must_use]
     pub(crate) fn new() -> Self {
         Self {
             state: parking_lot::Mutex::new(StoreViewManagerState::default()),
-            built: parking_lot::Condvar::new(),
         }
     }
 
@@ -3906,7 +4003,7 @@ impl StoreViewManager {
     ///
     /// On a token miss, exactly ONE caller claims the build (`building =
     /// true`) and runs `build_coherent` OUTSIDE the lock; concurrent
-    /// token-miss callers WAIT on the `built` condvar and then clone the
+    /// token-miss callers WAIT for the claim release and then clone the
     /// winner's published `Arc<StoreViewSnapshot>` instead of each
     /// running a parallel coherent build. This collapses the first
     /// wave after any token change onto one materialization (without it,
@@ -3953,6 +4050,25 @@ impl StoreViewManager {
     /// retry-budget exhaustion) yields [`StoreViewRead::ReturnOnly`]. The
     /// manager NEVER hands a warm validator a view it knows is stale.
     fn base_view(&self, host: &VerterHost) -> StoreViewRead {
+        // One implementation: the synchronous read drives the pollable one,
+        // entering the store-view wait only when it would park behind
+        // another thread's build.
+        let mut read = std::pin::pin!(self.base_view_pollable(host));
+        verter_execution::blocking::block_on_when_pending(
+            verter_execution::blocking::WaitFamily::StoreViewBuild,
+            |waker| {
+                std::future::Future::poll(read.as_mut(), &mut std::task::Context::from_waker(waker))
+            },
+        )
+    }
+
+    /// [`Self::base_view`] as a pollable computation: where the read would
+    /// park behind another thread's build, it returns `Pending` with its
+    /// waker registered for that build's release, holding no manager lock,
+    /// and resumes the round from there. Each round's role decision, build
+    /// and publication run within one poll, so a claim is never held across
+    /// a suspension.
+    pub(crate) async fn base_view_pollable(&self, host: &VerterHost) -> StoreViewRead {
         // The freshest view a superseded build on THIS call produced, kept
         // to hand back return-only if the cooperative rounds are exhausted,
         // together with the reason classifying why the freshest round was
@@ -3964,19 +4080,18 @@ impl StoreViewManager {
             // re-read INSIDE the lock (below) on every iteration, so a woken
             // waiter that re-enters this loop top always decides its role
             // against a freshly-captured token — never one captured before
-            // it slept. The block evaluates to the armed claim guard plus the
-            // reset generation observed when this round CLAIMED the build (the
-            // warm-hit / park arms return / continue before reaching it).
-            let (claim, claim_reset_generation) = {
+            // it slept. A claiming round evaluates to the armed claim guard
+            // plus the reset generation observed when it CLAIMED the build.
+            let role = {
                 let mut state = self.state.lock();
                 // Warm probe: token-stable cache hit hands back an Arc clone.
                 //
                 // RE-READ the live token here, AFTER acquiring the manager
-                // lock, rather than trusting the `current` captured at the
-                // loop top. A host mutation can land between that pre-lock
+                // lock, rather than trusting a token captured before the
+                // lock. A host mutation can land between that pre-lock
                 // capture and this point (e.g. while this thread waited to
                 // acquire `state`), bumping the live token; the cached entry
-                // would still match the STALE `current` and we would return a
+                // would still match the STALE token and we would return a
                 // view the host has already superseded. Direct callers such
                 // as `try_component_meta_cache_hit` use this view for
                 // immediate fact validation, so a stale warm hit can validate
@@ -4020,35 +4135,46 @@ impl StoreViewManager {
                     }
                 }
                 if state.building.is_claimed() {
-                    // A builder owns the in-flight cold build. Park until it
-                    // publishes. On wake the live host token may have advanced
-                    // (a host mutation while we slept, or the winner was
-                    // superseded to a still newer token), so we restart the
-                    // loop to RE-READ the live token inside the lock before
-                    // deciding our role afresh: a published winner keyed on a
-                    // now-stale token must false-miss (forcing a re-claim),
-                    // and a winner keyed on the current token warm-hits.
+                    // A builder owns the in-flight cold build. Wait until it
+                    // publishes. On wake the live host token may have
+                    // advanced (a host mutation while we waited, or the
+                    // winner was superseded to a still newer token), so we
+                    // restart the loop to RE-READ the live token inside the
+                    // lock before deciding our role afresh: a published
+                    // winner keyed on a now-stale token must false-miss
+                    // (forcing a re-claim), and a winner keyed on the
+                    // current token warm-hits.
                     //
                     // ...UNLESS the claim we just observed is OUR OWN, in
-                    // which case parking would deadlock behind ourselves; the
+                    // which case waiting would deadlock behind ourselves; the
                     // chokepoint hands back a fail-closed read instead.
                     match self.park_for_build(&mut state) {
-                        ParkDecision::Woken => continue,
+                        ParkDecision::Park(release) => BuildRole::Join(release),
                         ParkDecision::RefusedSelfAwait(read) => return *read,
                     }
+                } else {
+                    // No warm hit and no in-flight build — claim it. Taking
+                    // the claim ALSO arms the RAII guard, under this same
+                    // lock, so the claim is cleared (and joiners woken) on
+                    // EVERY exit path — including a panic unwinding out of
+                    // `build_coherent`. parking_lot mutexes do not poison, so
+                    // without the guard a panicking builder would leave the
+                    // claim set forever and every current joiner AND future
+                    // caller would wait on the claim release permanently (a
+                    // total store-view hang). The guard also records the
+                    // reset generation observed at claim time, so the
+                    // publish fence below can detect a `clear()` that races
+                    // this build.
+                    let (claim, generation) = BuildClaimGuard::claim(self, &mut state);
+                    BuildRole::Build(claim, generation)
                 }
-                // No warm hit and no in-flight build — claim it. Taking the
-                // claim ALSO arms the RAII guard, under this same lock, so
-                // the claim is cleared (and joiners woken) on EVERY exit path
-                // — including a panic unwinding out of `build_coherent`.
-                // parking_lot mutexes do not poison, so without the guard a
-                // panicking builder would leave the claim set forever and
-                // every current joiner AND future caller would block on the
-                // `built` condvar permanently (a total store-view hang). The
-                // guard also records the reset generation observed at claim
-                // time, so the publish fence below can detect a `clear()`
-                // that races this build.
-                BuildClaimGuard::claim(self, &mut state)
+            };
+            let (claim, claim_reset_generation) = match role {
+                BuildRole::Join(release) => {
+                    release.await;
+                    continue;
+                }
+                BuildRole::Build(claim, generation) => (claim, generation),
             };
 
             // Run the coherent build OUTSIDE the lock. A panic here unwinds
@@ -4130,17 +4256,17 @@ impl StoreViewManager {
             return StoreViewRead::ReturnOnly { view, reason };
         }
         // We never claimed a build on any round (every round was a warm miss
-        // followed by a park behind a builder that kept getting superseded),
+        // followed by a wait behind a builder that kept getting superseded),
         // so this waiter has no view of its own. The final build MUST stay
         // singleflighted: an UNCLAIMED `build_coherent` here would let every
         // exhausted waiter (N of them under churn) sweep the full workspace
         // in parallel — the exact CPU waste this manager exists to remove.
         // Route the final build through a claim-or-rejoin lane instead.
-        self.claim_or_rejoin_final_build(host)
+        self.claim_or_rejoin_final_build(host).await
     }
 
     /// Final-fallback read for a `base_view` waiter that exhausted its
-    /// retry budget WITHOUT ever claiming a build (it only ever parked
+    /// retry budget WITHOUT ever claiming a build (it only ever waited
     /// behind other in-flight builders, so it carries no view of its own).
     ///
     /// The defect this closes: returning the final view via an UNCLAIMED
@@ -4158,25 +4284,25 @@ impl StoreViewManager {
     ///   warm-validation-miss fence degrades it). No sweep.
     /// * **lane free** — claim it (`building = true`) and run exactly ONE
     ///   singleflighted `build_coherent`, then publish / return.
-    /// * **lane busy** — PARK on the `built` condvar; on wake, RE-CHECK the
-    ///   lane in the SAME lock acquisition and claim it inline if it has
-    ///   freed (so a park that wakes to a free lane claims WITHIN the round
-    ///   rather than spending another round). Never claim over a `true`
-    ///   `building` — that would double-claim and sweep in parallel.
+    /// * **lane busy** — wait until the claim is released; on wake, RE-CHECK
+    ///   the lane under the re-taken lock and claim it there if it has freed
+    ///   (so a wait that wakes to a free lane claims WITHIN the round rather
+    ///   than spending another round). Never claim over a `true` `building` —
+    ///   that would double-claim and sweep in parallel.
     ///
     /// Liveness: `build_coherent` is internally bounded and ALWAYS releases
     /// its claim (RAII guard) on completion, so the lane frees within bounded
-    /// time and a parked waiter is always woken. The loop is capped by
+    /// time and a waiting reader is always woken. The loop is capped by
     /// [`STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS`]; on the rare exhaustion (a
     /// builder monopolised the lane for the whole budget without caching) the
     /// freshest view this waiter managed to claim-build is returned
     /// `ReturnOnly`. The path terminates in bounded time, never spins, never
     /// sweeps unclaimed, and never advertises a known-stale view as
     /// `Current`.
-    fn claim_or_rejoin_final_build(&self, host: &VerterHost) -> StoreViewRead {
+    async fn claim_or_rejoin_final_build(&self, host: &VerterHost) -> StoreViewRead {
         let mut fallback: Option<(HostStoreView, StoreViewReturnOnlyReason)> = None;
         for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
-            let (claim, claim_reset_generation) = {
+            let role = {
                 let mut state = self.state.lock();
                 // Re-probe the cache under the lock (re-reading the live token
                 // so a hit is served only when genuinely current). A cached
@@ -4185,30 +4311,41 @@ impl StoreViewManager {
                     return read;
                 }
                 if state.building.is_claimed() {
-                    // A builder owns the lane and nothing is cached yet. PARK
+                    // A builder owns the lane and nothing is cached yet. Wait
                     // and ride its result rather than sweeping in parallel —
                     // unless the claim is OUR OWN, which the chokepoint
                     // refuses fail-closed instead of deadlocking.
                     match self.park_for_build(&mut state) {
-                        ParkDecision::Woken => {}
+                        ParkDecision::Park(release) => BuildRole::Join(release),
                         ParkDecision::RefusedSelfAwait(read) => return *read,
                     }
-                    // Re-check IN THE SAME lock acquisition: a cached view now
-                    // (current/stale) is returned; if the lane freed, fall
-                    // through to claim it within THIS round; if a different
-                    // builder re-claimed, park again next round.
+                } else {
+                    // Lane free, cache empty — claim so exactly THIS waiter
+                    // sweeps.
+                    let (claim, generation) = BuildClaimGuard::claim(self, &mut state);
+                    BuildRole::Build(claim, generation)
+                }
+            };
+            let (claim, claim_reset_generation) = match role {
+                BuildRole::Build(claim, generation) => (claim, generation),
+                BuildRole::Join(release) => {
+                    release.await;
+                    // Re-check under the re-taken lock: a cached view now
+                    // (current/stale) is returned; if the lane freed, claim
+                    // it within THIS round; if a different builder
+                    // re-claimed, wait again next round.
+                    let mut state = self.state.lock();
                     if let Some(read) = Self::current_or_stale_cached_read(host, &state) {
                         return read;
                     }
                     if state.building.is_claimed() {
                         // Another builder re-claimed before we could; re-loop
-                        // and park again (bounded).
+                        // and wait again (bounded).
                         continue;
                     }
-                    // Lane freed on wake with an empty cache — claim it inline.
+                    // Lane freed on wake with an empty cache — claim it here.
+                    BuildClaimGuard::claim(self, &mut state)
                 }
-                // Lane free, cache empty — claim so exactly THIS waiter sweeps.
-                BuildClaimGuard::claim(self, &mut state)
             };
 
             let outcome = HostStoreView::build_coherent(host, None);
@@ -4257,25 +4394,26 @@ impl StoreViewManager {
         // cached view if one finally exists; otherwise claim the now-or-soon-
         // free lane for a single guarded build. This still never sweeps
         // unclaimed.
-        let (claim, claim_reset_generation) = {
-            let mut state = self.state.lock();
-            if let Some(read) = Self::current_or_stale_cached_read(host, &state) {
-                return read;
-            }
-            // Wait (bounded) for the lane to free, then claim it. Each
-            // `build_coherent` releases its claim on completion, so this wakes
-            // within bounded time. A lane held by THIS thread would never free
-            // from here, so the chokepoint refuses that park fail-closed.
-            while state.building.is_claimed() {
-                match self.park_for_build(&mut state) {
-                    ParkDecision::Woken => {}
-                    ParkDecision::RefusedSelfAwait(read) => return *read,
-                }
+        //
+        // Wait (bounded) for the lane to free, then claim it. Each
+        // `build_coherent` releases its claim on completion, so this wakes
+        // within bounded time. A lane held by THIS thread would never free
+        // from here, so the chokepoint refuses that wait fail-closed.
+        let (claim, claim_reset_generation) = loop {
+            let release = {
+                let mut state = self.state.lock();
                 if let Some(read) = Self::current_or_stale_cached_read(host, &state) {
                     return read;
                 }
-            }
-            BuildClaimGuard::claim(self, &mut state)
+                if !state.building.is_claimed() {
+                    break BuildClaimGuard::claim(self, &mut state);
+                }
+                match self.park_for_build(&mut state) {
+                    ParkDecision::Park(release) => release,
+                    ParkDecision::RefusedSelfAwait(read) => return *read,
+                }
+            };
+            release.await;
         };
         let outcome = HostStoreView::build_coherent(host, None);
         match outcome {
@@ -4479,12 +4617,18 @@ impl StoreViewManager {
             .map(|(token, view)| (*token, Arc::clone(&view.snapshot)))
     }
 
-    /// Test-only: number of callers currently parked on `built.wait`.
+    /// Test-only: number of callers currently waiting for a build claim release.
     /// The woken-waiter regression polls this to line waiters up behind a
     /// gated builder before advancing the token.
     #[cfg(test)]
     pub(crate) fn parked_waiters(&self) -> usize {
         self.state.lock().parked_waiters
+    }
+
+    /// Test-only: the wakers registered for the in-flight build's release.
+    #[cfg(test)]
+    pub(crate) fn build_release_registrations(&self) -> usize {
+        self.state.lock().build_waiters.len()
     }
 }
 
@@ -4503,6 +4647,14 @@ impl crate::resolver_core::ResolverStore for VerterHost {
             StoreViewRead::Current(current) => current.view().clone(),
             StoreViewRead::ReturnOnly { view, .. } => view,
         }
+    }
+}
+
+/// A store-view read as its view and whether the manager proved it current.
+fn view_with_currentness(read: StoreViewRead) -> (HostStoreView, bool) {
+    match read {
+        StoreViewRead::Current(current) => (current.view().clone(), true),
+        StoreViewRead::ReturnOnly { view, .. } => (view, false),
     }
 }
 
@@ -4573,6 +4725,15 @@ impl VerterHost {
         HostStoreView::from_host_read(self)
     }
 
+    /// [`Self::resolver_store_view_read`] as a pollable computation: it
+    /// suspends where the read would wait behind another thread's build.
+    #[track_caller]
+    pub(crate) fn resolver_store_view_read_pollable(
+        &self,
+    ) -> impl std::future::Future<Output = StoreViewRead> + Send + '_ {
+        HostStoreView::from_host_read_pollable(self)
+    }
+
     /// Read the host's base store view together with the manager's
     /// currentness proof, for the stable-request executors whose warm
     /// preflight peek must be suppressed on a known-stale snapshot.
@@ -4580,10 +4741,21 @@ impl VerterHost {
     /// [`StoreViewRead::Current`] read.
     #[track_caller]
     pub(crate) fn resolver_store_view_with_currentness(&self) -> (HostStoreView, bool) {
-        match HostStoreView::from_host_read(self) {
-            StoreViewRead::Current(current) => (current.view().clone(), true),
-            StoreViewRead::ReturnOnly { view, .. } => (view, false),
-        }
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::StoreViewBuild,
+            std::pin::pin!(self.resolver_store_view_with_currentness_pollable()),
+        )
+    }
+
+    /// [`Self::resolver_store_view_with_currentness`] without driving a
+    /// pending build. Both forms preserve the same current/return-only
+    /// distinction; callers apply session overlays after this one read.
+    #[track_caller]
+    pub(crate) fn resolver_store_view_with_currentness_pollable(
+        &self,
+    ) -> impl std::future::Future<Output = (HostStoreView, bool)> + Send + '_ {
+        let read = self.resolver_store_view_read_pollable();
+        async move { view_with_currentness(read.await) }
     }
 
     /// Capture ONE coherent [`BatchFixedView`] for a whole component-meta
@@ -4641,6 +4813,34 @@ impl VerterHost {
         // request, including imported files omitted by files/include.
         self.ingest_configured_programs();
         let (base_view, is_current) = self.resolver_store_view_with_currentness();
+        self.fixed_view_from_capture(view, base_view, is_current)
+    }
+
+    /// [`Self::capture_batch_fixed_view`] as a pollable computation: where
+    /// the store-view read would wait behind another thread's build it
+    /// returns `Pending`, with its waker registered for that build's
+    /// release, and resumes the same read once woken.
+    #[track_caller]
+    pub(crate) fn capture_batch_fixed_view_pollable<'s>(
+        &'s self,
+        view: &'s dyn crate::session_view::SessionView,
+    ) -> impl std::future::Future<Output = BatchFixedView> + Send + 's {
+        self.ingest_configured_programs();
+        let read = HostStoreView::from_host_read_pollable(self);
+        async move {
+            let (base_view, is_current) = view_with_currentness(read.await);
+            self.fixed_view_from_capture(view, base_view, is_current)
+        }
+    }
+
+    /// The [`BatchFixedView`] of one store-view read under `view`'s session
+    /// overlay.
+    fn fixed_view_from_capture(
+        &self,
+        view: &dyn crate::session_view::SessionView,
+        base_view: HostStoreView,
+        is_current: bool,
+    ) -> BatchFixedView {
         // Base-external fence token: the captured view's token with
         // `overlay_identity` cleared. The base read's token already carries
         // `overlay_identity: None`, so this IS the base view's token; it is
@@ -4995,7 +5195,7 @@ impl HostStoreView {
     /// build (after the [`StoreViewManager`] singleflight claim is taken).
     /// Drives the builder-panic regression: the claim must still be
     /// released (RAII guard) so subsequent callers do not hang on the
-    /// `built` condvar. One-shot — the knob disarms itself after firing.
+    /// claim release. One-shot — the knob disarms itself after firing.
     pub(crate) fn arm_build_panic_for_tests() {
         FORCE_BUILD_PANIC.with(|c| c.set(true));
     }
@@ -5328,5 +5528,116 @@ impl crate::VerterHost {
                 .indexed()
                 .route_generation_reader(),
         )
+    }
+}
+
+#[cfg(test)]
+mod build_release_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts its wakes and, at each wake, whether the manager lock was
+    /// free, so a wake under the manager lock is observable.
+    struct ReleaseProbe {
+        manager: Arc<StoreViewManager>,
+        wakes: AtomicUsize,
+        locked_wakes: AtomicUsize,
+    }
+
+    impl std::task::Wake for ReleaseProbe {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            if self.manager.state.try_lock().is_none() {
+                self.locked_wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn probe(manager: &Arc<StoreViewManager>) -> (Arc<ReleaseProbe>, std::task::Waker) {
+        let probe = Arc::new(ReleaseProbe {
+            manager: Arc::clone(manager),
+            wakes: AtomicUsize::new(0),
+            locked_wakes: AtomicUsize::new(0),
+        });
+        (Arc::clone(&probe), std::task::Waker::from(probe))
+    }
+
+    #[test]
+    fn a_build_release_wait_is_woken_once_after_the_manager_lock_is_released() {
+        let manager = Arc::new(StoreViewManager::new());
+        let (claim, _) = BuildClaimGuard::claim(&manager, &mut manager.state.lock());
+        let (counter, waker) = probe(&manager);
+        let mut release = BuildRelease::new(&manager, &mut manager.state.lock());
+        assert!(release.poll(&waker).is_pending());
+        assert!(release.poll(&waker).is_pending());
+        assert_eq!(
+            manager.state.lock().build_waiters.len(),
+            1,
+            "a re-poll keeps one registration"
+        );
+        drop(claim);
+        assert_eq!(counter.wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            counter.locked_wakes.load(Ordering::SeqCst),
+            0,
+            "the joiner was woken under the manager lock"
+        );
+        assert!(release.poll(&waker).is_ready());
+    }
+
+    #[test]
+    fn dropping_a_build_release_wait_withdraws_only_its_own_registration() {
+        let manager = Arc::new(StoreViewManager::new());
+        let (claim, _) = BuildClaimGuard::claim(&manager, &mut manager.state.lock());
+        let (counter, waker) = probe(&manager);
+        let mut dropped = BuildRelease::new(&manager, &mut manager.state.lock());
+        let mut kept = BuildRelease::new(&manager, &mut manager.state.lock());
+        assert!(dropped.poll(&waker).is_pending());
+        assert!(kept.poll(&waker).is_pending());
+        drop(dropped);
+        assert_eq!(
+            manager.state.lock().build_waiters.len(),
+            1,
+            "drop withdraws its registration"
+        );
+        drop(claim);
+        assert_eq!(counter.wakes.load(Ordering::SeqCst), 1);
+        assert!(kept.poll(&waker).is_ready());
+    }
+
+    /// A release racing a joiner's registration is never lost: either the
+    /// registering poll sees the release, or its waker fires.
+    #[test]
+    fn a_claim_release_racing_registration_never_loses_the_wake() {
+        for round in 0..256u32 {
+            let manager = Arc::new(StoreViewManager::new());
+            let (claimed, claiming) = std::sync::mpsc::channel::<()>();
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let builder = {
+                let (manager, start) = (Arc::clone(&manager), Arc::clone(&start));
+                std::thread::spawn(move || {
+                    let (claim, _) = BuildClaimGuard::claim(&manager, &mut manager.state.lock());
+                    claimed.send(()).expect("the joiner is listening");
+                    start.wait();
+                    drop(claim);
+                })
+            };
+            claiming.recv().expect("the builder claims");
+            let (counter, waker) = probe(&manager);
+            let mut release = BuildRelease::new(&manager, &mut manager.state.lock());
+            start.wait();
+            let answered_at_poll = release.poll(&waker).is_ready();
+            builder.join().expect("the builder releases");
+            assert!(
+                answered_at_poll || counter.wakes.load(Ordering::SeqCst) == 1,
+                "round {round}: a pending joiner must be woken by the release"
+            );
+            assert!(release.poll(&waker).is_ready());
+            assert!(manager.state.lock().build_waiters.is_empty());
+        }
     }
 }

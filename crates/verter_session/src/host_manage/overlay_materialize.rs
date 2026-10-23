@@ -453,6 +453,30 @@ impl VerterHost {
         canonical_id: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::ResolverFlight,
+            verter_execution::blocking::on_heap(|| {
+                self.materialize_overlay_indexed_ready_serve_with_view_in_pollable::<M>(
+                    observation,
+                    canonical_id,
+                    view,
+                )
+            })
+            .as_mut(),
+        )
+    }
+
+    /// Overlay indexing with yielding flight joins and owner-shard
+    /// submission/results. Carrier structure acquisition remains synchronous.
+    pub(crate) async fn materialize_overlay_indexed_ready_serve_with_view_in_pollable<
+        M: verter_audit::observe::ObserveExec,
+    >(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
         let _ = observation;
         // Two canonical ids are in play and MUST NOT be conflated —
         // they are carried together by [`OverlayArtifactIdentity`]:
@@ -541,7 +565,7 @@ impl VerterHost {
             session: None,
             validity_fingerprint: 0,
         };
-        let flight_body = || -> Result<crate::project_type_store::IndexedFlightOutcome, ()> {
+        let flight_body = || async {
             // Re-check inside the flight — another flight may have
             // published while this claimant waited for the lane.
             if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
@@ -555,9 +579,11 @@ impl VerterHost {
             // The materialisation is one operation: a parse or walk-stack lease
             // refused its stack anywhere inside it leaves some product read off
             // an empty program, so the flight publishes nothing.
-            match verter_parser::oxc_parse::refusals_within(|| {
-                self.materialize_overlay_cold::<M>(&identity, canonical_id, view)
-            }) {
+            match verter_parser::oxc_parse::refusals_within_pollable(
+                self.materialize_overlay_cold_pollable::<M>(&identity, canonical_id, view),
+            )
+            .await
+            {
                 (materialized, None) => materialized.ok_or(()),
                 (_, Some(_)) => Err(()),
             }
@@ -571,13 +597,15 @@ impl VerterHost {
         const MAX_FLIGHT_ATTEMPTS: usize = 3;
         let mut last_fenced: Option<Arc<crate::project_type_store::IndexedReady>> = None;
         for _attempt in 0..MAX_FLIGHT_ATTEMPTS {
-            let run_result =
-                match singleflight.run_retaining(lane_key.clone(), token, flight_body, |outcome| {
+            let run_result = match singleflight
+                .run_retaining_pollable(lane_key.clone(), token, flight_body, |outcome| {
                     outcome.published
-                }) {
-                    Ok(run_result) => run_result,
-                    Err(()) => return None,
-                };
+                })
+                .await
+            {
+                Ok(run_result) => run_result,
+                Err(()) => return None,
+            };
             let outcome = (*run_result.value).clone();
             if outcome.published {
                 return Some(crate::host_manage::prepared_decl::IndexedReadyServe {
@@ -654,7 +682,7 @@ impl VerterHost {
     /// consult the LIVE scheduler, so a pre-stamp read would leave a
     /// fence-invisible window in which a base mutation lands between the
     /// content read and the stamp capture.
-    fn materialize_overlay_cold<M: verter_audit::observe::ObserveExec>(
+    async fn materialize_overlay_cold_pollable<M: verter_audit::observe::ObserveExec>(
         &self,
         identity: &OverlayArtifactIdentity,
         canonical_id: &str,
@@ -728,7 +756,7 @@ impl VerterHost {
                 framework_parse.as_deref(),
             )?;
         // Single source type + single eval-program parse — the arena
-        // stays on this flight's stack. The source type derives from the
+        // stays on its owner worker. The source type derives from the
         // OVERLAY content (the pure derivation over `raw_source` +
         // `framework_parse`, the exact inputs the snapshot below is built
         // from) — NEVER from the scheduler-stored
@@ -777,9 +805,10 @@ impl VerterHost {
         // hand the lease to the overlay artifact's memo below, so the
         // header-index parse and every later overlay body demand share ONE
         // parse for the overlay artifact's life.
-        let cold_lease = self
-            .decl_lowering
-            .acquire_lease(&snapshot_key, &eval_source, source_type);
+        let mut lease =
+            self.decl_lowering
+                .begin_acquire_lease(&snapshot_key, &eval_source, source_type);
+        let cold_lease = std::future::poll_fn(|cx| lease.poll(cx.waker())).await.0;
         // A program refused for want of stack is not retained: the flight
         // publishes nothing for the source, never an artifact read off an
         // empty program.
@@ -792,13 +821,13 @@ impl VerterHost {
                 .eval_program_parses
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        // LEASE-ONLY run: `cold_lease` (acquired above) is held on this
-        // stack, so the retained snapshot is pinned for the whole flight
+        // LEASE-ONLY run: `cold_lease` (acquired above) is held by this
+        // build, so the retained snapshot is pinned for the whole flight
         // and this cold-index job reuses it — the run cannot parse, per
         // the lease-only worker contract.
         // The job runs on a declaration-lowering worker, so it records its
         // own refusals: a refused one publishes nothing, as a refused parse.
-        let outcome = self.decl_lowering.run_leased(
+        let mut index = self.decl_lowering.begin_run_leased(
             &snapshot_key,
             move |program: Option<&verter_semantic_source::parsed_eval_program::ParsedEvalProgram>| {
                 verter_parser::oxc_parse::refusals_within(|| {
@@ -908,10 +937,11 @@ impl VerterHost {
                 })
             },
         );
+        let outcome = std::future::poll_fn(|cx| index.poll(cx.waker())).await;
         // The parse was already counted at lease acquisition above; the
         // cold-index run reused the pinned snapshot. A lease miss is
-        // impossible by construction (`cold_lease` is held on this
-        // stack), so the `None` arm is an invariant break: fail CLOSED
+        // impossible by construction (`cold_lease` is held by this
+        // build), so the `None` arm is an invariant break: fail CLOSED
         // (no artifact) — loud in debug builds — never a transient
         // re-parse.
         let Some(products) = outcome else {

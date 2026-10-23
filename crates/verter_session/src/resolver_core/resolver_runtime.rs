@@ -39,9 +39,15 @@ where
     V: CachedData,
 {
     pub fn new() -> Self {
+        Self::with_task_registry(verter_execution::tasks::TaskRegistry::default())
+    }
+
+    /// A request state whose flights are led and joined by tasks of
+    /// `tasks`.
+    pub fn with_task_registry(tasks: verter_execution::tasks::TaskRegistry) -> Self {
         Self {
             cache: ValidatedFactCache::default(),
-            singleflight: SingleflightGroup::default(),
+            singleflight: SingleflightGroup::with_task_registry(tasks),
         }
     }
 
@@ -288,16 +294,25 @@ where
     /// [`ProjectTypeStore::imported_roots_handle`](crate::project_type_store::ProjectTypeStore::imported_roots_handle)
     /// at construction time and threads them in here so resolver hot-path
     /// mutations land on the shared project authority.
-    pub fn new(routes: Arc<RouteDb>, imported_roots: Arc<ImportedRootDb>) -> Self {
+    ///
+    /// Every flight of the runtime is led and joined by tasks of `tasks`,
+    /// the host's one cycle authority.
+    pub fn new(
+        routes: Arc<RouteDb>,
+        imported_roots: Arc<ImportedRootDb>,
+        tasks: verter_execution::tasks::TaskRegistry,
+    ) -> Self {
         let counters = Arc::new(ResolverCounters::new());
         Self {
             fallthrough: FallthroughResolverState::new(counters.clone()),
-            component_meta: StableRequestState::new(),
+            component_meta: StableRequestState::with_task_registry(tasks.clone()),
             recent_component_meta_views: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            prepared_decl_bundles: StableRequestState::new(),
-            top_level_fallthrough_singleflight: SingleflightGroup::default(),
+            prepared_decl_bundles: StableRequestState::with_task_registry(tasks.clone()),
+            top_level_fallthrough_singleflight: SingleflightGroup::with_task_registry(
+                tasks.clone(),
+            ),
             counters,
-            indexed_singleflight: SingleflightGroup::default(),
+            indexed_singleflight: SingleflightGroup::with_task_registry(tasks),
             routes,
             imported_roots,
         }
@@ -499,7 +514,11 @@ where
     /// real project-store path.
     #[cfg(test)]
     pub fn for_tests() -> Self {
-        Self::new(Arc::new(RouteDb::new()), Arc::new(ImportedRootDb::new()))
+        Self::new(
+            Arc::new(RouteDb::new()),
+            Arc::new(ImportedRootDb::new()),
+            verter_execution::tasks::TaskRegistry::default(),
+        )
     }
 
     /// Test-only constructor variant that shares counters with another
@@ -520,7 +539,11 @@ where
     FallthroughV: Clone,
 {
     fn default() -> Self {
-        Self::new(Arc::new(RouteDb::new()), Arc::new(ImportedRootDb::new()))
+        Self::new(
+            Arc::new(RouteDb::new()),
+            Arc::new(ImportedRootDb::new()),
+            verter_execution::tasks::TaskRegistry::default(),
+        )
     }
 }
 
