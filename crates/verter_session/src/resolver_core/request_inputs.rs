@@ -2,7 +2,7 @@
 //! records of `verter_session_query::inputs` from host artifacts, and the
 //! request leases that keep the source behind every served record alive.
 use rustc_hash::FxHashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use verter_session_query::inputs::indexed::{
     IndexedInputIdentity, IndexedInputRecord, IndexedInputServe,
 };
@@ -10,10 +10,10 @@ use verter_session_query::inputs::prepared::PreparedInputRecord;
 use verter_session_query::inputs::shallow::ShallowInputRecord;
 
 #[derive(Debug)]
-pub(crate) struct CachedProjection<T>(OnceLock<Arc<T>>);
+pub(crate) struct CachedProjection<T>(verter_retention::pinned_heap::PinnedOnce<Arc<T>>);
 impl<T> Default for CachedProjection<T> {
     fn default() -> Self {
-        Self(OnceLock::new())
+        Self(Default::default())
     }
 }
 impl<T> Clone for CachedProjection<T> {
@@ -21,7 +21,7 @@ impl<T> Clone for CachedProjection<T> {
         Self::default()
     }
 }
-impl<T> CachedProjection<T> {
+impl<T: verter_retention::heap_size::HeapSize + Send + Sync + 'static> CachedProjection<T> {
     pub(crate) fn get_or_init(&self, build: impl FnOnce() -> T) -> Arc<T> {
         Arc::clone(self.0.get_or_init(|| Arc::new(build())))
     }

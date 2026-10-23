@@ -1422,9 +1422,9 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
     /// The bundle as admitted: both declaration caches' tables and its shared
     /// cells. What it commits afterwards — declarations, name tables, the
     /// engine's input record — is each its own cell, held by the bundle as
-    /// it fills ([`Held`]). The file's shallow state is the file artifact
-    /// store's and the identity pool the project store's; the bundle shares
-    /// both, owns neither.
+    /// it fills ([`Held`]). The shared shallow state carries its own pin until its last artifact or
+    /// bundle holder drops; the identity pool likewise charges its own cells.
+    /// The bundle pays only for its handles to those shared owners.
     fn heap_size<'t>(
         &'t self,
         meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
@@ -1644,6 +1644,7 @@ pub fn build_prepared_decl_bundle(
     interner: &Arc<IdentityInterner>,
 ) -> PreparedDeclBundle {
     verter_audit::attribute_scope!(PreparedDeclBuild);
+    state.pin_storage();
     let dep_edges = DepEdges::new(dep_edges);
     let import_canonicalization = Arc::new(import_canonicalization);
 

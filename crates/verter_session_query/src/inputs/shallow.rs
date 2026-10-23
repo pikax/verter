@@ -39,7 +39,7 @@ impl std::fmt::Debug for RuneAmbientLookup {
 /// synthesised component default, a hermetic routing fixture) fills it in.
 /// Nothing shares an assembly as an observation; [`ShallowInputRecord::finalize`]
 /// seals one into the published record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ShallowInputAssembly {
     pub whole_hash: Hash16,
     pub canonical_id: Arc<str>,
@@ -56,6 +56,7 @@ pub struct ShallowInputAssembly {
     pub export_assignment: Option<String>,
     /// The rune ambient inventory's presence lookups for a Svelte rune
     /// module; `None` for every other file.
+    #[heap_size(inline)]
     pub rune_ambient: Option<RuneAmbientLookup>,
 }
 
@@ -69,7 +70,7 @@ pub struct ShallowInputAssembly {
 /// change are a new observation; a clone is the same observation and keeps
 /// its id. The id selects retained source objects and matches known inputs
 /// against indexed ones, so it never outlives the facts it was assigned to.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ShallowInputRecord {
     observation_id: u64,
     facts: ShallowInputAssembly,
@@ -108,7 +109,7 @@ impl std::ops::Deref for ShallowInputRecord {
 /// and demanded live by consumers; baking it into this content-addressed
 /// artifact is what made the artifact go stale on an unrelated
 /// dependency-set change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct WildcardReexport {
     pub owner: TopLevelOwnerId,
     /// The raw source specifier (e.g., `./types`).
@@ -119,7 +120,7 @@ pub struct WildcardReexport {
 ///
 /// Parse domain: no resolved canonical is retained (see
 /// [`WildcardReexport`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct ImportTarget {
     /// The raw source specifier (e.g., `./types`).
     pub source_specifier: String,
@@ -146,7 +147,7 @@ impl ImportTarget {
 }
 
 /// Where an exported name resolves to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum ExportTarget {
     /// Locally declared and exported.
     Local {
@@ -171,7 +172,7 @@ pub enum ExportTarget {
 /// memo-owned [`LoweredTypeDecl`] (read through [`ShallowFileState::type_decl`]);
 /// dependency edges live in [`ClassifiedTypeDeps`] (read through
 /// [`ShallowFileState::type_deps`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ShallowTypeSymbol {
     /// Declaration kind (header fact).
     pub kind: TypeDeclKind,
@@ -209,7 +210,7 @@ impl ShallowTypeSymbol {
 /// Per-symbol dependency-edge classification — the local vs external
 /// split over one type declaration's reference graph, baked against the
 /// owning state's import targets. Dependency EDGES only; no body product.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct ClassifiedTypeDeps {
     /// Names of same-file symbols this type directly depends on.
     /// Used for iterative local closure.
@@ -263,7 +264,7 @@ pub enum LexicalValueBinding<'a> {
 /// It OWNS no body product — declaration bodies live exclusively in the
 /// memo-owned (or eager synthesised) [`LoweredValueDecl`], read through
 /// [`ShallowFileState::value_decl`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ShallowValueSymbol {
     /// Declaration kind (header fact).
     pub kind: ValueDeclKind,
@@ -319,7 +320,7 @@ impl ShallowValueSymbol {
 }
 
 /// A reference to an imported symbol that needs cross-file resolution.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ExternalSymbolRef {
     /// The local import name in this file.
     pub local_name: String,

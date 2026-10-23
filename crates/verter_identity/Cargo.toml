@@ -22,6 +22,7 @@ publish = false
 # because a `Span`-carrying identity is a decision for the type that OWNS the
 # span-relative concept, not for this neutral vocabulary crate.
 [dependencies]
+verter_retention = { path = "../verter_retention" }
 blake3 = { workspace = true }
 
 [dev-dependencies]

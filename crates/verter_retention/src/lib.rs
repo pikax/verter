@@ -94,6 +94,7 @@ pub mod allocation;
 pub mod granular;
 pub mod heap_size;
 pub mod owned;
+pub mod pinned_heap;
 pub mod shared;
 pub mod unshared;
 #[cfg(any(test, feature = "test-support", feature = "soak-support"))]

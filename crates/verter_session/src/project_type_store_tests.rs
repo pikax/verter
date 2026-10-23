@@ -9,6 +9,150 @@
 use super::project_type_store::ProjectTypeStore;
 
 #[test]
+fn lazy_declaration_growth_is_pinned_once_and_released_with_its_memo() {
+    use verter_retention::SemanticRetentionAccount;
+    let account = SemanticRetentionAccount::process_local();
+    let baseline = account.snapshot().pinned_bytes;
+    let members = (0..128)
+        .map(|index| format!("field_{index}: {{ nested_{index}: string }};"))
+        .collect::<String>();
+    let state = crate::resolver_core::ShallowFileState::service_backed_for_test(&format!(
+        "export interface Wide {{ {members} }}"
+    ));
+    let cold = account.snapshot().pinned_bytes;
+    let body = state.type_decl("Wide").expect("lowered declaration");
+    let warm = account.snapshot().pinned_bytes;
+    assert!(warm > cold, "lowering publishes new charged body facts");
+    let again = state.type_decl("Wide").expect("memo hit");
+    assert!(std::sync::Arc::ptr_eq(&body, &again));
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        warm,
+        "warm demand neither remeasures nor recharges the body"
+    );
+    drop((body, again, state));
+    assert_eq!(account.snapshot().pinned_bytes, baseline);
+}
+
+#[test]
+fn artifact_sources_stay_charged_until_the_last_artifact_reader_drops() {
+    use crate::project_type_store::IndexedReady;
+    use std::sync::Arc;
+    use verter_retention::SemanticRetentionAccount;
+
+    let account = SemanticRetentionAccount::process_local();
+    let baseline = account.snapshot().pinned_bytes;
+    let mut indexed = IndexedReady::new_for_test([19; 16]);
+    let source: Arc<str> = Arc::from(" ".repeat(2 * 1024 * 1024));
+    indexed.raw_source = Arc::clone(&source);
+    indexed.eval_source = source;
+    let indexed = Arc::new(indexed);
+    let store = crate::file_artifact_store::FileArtifactStore::default();
+    store.insert(Arc::from("/accounted.ts"), Arc::clone(&indexed));
+    let charged = account.snapshot().pinned_bytes;
+    assert!(
+        charged >= baseline + indexed.raw_source.len(),
+        "the full source allocation is charged"
+    );
+    assert!(
+        charged < baseline + 2 * indexed.raw_source.len(),
+        "raw and eval aliases share one charge"
+    );
+    drop(store);
+    assert!(
+        account.snapshot().pinned_bytes >= baseline + indexed.raw_source.len(),
+        "a reader keeps the complete source charged after store teardown"
+    );
+    drop(indexed);
+    assert_eq!(account.snapshot().pinned_bytes, baseline);
+}
+
+#[test]
+fn prepared_bundles_and_artifacts_share_the_shallow_pin_in_both_release_orders() {
+    use crate::project_type_store::IndexedReady;
+    use crate::resolver_core::prepared_decl::{build_prepared_decl_bundle, ImportCanonicalization};
+    use std::sync::Arc;
+    use verter_retention::SemanticRetentionAccount;
+    use verter_session_query::inputs::shallow::ExportTarget;
+
+    for artifact_first in [true, false] {
+        let account = SemanticRetentionAccount::process_local();
+        let baseline = account.snapshot().pinned_bytes;
+        let mut artifact = IndexedReady::new_for_test([20; 16]);
+        Arc::make_mut(&mut artifact.shallow_state).exports.insert(
+            "forwarded".into(),
+            ExportTarget::Reexport {
+                source_specifier: "a".repeat(2 * 1024 * 1024),
+                original_name: "Forwarded".into(),
+                is_type: true,
+            },
+        );
+        artifact.pin_storage();
+        let shared = account.snapshot().pinned_bytes;
+        assert!(shared >= baseline + 2 * 1024 * 1024);
+        let interner =
+            Arc::new(verter_type_engine::identity_interner::IdentityInterner::new(account.clone()));
+        let bundle = build_prepared_decl_bundle(
+            "/shared.ts",
+            artifact.shallow_state.clone(),
+            Default::default(),
+            Default::default(),
+            ImportCanonicalization::default(),
+            &interner,
+        );
+        assert!(
+            account.snapshot().pinned_bytes < shared + 1024 * 1024,
+            "building a bundle cannot duplicate the shared shallow payload's charge"
+        );
+        if artifact_first {
+            drop(artifact);
+            assert!(
+                account.snapshot().pinned_bytes >= baseline + 2 * 1024 * 1024,
+                "the bundle retains the whole shallow charge"
+            );
+            drop(bundle);
+        } else {
+            drop(bundle);
+            assert!(
+                account.snapshot().pinned_bytes >= baseline + 2 * 1024 * 1024,
+                "the artifact retains the whole shallow charge"
+            );
+            drop(artifact);
+        }
+        drop(interner);
+        assert_eq!(account.snapshot().pinned_bytes, baseline);
+    }
+}
+
+#[test]
+fn artifact_replacement_and_removal_release_only_unheld_payloads() {
+    use crate::project_type_store::IndexedReady;
+    use std::sync::Arc;
+    use verter_retention::SemanticRetentionAccount;
+
+    let account = SemanticRetentionAccount::process_local();
+    let baseline = account.snapshot().pinned_bytes;
+    let store = crate::file_artifact_store::FileArtifactStore::default();
+    let make = |hash| {
+        let mut artifact = IndexedReady::new_for_test([hash; 16]);
+        artifact.raw_source = Arc::from(" ".repeat(1024 * 1024));
+        artifact.eval_source = artifact.raw_source.clone();
+        Arc::new(artifact)
+    };
+    let held = make(1);
+    store.insert(Arc::from("/replace.ts"), held.clone());
+    let replacement = make(2);
+    store.insert(Arc::from("/replace.ts"), replacement.clone());
+    assert!(account.snapshot().pinned_bytes >= baseline + 2 * 1024 * 1024);
+    store.remove("/replace.ts");
+    drop(replacement);
+    drop(store);
+    assert!(account.snapshot().pinned_bytes >= baseline + 1024 * 1024);
+    drop(held);
+    assert_eq!(account.snapshot().pinned_bytes, baseline);
+}
+
+#[test]
 fn compile_cache_db_present_with_accessor() {
     // Asserts the accessor is callable and the DB starts empty; the
     // per-domain invalidation tests below exercise the contents.

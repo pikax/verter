@@ -31,6 +31,8 @@ use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
+use verter_retention::heap_size::{HeapMeter, HeapSize};
+use verter_retention::pinned_heap::{PinContext, PinnedOnce, StoragePin};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -149,8 +151,17 @@ enum DemandCell<D> {
     LeaseMiss,
 }
 
-type TypeCell = Arc<OnceLock<DemandCell<LoweredTypeDecl>>>;
-type ValueCell = Arc<OnceLock<DemandCell<LoweredValueDecl>>>;
+impl<D: HeapSize + Send + Sync + 'static> HeapSize for DemandCell<D> {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        match self {
+            Self::Ready(value) => value.heap_size(meter),
+            Self::LeaseMiss => 0,
+        }
+    }
+}
+
+type TypeCell = Arc<PinnedOnce<DemandCell<LoweredTypeDecl>>>;
+type ValueCell = Arc<PinnedOnce<DemandCell<LoweredValueDecl>>>;
 type LoweredDeclGroups = (
     Vec<(DeclBindingKey, LoweredTypeDecl)>,
     Vec<(DeclBindingKey, LoweredValueDecl)>,
@@ -334,7 +345,7 @@ struct FunctionIndexDemand {
     owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
     class_fields: Arc<verter_session_query::declarations::class_fields::ClassFieldValues>,
     function_program_index:
-        OnceLock<Arc<verter_session_query::function_program::FunctionProgramIndex>>,
+        PinnedOnce<Arc<verter_session_query::function_program::FunctionProgramIndex>>,
 }
 impl FunctionIndexDemand {
     pub fn function_program_index(
@@ -439,6 +450,7 @@ pub struct IndexedExpressionDemand {
 }
 /// See module docs.
 pub struct DeclBodyMemo {
+    storage: StoragePin,
     #[cfg(any(test, feature = "test-support"))]
     pub capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
     /// This memo's slice lowerings' work
@@ -473,18 +485,18 @@ pub struct DeclBodyMemo {
     /// argument). Consulted by the lowering-time body-fingerprint producer;
     /// the SAME `Arc` backs the lazy fact source, so there is exactly one
     /// lens instance per state.
-    lens: OnceLock<Arc<ShallowLens>>,
+    lens: PinnedOnce<Arc<ShallowLens>>,
     /// The ONE shared route-fact lens (hash-free full-import-target +
     /// header-membership view) the graph-free route producer classifies
     /// against — installed with the shallow lens at state construction.
-    route_lens: OnceLock<Arc<RouteLens>>,
+    route_lens: PinnedOnce<Arc<RouteLens>>,
     type_entries: crate::per_file_map::PerFileMap<DeclBindingKey, TypeCell>,
     value_entries: crate::per_file_map::PerFileMap<DeclBindingKey, ValueCell>,
     aug_type_entries:
         crate::per_file_map::PerFileMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
     aug_value_entries:
         crate::per_file_map::PerFileMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
-    whole_env: OnceLock<Arc<EvalEnv>>,
+    whole_env: PinnedOnce<Arc<EvalEnv>>,
     /// The per-file function program index — a DEMAND product: exact
     /// function identities + body locators, binding/reference inventory,
     /// return sites, writes/effects, the control-region skeleton, exact
@@ -500,6 +512,7 @@ pub struct DeclBodyMemo {
     /// [`PrimedTypeBodies`] guard drops any entry left unread, so nothing
     /// here outlives the demand that primed it.
     primed_type_parts: parking_lot::Mutex<Vec<PrimedTypeParts>>,
+    primed_parts_storage: parking_lot::Mutex<verter_retention::granular::GranularPin>,
 }
 
 /// One primed transient body: the demanded declaration, its scope (`None`
@@ -517,6 +530,84 @@ impl std::fmt::Debug for DeclBodyMemo {
             .field("type_entries", &self.type_entries.len())
             .field("value_entries", &self.value_entries.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl HeapSize for SnapshotDemandLease {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        let Self {
+            key,
+            eval_source,
+            source_type: _,
+            service: _,
+            lease: _,
+            counters: _,
+        } = self;
+        key.heap_size(meter) + eval_source.heap_size(meter)
+    }
+}
+
+impl HeapSize for FunctionIndexDemand {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        let Self {
+            snapshot,
+            owner_table,
+            class_fields,
+            function_program_index: _,
+        } = self;
+        snapshot.heap_size(meter) + owner_table.heap_size(meter) + class_fields.heap_size(meter)
+    }
+}
+
+impl HeapSize for DeclBodyMemo {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        let Self {
+            storage: _,
+            #[cfg(any(test, feature = "test-support"))]
+                capture_lookup_work: _,
+            #[cfg(any(test, feature = "test-support"))]
+                lowering_work: _,
+            key,
+            #[cfg(any(test, feature = "test-support"))]
+            eval_source,
+            framework_parse,
+            owner_table,
+            svelte_component_runes_mode: _,
+            service: _,
+            snapshot,
+            header_index,
+            counters: _,
+            lens: _,
+            route_lens: _,
+            type_entries: _,
+            value_entries: _,
+            aug_type_entries: _,
+            aug_value_entries: _,
+            whole_env: _,
+            function_index,
+            raw_surfaces: _,
+            primed_type_parts: _,
+            primed_parts_storage: _,
+        } = self;
+        #[cfg(any(test, feature = "test-support"))]
+        let test_source = eval_source.heap_size(meter);
+        #[cfg(not(any(test, feature = "test-support")))]
+        let test_source = 0;
+        test_source
+            + key.heap_size(meter)
+            + framework_parse.heap_size(meter)
+            + owner_table.heap_size(meter)
+            + snapshot.heap_size(meter)
+            + header_index.heap_size(meter)
+            + function_index.heap_size(meter)
+    }
+    fn pin_storage(&self, context: &PinContext) -> bool {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+        true
     }
 }
 
@@ -558,7 +649,7 @@ impl DeclBodyMemo {
             snapshot: Arc::clone(&snapshot),
             owner_table: Arc::clone(&owner_table),
             class_fields: Arc::clone(&header_index.class_field_values),
-            function_program_index: OnceLock::new(),
+            function_program_index: PinnedOnce::new(),
         });
         Self {
             #[cfg(any(test, feature = "test-support"))]
@@ -575,16 +666,20 @@ impl DeclBodyMemo {
             snapshot,
             header_index,
             counters,
-            lens: OnceLock::new(),
-            route_lens: OnceLock::new(),
+            lens: PinnedOnce::new(),
+            route_lens: PinnedOnce::new(),
+            storage: StoragePin::default(),
             type_entries: crate::per_file_map::per_file_map(),
             value_entries: crate::per_file_map::per_file_map(),
             aug_type_entries: crate::per_file_map::per_file_map(),
             aug_value_entries: crate::per_file_map::per_file_map(),
-            whole_env: OnceLock::new(),
+            whole_env: PinnedOnce::new(),
             function_index,
             raw_surfaces: crate::per_file_map::per_file_map(),
             primed_type_parts: parking_lot::Mutex::new(Vec::new()),
+            primed_parts_storage: parking_lot::Mutex::new(
+                verter_retention::granular::GranularPin::new(PinContext::default().account(), 1024),
+            ),
         }
     }
 
@@ -616,7 +711,7 @@ impl DeclBodyMemo {
                 ),
             ),
             class_fields: Arc::clone(&header_index.class_field_values),
-            function_program_index: OnceLock::new(),
+            function_program_index: PinnedOnce::new(),
         });
         let memo = Self {
             #[cfg(any(test, feature = "test-support"))]
@@ -637,16 +732,20 @@ impl DeclBodyMemo {
             snapshot,
             header_index,
             counters,
-            lens: OnceLock::new(),
-            route_lens: OnceLock::new(),
+            lens: PinnedOnce::new(),
+            route_lens: PinnedOnce::new(),
+            storage: StoragePin::default(),
             type_entries: crate::per_file_map::per_file_map(),
             value_entries: crate::per_file_map::per_file_map(),
             aug_type_entries: crate::per_file_map::per_file_map(),
             aug_value_entries: crate::per_file_map::per_file_map(),
-            whole_env: OnceLock::new(),
+            whole_env: PinnedOnce::new(),
             function_index,
             raw_surfaces: crate::per_file_map::per_file_map(),
             primed_type_parts: parking_lot::Mutex::new(Vec::new()),
+            primed_parts_storage: parking_lot::Mutex::new(
+                verter_retention::granular::GranularPin::new(PinContext::default().account(), 1024),
+            ),
         };
 
         for (name, group) in &env.type_symbols {
@@ -677,7 +776,7 @@ impl DeclBodyMemo {
             );
             memo.type_entries.insert(
                 name.clone(),
-                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+                Arc::new(PinnedOnce::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         for (name, group) in &env.value_symbols {
@@ -693,7 +792,7 @@ impl DeclBodyMemo {
             let lowered = lowered_value_decl_from_group(group, None, &UnresolvedLens);
             memo.value_entries.insert(
                 name.clone(),
-                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+                Arc::new(PinnedOnce::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         for ((scope, name), group) in &env.augmentation_scopes {
@@ -714,14 +813,14 @@ impl DeclBodyMemo {
             );
             memo.aug_type_entries.insert(
                 (scope.clone(), name.clone()),
-                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+                Arc::new(PinnedOnce::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         for ((scope, name), group) in &env.augmentation_value_scopes {
             let lowered = lowered_value_decl_from_group(group, None, &UnresolvedLens);
             memo.aug_value_entries.insert(
                 (scope.clone(), name.clone()),
-                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+                Arc::new(PinnedOnce::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         let _ = memo.whole_env.set(Arc::new(env.clone()));
@@ -2076,14 +2175,14 @@ impl DeclBodyMemo {
     /// the poisoned cell from its owning map ptr-eq-guarded — so no future
     /// demand serves the wrong-empty warm entry and the next demand retries
     /// under a live lease. Fail CLOSED via ReturnOnly, in DEBUG *and* RELEASE.
-    fn demand_and_commit<D>(
+    fn demand_and_commit<D: HeapSize + Send + Sync + 'static>(
         &self,
-        cell: &Arc<OnceLock<DemandCell<D>>>,
+        cell: &Arc<PinnedOnce<DemandCell<D>>>,
         key: &DeclBindingKey,
         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
         extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
-        on_lease_miss_evict: impl FnOnce(&Arc<OnceLock<DemandCell<D>>>),
+        on_lease_miss_evict: impl FnOnce(&Arc<PinnedOnce<DemandCell<D>>>),
     ) -> (DemandOutcome<D>, Option<LoweredStatementBatch>) {
         // Warm / joiner-visible hit — the cell already carries a committed
         // outcome (this thread lost the init race or re-demands a warm cell).
@@ -2412,11 +2511,20 @@ pub fn prime_type_bodies(demands: &[TypeBodyDemand<'_>]) -> PrimedTypeBodies {
                 }
             }
             if let Some(parts) = transient {
-                pending.memo.primed_type_parts.lock().push(PrimedTypeParts {
+                let mut primed = pending.memo.primed_type_parts.lock();
+                primed.push(PrimedTypeParts {
                     scope: pending.scope.clone(),
                     key: pending.key.clone(),
                     parts: Arc::new(parts),
                 });
+                let bytes = verter_retention::allocation::heap_block_bytes(
+                    primed.capacity() * std::mem::size_of::<PrimedTypeParts>(),
+                );
+                let mut pin = pending.memo.primed_parts_storage.lock();
+                let old = pin.used();
+                if bytes > old {
+                    pin.add(bytes - old);
+                }
                 kept.push((Arc::clone(pending.memo), pending.scope, pending.key));
             }
         }

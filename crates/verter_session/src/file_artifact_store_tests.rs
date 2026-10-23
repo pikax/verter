@@ -1441,6 +1441,7 @@ fn synth_augmenter_artifacts_declared_in(
     use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     Arc::new(FileArtifacts {
+        storage: Default::default(),
         indexed: synth_indexed(0xA9),
         facts: Arc::new(FileFacts::empty()),
         parse_stable_hash,
@@ -1966,6 +1967,7 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
         use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
         use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
+            storage: Default::default(),
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
             parse_stable_hash: [0x11u8; 16],
@@ -2122,6 +2124,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
         use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
         use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
+            storage: Default::default(),
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
             parse_stable_hash: [0x11u8; 16],
@@ -2146,6 +2149,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
         use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
         use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
+            storage: Default::default(),
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
             parse_stable_hash: [0x11u8; 16],

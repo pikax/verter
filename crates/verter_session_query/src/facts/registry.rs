@@ -714,7 +714,16 @@ pub struct ObservedFact {
 ///
 /// **Lookup cost contract.** All `FactKey::domain() == ParseFile`
 /// lookups MUST be O(1). The registry is backed by an `FxHashMap`.
-#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct FactRegistry {
     /// Parse-domain facts. Key uniqueness is guaranteed by R10:
     /// `FactKey` is stable across file edits that preserve the

@@ -361,10 +361,25 @@ moves the tree out of its cell when the carrier is the cell's last holder
 (`Owned::try_unwrap`, releasing the charge as the tree leaves) and
 otherwise hands the caller an unshared deep copy
 (`verter_retention::unshared::Unshared`, `#[derive(Unshared)]`), never an
-alias of a retained payload. The parse-artifact layer (`FileArtifactStore`
-entries, `DeclBodyMemo`, scheduler snapshots) stays outside the account;
-a prepared-declaration bundle counts what it reaches of it while it lives
-and charges none of the layer's own storage.
+alias of a retained payload. The parse-artifact layer is pinned on the same process account. `IndexedReady`,
+`FileArtifacts`, `ShallowFileState`, scheduler source/analysis snapshots and
+lazy declaration products carry capacity-based charges. Raw allocations shared
+by these owners use the process `PinContext` alias registry; owned cells keep
+their own charges. A prepared bundle retains the same shallow-state Arc, so
+either release order keeps its single pin until the final state holder drops.
+`PinnedOnce` charges lazy publications before waiters can observe them. Per-file
+map entries charge their variable payloads and settle only the affected shard
+capacity; artifact version chains charge keys, entries and spilled buffers,
+with only each touched table shard's capacity settled after its guard drops.
+Read capacity before taking accounting's lock, and retain its monotonic maximum
+because DashMap removals keep bucket storage. Never scan unrelated shards: an
+admission callback can hold one while publishing a different artifact.
+`PerFileMap` entry guards expose heap-owning values immutably; replace those
+values through `insert`, which replaces the payload and its pin together.
+Copy-only counters retain mutable entry access.
+No capture feature gates these charges, and no admission limit refuses them.
+The full allocation conventions and field owners are recorded in
+`crates/verter_type_engine/observe-inventory/SKR-OWN-ACCOUNT-ARTIFACTS.md`.
 
 **Refusal routing.** `RetentionRefusal::{Oversized, Pressure,
 ActiveExhausted}` all map to `NonAdmissionReason::RetentionPressure`,

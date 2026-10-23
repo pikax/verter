@@ -142,6 +142,7 @@ pub struct AnalysisArtifactKey {
 /// materialise closure is its single producer.
 #[derive(Debug, Clone)]
 pub struct IndexedReady {
+    pub(crate) storage: verter_retention::pinned_heap::StoragePin,
     pub whole_hash: Hash16,
     /// Runtime-authoritative language this exact source was parsed under.
     ///
@@ -247,10 +248,19 @@ pub struct IndexedReady {
 }
 
 /// An artifact's source parse identity, derived once ([`IndexedReady::source_parse_key`]).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct SourceParseKey(std::sync::OnceLock<Option<verter_language::ParseKey>>);
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
+pub(crate) struct SourceParseKey(
+    verter_retention::pinned_heap::PinnedOnce<Option<verter_language::ParseKey>>,
+);
 
 impl IndexedReady {
+    pub(crate) fn pin_storage(&self) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            &Default::default(),
+        );
+    }
     pub(crate) fn cached_source_parse_key(&self) -> Option<Option<verter_language::ParseKey>> {
         self.source_parse_key.0.get().cloned()
     }
@@ -314,6 +324,7 @@ impl IndexedReady {
     ) -> Self {
         let route_inventory = Arc::clone(&shallow_state.route_inventory);
         Self {
+            storage: Default::default(),
             whole_hash,
             file_language: verter_language::FileLanguage::script_ts(),
             shallow_state,
@@ -355,6 +366,7 @@ impl IndexedReady {
                 Arc::clone(&route_inventory),
             );
         Self {
+            storage: Default::default(),
             whole_hash,
             file_language: verter_language::FileLanguage::script_ts(),
             shallow_state: Arc::new(shallow),
@@ -375,6 +387,48 @@ impl IndexedReady {
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
             input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         }
+    }
+}
+
+impl verter_retention::heap_size::HeapSize for IndexedReady {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            storage: _,
+            whole_hash: _,
+            file_language,
+            shallow_state,
+            built_at_content_generation: _,
+            parse_env_hash: _,
+            raw_source,
+            eval_source,
+            framework_parse,
+            script_analysis,
+            export_signatures,
+            snapshot,
+            route_inventory,
+            declares_interface_app_config: _,
+            macro_hot_mirror,
+            source_parse_key,
+            input_projection: _,
+        } = self;
+        file_language.heap_size(meter)
+            + shallow_state.heap_size(meter)
+            + raw_source.heap_size(meter)
+            + eval_source.heap_size(meter)
+            + framework_parse.heap_size(meter)
+            + script_analysis.heap_size(meter)
+            + export_signatures.heap_size(meter)
+            + snapshot.heap_size(meter)
+            + route_inventory.heap_size(meter)
+            + source_parse_key.heap_size(meter)
+            + macro_hot_mirror.heap_size(meter)
+    }
+    fn pin_storage(&self, _context: &verter_retention::pinned_heap::PinContext) -> bool {
+        self.pin_storage();
+        true
     }
 }
 
@@ -2320,6 +2374,7 @@ mod tests {
         db.insert(
             Arc::from("/w/a.ts"),
             Arc::new(IndexedReady {
+                storage: Default::default(),
                 whole_hash: hash_v1,
                 file_language: verter_language::FileLanguage::script_ts(),
                 shallow_state: shallow,
@@ -2373,6 +2428,7 @@ mod tests {
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {
+                storage: Default::default(),
                 whole_hash: hash,
                 file_language: verter_language::FileLanguage::script_ts(),
                 shallow_state: Arc::new(

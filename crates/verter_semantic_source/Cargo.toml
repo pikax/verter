@@ -23,6 +23,7 @@ semantic-observe = ["verter_audit/semantic-observe", "verter_execution/semantic-
 # engine and the session, and depends on neither, nor on the workspace, the
 # compiler, the concrete scheduler, the protocol or any provider.
 [dependencies]
+verter_retention = { path = "../verter_retention" }
 verter_audit = { path = "../verter_audit" }
 verter_debug_assert = { workspace = true }
 verter_ecma = { workspace = true }
@@ -41,7 +42,7 @@ oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
 crossbeam-channel = "0.5.15"
-dashmap = "6.2"
+dashmap = { version = "6.2", features = ["raw-api"] }
 parking_lot = "0.12.5"
 rustc-hash = { workspace = true }
 self_cell = { workspace = true }

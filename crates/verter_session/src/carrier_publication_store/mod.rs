@@ -165,7 +165,7 @@ impl PublicationOutcome {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct FrameworkArtifactId {
     authority: SourceAuthorityNamespaceId,
     source: RegisteredSourceSnapshotId,
@@ -355,6 +355,7 @@ fn base64url_32(bytes: [u8; 32]) -> String {
     out
 }
 
+#[derive(verter_retention::heap_size::HeapSize)]
 pub struct FrameworkArtifactEnvelope {
     id: FrameworkArtifactId,
     source: RegisteredSourceSnapshot,
@@ -389,7 +390,7 @@ impl FrameworkArtifactEnvelope {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct RegisteredFileStructure {
     envelope: Arc<FrameworkArtifactEnvelope>,
 }

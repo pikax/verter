@@ -72,6 +72,45 @@ fn materialized_artifact(
 }
 
 #[test]
+fn registered_parse_storage_charges_geometry_and_shares_source_and_reader_allocations() {
+    use verter_retention::pinned_heap::{PinContext, PinnedHeap};
+    for language in [
+        verter_language::FileLanguage::vue(),
+        verter_language::FileLanguage::svelte(),
+    ] {
+        let source = format!(
+            "<script lang=\"ts\">export let value: string;</script>{}",
+            "<div class=\"large\">text</div>".repeat(512)
+        );
+        let (_, _, accepted) = accepted("/retained-component", language, &source);
+        let artifact = project(&accepted);
+        let context = PinContext::default();
+        let baseline = context.account().snapshot().pinned_bytes;
+        let source_pin = PinnedHeap::measure(artifact.carrier_source(), 0, &context);
+        let source_bytes = context.account().snapshot().pinned_bytes;
+        let first = PinnedHeap::measure(&artifact, 0, &context);
+        let complete = context.account().snapshot().pinned_bytes;
+        assert!(
+            complete
+                > source_bytes + 512 * std::mem::size_of::<verter_language::MarkupSyntaxNode>(),
+            "the registered geometry and parser payload add variable storage beside source text"
+        );
+        let second = PinnedHeap::measure(&artifact, 0, &context);
+        assert!(
+            context.account().snapshot().pinned_bytes <= complete + second.used() + 2048,
+            "another reader adds only its owning hold-list backing"
+        );
+        drop((first, second));
+        assert!(
+            context.account().snapshot().pinned_bytes >= source_bytes,
+            "the source remains pinned, including the registry capacity grown by the artifact"
+        );
+        drop(source_pin);
+        assert_eq!(context.account().snapshot().pinned_bytes, baseline);
+    }
+}
+
+#[test]
 fn registered_rehome_rejects_unrelated_same_length_source_and_parse_identity() {
     let (_, _, accepted_a) = accepted(
         "file:///workspace/A.vue",
