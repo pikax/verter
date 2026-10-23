@@ -417,14 +417,9 @@ impl VerterHost {
         Option<crate::meta_resolve::ComponentMetaOutput>,
         crate::meta_resolve::ComponentMetaFailure,
     > {
-        let view = crate::session_view::HostViewRef::new(self);
-        let fixed = self.capture_batch_fixed_view(&view);
-        self.get_component_meta_output_via_view_with_fixed_store_view(
-            canonical_or_alias,
-            &view,
-            &fixed,
-            false,
-        )
+        // The synchronous entry drives the request's pollable root
+        // ([`Self::begin_component_meta_output`]) to its answer.
+        self.begin_component_meta_output(canonical_or_alias).drive()
     }
 
     /// Output-bearing VIEW entry pinned to a caller-captured

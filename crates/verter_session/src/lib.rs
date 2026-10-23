@@ -88,6 +88,8 @@ pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
 pub use component_meta_delivery::ComponentMetaDelivery;
+mod root_continuation;
+pub use root_continuation::{ComponentMetaOutputAnswer, ComponentMetaOutputRoot};
 #[cfg(test)]
 mod compile_blockers_snapshot_generation_tests;
 #[cfg(test)]

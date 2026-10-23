@@ -1,9 +1,8 @@
-//! Root continuations: which synchronous dependency waits the public
-//! component-meta and compile roots still reach, and the harness that
-//! decides whether a poll returns `Pending` before a held dependency is
-//! released.
+//! Root continuations: the pollable host roots, which synchronous
+//! dependency waits they still reach, and the harness that decides whether
+//! a poll returns `Pending` before a held dependency is released.
 //!
-//! The inventory runs the real public roots under a recording
+//! The inventory polls the real public roots under a recording
 //! [`WaitProbe`] on cold, warm and mixed paths over cross-file
 //! dependencies, construction and the store-view capture included. Each
 //! path's reached families must stay inside the documented inventory in
@@ -32,7 +31,9 @@ use crate::host_compile::{
     CompileBatchInput, CompileBatchOptions, CompileBatchOutcome, CompileManyTarget,
 };
 use crate::types::{CompiledProduct, HostConfig, UpsertRequest};
-use crate::VerterHost;
+use crate::{ComponentMetaOutputAnswer, ComponentMetaOutputRoot, VerterHost};
+
+static_assertions::assert_impl_all!(ComponentMetaOutputRoot<'static>: Send);
 
 const PROPS: &str = "/src/props.ts";
 const CHILD: &str = "/src/Child.vue";
@@ -87,10 +88,44 @@ fn reached<T>(run: impl FnOnce() -> T) -> (BTreeSet<WaitFamily>, T) {
     (probe.families(), answer)
 }
 
-/// The labels of the owner's published props, sorted.
+/// Wakes the thread that polls a root.
+struct UnparkWaker(std::thread::Thread);
+
+impl Wake for UnparkWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+/// Poll `root` to its answer on this thread, parking while it is pending.
+/// The loop enters no wait of its own, so a probe around it sees only the
+/// waits the root's polls enter.
+fn poll_to_answer(mut root: ComponentMetaOutputRoot<'_>) -> ComponentMetaOutputAnswer {
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    loop {
+        if let Poll::Ready(answer) = root.poll(&waker) {
+            return answer;
+        }
+        std::thread::park();
+    }
+}
+
+/// The owner's output through its pollable root, as text.
+fn owner_output_through_root(host: &VerterHost) -> String {
+    let output = poll_to_answer(host.begin_component_meta_output(OWNER))
+        .expect("the owner's metadata resolves")
+        .expect("the owner is a component");
+    format!("{output:?}")
+}
+
+/// The labels of the owner's published props, sorted, polled through the
+/// owner's root.
 fn owner_props(host: &VerterHost) -> Vec<String> {
-    let output = host
-        .get_component_meta_output(OWNER)
+    props_of(poll_to_answer(host.begin_component_meta_output(OWNER)))
+}
+
+fn props_of(answer: ComponentMetaOutputAnswer) -> Vec<String> {
+    let output = answer
         .expect("the owner's metadata resolves")
         .expect("the owner is a component");
     let (analysis, _resolution, _types) = output.into_parts();
@@ -312,6 +347,147 @@ fn root_continuations_batch_compile_inventory() {
     for (path, families) in [("cold batch compile", &cold), ("warm batch compile", &warm)] {
         assert_reaches(path, families, &[WaitFamily::CpuPool]);
     }
+}
+
+// ── Component-metadata root ────────────────────────────────────────────
+
+/// A component-metadata root outlives the call that began it: the entry
+/// returns the unpolled root, another thread polls it to its answer, and
+/// that answer is the one the synchronous entry gives.
+#[test]
+fn root_continuations_component_meta_root_resumes_after_its_entry_returns() {
+    fn begin(host: &VerterHost) -> ComponentMetaOutputRoot<'_> {
+        host.begin_component_meta_output(OWNER)
+    }
+    let host = host();
+    let root = begin(&host);
+    let polled = std::thread::scope(|scope| {
+        scope
+            .spawn(move || poll_to_answer(root))
+            .join()
+            .expect("the root answers on the thread that polls it")
+    });
+    let polled = format!(
+        "{:?}",
+        polled
+            .expect("the owner's metadata resolves")
+            .expect("the owner is a component")
+    );
+    let synchronous = format!(
+        "{:?}",
+        host.get_component_meta_output(OWNER)
+            .expect("the owner's metadata resolves")
+            .expect("the owner is a component")
+    );
+    assert_eq!(polled, synchronous);
+}
+
+/// A thread holding the host's next store-view build at the test gate,
+/// with the build claim taken.
+fn hold_store_view_build<'s>(
+    scope: &'s std::thread::Scope<'s, '_>,
+    host: &'s VerterHost,
+) -> std::thread::ScopedJoinHandle<'s, ()> {
+    let gate = &crate::resolver_store::TEST_BUILD_GATE;
+    // The cached view goes stale, so the next read builds.
+    host.bump_store_view_epoch();
+    gate.arm();
+    let builder = scope.spawn(move || {
+        gate.enroll_current_thread();
+        let _ = host.resolver_store_view_read();
+    });
+    assert!(
+        gate.wait_for_builder_parked(POLL_DEADLINE),
+        "the builder holds the store-view build claim",
+    );
+    builder
+}
+
+/// The component-metadata root suspends on a store-view build another
+/// thread holds: its first poll returns `Pending` without entering a wait,
+/// the build's release wakes it, and it resumes from the wait to the same
+/// answer, its remaining (warm) work entering no wait either.
+#[test]
+fn root_continuations_component_meta_root_suspends_behind_a_held_store_view_build() {
+    let host = host();
+    let cold = owner_output_through_root(&host);
+    let answer = std::thread::scope(|scope| {
+        let builder = hold_store_view_build(scope, &host);
+        pending_before_release(
+            POLL_DEADLINE,
+            host.begin_component_meta_output(OWNER),
+            |root, waker| root.poll(waker),
+            || {
+                crate::resolver_store::TEST_BUILD_GATE.release();
+                builder.join().expect("the held build publishes");
+            },
+        )
+    });
+    let answer = answer.expect("the root suspends until the held build is released");
+    let answer = format!(
+        "{:?}",
+        answer
+            .expect("the owner's metadata resolves")
+            .expect("the owner is a component")
+    );
+    assert_eq!(answer, cold);
+    assert_eq!(host.store_view_manager().build_release_registrations(), 0);
+}
+
+/// The synchronous store-view capture behind the same held build enters
+/// the store-view wait, which the harness refuses: the planted blocking
+/// form of the boundary the root suspends on fails the same check.
+#[test]
+fn root_continuations_synchronous_capture_behind_a_held_build_is_refused() {
+    let host = host();
+    let _ = host.resolver_store_view_read();
+    let verdict = std::thread::scope(|scope| {
+        let builder = hold_store_view_build(scope, &host);
+        pending_before_release(
+            POLL_DEADLINE,
+            (),
+            |(), _waker| {
+                let view = crate::session_view::HostViewRef::new(&host);
+                Poll::Ready(host.capture_batch_fixed_view(&view).is_current())
+            },
+            || {
+                crate::resolver_store::TEST_BUILD_GATE.release();
+                builder.join().expect("the held build publishes");
+            },
+        )
+    });
+    match verdict {
+        Err(NotSuspended::EnteredWait(message)) => {
+            assert!(message.contains("StoreViewBuild"), "{message}");
+        }
+        other => panic!("the synchronous capture must be refused, got {other:?}"),
+    }
+    assert_eq!(host.store_view_manager().build_release_registrations(), 0);
+}
+
+/// Dropping a root suspended behind a held store-view build withdraws its
+/// wait: the build's release finds nobody registered, and the dropped root
+/// leaves no wait behind.
+#[test]
+fn root_continuations_dropping_a_suspended_component_meta_root_withdraws_its_wait() {
+    let host = host();
+    let _ = owner_output_through_root(&host);
+    std::thread::scope(|scope| {
+        let builder = hold_store_view_build(scope, &host);
+        let mut root = host.begin_component_meta_output(OWNER);
+        let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+        let first = {
+            let _forbid = WaitProbe::forbid();
+            root.poll(&waker)
+        };
+        let registered = host.store_view_manager().build_release_registrations();
+        drop(root);
+        let after_drop = host.store_view_manager().build_release_registrations();
+        crate::resolver_store::TEST_BUILD_GATE.release();
+        builder.join().expect("the held build publishes");
+        assert!(first.is_pending(), "the root waits behind the held build");
+        assert_eq!((registered, after_drop), (1, 0));
+    });
 }
 
 // ── Pending-before-release harness ─────────────────────────────────────

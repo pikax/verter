@@ -64,6 +64,10 @@ pub enum WaitFamily {
     DeclLowering,
     /// Work installed on a CPU pool, blocking its caller until it returns.
     CpuPool,
+    /// A synchronous public entry driving a host root computation to its
+    /// answer. This is the external boundary itself: a root's own poll
+    /// never enters it.
+    Root,
 }
 
 /// The probe installed on this thread, if any.
@@ -237,6 +241,34 @@ pub fn block_on<T>(
     })
 }
 
+/// Poll `poll` to completion on this thread, entering the `family` wait only
+/// if its first poll is pending.
+///
+/// For a synchronous entry over a computation that usually answers at once
+/// and waits only behind another caller's work (a store-view build another
+/// thread holds): the answer it gives without waiting is no wait, and the
+/// wait it does enter is announced before the thread parks. Under a
+/// forbidding `WaitProbe` the pending first poll's registration is withdrawn
+/// as the refusal unwinds through whatever owns it.
+///
+/// # Panics
+///
+/// Under a forbidding `WaitProbe`, once the first poll is pending.
+pub fn block_on_when_pending<T>(family: WaitFamily, mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
+    PARK_WAKER.with(|waker| {
+        if let Poll::Ready(outcome) = poll(waker) {
+            return outcome;
+        }
+        enter_wait(family);
+        loop {
+            std::thread::park();
+            if let Poll::Ready(outcome) = poll(waker) {
+                return outcome;
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +369,42 @@ mod tests {
             std::panic::catch_unwind(|| enter_wait(WaitFamily::CpuPool)).is_err(),
             "a nested recording probe still forbids",
         );
+    }
+
+    /// A drive that answers on its first poll enters no wait; one whose
+    /// first poll is pending enters its family's wait before parking, and a
+    /// forbidding probe refuses it there.
+    #[test]
+    fn a_drive_enters_its_wait_only_once_its_first_poll_is_pending() {
+        let probe = WaitProbe::record();
+        let answer = block_on_when_pending(WaitFamily::StoreViewBuild, |_| Poll::Ready(3));
+        assert_eq!(answer, 3);
+        assert!(probe.reached().is_empty(), "a ready drive waits on nothing");
+
+        let mut polls = 0;
+        let answer = block_on_when_pending(WaitFamily::StoreViewBuild, |waker| {
+            polls += 1;
+            if polls == 1 {
+                waker.wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(5)
+            }
+        });
+        assert_eq!((answer, polls), (5, 2));
+        assert_eq!(probe.reached(), [WaitFamily::StoreViewBuild]);
+        drop(probe);
+
+        let _forbid = WaitProbe::forbid();
+        let mut polls = 0;
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on_when_pending(WaitFamily::StoreViewBuild, |_| {
+                polls += 1;
+                Poll::<()>::Pending
+            })
+        }));
+        assert!(refused.is_err(), "a pending drive is refused");
+        assert_eq!(polls, 1, "the refusal comes before the thread parks");
     }
 
     /// A probe observes its own thread only.
