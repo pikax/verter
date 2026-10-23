@@ -143,9 +143,11 @@ pub struct WorkspaceScannerConfig {
     /// generation or publication retires it (`WorkspaceScannerHandle::is_current_for`).
     pub generation: u64,
     /// Optional oneshot channel fired after the full scanner loop completes
-    /// (both `.vue` files and non-carrier source files).
-    /// Used by the server to send `$/verter/typeProviderSyncComplete`.
-    pub done_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// (both `.vue` files and non-carrier source files), carrying the number of
+    /// carrier companions the scan published into the durable store. Used by
+    /// the server to settle the scan and to ping subscribed clients that an
+    /// editor-owned TypeScript service needs to refresh its view of the store.
+    pub done_tx: Option<tokio::sync::oneshot::Sender<u64>>,
     /// The owning server's interactive-handler activity. Background work
     /// yields to that server's handlers, never to another server's.
     pub(crate) handler_activity: Arc<crate::server::HandlerActivity>,
@@ -447,7 +449,7 @@ async fn scanner_loop(
     if carrier_paths.is_empty() && source_paths.is_empty() {
         tracing::info!("workspace_scanner: no source files found");
         if let Some(tx) = config.done_tx {
-            let _ = tx.send(());
+            let _ = tx.send(0);
         }
         return;
     }
@@ -483,7 +485,7 @@ async fn scanner_loop(
     ) {
         tracing::info!("workspace_scanner: discovery complete — no carrier publication route");
         if let Some(tx) = config.done_tx {
-            let _ = tx.send(());
+            let _ = tx.send(0);
         }
         return;
     }
@@ -717,7 +719,7 @@ async fn scanner_loop(
 
     // Signal that the full scanner loop is complete.
     if let Some(tx) = config.done_tx {
-        let _ = tx.send(());
+        let _ = tx.send(published_companions.len() as u64);
     }
 }
 

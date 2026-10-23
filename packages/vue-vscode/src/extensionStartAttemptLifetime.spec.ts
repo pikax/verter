@@ -34,6 +34,10 @@ const mocks = vi.hoisted(() => {
     configurePluginHold: false,
     releaseConfigurePlugin: undefined as (() => void) | undefined,
     configurePluginConfigs: [] as unknown[],
+    /** Every `sendRequest` the created clients issued, newest last. */
+    clientRequests: [] as Array<{ clientIndex: number; type: string; params: unknown }>,
+    /** When set, a `$/verter/getProjectOverview` request rejects with this LSP code. */
+    projectOverviewError: undefined as number | undefined,
     closeListeners: [] as Array<(document: unknown) => void>,
     configurationListeners: [] as Array<(event: unknown) => void>,
     infoMessages: [] as string[],
@@ -286,51 +290,82 @@ vi.mock("vscode", () => {
   };
 });
 
-vi.mock("vscode-languageclient/node", () => ({
-  LanguageClient: class {
-    handlers = new Map<string, Array<(params: unknown) => void>>();
-    constructor(_id: string, _name: string, _serverOptions: unknown, clientOptions: unknown) {
-      mocks.state.createdClientOptions.push(clientOptions);
-      mocks.state.createdClients.push(this);
+vi.mock("vscode-languageclient/node", () => {
+  class ResponseError extends Error {
+    constructor(
+      public code: number,
+      message: string,
+    ) {
+      super(message);
     }
-    protocol2CodeConverter = {};
-    onNotification(type: unknown, handler: (params: unknown) => void) {
-      const key = String(type);
-      const list = this.handlers.get(key) ?? [];
-      list.push(handler);
-      this.handlers.set(key, list);
-      return { dispose: () => {} };
-    }
-    onRequest() {
-      return { dispose: () => {} };
-    }
-    onDidChangeState() {
-      return { dispose: () => {} };
-    }
-    sendNotification() {
-      return Promise.resolve();
-    }
-    async start() {
-      mocks.state.startCalls += 1;
-      if (mocks.state.startShouldFail) {
-        throw new Error("verter-lsp exited before the initialize handshake");
+  }
+  return {
+    ResponseError,
+    LanguageClient: class {
+      handlers = new Map<string, Array<(params: unknown) => void>>();
+      constructor(_id: string, _name: string, _serverOptions: unknown, clientOptions: unknown) {
+        mocks.state.createdClientOptions.push(clientOptions);
+        mocks.state.createdClients.push(this);
       }
-      if (mocks.state.holdStart) {
-        await new Promise<void>((resolve) => {
-          mocks.state.releaseStart = resolve;
+      protocol2CodeConverter = {};
+      onNotification(type: unknown, handler: (params: unknown) => void) {
+        const key = String(type);
+        const list = this.handlers.get(key) ?? [];
+        list.push(handler);
+        this.handlers.set(key, list);
+        return { dispose: () => {} };
+      }
+      onRequest() {
+        return { dispose: () => {} };
+      }
+      onDidChangeState() {
+        return { dispose: () => {} };
+      }
+      sendNotification() {
+        return Promise.resolve();
+      }
+      sendRequest(type: unknown, params?: unknown) {
+        mocks.state.clientRequests.push({
+          clientIndex: mocks.state.createdClients.indexOf(this),
+          type: String(type),
+          params,
         });
+        if (
+          String(type) === "$/verter/getProjectOverview" &&
+          mocks.state.projectOverviewError !== undefined
+        ) {
+          const code = mocks.state.projectOverviewError;
+          return Promise.reject(
+            new ResponseError(
+              code,
+              "the workspace inventory is still being built; retry once it settles",
+            ),
+          );
+        }
+        return Promise.resolve({});
       }
-    }
-    async stop() {
-      mocks.state.stopCalls += 1;
-    }
-  },
-  State: { Stopped: 1, Running: 2, Starting: 3 },
-  ErrorAction: { Continue: 1, Shutdown: 2 },
-  CloseAction: { DoNotRestart: 1, Restart: 2 },
-  TransportKind: { stdio: 0, ipc: 1, pipe: 2, socket: 3 },
-  RevealOutputChannelOn: { Info: 1, Warn: 2, Error: 3, Never: 4 },
-}));
+      async start() {
+        mocks.state.startCalls += 1;
+        if (mocks.state.startShouldFail) {
+          throw new Error("verter-lsp exited before the initialize handshake");
+        }
+        if (mocks.state.holdStart) {
+          await new Promise<void>((resolve) => {
+            mocks.state.releaseStart = resolve;
+          });
+        }
+      }
+      async stop() {
+        mocks.state.stopCalls += 1;
+      }
+    },
+    State: { Stopped: 1, Running: 2, Starting: 3 },
+    ErrorAction: { Continue: 1, Shutdown: 2 },
+    CloseAction: { DoNotRestart: 1, Restart: 2 },
+    TransportKind: { stdio: 0, ipc: 1, pipe: 2, socket: 3 },
+    RevealOutputChannelOn: { Info: 1, Warn: 2, Error: 3, Never: 4 },
+  };
+});
 
 import { window, workspace } from "vscode";
 import { activate, activateVueLanguageServer, deactivate } from "./extension";
@@ -387,6 +422,8 @@ function resetHostRuntimeMocks() {
   mocks.state.configurePluginHold = false;
   mocks.state.releaseConfigurePlugin = undefined;
   mocks.state.configurePluginConfigs.length = 0;
+  mocks.state.clientRequests.length = 0;
+  mocks.state.projectOverviewError = undefined;
   mocks.state.closeListeners.length = 0;
   mocks.state.configurationListeners.length = 0;
   mocks.state.infoMessages.length = 0;
@@ -715,6 +752,9 @@ describe("language server ownership through runtime publication", () => {
     (workspace as { textDocuments: unknown[] }).textDocuments.push(vueDocument);
     (window as { activeTextEditor?: { document: unknown } }).activeTextEditor = {
       document: vueDocument,
+      // A ready-path test lets the decoration providers reach the editor; the
+      // stub must accept the call instead of rejecting after the test ends.
+      setDecorations: () => {},
     };
   });
 
@@ -1086,6 +1126,47 @@ describe("one crash-recovery authority", () => {
 
     fireNotificationOn(1, "$/verter/ready", { gen: 1 });
     expect(onReady).toHaveBeenCalledTimes(1);
+
+    lifetime.dispose();
+  });
+
+  it("demands the workspace inventory when the serving server reports its carrier store", async () => {
+    mocks.state.startShouldFail = false;
+    const lifetime = new StartAttemptScope();
+    const server = await startAttempt(makeContext(), lifetime);
+
+    const overviewDemands = () =>
+      mocks.state.clientRequests.filter(
+        (request) => request.type === "$/verter/getProjectOverview",
+      );
+
+    // The serving server names its carrier store: this extension wires VS Code's
+    // own TypeScript service over that store, and the store only fills once the
+    // server's inventory scan runs. The overview request IS that demand, so it
+    // must ride the SAME client the notification arrived on.
+    mocks.state.projectOverviewError = -32803;
+    fireNotificationOn(0, "$/verter/carrierStoreReady", { carrierStoreDir: "/store" });
+    expect(overviewDemands()).toHaveLength(1);
+    expect(overviewDemands()[0].clientIndex).toBe(0);
+    // The pending (-32803) answer is the expected answer while the demanded scan
+    // runs: swallowed, so no unhandled rejection and no retry churn.
+    await vi.advanceTimersByTimeAsync(0);
+
+    // One notification is one demand: every carrier-store report of a live
+    // server generation carries its own request (a re-report means the server
+    // re-resolved the store, e.g. after a workspace switch).
+    fireNotificationOn(0, "$/verter/carrierStoreReady", { carrierStoreDir: "/store" });
+    expect(overviewDemands()).toHaveLength(2);
+
+    // A replaced client's report never demands anything for the replacement.
+    await server.restart(false);
+    fireNotificationOn(0, "$/verter/carrierStoreReady", { carrierStoreDir: "/stale" });
+    expect(overviewDemands()).toHaveLength(2);
+
+    // The replacement's own report demands on ITS client.
+    fireNotificationOn(1, "$/verter/carrierStoreReady", { carrierStoreDir: "/store" });
+    expect(overviewDemands()).toHaveLength(3);
+    expect(overviewDemands()[2].clientIndex).toBe(1);
 
     lifetime.dispose();
   });

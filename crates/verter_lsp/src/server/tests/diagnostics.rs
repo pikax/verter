@@ -1305,6 +1305,158 @@ async fn workspace_wide_requests_demand_the_scan_and_answer_pending_until_it_set
     );
 }
 
+/// The editor-owned tsserver tier has no local provider buffers: its content
+/// authority is the durable carrier store the editor plugin reads, and it is
+/// filled only by a demanded inventory scan (the client's `getProjectOverview`
+/// request — nothing on this tier issues frontier or workspace-wide requests
+/// by itself). That scan's publications must ALSO reach the subscribed client
+/// as a `$/verter/carrierStoreChanged` ping, the signal the extension refreshes
+/// VS Code's own TypeScript service on. Without the ping the first store fill
+/// after `carrierStoreReady` is invisible to the editor plugin and `.vue`
+/// semantic completions never arrive.
+#[tokio::test(flavor = "multi_thread")]
+async fn demanded_inventory_scan_publishes_and_pings_the_editor_owned_client() {
+    let workspace_root = unique_server_ws_root("editor_scan_demand");
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let app_path = format!("{workspace_root}/src/App.vue");
+    std::fs::create_dir_all(format!("{workspace_root}/src")).unwrap();
+    std::fs::write(&tsconfig, "{}").unwrap();
+    std::fs::write(
+        &app_path,
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": { "subscriptions": { "carrierStoreChanged": true } },
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    server
+        .spawn_background_init(None, "editor-owned inventory demand test")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/ready")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the server announces readiness");
+
+    let uri = crate::uri::path_to_file_uri(&app_path).expect("app uri");
+    let text = std::fs::read_to_string(&app_path).unwrap();
+    server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".into(),
+        version: 1,
+        text,
+    });
+
+    // The demand a client that wires an editor TypeScript service over the
+    // store issues. The pending answer is expected while the demanded scan runs.
+    let pending = tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803);
+    let overview = server
+        .get_project_overview(serde_json::Value::Null)
+        .await
+        .expect_err("the overview is pending while the demanded scan runs");
+    assert_eq!(overview.code, pending);
+    await_workspace_scan_settled(server).await;
+
+    let manifest = carrier_manifest_strict(&workspace_root)
+        .expect("the demanded scan must publish the carrier into the durable store");
+    assert!(
+        manifest
+            .projects
+            .get(&tsconfig)
+            .expect("the configured project owns the carrier")
+            .ready_files
+            .keys()
+            .any(|provider| provider.ends_with(".vue.tsx")),
+        "the store must advertise the App.vue IDE companion for the editor plugin"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/carrierStoreChanged")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the scan's carrier publication must ping the subscribed client");
+}
+
 /// Auto-import tag completion enumerates the whole host: while the workspace
 /// inventory is not built it keeps its local items but marks the list
 /// incomplete so the client asks again, and it never marks a workspace with no

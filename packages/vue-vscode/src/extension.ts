@@ -1536,6 +1536,17 @@ async function startVueLanguageServer(
     lc.onNotification(NotificationType.CarrierStoreReady, (params: { carrierStoreDir: string }) => {
       if (!lifecycle.isCurrent(epoch)) return;
       log.info(`Carrier store dir reported by LSP: ${params.carrierStoreDir}`);
+      // This extension wires VS Code's own TypeScript service over that store,
+      // and the server fills the store only when a request needs the complete
+      // workspace inventory. The overview request is that demand: it starts the
+      // inventory scan whose carrier publications feed the store this client's
+      // editor reads. Its `RequestFailed` (-32803) answer while the scan runs is
+      // the expected pending answer — the demand is sticky server-side, so no
+      // retry is needed.
+      lc.sendRequest(RequestType.GetProjectOverview, {}).catch((error: unknown) => {
+        if (error instanceof ResponseError && error.code === -32803) return;
+        log.warn("Workspace inventory demand failed", error);
+      });
       // Forward to VS Code's own TS server plugin so a plain `.ts` served by
       // VS Code's TS service reads the same store the LSP publishes into.
       options.onCarrierStoreReady?.(params.carrierStoreDir);

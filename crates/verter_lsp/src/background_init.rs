@@ -681,7 +681,7 @@ impl super::VerterLanguageServer {
         else {
             return;
         };
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<u64>();
         let scanner = crate::workspace_scanner::spawn_workspace_scanner(
             crate::workspace_scanner::WorkspaceScannerConfig {
                 root_paths,
@@ -709,10 +709,13 @@ impl super::VerterLanguageServer {
 
         let server = self.clone();
         tokio::spawn(async move {
-            if done_rx.await.is_err() {
-                // Scanner cancelled: a newer generation re-arms its own.
-                return;
-            }
+            let published_companions = match done_rx.await {
+                Ok(count) => count,
+                Err(_) => {
+                    // Scanner cancelled: a newer generation re-arms its own.
+                    return;
+                }
+            };
             if server.init_generation.load(Ordering::Acquire) != my_gen {
                 return;
             }
@@ -743,6 +746,16 @@ impl super::VerterLanguageServer {
             server.workspace_scan_settled.notify_waiters();
             server.rearm_open_document_diagnostics();
             server.refresh_deferred_decorations();
+            // The scan is an editor-membership publication like any interactive
+            // one: a client that subscribed to carrier-store changes runs its
+            // own TypeScript service over the store and refreshes it on this
+            // ping. On the editor-owned tier the scan is the ONLY publisher, so
+            // without this settle ping the store's first fill stays invisible
+            // to the editor plugin. One trailing ping covers the whole batch
+            // (the client's refresh coalesces).
+            if published_companions > 0 {
+                server.notify_editor_carrier_store_changed().await;
+            }
         });
     }
 
