@@ -557,6 +557,15 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 return;
             }
 
+            // The store-fill tail baselines BEFORE the post-init drain runs:
+            // that drain reconciles a still-queued carrier directly, and its
+            // durable publication is announced by no one else — a baseline
+            // taken only after the drain would already include the recovered
+            // fill and swallow its ping. The scan-settle task's own compare
+            // closed when the scan flag went false, so only this tail spans
+            // both the drain below and the completion gate's wait.
+            let fill_tail = StoreFillTail::capture(&server);
+
             // Settle provider retries enqueued since the init drain before
             // announcing the provider frontier; a non-empty queue means level 2
             // is not true yet.
@@ -573,19 +582,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             }
 
             let weak = Arc::downgrade(&server.core);
-            let fill_tail = StoreFillTail::capture(&server);
             drop(server);
             // Level 2 closing hands the store-fill announcement tail its weak
-            // reference: every publication recovered after this point (a
-            // detached successor pass, a later external drain) still owes the
-            // subscribed editor its `carrierStoreChanged` refresh, and nothing
-            // else observes those — the scan settle compared its window once
-            // and this task's own completion loop just exited. The tail's
-            // baseline is captured BELOW, BEFORE the completion gate waits: a
-            // successor pass may publish while the gate is still parked open
-            // (the post-init drain left the carrier queued), and a baseline
-            // taken only when the gate closed would already include that
-            // publication and swallow its ping.
+            // reference: every publication above its baseline — one recovered
+            // by the post-init drain above, a detached successor pass, a later
+            // external drain — still owes the subscribed editor its
+            // `carrierStoreChanged` refresh, and nothing else observes those:
+            // the scan settle compared its window once and this task's own
+            // completion loop just exited.
             if finish_post_scan(weak, my_gen).await {
                 announce_recovered_store_fills(fill_tail, my_gen).await;
             }
@@ -664,12 +668,15 @@ pub(super) async fn finish_post_scan(server: std::sync::Weak<ServerCore>, my_gen
 
 /// The captured starting point of [`announce_recovered_store_fills`]: the
 /// weak server reference, the pending-sync progress subscription, and the
-/// publication baseline, all taken BEFORE the completion gate begins to
-/// wait. A successor pass can publish while that gate is still parked open
-/// (the post-init drain left the carrier queued); a baseline captured only
-/// when the gate closed would already include that publication and swallow
-/// the ping. The progress subscription rides along for the same reason —
-/// every wake the gate parks through stays visible to the tail.
+/// publication baseline, all taken BEFORE the post-init drain runs and
+/// before the completion gate begins to wait. A carrier still queued at that
+/// point can be recovered by the drain itself — its publication commits
+/// above the baseline — and a successor pass can publish while the gate is
+/// still parked open (the drain left the carrier queued); a baseline
+/// captured only when the gate closed would already include those
+/// publications and swallow their pings. The progress subscription rides
+/// along for the same reason — every wake the drain or the gate parks
+/// through stays visible to the tail.
 struct StoreFillTail {
     server: std::sync::Weak<ServerCore>,
     progress: tokio::sync::watch::Receiver<()>,
@@ -696,19 +703,20 @@ impl StoreFillTail {
 /// baseline was captured.
 ///
 /// A publication the scan settle compared as "unchanged" can still commit
-/// later: the failed drain armed a bounded successor chain
-/// (`background_drain`), and a pass that finds the inputs repaired publishes
-/// durably. Nothing else observes that recovery — the settle task compared its
-/// window once and exited, the completion loop above returned once the queue
-/// emptied, and the drain pass itself only notes pending-sync progress. An
-/// editor client subscribed to `carrierStoreChanged` would keep its empty
-/// project view until an unrelated refresh.
+/// later: the post-init drain re-runs the still-queued carrier, the failed
+/// drains armed a bounded successor chain (`background_drain`), and any pass
+/// that finds the inputs repaired publishes durably. Nothing else observes
+/// that recovery — the settle task compared its window once and exited, the
+/// completion loop above returned once the queue emptied, and the drain pass
+/// itself only notes pending-sync progress. An editor client subscribed to
+/// `carrierStoreChanged` would keep its empty project view until an
+/// unrelated refresh.
 ///
 /// This tail parks on the same progress signal every drain pass emits and
 /// diffs the coordinator's monotonic publication count against the baseline
-/// [`StoreFillTail`] captured BEFORE the completion gate began to wait, so a
-/// publication recovered while that gate was still open counts exactly like
-/// one recovered after it closed. It may duplicate the settle ping for fills
+/// [`StoreFillTail`] captured BEFORE the post-init drain ran, so a
+/// publication that drain itself recovers counts exactly like one recovered
+/// while the completion gate was still open or after it closed. It may duplicate the settle ping for fills
 /// that landed inside the scan's own window; the client's refresh coalesces,
 /// and one trailing ping per batch remains the contract. Parks with only a
 /// weak server reference, like [`finish_post_scan`]: it neither keeps a

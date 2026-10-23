@@ -2075,6 +2075,228 @@ async fn recovered_publication_while_the_completion_gate_is_open_pings_the_store
     .expect("a publication recovered while the gate was open must ping the client");
 }
 
+/// The variant above parks the recovery inside the completion gate's OPEN
+/// window: its publication lands while `finish_post_scan` is parked, so a
+/// baseline taken just before the gate waits still catches it. This companion
+/// pins the ordering that one misses: the store is repaired while the
+/// POST-INIT drain itself is parked, so the publication commits inside that
+/// drain — before the gate's first queue check. The drain path publishes
+/// durably without its own `carrierStoreChanged`, the scan-settle task's
+/// compare closed when the scan flag went false, and the completion gate
+/// then finds an empty queue and closes without ever parking: only a baseline
+/// captured BEFORE the drain runs still sees the increment, and without it
+/// the recovered fill is absorbed into the tail's starting count and the
+/// subscribed editor keeps its empty store view forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovered_publication_during_the_post_init_drain_pings_the_store_fill_client() {
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        _temp.path().join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let app_canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "subscriptions": { "carrierStoreChanged": true, "carrierStoreFill": true }
+                },
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    // Sabotage the durable store before the init runs: the negotiated
+    // store-fill demand arms the scan, every publication attempt fails
+    // cleanly, and the carrier stays queued until the file is removed.
+    let store_dir = crate::external_ts::carrier_store_dir_for(
+        crate::external_ts::default_carrier_store_host_version(),
+        &workspace_root,
+    );
+    std::fs::create_dir_all(store_dir.parent().expect("the store's parent dir")).unwrap();
+    std::fs::write(&store_dir, b"not a directory").unwrap();
+
+    server
+        .spawn_background_init(None, "store-fill recovery inside the post-init drain test")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/ready")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the server announces readiness");
+
+    // Park drain passes one at a time — releasing each pass only AFTER the
+    // next hook is armed, so no pass can slip through unparked — until the
+    // parked one is POST-settle. While the scan flag is still up, a parked
+    // pass belongs to the scan's own settle drain (or a pre-settle
+    // successor); repairing there would let the settle task's own compare
+    // announce the fill, which is not this test's path. The first post-settle
+    // pass is the post-init drain: the completion waiter arms it the instant
+    // `workspace_scan_settled` fires, a full backoff delay ahead of any
+    // successor pass.
+    let release = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut parked_release: Option<Arc<tokio::sync::Notify>> = None;
+        loop {
+            let arrived = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            *server.documents.snapshot_drain_pause.lock() =
+                Some((Arc::clone(&arrived), Arc::clone(&release)));
+            if let Some(previous) = parked_release.take() {
+                previous.notify_one();
+            }
+            arrived.notified().await;
+            if !server.sync_coordinator.workspace_scan_in_progress()
+                && server
+                    .pending_snapshot_provider_sync
+                    .contains(&app_canonical_id)
+            {
+                return release;
+            }
+            parked_release = Some(release);
+        }
+    })
+    .await
+    .expect("the post-init drain must park with the failed carrier still queued");
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/typeProviderSyncComplete"),
+        "the parked post-init drain must hold the completion gate open (no level 2 yet)"
+    );
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/carrierStoreChanged"),
+        "nothing may ping the client before the store actually fills"
+    );
+
+    // Repair the store WHILE the post-init drain is parked, then release it:
+    // the drain finds the repaired store and publishes durably — an increment
+    // no other observer announces — and empties the queue, so the completion
+    // gate closes without ever parking.
+    std::fs::remove_file(&store_dir).unwrap();
+    std::fs::create_dir_all(&store_dir).unwrap();
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if carrier_manifest_strict(&workspace_root).is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the parked post-init drain must fill the durable store once repaired");
+
+    // The queue emptied, so the gate closes and level 2 is announced...
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/typeProviderSyncComplete")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the recovered publication must let the completion gate close");
+    // ...and the publication that landed INSIDE the post-init drain — before
+    // the gate's first queue check — is exactly what the tail's pre-drain
+    // baseline exists to catch.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/carrierStoreChanged")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("a publication recovered inside the post-init drain must ping the client");
+}
+
 /// The store-fill demand is NEGOTIATED, not requested: a client that
 /// subscribed `carrierStoreFill` runs a consumer over the durable carrier
 /// store and asks at initialize time that the server keep it filled. On the
