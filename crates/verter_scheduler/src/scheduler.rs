@@ -107,6 +107,10 @@ use dag_lock::*;
 use dependencies::*;
 #[cfg(not(target_arch = "wasm32"))]
 use driver::*;
+// The dispatch pause hook is test instrumentation every build that carries
+// test support compiles, wasm32 included.
+#[cfg(all(target_arch = "wasm32", any(test, feature = "test-support")))]
+use driver::DispatchPauseHook;
 use identity::*;
 // `lifecycle`'s only free export is `num_cpus`, which is native-only; gating
 // the glob with it keeps the wasm32 build free of an unused-import warning.

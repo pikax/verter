@@ -130,6 +130,11 @@ compile contracts `root_external_consumer_positive` (a plain external
 consumer drives both roots, with no support feature) and
 `root_poll_no_blocking_driver` (the boundary driver is unreachable from a
 root) pin the polling surface; making the driver public fails the second.
+On `wasm32-unknown-unknown`, where the scheduler and the owner shards run
+inline on the one thread, `verter_wasm`'s `host_root_wasm_tests` (run by
+the wasm JS-boundary lane) drive a compile root by the dispatch steps and
+the producer it hands out, and poll a component-metadata root to the
+synchronous entry's answer.
 
 ## Execution tasks across suspension
 
