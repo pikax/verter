@@ -38,6 +38,10 @@ exactly one `ScopedCacheNodeProducer<T>` for the external driver to run before
 resuming the handoff. `execute_scoped_cache_node` is the synchronous driver over
 the same state, using the existing CPU pool. Scoped-flight dispatch/settlement
 wakes use the lifecycle deferral rail through flight and incarnation holds.
+Aggregate cancellation uses that same rail, including last-owner teardown,
+token probes and DAG cancellation; its latch changes immediately but callbacks
+wait for unlock. Transferred producers install their captured request context
+or clear every request slot when absent, restoring the driver's slots on exit.
 Dropping a producer settles cancellation; dropping a subscriber detaches only
 its own owner. The host supplies its existing `TaskRegistry` through
 `with_executor_and_task_registry` / `new_sync_with_executor_and_task_registry`,
@@ -46,8 +50,9 @@ task, transferred producers install it on their running thread, and followers
 hold RAII wait edges until terminal/drop. Election wakes pre-existing followers
 to register their edges; self-dependency and mixed semantic/cache task cycles
 take the existing `Reentrant` refusal without cancelling siblings.
-Cancellation-only wake subscriptions are still missing. See the
-root-continuations reference for the full contract.
+Pending scoped handoffs subscribe to their request's cancellation. Scheduler
+completion subscriptions and other unconverted waits still need that
+integration. See the root-continuations reference for the full contract.
 
 Each `FileNode` keeps four shards for its small per-profile artifact map,
 independent of the host CPU count. Source-only scripts still allocate that

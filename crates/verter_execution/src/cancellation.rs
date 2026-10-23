@@ -24,7 +24,14 @@ use std::task::{Poll, Wake, Waker};
 
 use parking_lot::Mutex;
 
-use crate::wake::{WakeRegistration, WakerSet};
+use crate::wake::{TakenWakers, WakeRegistration, WakerSet};
+
+/// Delivery rail for an aggregate owned by a scheduler with outer lifecycle
+/// locks. Cancellation still latches immediately; callbacks can wait for unlock.
+pub trait CancellationWakeDelivery: Send + Sync + std::fmt::Debug {
+    /// Deliver these registrations once the owner's lifecycle holds release.
+    fn deliver(&self, wakers: TakenWakers);
+}
 
 /// A cheap, clonable, thread-safe one-shot cancellation flag.
 ///
@@ -59,13 +66,25 @@ impl CancellationState {
     fn trip(&self) {
         if !self.cancelled.swap(true, Ordering::AcqRel) {
             let taken = self.wakers.lock().take();
-            taken.wake();
+            self.deliver(taken);
+        }
+    }
+
+    fn deliver(&self, taken: TakenWakers) {
+        match self
+            .owners
+            .as_ref()
+            .and_then(|owners| owners.delivery.get())
+        {
+            Some(delivery) => delivery.deliver(taken),
+            None => taken.wake(),
         }
     }
 }
 
 #[derive(Debug)]
 struct AggregateOwners {
+    delivery: OnceLock<Arc<dyn CancellationWakeDelivery>>,
     ever_registered: AtomicBool,
     entries: Mutex<OwnerEntries>,
     /// The waker each owner's request token wakes when it cancels: it
@@ -215,11 +234,25 @@ impl CancellationToken {
     pub fn aggregate() -> Self {
         Self {
             state: CancellationState::new(Some(AggregateOwners {
+                delivery: OnceLock::new(),
                 ever_registered: AtomicBool::new(false),
                 entries: Mutex::new(OwnerEntries::default()),
                 request_wake: OnceLock::new(),
             })),
         }
+    }
+
+    /// Bind an aggregate's cancellation callbacks to its owner's delivery rail.
+    /// Install before exposing subscriptions. The first binding wins; returns
+    /// `false` if already bound. Request tokens cannot be bound.
+    pub fn set_wake_delivery(&self, delivery: Arc<dyn CancellationWakeDelivery>) -> bool {
+        self.state
+            .owners
+            .as_ref()
+            .expect("only aggregate tokens have an owner delivery rail")
+            .delivery
+            .set(delivery)
+            .is_ok()
     }
 
     /// Attach one request token to this aggregate job token. `None` denotes
@@ -418,7 +451,7 @@ impl CancellationSubscription {
                 let taken = newly.then(|| wakers.take());
                 drop(wakers);
                 if let Some(taken) = taken {
-                    taken.wake();
+                    state.deliver(taken);
                 }
                 Poll::Ready(())
             }
@@ -810,6 +843,53 @@ mod tests {
             drop(first_owner);
             drop(second_owner);
             assert_eq!(registered(&first) + registered(&second), 0);
+        }
+    }
+
+    #[test]
+    fn an_aggregate_latches_before_its_owner_delivers_callbacks() {
+        #[derive(Default)]
+        struct Deferred(Mutex<Vec<TakenWakers>>);
+        impl std::fmt::Debug for Deferred {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("Deferred").finish_non_exhaustive()
+            }
+        }
+        impl CancellationWakeDelivery for Deferred {
+            fn deliver(&self, wakers: TakenWakers) {
+                self.0.lock().push(wakers);
+            }
+        }
+        for terminal in ["cancel", "detach", "request", "probe"] {
+            let aggregate = CancellationToken::aggregate();
+            let delivery = Arc::new(Deferred::default());
+            assert!(aggregate.set_wake_delivery(delivery.clone()));
+            let request = CancellationToken::new();
+            let mut owner = Some(aggregate.register_owner(Some(request.clone())).unwrap());
+            let (count, waker) = counting();
+            let mut subscription = aggregate.subscribe();
+            assert!(subscription.poll(&waker).is_pending());
+            match terminal {
+                "cancel" => aggregate.cancel(),
+                "detach" => drop(owner.take()),
+                "request" => request.cancel(),
+                "probe" => {
+                    // Model a request flag changing before its callback runs:
+                    // the subscription's readiness probe discovers it first.
+                    request.state.cancelled.store(true, Ordering::Release);
+                    assert!(aggregate.subscribe().poll(Waker::noop()).is_ready());
+                }
+                _ => unreachable!(),
+            }
+            assert!(aggregate.is_cancelled(), "{terminal}");
+            assert_eq!(wakes(&count), 0, "callbacks wait for owner unlock");
+            let pending = std::mem::take(&mut *delivery.0.lock());
+            assert_eq!(pending.len(), 1, "{terminal}");
+            for wakers in pending {
+                wakers.wake();
+            }
+            assert_eq!(wakes(&count), 1, "{terminal}");
+            assert!(subscription.poll(&waker).is_ready());
         }
     }
 

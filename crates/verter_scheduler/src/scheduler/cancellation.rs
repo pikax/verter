@@ -7,6 +7,21 @@
 use super::*;
 use verter_execution::wake::WakerSet;
 
+/// The flight and its DAG token share one callback rail. Keep a weak link:
+/// the DAG itself owns the aggregate, so a strong link would form a cycle.
+#[derive(Debug)]
+struct ScopedCancellationDelivery(std::sync::Weak<DagMutex>);
+
+impl verter_execution::cancellation::CancellationWakeDelivery for ScopedCancellationDelivery {
+    fn deliver(&self, wakers: verter_execution::wake::TakenWakers) {
+        if let Some(delivery) = self.0.upgrade() {
+            delivery.deliver(vec![wakers]);
+        } else {
+            wakers.wake();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum ScopedCacheTerminal {
     Value(Arc<dyn Any + Send + Sync>),
@@ -84,6 +99,12 @@ impl ScopedCacheFlight {
         if state.aggregate.is_some() {
             return true;
         }
+        // Owner detachment, token probes and explicit DAG cancellation can
+        // all notify aggregate subscribers. Route every path through the same
+        // deferral as flight/completion wakes before registering any owner.
+        aggregate.set_wake_delivery(Arc::new(ScopedCancellationDelivery(Arc::downgrade(
+            &self.delivery,
+        ))));
         for owner in state.owners.values_mut() {
             let Some(registration) = aggregate.register_owner(owner.request.clone()) else {
                 state.terminal = Some(ScopedCacheTerminal::Cancelled);

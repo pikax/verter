@@ -101,8 +101,11 @@ re-exported from the crate root with `RootWork`.
   dispatch step — and polls again; `RootWork::run` answers whether the work
   made progress (a dispatch step that dispatched nothing returns `false`,
   and the dependency's own settlement then wakes the root). Nothing else
-  wakes a root that handed out work. Dropping the work abandons the
-  dependency it carried, and the next poll answers that abandonment.
+  wakes a root that handed out work. Dropping a transferred producer abandons
+  its dependency, and the next poll answers that abandonment. Dropping a
+  dispatch opportunity leaves the admitted dependency live; a later poll may
+  offer another dispatch step or producer, or remain pending. Dropping the
+  root withdraws its subscription and request ownership.
 - **Backpressure.** A root waits on admission like any other pending
   dependency; it adds no queue of its own.
 - **External driving.** The synchronous entry drives the same root with
