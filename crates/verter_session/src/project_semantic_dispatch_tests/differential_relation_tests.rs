@@ -1244,6 +1244,40 @@ fn a_weak_target_takes_a_source_as_the_checker_checks_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A primitive sibling does not bypass a weak union arm's common-property
+/// check. Empty objects and compatible shared properties still fit that arm.
+#[test]
+fn a_weak_union_arm_checks_common_properties() {
+    let failures = Matrix::new(include_str!("../typeinfo/typeinfo_tests/fixtures/weak_union_unwrap.ts"))
+    .types(&[
+        (
+            r#"{ a: 1 } extends string | { raw?: true } ? "bail" : "no""#,
+            r#""no""#,
+        ),
+        (
+            r#"{} extends string | { raw?: true } ? "bail" : "no""#,
+            r#""bail""#,
+        ),
+        (
+            r#"{ raw: true; a: 1 } extends string | { raw?: true } ? "bail" : "no""#,
+            r#""bail""#,
+        ),
+        (
+            r#"{ raw: false } extends string | { raw?: true } ? "bail" : "no""#,
+            r#""no""#,
+        ),
+        (
+            r#""value" extends string | { raw?: true } ? "bail" : "no""#,
+            r#""bail""#,
+        ),
+        (
+            "UnwrapRef<N4>",
+            "{ o4: { o3: { o2: { o1: { o0: number; v0: boolean; }; v1: string; }; v2: boolean; }; v3: string; }; v4: boolean; }",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A primitive, an array or a tuple offers the weak-type check its apparent
 /// type's properties (`1` shares none with `Weak`, `"s"` shares `length`
 /// with `{ length?: number }`, `[1]` its position `0`), an enum member its

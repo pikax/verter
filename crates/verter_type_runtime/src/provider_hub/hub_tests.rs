@@ -5357,19 +5357,16 @@ async fn compensating_release_holds_the_serving_fence_through_the_receipt_remova
         .applied_files
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let release_started = hub
+        .state
+        .shared
+        .compensation_receipt_release_started
+        .notified();
     close_gate.add_permits(1);
-    // Wait until the compensating release has parked on the applied map: from
-    // that instant the serving cell must be fenced — the epoch check and the
-    // receipt removal are one critical section. (The bound only fails loudly
-    // if a release parked WITHOUT the fence ever appearing.)
-    let mut fenced = false;
-    for _ in 0..100_000 {
-        if hub.state.shared.serving.try_write().is_err() {
-            fenced = true;
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    // The release has acquired its epoch guard and cannot remove the receipt
+    // while this test holds the applied map. Observe that exact window.
+    release_started.await;
+    let fenced = hub.state.shared.serving.try_write().is_err();
     drop(applied);
     let refusal = settlement
         .await

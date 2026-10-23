@@ -385,7 +385,7 @@ impl SemanticGraphStore {
             .then_some(())
     }
 
-    /// Inspect mapped-member admission, independently of shell and whole-value demands.
+    /// Inspect mapped-member admission independently of whole selected values.
     #[cfg(any(test, feature = "test-support"))]
     pub fn peek_mapped_member_value_memo_for_tests(
         &self,
