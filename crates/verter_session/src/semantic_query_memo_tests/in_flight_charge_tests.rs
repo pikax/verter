@@ -18,7 +18,16 @@ use verter_type_expr::TopLevelOwnerId;
 
 const FILE: &str = "/in-flight/owned.ts";
 const OWNER: &str = "/in-flight/owner.ts";
-const NAME_LEN: usize = 20_000;
+/// The delivered rail's size, chosen to sit ABOVE one full granule of the
+/// arena's fresh-construction storage (64 KiB) so the delivery-payload
+/// proofs below cannot be met by construction or flight storage alone,
+/// and BELOW the fresh-payload rail: flight storage (a few KiB) <
+/// construction granule (64 KiB) < NAME_LEN < PAYLOAD_LEN.
+const NAME_LEN: usize = 100_000;
+/// A fresh construction's payload rail: bytes of ONE literal node's heap,
+/// far past the arena's storage granule, so a window that sees them cannot
+/// be seeing flight storage or delivery metadata (a few KiB at most).
+const PAYLOAD_LEN: usize = 300_000;
 
 fn host() -> VerterHost {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -37,6 +46,10 @@ fn host() -> VerterHost {
 }
 
 fn key() -> SemanticQueryKey {
+    named_key("Target")
+}
+
+fn named_key(name: &str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: verter_session_query::retention::owned::OwnedStr::from(FILE),
@@ -46,7 +59,7 @@ fn key() -> SemanticQueryKey {
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: verter_session_query::retention::owned::OwnedStr::from("Target"),
+        name: verter_session_query::retention::owned::OwnedStr::from(name),
     })
 }
 
@@ -66,6 +79,19 @@ fn build(
 ) -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<
     verter_type_engine::semantic_query::SemanticNodeId,
 > {
+    build_with_payload(store, "in-flight")
+}
+
+/// [`build`]'s construction with its value's payload heap sized to
+/// `payload`: a literal node whose own heap is the fresh construction's
+/// dominant allocation. Two constructions of the SAME payload structurally
+/// dedup to one node — the reuse the control proof below relies on.
+fn build_with_payload(
+    store: &SemanticGraphStore,
+    payload: &str,
+) -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<
+    verter_type_engine::semantic_query::SemanticNodeId,
+> {
     use verter_type_engine::project_semantic_dispatch::walk::{
         QueryBuildOutput, ShallowDiagnostic,
     };
@@ -73,7 +99,7 @@ fn build(
     let mut output: QueryBuildOutput<verter_type_engine::semantic_query::SemanticNodeId> = (
         QueryResult::Value(
             store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                "in-flight".into(),
+                payload.into(),
             ))),
         ),
         empty_signature(),
@@ -93,8 +119,26 @@ fn read(
 ) -> verter_type_engine::semantic_query::CacheRead<
     QueryResult<verter_type_engine::semantic_query::SemanticNodeId>,
 > {
+    read_build(harness, host, key(), "in-flight")
+}
+
+/// One cold read of `key` whose raw construction interns a literal node
+/// with a `payload`-byte heap: the fresh-construction rail.
+fn read_build(
+    harness: &GraphFixture,
+    host: &VerterHost,
+    key: SemanticQueryKey,
+    payload: &str,
+) -> verter_type_engine::semantic_query::CacheRead<
+    QueryResult<verter_type_engine::semantic_query::SemanticNodeId>,
+> {
     harness.run(|store| {
-        store.execute_cooperative(host, key(), || panic!("no recursion"), || build(store))
+        store.execute_cooperative(
+            host,
+            key,
+            || panic!("no recursion"),
+            || build_with_payload(store, payload),
+        )
     })
 }
 
@@ -133,17 +177,22 @@ fn a_publication_settles_the_in_flight_delivery_into_retained() {
         .attributed()
         .expect("a workload alone on its private account is attributable");
     assert!(
-        peak.crossed(1),
-        "the cold read charged real ACTIVE bytes in flight, peak {}",
+        peak.crossed(NAME_LEN),
+        "the delivered rail itself charged ACTIVE in flight — flight storage \
+         alone (a few KiB) cannot cross {NAME_LEN}: peak {}",
         peak.peak_active_bytes
     );
-    assert!(report.rise_bytes > 0 && report.fall_bytes > 0);
+    assert!(
+        report.rise_bytes >= NAME_LEN,
+        "the payload rose inside the window, not only flight storage"
+    );
+    assert!(report.fall_bytes >= NAME_LEN);
     assert_eq!(report.active_at_close, 0, "nothing stays in flight");
     let settled = account.snapshot();
     assert_eq!(settled.active_bytes, 0);
     assert!(
-        settled.retained_bytes > 0,
-        "the publication adopted the in-flight charge into retention: {settled:?}"
+        settled.retained_bytes >= NAME_LEN,
+        "the publication adopted the delivered rail's charge into retention: {settled:?}"
     );
     assert!(matches!(read.value(), QueryResult::Value(_)));
 
@@ -169,8 +218,11 @@ fn a_denied_retention_delivery_hands_its_in_flight_charge_to_its_caller() {
         .attributed()
         .expect("a workload alone on its private account is attributable");
     assert!(
-        peak.crossed(1),
-        "even a refused publication's delivery charged real ACTIVE bytes"
+        peak.crossed(NAME_LEN),
+        "even a refused publication's delivery charged its rail ACTIVE in \
+         flight — flight storage alone (a few KiB) cannot cross {NAME_LEN}: \
+         peak {}",
+        peak.peak_active_bytes
     );
     assert!(matches!(read.value(), QueryResult::Value(_)));
     assert!(!read.result_is_partial());
@@ -179,8 +231,8 @@ fn a_denied_retention_delivery_hands_its_in_flight_charge_to_its_caller() {
     assert_eq!(settled.retained_bytes, 0, "nothing was retained");
     assert_eq!(settled.active_bytes, 0, "the handoff settled the flight");
     assert!(
-        settled.pinned_bytes > 0,
-        "the caller owns its complete delivered value as pins: {settled:?}"
+        settled.pinned_bytes >= NAME_LEN,
+        "the caller owns its complete delivered rail as pins: {settled:?}"
     );
 
     let clone = read.clone();
@@ -206,15 +258,21 @@ fn crossing_a_small_ceiling_cannot_abort_the_admitted_read() {
         .attributed()
         .expect("a workload alone on its private account is attributable");
     assert!(
-        peak.peak_active_bytes > 1,
-        "the in-flight rail dwarfed the ceiling and was charged anyway"
+        peak.crossed(NAME_LEN),
+        "the delivered rail dwarfed the ceiling and was charged ACTIVE \
+         anyway — flight storage alone (a few KiB) cannot cross {NAME_LEN}: \
+         peak {}",
+        peak.peak_active_bytes
     );
     assert!(matches!(read.value(), QueryResult::Value(_)));
     assert_eq!(read.walker_diagnostics().len(), 1);
     let settled = account.snapshot();
     assert_eq!(settled.retained_bytes, 0);
     assert_eq!(settled.active_bytes, 0);
-    assert!(settled.pinned_bytes > 0, "the caller holds its delivery");
+    assert!(
+        settled.pinned_bytes >= NAME_LEN,
+        "the caller holds its delivered rail"
+    );
     assert_eq!(settled.refusals_active, 0, "no active-class refusal exists");
     drop(read);
     drop(harness);
@@ -231,13 +289,46 @@ fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
     let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let before = account.snapshot().active_bytes;
     harness.run(|store| {
-        let flight = store
+        let mut flight = store
             .begin_inline_member_flight_for_tests(key())
             .expect("no other producer owns the key");
-        let held = account.snapshot().active_bytes;
+        let after_flight = account.snapshot().active_bytes;
         assert!(
-            held > before,
-            "the member's hold charges its root set in flight"
+            after_flight > before,
+            "the member's flight storage charges in flight"
+        );
+        // The held VALUE is its own charge, beyond the flight's storage:
+        // the root set the hold keeps for the member's decided value
+        // charges ACTIVE — never a pin, never free. The construction scope
+        // stays open until the hold has rooted the value, so the node is
+        // live for it.
+        let (_scope, held_value) = {
+            let scope = store.enter_node_root_scope();
+            let node = store.intern_node(
+                verter_type_engine::semantic_query::SemanticNodeData::Literal(
+                    verter_type_engine::semantic_query::LiteralValue::String("member value".into()),
+                ),
+            );
+            (
+                scope,
+                QueryResult::Value(
+                    verter_type_engine::semantic_query::SemanticQueryValue::TypeNode(node),
+                ),
+            )
+        };
+        let pinned_at_hold = account.snapshot().pinned_bytes;
+        flight.hold_value_for_tests(store, &held_value);
+        let after_hold = account.snapshot();
+        assert!(
+            after_hold.active_bytes
+                >= after_flight
+                    + std::mem::size_of::<verter_type_engine::semantic_query::SemanticNodeId>(),
+            "the held value's root set charges ACTIVE beyond the flight's \
+             storage: {after_hold:?} vs {after_flight} charged before the hold"
+        );
+        assert_eq!(
+            after_hold.pinned_bytes, pinned_at_hold,
+            "the hold is in-flight work, not a pinned settlement"
         );
         // The batch refuses the whole component: the hold ends with the
         // abort, releasing its in-flight bytes with it.
@@ -249,6 +340,74 @@ fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
         before,
         "the aborted member's hold released its in-flight charge"
     );
+}
+
+/// A cold construction's FRESH payload — the heap of the nodes its raw
+/// build allocates, before any publication or caller handoff owns them —
+/// charges ACTIVE on the same account: a window over the read sees a peak
+/// and rise no flight storage or delivery metadata (a few KiB at most)
+/// can explain, and the settle hands the construction to the arena's
+/// settled storage so nothing stays ACTIVE. A construction charged as
+/// pinned from its first allocation, or not charged at all, misses the
+/// peak.
+#[test]
+fn a_cold_construction_charges_its_fresh_payload_active_until_it_settles() {
+    let host = host();
+    let account = account(usize::MAX / 2);
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
+    let payload = "p".repeat(PAYLOAD_LEN);
+    let owner = account.mint_active_owner();
+    let window = account.open_active_window(&owner);
+    let read = read_build(&harness, &host, key(), &payload);
+    let report = window.finish();
+    let peak = report
+        .attributed()
+        .expect("a workload alone on its private account is attributable");
+    assert!(
+        peak.crossed(PAYLOAD_LEN),
+        "the fresh construction's payload charged ACTIVE before \
+         publication — flight storage and delivery metadata (a few KiB) \
+         cannot cross {PAYLOAD_LEN}: peak {}",
+        peak.peak_active_bytes
+    );
+    assert!(
+        report.rise_bytes >= PAYLOAD_LEN,
+        "the payload itself rose inside the window"
+    );
+    assert_eq!(report.active_at_close, 0, "the settle handed it over");
+    assert!(matches!(read.value(), QueryResult::Value(_)));
+    assert_eq!(
+        account.snapshot().active_bytes,
+        0,
+        "nothing of the construction stays in flight after the delivery settles"
+    );
+
+    // Reused-node control: a SECOND cold read, on the same arena, whose
+    // construction structurally reuses the held literal instead of
+    // allocating it afresh, charges no fresh payload. Its window peak —
+    // flight storage and delivery metadata only — cannot cross the
+    // payload rail again, so the proof above measures FRESH construction,
+    // not a blanket per-build charge.
+    let second_owner = account.mint_active_owner();
+    let second_window = account.open_active_window(&second_owner);
+    let second = read_build(&harness, &host, named_key("Target2"), &payload);
+    let second_report = second_window.finish();
+    let second_peak = second_report
+        .attributed()
+        .expect("the second workload is attributable to its own owner");
+    assert!(
+        !second_peak.crossed(PAYLOAD_LEN),
+        "a construction that reuses the live literal allocates no fresh \
+         payload: peak {}",
+        second_peak.peak_active_bytes
+    );
+    assert!(
+        second_peak.crossed(1),
+        "the second read's own flight is still real work"
+    );
+    drop((read, second));
+    drop(harness);
+    assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
 /// A producer whose request is cancelled mid-flight returns on the

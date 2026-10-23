@@ -1195,28 +1195,24 @@ impl RetentionCharge {
         }
     }
 
-    /// Reclassify an [`ChargeClass::Active`] charge as
-    /// [`ChargeClass::Retained`] when the in-flight work it covered
-    /// decided to publish.
+    /// Take over a charge a cache was just granted as this cache hold's
+    /// retained bytes. Calling it on a charge that is not already
+    /// retained is rejected (see Panics); a pinned or in-flight charge is
+    /// adopted only through the refusable paths
+    /// ([`RetentionCharge::try_adopt_retained`], `shared::CallerHold::adopt`),
+    /// which decide the per-entry cap and aggregate headroom.
     ///
-    /// Infallible and gap-free: the bytes stay charged throughout, so a
-    /// concurrent reservation can never slip into a window where this
-    /// payload is unaccounted, and the commit only RELEASES active
-    /// sub-limit pressure. Calling it on a non-active charge is a no-op.
+    /// # Panics
+    ///
+    /// When `charge` is [`ChargeClass::Active`]: committing an in-flight
+    /// charge unconditionally could move bytes a refused retention never
+    /// admitted into [`ChargeClass::Retained`].
     #[must_use]
-    pub fn commit_retained(mut self) -> Self {
+    pub fn commit_retained(self) -> Self {
         if self.class == ChargeClass::Active {
-            if let Some(account) = self.account.as_ref() {
-                let _admission_lock = account.lock_aggregate_state();
-                if self.bytes > 0 {
-                    let active = account.active_bytes.load(Ordering::Relaxed);
-                    account
-                        .active_bytes
-                        .store(active - self.bytes, Ordering::Relaxed);
-                    account.note_active_locked(self.provenance, 0, self.bytes);
-                }
-            }
-            self.class = ChargeClass::Retained;
+            unreachable!(
+                "an in-flight charge is adopted into retention refusably, never committed"
+            );
         }
         self
     }

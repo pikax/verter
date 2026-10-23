@@ -311,6 +311,13 @@ pub struct ProducerLease<'s> {
     panic_guard: InflightPanicGuard<'s>,
     open: OpenProducer,
     stats: InFlightStatsGuard<'s>,
+    /// Ownership of the arena storage this producer's raw construction
+    /// allocates: its fresh payload blocks and their heap charge ACTIVE —
+    /// the producer's in-flight payload — until `settle` ends and the
+    /// delivery takes the construction over (storage pin). Opened with the
+    /// flight, so a producer abandoned before it settles (a panic, an
+    /// early return) settles its construction on the way out.
+    _construction: super::arena::ConstructionChargeGuard,
     /// Build clock for the held-time measurements; read only where they
     /// are kept.
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
@@ -703,6 +710,14 @@ impl SemanticGraphStore {
         // before it settles (a panic, an early return) closes itself and
         // releases its subscribers.
         let open = task.open_producer(prepared.clone(), inflight.site);
+        // The construction ownership is a guard with the same lifetime:
+        // the arena storage this producer's raw build allocates charges
+        // ACTIVE from its first allocation, and settles — ACTIVE→PINNED,
+        // exactly once — when `settle` ends at the delivery boundary
+        // (publication decision, caller handoff, or abort), on every exit.
+        let _construction = self
+            .arena
+            .open_construction_charge(self.retention_account());
         let panic_guard = if independent {
             InflightPanicGuard::new_independent(
                 Arc::clone(&inflight),
@@ -724,6 +739,7 @@ impl SemanticGraphStore {
             panic_guard,
             open,
             stats,
+            _construction,
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             started: super::records_telemetry::<M>().then(Instant::now),
         }
@@ -1391,6 +1407,10 @@ impl<'s> ProducerLease<'s> {
             mut panic_guard,
             open,
             stats,
+            // Dropped at the end of `settle`, on every exit: the delivery
+            // boundary where the construction's fresh storage settles
+            // ACTIVE→PINNED into the arena's storage pin.
+            _construction,
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             started,
         } = self;

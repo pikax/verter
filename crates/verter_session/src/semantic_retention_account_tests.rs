@@ -456,19 +456,24 @@ fn splitting_more_than_a_charge_holds_panics() {
     let _share = charge.split_off(101);
 }
 
-/// Committing an in-flight charge to retained is gap-free: the bytes
-/// stay charged across the transition (so a concurrent reservation can
-/// never slip into an unaccounted window) while the ACTIVE sub-limit
-/// pressure is released.
+/// Adopting an in-flight charge into retained is decided refusably — the
+/// per-entry cap and aggregate headroom a fresh retained reservation of
+/// the same bytes meets — and on success the bytes stay charged across the
+/// transition (so a concurrent reservation can never slip into an
+/// unaccounted window) while the ACTIVE pressure is released. An
+/// unconditional commit route does not exist: reaching retained from
+/// in-flight bytes through `commit_retained` is rejected outright.
 #[test]
-fn committing_active_to_retained_never_drops_the_charge() {
+fn adopting_active_to_retained_is_refusable_and_never_drops_the_charge() {
     let account = account(10_000, 10_000);
-    let charge = account
+    let mut charge = account
         .reserve(ChargeClass::Active, 100)
         .admitted()
         .expect("fits");
     assert_eq!(account.snapshot().active_bytes, 100);
-    let charge = charge.commit_retained();
+    charge
+        .try_adopt_retained()
+        .expect("the headroom excludes the charge's own bytes");
     let snapshot = account.snapshot();
     assert_eq!(snapshot.active_bytes, 0, "active pressure is released");
     assert_eq!(snapshot.retained_bytes, 100, "bytes stay charged");
@@ -480,6 +485,39 @@ fn committing_active_to_retained_never_drops_the_charge() {
     ));
     drop(charge);
     assert_eq!(account.snapshot().retained_bytes, 0);
+
+    // A refusal decides the same rules a fresh retained reservation meets:
+    // an in-flight charge past the per-entry cap stays ACTIVE — complete
+    // and deliverable — instead of being committed into retained bytes the
+    // account never admitted.
+    let capped = SemanticRetentionAccount::new(RetentionLimits {
+        aggregate_ceiling_bytes: 1_000,
+        max_entry_bytes: 1_000,
+        pin_threshold_bytes: 1_000,
+    });
+    let mut in_flight = capped.reserve_in_flight(5_000);
+    assert_eq!(capped.snapshot().active_bytes, 5_000);
+    assert!(matches!(
+        in_flight.try_adopt_retained(),
+        Err(RetentionRefusal::Oversized { .. })
+    ));
+    let refused = capped.snapshot();
+    assert_eq!(
+        (refused.active_bytes, refused.retained_bytes),
+        (5_000, 0),
+        "the refused adoption moved nothing into retained"
+    );
+    // The unconditional commit route is gone: reaching it with an ACTIVE
+    // charge is a hard contract violation in every build, and the
+    // rejected charge still releases its bytes exactly once on unwind.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(in_flight.commit_retained());
+    }));
+    assert!(
+        result.is_err(),
+        "commit_retained rejects in-flight charges in every build"
+    );
+    assert_eq!(capped.snapshot().total_bytes(), 0);
 }
 
 /// A charge shared by several owners counts ONCE. This is what a

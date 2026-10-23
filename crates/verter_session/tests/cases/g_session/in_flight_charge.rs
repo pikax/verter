@@ -27,6 +27,13 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 
 const FILE: &str = "/src/in-flight-decl.ts";
 const HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+/// One full granule of the arena's declared storage backing (64 KiB):
+/// resolving `Target` freshly CONSTRUCTS that much graph storage while
+/// only the construction owns it, so a window peak crossing this bound
+/// measured the workload's real in-flight payload — the flight's own
+/// storage and this delivery's metadata (a few KiB together) cannot
+/// reach it.
+const FRESH_CONSTRUCTION_FLOOR: usize = 64 * 1024;
 
 /// A host closed and drained through the public completion boundary when
 /// it drops — on a failing assertion's unwind too.
@@ -116,8 +123,12 @@ fn a_parked_producer_holds_real_active_bytes_while_genuinely_in_flight() {
         "a settled host holds no ACTIVE work"
     );
 
-    let rendezvous = graph.arm_flight_rendezvous(key());
     let parked = std::thread::scope(|scope| {
+        // The releasing guard is owned INSIDE the scope: a failing
+        // assertion's unwind drops it — releasing the parked producer —
+        // before the scope joins the producer's thread, so the failure
+        // terminates and drains instead of hanging on the join.
+        let rendezvous = graph.arm_flight_rendezvous(key());
         let producer = scope.spawn(|| dispatch_read(&host));
         rendezvous
             .wait_producer_parked(HANG_BOUND)
@@ -187,8 +198,12 @@ fn a_reopened_host_opens_its_window_at_zero_and_attributes_fresh_work() {
         "no stale untagged provenance from the torn-down host"
     );
     assert!(
-        peak.crossed(1),
-        "the reopened host's fresh work charged real ACTIVE bytes"
+        peak.crossed(FRESH_CONSTRUCTION_FLOOR),
+        "the reopened host's fresh work charged its real in-flight payload \
+         — one full granule of freshly constructed graph storage — which \
+         flight storage and delivery metadata (a few KiB together) cannot \
+         explain: peak {}",
+        peak.peak_active_bytes
     );
     assert_eq!(report.active_at_close, 0);
     drop(measured);

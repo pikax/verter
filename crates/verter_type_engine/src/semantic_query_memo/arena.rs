@@ -150,6 +150,76 @@ impl Drop for NodePayload {
     }
 }
 
+/// Identity of the next construction ownership opened on any arena: unique
+/// among every live scope, so a guard closes exactly its own.
+fn next_construction_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// Construction ownership over the arena's freshly allocated storage: the
+/// payload blocks, their heap and the slot storage this arena allocates
+/// while the guard is open are charged as the opening computation's
+/// IN-FLIGHT payload — [`ChargeClass::Active`], charged unconditionally —
+/// instead of joining the settled storage pin, so a cold construction owns
+/// its fresh graph bytes exactly once before its delivery settles them.
+///
+/// Dropping the guard settles the construction: its remaining charge hands
+/// off ACTIVE→PINNED into the arena's storage pin, in one transition per
+/// granule, so the bytes stay charged throughout — never released, never
+/// doubled — however the producer ends (publication, caller handoff,
+/// cancellation, failure or panic).
+///
+/// [`ChargeClass::Active`]: verter_session_query::retention::ChargeClass::Active
+pub(crate) struct ConstructionChargeGuard {
+    charges: Arc<parking_lot::Mutex<ArenaCharges>>,
+    id: u64,
+}
+
+impl Drop for ConstructionChargeGuard {
+    fn drop(&mut self) {
+        let mut charges = self.charges.lock();
+        let Some(position) = charges
+            .construction
+            .iter()
+            .position(|open| open.id == self.id)
+        else {
+            return;
+        };
+        let open = charges.construction.remove(position);
+        let pin = charges.storage.get_or_insert_with(|| {
+            verter_session_query::retention::granular::GranularPin::new(
+                &open.account,
+                ARENA_STORAGE_GRANULE,
+            )
+        });
+        open.charge.settle_into(pin);
+    }
+}
+
+impl NodeArenaCore {
+    /// Open a construction ownership over this arena's fresh allocations:
+    /// while the returned guard is open, every payload block, payload heap
+    /// and slot storage this arena allocates is charged ACTIVE against
+    /// `account` as the opening computation's in-flight payload, and the
+    /// guard's drop settles the remainder into the arena's storage pin.
+    pub(crate) fn open_construction_charge(
+        &self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> ConstructionChargeGuard {
+        let charges = self.inner.read().charges.clone();
+        let id = next_construction_id();
+        charges.lock().construction.push(OpenConstruction {
+            id,
+            account: Arc::clone(account),
+            charge: verter_session_query::retention::granular::GranularInFlight::new(
+                ARENA_STORAGE_GRANULE,
+            ),
+        });
+        ConstructionChargeGuard { charges, id }
+    }
+}
+
 /// A shared read of an interned payload: derefs to the payload, and every
 /// clone shares the one allocation and its charge.
 #[derive(Clone)]
@@ -839,6 +909,23 @@ struct ArenaCharges {
     /// and released with its last, so one shared between many payloads
     /// (`PayloadArray::share`) is charged once.
     shared_heap: rustc_hash::FxHashMap<usize, usize>,
+    /// Construction ownerships open on this arena, most recently opened
+    /// last. While one is open, the storage this arena freshly allocates
+    /// is charged to the innermost open construction as that computation's
+    /// IN-FLIGHT payload — ACTIVE, unconditionally — and a release pays
+    /// the innermost non-empty construction before the settled storage
+    /// pin, so the classes may mix during flight while the TOTAL stays
+    /// exactly the live storage. The construction's settlement hands its
+    /// remainder to the storage pin (see [`ConstructionChargeGuard`]).
+    construction: Vec<OpenConstruction>,
+}
+
+/// One open construction ownership over this arena's freshly allocated
+/// storage.
+struct OpenConstruction {
+    id: u64,
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    charge: verter_session_query::retention::granular::GranularInFlight,
 }
 
 /// Bytes one bucket of the arena's shared-heap table holds: its key, its
@@ -919,6 +1006,10 @@ impl ArenaCharges {
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
         bytes: usize,
     ) {
+        if let Some(construction) = self.construction.last_mut() {
+            construction.charge.add(account, bytes);
+            return;
+        }
         self.storage
             .get_or_insert_with(|| {
                 verter_session_query::retention::granular::GranularPin::new(
@@ -930,8 +1021,25 @@ impl ArenaCharges {
     }
 
     fn sub(&mut self, bytes: usize) {
-        if let Some(storage) = self.storage.as_mut() {
-            storage.sub(bytes);
+        // A release pays the open constructions first, innermost to
+        // outermost, and the settled storage pin last: whichever class the
+        // freed bytes were charged in, the TOTAL the arena keeps charged
+        // stays exactly its live storage.
+        let mut remaining = bytes;
+        for construction in self.construction.iter_mut().rev() {
+            if remaining == 0 {
+                break;
+            }
+            let freed = remaining.min(construction.charge.used());
+            if freed > 0 {
+                construction.charge.sub(freed);
+                remaining -= freed;
+            }
+        }
+        if remaining > 0 {
+            if let Some(storage) = self.storage.as_mut() {
+                storage.sub(remaining);
+            }
         }
     }
 
