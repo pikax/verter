@@ -11,8 +11,10 @@
 //!
 //! Like the aggregate retention account, the figures are per PROCESS: every
 //! host of the process contributes to the same totals.
+//! Each kind's counts and allocation total are read and updated together,
+//! so a snapshot cannot mix occupancy before a release with its total after it.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use parking_lot::Mutex;
 
 use verter_no_typeexpr::NoTypeExpr;
 
@@ -37,28 +39,59 @@ impl ResidentKind {
 }
 
 struct Ledger {
-    counts: [AtomicUsize; RESIDENT_SLOTS],
-    allocations: AtomicUsize,
+    totals: Mutex<Totals>,
+}
+
+struct Totals {
+    counts: [usize; RESIDENT_SLOTS],
+    allocations: usize,
+}
+
+impl Totals {
+    fn add(&mut self, counts: &[usize; RESIDENT_SLOTS]) {
+        for (slot, count) in self.counts.iter_mut().zip(counts) {
+            *slot += *count;
+        }
+    }
+
+    fn sub(&mut self, counts: &[usize; RESIDENT_SLOTS]) {
+        for (slot, count) in self.counts.iter_mut().zip(counts) {
+            *slot -= *count;
+        }
+    }
 }
 
 impl Ledger {
     const fn new() -> Self {
         Self {
-            counts: [const { AtomicUsize::new(0) }; RESIDENT_SLOTS],
-            allocations: AtomicUsize::new(0),
+            totals: Mutex::new(Totals {
+                counts: [0; RESIDENT_SLOTS],
+                allocations: 0,
+            }),
         }
     }
 
-    fn add(&self, counts: &[usize; RESIDENT_SLOTS]) {
-        for (slot, count) in self.counts.iter().zip(counts) {
-            slot.fetch_add(*count, Ordering::Relaxed);
-        }
+    fn admit(&self, counts: &[usize; RESIDENT_SLOTS]) {
+        let mut totals = self.totals.lock();
+        totals.add(counts);
+        totals.allocations += 1;
     }
 
-    fn sub(&self, counts: &[usize; RESIDENT_SLOTS]) {
-        for (slot, count) in self.counts.iter().zip(counts) {
-            slot.fetch_sub(*count, Ordering::Relaxed);
-        }
+    fn release(&self, counts: &[usize; RESIDENT_SLOTS]) {
+        let mut totals = self.totals.lock();
+        totals.sub(counts);
+        totals.allocations -= 1;
+    }
+
+    fn recharge(&self, previous: &[usize; RESIDENT_SLOTS], counts: &[usize; RESIDENT_SLOTS]) {
+        let mut totals = self.totals.lock();
+        totals.sub(previous);
+        totals.add(counts);
+    }
+
+    fn snapshot(&self) -> ([usize; RESIDENT_SLOTS], usize) {
+        let totals = self.totals.lock();
+        (totals.counts, totals.allocations)
     }
 }
 
@@ -75,8 +108,7 @@ impl ResidentCharge {
     /// Count one allocation of `kind` holding `counts`.
     pub(crate) fn admit(kind: ResidentKind, counts: [usize; RESIDENT_SLOTS]) -> Self {
         let ledger = kind.ledger();
-        ledger.add(&counts);
-        ledger.allocations.fetch_add(1, Ordering::Relaxed);
+        ledger.admit(&counts);
         Self {
             charged: Some((kind, counts)),
         }
@@ -87,8 +119,7 @@ impl ResidentCharge {
         match &mut self.charged {
             Some((charged_kind, charged)) if *charged_kind == kind => {
                 let ledger = kind.ledger();
-                ledger.sub(charged);
-                ledger.add(&counts);
+                ledger.recharge(charged, &counts);
                 *charged = counts;
             }
             _ => *self = Self::admit(kind, counts),
@@ -100,8 +131,7 @@ impl Drop for ResidentCharge {
     fn drop(&mut self) {
         if let Some((kind, counts)) = self.charged.take() {
             let ledger = kind.ledger();
-            ledger.sub(&counts);
-            ledger.allocations.fetch_sub(1, Ordering::Relaxed);
+            ledger.release(&counts);
         }
     }
 }
@@ -109,9 +139,48 @@ impl Drop for ResidentCharge {
 /// What every live allocation of `kind` holds, summed, and how many there
 /// are.
 pub(crate) fn resident(kind: ResidentKind) -> ([usize; RESIDENT_SLOTS], usize) {
-    let ledger = kind.ledger();
-    (
-        std::array::from_fn(|slot| ledger.counts[slot].load(Ordering::Relaxed)),
-        ledger.allocations.load(Ordering::Relaxed),
-    )
+    kind.ledger().snapshot()
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn snapshots_are_coherent_during_admission_recharge_and_release() {
+        let ledger = Ledger::new();
+        let start = Barrier::new(4);
+        std::thread::scope(|scope| {
+            for _ in 0..3 {
+                scope.spawn(|| {
+                    start.wait();
+                    for _ in 0..20_000 {
+                        let initial = [1, 2, 3, 4, 5, 6];
+                        let grown = [2, 4, 6, 8, 10, 12];
+                        ledger.admit(&initial);
+                        std::thread::yield_now();
+                        ledger.recharge(&initial, &grown);
+                        std::thread::yield_now();
+                        ledger.release(&grown);
+                    }
+                });
+            }
+            start.wait();
+            for _ in 0..60_000 {
+                let (counts, allocations) = ledger.snapshot();
+                assert_eq!(
+                    counts,
+                    std::array::from_fn(|slot| counts[0] * (slot + 1)),
+                    "every slot must describe the same set of allocations"
+                );
+                assert!(
+                    (allocations..=allocations * 2).contains(&counts[0]),
+                    "allocation count must agree with occupancy: {counts:?}, {allocations}"
+                );
+                std::thread::yield_now();
+            }
+        });
+        assert_eq!(ledger.snapshot(), ([0; RESIDENT_SLOTS], 0));
+    }
 }
