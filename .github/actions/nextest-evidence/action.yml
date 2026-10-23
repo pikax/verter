@@ -1,0 +1,97 @@
+name: Nextest JUnit evidence
+description: >-
+  Locates the junit.xml the nextest `ci` profile wrote, writes the schema v1
+  metadata document beside it (tested tree and parents, toolchain, environment
+  fingerprint, run configuration, per-test hermetic flag), fails the job when
+  the metadata lacks a required field, and uploads both files under a stable
+  artifact name, also when tests fail. Removing the step restores the report
+  as it was; no required check reads it.
+
+inputs:
+  name:
+    description: Stable artifact name for this job and partition.
+    required: true
+  command:
+    description: The nextest command line the job ran.
+    required: true
+  features:
+    description: Cargo features the run enabled, or `none`.
+    default: none
+  filter:
+    description: The nextest filter expression, or `none`.
+    default: none
+  partition:
+    description: The nextest partition, or `none`.
+    default: none
+  matrix-json:
+    description: The job's matrix values as JSON.
+    default: "{}"
+  tools:
+    description: Comma-separated tools whose versions are recorded.
+    default: rustc,cargo,cargo-nextest
+
+outputs:
+  junit-path:
+    description: Path of the located junit.xml.
+    value: ${{ steps.locate.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Locate nextest JUnit report
+      id: locate
+      if: always()
+      shell: bash
+      run: |
+        found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
+        if [ -z "$found" ]; then
+          echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
+          find target -type d -name nextest -print 2>/dev/null || true
+          exit 1
+        fi
+        echo "path=$found" >> "$GITHUB_OUTPUT"
+        echo "metadata=$(dirname "$found")/junit-metadata.json" >> "$GITHUB_OUTPUT"
+        echo "JUnit report: $found"
+    - name: Write JUnit metadata
+      id: write
+      if: always() && steps.locate.outputs.path != ''
+      shell: bash
+      env:
+        JUNIT: ${{ steps.locate.outputs.path }}
+        METADATA: ${{ steps.locate.outputs.metadata }}
+        EVIDENCE_COMMAND: ${{ inputs.command }}
+        EVIDENCE_FEATURES: ${{ inputs.features }}
+        EVIDENCE_FILTER: ${{ inputs.filter }}
+        EVIDENCE_PARTITION: ${{ inputs.partition }}
+        EVIDENCE_MATRIX: ${{ inputs.matrix-json }}
+        EVIDENCE_TOOLS: ${{ inputs.tools }}
+      run: |
+        node scripts/ci-junit-metadata.mjs write \
+          --junit "$JUNIT" \
+          --out "$METADATA" \
+          --command "$EVIDENCE_COMMAND" \
+          --profile ci \
+          --features "$EVIDENCE_FEATURES" \
+          --filter "$EVIDENCE_FILTER" \
+          --partition "$EVIDENCE_PARTITION" \
+          --matrix-json "$EVIDENCE_MATRIX" \
+          --tools "$EVIDENCE_TOOLS"
+    - name: Check JUnit metadata schema
+      if: always() && steps.write.outcome == 'success'
+      shell: bash
+      env:
+        JUNIT: ${{ steps.locate.outputs.path }}
+        METADATA: ${{ steps.locate.outputs.metadata }}
+      run: |
+        node scripts/ci-junit-metadata.mjs check \
+          --junit "$JUNIT" \
+          --metadata "$METADATA"
+    - name: Upload JUnit and metadata
+      if: always() && steps.locate.outputs.path != ''
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ inputs.name }}
+        path: |
+          ${{ steps.locate.outputs.path }}
+          ${{ steps.locate.outputs.metadata }}
+        if-no-files-found: error

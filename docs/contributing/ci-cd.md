@@ -354,6 +354,10 @@ Triggered on push to `main` when `crates/**`, `packages/wasm/**`, or `packages/p
 5. Cleans up old assets beyond the 50-commit window
 6. Builds and deploys the playground to production (via Netlify)
 
+## Nextest JUnit evidence
+
+Every job that runs nextest with the `ci` profile (the `Rust Test (Core n/4)` shards, the instrumentation lane, BF2 Authoritative, and the nightly core coverage lane) uploads its `junit.xml` with a `junit-metadata.json` beside it, through `.github/actions/nextest-evidence`, under a stable artifact name (`nextest-evidence-<job>[-<partition>]`), also when tests fail. The document (schema v1, `scripts/ci-junit-metadata.mjs`) carries the tested tree and its parents read from the checked-out commit object, tool versions, the environment fingerprint, the run configuration and each test's hermetic flag. A test is hermetic only when `scripts/manifests/ci-hermetic-tests.json` names it. The same script's `check` mode fails the job when a required field is missing or the test list differs from the junit.xml. No required check reads these files; deleting the step restores the previous CI.
+
 ## Versioning
 
 ### Pre-release Flow

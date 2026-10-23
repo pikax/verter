@@ -431,30 +431,32 @@ jobs:
       # three minutes.
       - name: Run core Rust tests from the shared archive
         timeout-minutes: 30
+        id: nextest
         env:
           NEXTEST_PROFILE: ci
         run: |
           mkdir -p target/rust-nextest-archive
           export VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter core)"
+          echo "filter=$VERTER_NEXTEST_FILTER" >> "$GITHUB_OUTPUT"
           cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER"
-      - name: Locate nextest JUnit report
-        if: always()
+      # The JUnit report plus its metadata document, under a stable name per shard.
+      - name: Nextest JUnit evidence
         id: junit
-        run: |
-          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
-          if [ -z "$found" ]; then
-            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
-            find target -type d -name nextest -print 2>/dev/null || true
-            exit 1
-          fi
-          echo "path=$found" >> "$GITHUB_OUTPUT"
-          echo "JUnit report: $found"
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          name: nextest-evidence-rust-test-core-${{ matrix.shard }}-of-4
+          command: cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition hash:${{ matrix.shard }}/4 -E <filter>
+          filter: ${{ steps.nextest.outputs.filter || 'none' }}
+          partition: hash:${{ matrix.shard }}/4
+          matrix-json: ${{ toJSON(matrix) }}
+          tools: rustc,cargo,cargo-nextest,node,pnpm
       - name: Test report
-        if: always() && steps.junit.outputs.path != ''
+        if: always() && steps.junit.outputs.junit-path != ''
         uses: dorny/test-reporter@v3
         with:
           name: Rust Core Test Results (${{ matrix.shard }}/4)
-          path: ${{ steps.junit.outputs.path }}
+          path: ${{ steps.junit.outputs.junit-path }}
           reporter: java-junit
           fail-on-error: false
 
@@ -492,22 +494,26 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
         run: node scripts/observe-lane.mjs run
-      - name: Locate nextest JUnit report
+      - name: Core nextest filter
+        id: core-filter
         if: always()
+        run: echo "expr=$(node scripts/provider-ci.mjs filter core)" >> "$GITHUB_OUTPUT"
+      - name: Nextest JUnit evidence
         id: junit
-        run: |
-          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
-          if [ -z "$found" ]; then
-            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
-            exit 1
-          fi
-          echo "path=$found" >> "$GITHUB_OUTPUT"
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          name: nextest-evidence-rust-observe
+          command: node scripts/observe-lane.mjs run
+          features: semantic-observe
+          filter: ${{ steps.core-filter.outputs.expr || 'none' }}
+          tools: rustc,cargo,cargo-nextest,node,pnpm
       - name: Test report
-        if: always() && steps.junit.outputs.path != ''
+        if: always() && steps.junit.outputs.junit-path != ''
         uses: dorny/test-reporter@v3
         with:
           name: Rust Instrumentation Test Results
-          path: ${{ steps.junit.outputs.path }}
+          path: ${{ steps.junit.outputs.junit-path }}
           reporter: java-junit
           fail-on-error: false
 
@@ -676,6 +682,20 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
         run: node scripts/bf2-authoritative.mjs
+      - name: BF2 nextest filter
+        id: bf2-filter
+        if: always()
+        run: |
+          echo "expr=$(node -e 'import("./scripts/gate-internals.mjs").then((m) => console.log(m.BF2_AUTHORITATIVE_FILTER_EXPR))')" >> "$GITHUB_OUTPUT"
+      - name: Nextest JUnit evidence
+        if: always()
+        uses: ./.github/actions/nextest-evidence
+        with:
+          name: nextest-evidence-bf2-authoritative
+          command: node scripts/bf2-authoritative.mjs
+          features: bf2-authoritative
+          filter: ${{ steps.bf2-filter.outputs.expr || 'none' }}
+          tools: rustc,cargo,cargo-nextest,node,pnpm
 
   js-build-test:
     name: JS Build & Test
