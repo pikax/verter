@@ -985,3 +985,185 @@ fn tables_do_not_depend_on_how_long_the_expressions_live() {
     assert_eq!(transient.nodes(), kept.nodes());
     assert_eq!(transient.strings(), kept.strings());
 }
+
+/// Encodes `exprs` in order, drops them, and checks the builder alone keeps
+/// `tracked` alive: its reference count stays raised while the builder lives
+/// and returns to the caller's single handle once the builder is dropped.
+fn assert_builder_keeps_alive<T: ?Sized>(case: &str, tracked: &Arc<T>, exprs: Vec<TypeExpr>) {
+    let mut builder = GraphBuilder::new();
+    for expr in &exprs {
+        builder.node_id(expr);
+    }
+    drop(exprs);
+    assert!(
+        Arc::strong_count(tracked) > 1,
+        "{case}: the builder must own the allocation its memo names"
+    );
+    drop(builder);
+    assert_eq!(
+        Arc::strong_count(tracked),
+        1,
+        "{case}: the builder releases the allocation when dropped"
+    );
+}
+
+/// Every allocation a memo key names by address is owned by the builder for
+/// its whole lifetime, whatever the caller does with the expression, so no
+/// key can outlive its allocation. Checked through reference counts, which
+/// do not depend on how the allocator reuses memory.
+#[test]
+fn every_allocation_a_memo_key_names_lives_as_long_as_the_builder() {
+    use verter_type_expr::{FunctionExpr, ObjectExpr};
+    let string = || TypeExpr::Primitive(PrimitiveName::String);
+
+    let object = Arc::new(ObjectExpr {
+        empty_literal: true,
+        properties: Vec::new(),
+    });
+    assert_builder_keeps_alive("object", &object, vec![TypeExpr::Object(object.clone())]);
+
+    let function = Arc::new(FunctionExpr::synthetic(
+        Vec::new(),
+        Some(Arc::new(string())),
+        Vec::new(),
+    ));
+    assert_builder_keeps_alive(
+        "function",
+        &function,
+        vec![TypeExpr::Function(function.clone())],
+    );
+
+    let members: Arc<[TypeExpr]> = Arc::from(vec![string(), TypeExpr::named("A")]);
+    assert_builder_keeps_alive("union", &members, vec![TypeExpr::Union(members.clone())]);
+
+    let element = Arc::new(string());
+    assert_builder_keeps_alive(
+        "array",
+        &element,
+        vec![TypeExpr::Array {
+            element: element.clone(),
+            readonly: false,
+        }],
+    );
+
+    // Variants identified by address only in the full memo key.
+    let source = Arc::new(TypeExpr::named("Keys"));
+    let value = Arc::new(string());
+    let name_type = Arc::new(TypeExpr::named("Renamed"));
+    let mapped = || TypeExpr::Mapped {
+        parameter: "K".to_string(),
+        source: source.clone(),
+        value: value.clone(),
+        optional: MappedModifier::None,
+        readonly: MappedModifier::None,
+        name_type: Some(name_type.clone()),
+    };
+    assert_builder_keeps_alive("mapped source", &source, vec![mapped()]);
+    assert_builder_keeps_alive("mapped value", &value, vec![mapped()]);
+    assert_builder_keeps_alive("mapped name type", &name_type, vec![mapped()]);
+
+    let expressions: Arc<[TypeExpr]> = Arc::from(vec![string()]);
+    assert_builder_keeps_alive(
+        "template literal",
+        &expressions,
+        vec![TypeExpr::TemplateLiteral {
+            quasis: vec!["a".to_string(), "b".to_string()],
+            expressions: expressions.clone(),
+        }],
+    );
+
+    let constraint = Arc::new(string());
+    assert_builder_keeps_alive(
+        "infer constraint",
+        &constraint,
+        vec![TypeExpr::Infer {
+            name: "U".to_string(),
+            constraint: Some(constraint.clone()),
+        }],
+    );
+
+    let import_arguments: Arc<[TypeExpr]> = Arc::from(vec![string()]);
+    assert_builder_keeps_alive(
+        "import type",
+        &import_arguments,
+        vec![TypeExpr::ImportType {
+            specifier: Arc::from("./module"),
+            qualifier: Arc::from(vec![Arc::<str>::from("Box")]),
+            typeof_query: false,
+            type_arguments: import_arguments.clone(),
+        }],
+    );
+
+    // A reference whose name text equals an encoded one but lives in its own
+    // allocation misses the fast path, hits the full memo by content, and is
+    // then remembered in the fast path by its own name allocation.
+    let arguments: Arc<[TypeExpr]> = Arc::from(vec![string()]);
+    let second_name: Arc<str> = Arc::from("Box");
+    assert_builder_keeps_alive(
+        "reference after a content hit",
+        &second_name,
+        vec![
+            TypeExpr::Ref {
+                name: Arc::from("Box"),
+                type_arguments: arguments.clone(),
+            },
+            TypeExpr::Ref {
+                name: second_name.clone(),
+                type_arguments: arguments,
+            },
+        ],
+    );
+}
+
+/// Member signatures (methods, call and construct signatures) live inline in
+/// their member and are interned by value: encoding them adds no
+/// function entry to either memo, whatever the allocator does.
+#[test]
+fn member_signatures_add_no_memo_entries() {
+    use verter_type_expr::{
+        FunctionExpr, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember,
+    };
+    let signature = |value: u32| {
+        FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(TypeExpr::Literal(LiteralValue::Number(
+                f64::from(value),
+            )))),
+            Vec::new(),
+        )
+    };
+    let mut properties: Vec<ObjectMember> = (0..8)
+        .map(|value| {
+            ObjectMember::Method(MethodSignature::with_key_visibility(
+                format!("m{value}").as_str().into(),
+                signature(value),
+                false,
+                MemberVisibility::Public,
+                Default::default(),
+            ))
+        })
+        .collect();
+    properties.push(ObjectMember::CallSignature(signature(8)));
+    properties.push(ObjectMember::ConstructSignature(signature(9)));
+    let object = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
+        properties,
+    }));
+    let mut builder = GraphBuilder::new();
+    builder.node_id(&object);
+    assert_eq!(builder.debug_function_memo_entries(), 0);
+}
+
+/// The builder's debug output reports table sizes, never the expression
+/// trees its memo owns.
+#[test]
+fn debug_output_reports_table_sizes_only() {
+    let mut builder = GraphBuilder::new();
+    builder.node_id(&TypeExpr::Array {
+        element: Arc::new(TypeExpr::named("VeryDistinctiveTypeName")),
+        readonly: false,
+    });
+    let debug = format!("{builder:?}");
+    assert!(debug.starts_with("GraphBuilder"), "{debug}");
+    assert!(!debug.contains("VeryDistinctiveTypeName"), "{debug}");
+}
