@@ -280,6 +280,43 @@ Their existing synchronous calls still need resumable traversal state.
 | `resolver_core/route_db.rs` → barrel-surface flight | DISPATCH |
 | Compile traversal and hydration above these shared dispatch calls | COMPILE |
 
+### Base store-view capture
+
+`VerterHost::begin_store_view(waiter, cancellation)` returns the opaque,
+owned `StoreViewHandoff`. `poll` returns `StoreViewStep::Produce` with an
+independent `Send` producer or `Value` with the capture's intrinsic currentness.
+It never builds a snapshot or sweeps retired artifacts. A cold producer's
+external `run` builds and publishes through the existing manager cache and
+its exact token/reset fence. A completed producer reply revalidates the full
+live token and cached snapshot identity under the manager lock when its owner
+resumes; publication alone cannot mint currentness after suspension. A warm
+hit returns immediately unless released roots left reclamation pending; then the same claim transfers maintenance
+with the exact cached read, preserving a return-only read's reason.
+
+The manager uses the host's shared registry and one physical claim. Each
+subscription retains its own wait edge and stop registration. Typed errors
+are `Cancelled`, `Cycle`, `ProducerUnowned`, `ProducerDropped`,
+`ProducerPanicked` and `Reset`; none carries a partial view. Dropping or
+cancelling a subscriber leaves its transferred producer and siblings live.
+An abandoned producer releases only its exact claim, and owned execution
+contains panic after settling subscribers. Readiness and reset take wakers
+under the manager lock and invoke them after unlocking.
+
+Reset revokes unstarted work immediately. Running work keeps the physical
+claim until it exits, while pre-reset subscribers become `Reset` at once.
+New subscribers wait for that physical release, then recapture under the new
+generation; they do not inherit the old reset result. Successful followers
+recapture and validate the cache under the original bounded main/final/fallback
+rounds. The synchronous `StoreViewManager::base_view` drives this same core,
+retaining its execution-scoped reentry refusal and external reclamation.
+Completed handoffs release their host, task and cancellation interests; the
+opaque result retains only its captured view and exposes no blocking driver.
+
+Caller conversion above this boundary remains with DISPATCH for shared
+`capture_batch_fixed_view`/resolver contexts, META for component metadata
+traversal, and COMPILE for compile traversal. Overlay application and batch
+membership ingestion remain caller operations, outside this base capture.
+
 ### Declaration-lowering owner-shard handoffs
 
 Retained parses live on dedicated worker shards and never leave them. A job
@@ -295,14 +332,34 @@ carries owned inputs to the shard and brings back owned results.
 All of these are in `crates/verter_semantic_source/src/decl_lowering.rs`.
 
 Each handoff additionally offers `owned(waiter, cancellation)` before its
-first poll. This returns `OwnedDependency` with typed `LoweringFailure`
-(`WorkerStopped` or `Panicked`) inside its answer. The existing worker job
+first poll. This returns `OwnedLoweringHandoff`, whose poll yields
+`LoweringStep::Work` or `Value`, with typed `LoweringFailure` (`WorkerStopped`,
+`ProducerDropped`, `Panicked` or `Reentrant`) inside its value. The existing worker job
 installs its producer task from the waiter's registry; no parser arena or
 borrowed AST crosses a shard boundary. A batch's pure shard operations
 jointly produce one ordered answer under its batch task identity. Cancellation
 drops unsubmitted jobs or abandons admitted replies; an arriving lease is
 released on its owner shard. Existing synchronous entries retain their panic
 compatibility and drive the same queue/reply state.
+
+On native workers the owned step normally carries `Value`. WASM transfers a
+`Send` `LoweringWork` token and polls a retained reply; no parser work or pure
+callback runs inside poll. External `run` contains operation panic, and dropping
+the token settles `ProducerDropped`. The shared dependency remains pending
+across this transfer, retaining its wait edge, task and stop interest until the
+value or stop is observed. Cancelling the subscriber after transfer leaves that
+work independent. Raw handoffs expose `poll_step` for the same transfer, and
+synchronous entries run it outside the reply poll. An empty batch is ready
+without work or an arena borrow. The generic inline reply/work protocol has
+native behavioral controls as well as target compilation; its fields carry
+owned operations and answers, never an AST or parser arena.
+
+The executing worker opens its existing shard identity on that actual task.
+An owned demand targeting a shard its waiter already owns returns `Reentrant`
+before queue admission. Batches preflight every target before admitting any
+share. WASM checks its single arena identity before borrowing the thread-local
+shard. This is a defensive refusal; callbacks remain pure and may not reenter
+the service or host.
 
 - **Backpressure yields.** A poll first offers the job to its worker's
   bounded queue with a non-blocking send. If the queue is full, the poll
@@ -330,12 +387,13 @@ compatibility and drive the same queue/reply state.
   shard's share is offered on the first poll and the shards lower in
   parallel. The batch answers once every share has answered, and the first
   job panic re-panics then.
-- **wasm32:** the shard is the calling thread's own. Construction retains
-  owned inputs; its first poll runs the pure shard operation and is `Ready`.
-  Attaching ownership before that poll installs the task around the work and
-  allows an already cancelled demand to stop without executing it. Panic
-  containment requires an unwinding target; the default wasm panic-abort
-  target is checked for compilation rather than panic recovery.
+- **wasm32:** the shard remains thread-local. Construction retains owned
+  inputs; an owned poll or raw `poll_step` transfers `LoweringWork` before
+  execution. External `run` installs its actual task and opens the arena
+  identity around the pure operation. Later polls observe only its reply.
+  Stop before transfer executes nothing; stop after transfer abandons only
+  the subscriber. Panic containment requires an unwinding target; the default
+  wasm panic-abort target is checked for compilation rather than recovery.
 
 ### Cache admission and publication
 
@@ -385,8 +443,8 @@ reaches it, so a root that reaches one is not yet pollable. Semantic memo
 flights and scoped cache-node handoffs register shared-registry wait edges.
 Completion, cache admission and declaration-lowering subscriptions offer
 explicit task-owned adapters; their synchronous callers still require
-conversion. Resolver/store-view, workspace, carrier publication and host
-load/index ownership remain incomplete in this inventory.
+conversion. Workspace, carrier publication and host index ownership remain
+incomplete in this inventory.
 
 | Wait | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- |
@@ -395,7 +453,7 @@ load/index ownership remain incomplete in this inventory.
 | Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | owned artifact admission with producer transfer; dispatch callers still synchronous |
 | Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |
 | Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |
-| Store-view build park (`StoreViewManager::park_for_build`) | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | private `BuildRelease::poll`; callers still synchronous |
+| Store-view capture (`StoreViewManager::base_view`) | `verter_session/src/store_view_handoff.rs` | `capture_batch_fixed_view` at every component-meta entry | `VerterHost::begin_store_view` with owned build/maintenance producer; callers still synchronous |
 | Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
 | Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; synchronous callers externally drive and integrate |
 | Batch upsert completion (`Scheduler::wait_batch`) | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |

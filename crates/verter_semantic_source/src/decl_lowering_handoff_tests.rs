@@ -291,7 +291,10 @@ fn stopping_an_owned_acquisition_detaches_before_queue_or_reply_release() {
             assert_eq!(space_waiters(&service), 1);
         }
         release.send(()).unwrap();
-        let outcome = finish(|waker| sibling.poll(waker)).unwrap().unwrap().0;
+        let outcome = finish_owned(|waker| sibling.poll(waker))
+            .unwrap()
+            .unwrap()
+            .0;
         assert!(run_leased(&service, &k).is_some());
         assert_eq!(registry.wait_graph_occupancy().edges, 0);
         drop(outcome);
@@ -321,7 +324,7 @@ fn an_owned_lowering_contains_job_panic_and_installs_its_producer_task() {
         })
         .owned(registry.register_task(), CancellationToken::new());
     assert!(matches!(
-        finish(|waker| handoff.poll(waker)),
+        finish_owned(|waker| handoff.poll(waker)),
         Ok(Err(super::LoweringFailure::Panicked))
     ));
     assert!(task_present.load(Ordering::SeqCst));
@@ -343,7 +346,7 @@ fn an_owned_run_reports_a_closed_reply_and_an_owned_batch_preserves_order() {
     handoff.handoff.job = Some(Box::new(move |_| drop(discarded)));
     let mut handoff = handoff.owned(registry.register_task(), CancellationToken::new());
     assert!(matches!(
-        finish(|waker| handoff.poll(waker)),
+        finish_owned(|waker| handoff.poll(waker)),
         Ok(Err(super::LoweringFailure::WorkerStopped))
     ));
     let jobs = vec![
@@ -364,7 +367,7 @@ fn an_owned_run_reports_a_closed_reply_and_an_owned_batch_preserves_order() {
         .begin_run_leased_batch(jobs)
         .owned(registry.register_task(), CancellationToken::new());
     assert_eq!(
-        finish(|waker| batch.poll(waker)),
+        finish_owned(|waker| batch.poll(waker)),
         Ok(Ok(vec![Some(11), None, Some(33)]))
     );
     assert_eq!(registry.wait_graph_occupancy().edges, 0);
@@ -445,4 +448,351 @@ fn a_batch_handoff_answers_in_input_order_after_every_share() {
         .expect("the share's answer wakes the batch");
     assert_eq!(finish(|waker| handoff.poll(waker)), vec![None, Some(2)]);
     drop(lease.lease);
+}
+
+#[test]
+fn owned_lowering_refuses_same_shard_reentry_before_admitting_any_job() {
+    use verter_execution::cancellation::CancellationToken;
+    use verter_execution::tasks::{ExecutionScope, TaskRegistry};
+    for operation in 0..3 {
+        let service = service(2);
+        let k = key("/ws/outer.ts", 25);
+        // Different keys still share this one worker and cannot re-enter it.
+        let nested_key = key("/ws/nested.ts", 26);
+        let registry = TaskRegistry::default();
+        let nested_service = service.clone();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let nested_ran = ran.clone();
+        let mut outer = service
+            .begin_acquire_lease_and_run(&k, &source(), oxc_span::SourceType::ts(), move |_| {
+                let waiter = ExecutionScope::current_task().expect("actual worker task");
+                if operation == 1 {
+                    let mut nested = nested_service
+                        .begin_run_leased_batch(vec![LeasedJob {
+                            key: nested_key,
+                            run: Box::new(move |_| {
+                                nested_ran.fetch_add(1, Ordering::SeqCst);
+                                1
+                            }),
+                        }])
+                        .owned(waiter, CancellationToken::new());
+                    matches!(
+                        nested.poll(Waker::noop()),
+                        Poll::Ready(Ok(super::LoweringStep::Value(Err(
+                            super::LoweringFailure::Reentrant
+                        ))))
+                    )
+                } else if operation == 2 {
+                    let mut nested = nested_service
+                        .begin_acquire_lease_and_run(
+                            &nested_key,
+                            &source(),
+                            oxc_span::SourceType::ts(),
+                            move |_| {
+                                nested_ran.fetch_add(1, Ordering::SeqCst);
+                                1
+                            },
+                        )
+                        .owned(waiter, CancellationToken::new());
+                    matches!(
+                        nested.poll(Waker::noop()),
+                        Poll::Ready(Ok(super::LoweringStep::Value(Err(
+                            super::LoweringFailure::Reentrant
+                        ))))
+                    )
+                } else {
+                    let mut nested = nested_service
+                        .begin_run_leased(&nested_key, move |_| {
+                            nested_ran.fetch_add(1, Ordering::SeqCst);
+                            1
+                        })
+                        .owned(waiter, CancellationToken::new());
+                    matches!(
+                        nested.poll(Waker::noop()),
+                        Poll::Ready(Ok(super::LoweringStep::Value(Err(
+                            super::LoweringFailure::Reentrant
+                        ))))
+                    )
+                }
+            })
+            .owned(registry.register_task(), CancellationToken::new());
+        let (outcome, refused) = finish_owned(|waker| outer.poll(waker)).unwrap().unwrap();
+        drop(outcome);
+        service.release_completion().wait().unwrap();
+        assert_eq!(
+            refused,
+            Some(true),
+            "a worker must refuse its own shard before queue admission"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    }
+}
+
+#[test]
+fn inline_lowering_poll_transfers_work_instead_of_running_it() {
+    let ran = Arc::new(AtomicUsize::new(0));
+    let executed = ran.clone();
+    let mut reply = super::inline::InlineWork::new(Box::new(move || {
+        executed.fetch_add(1, Ordering::SeqCst);
+        42_usize
+    }));
+    let (wake, waker, _) = reporting_waker();
+    assert!(reply.poll(&waker).is_pending());
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+    let work = reply.take_work().expect("explicit independent work token");
+    assert!(reply.poll(&waker).is_pending());
+    std::thread::spawn(move || work.run()).join().unwrap();
+    assert!(wakes(&wake) > 0);
+    assert_eq!(reply.poll(&waker), Poll::Ready(42));
+}
+
+fn finish_owned<T>(
+    mut poll: impl FnMut(
+        &Waker,
+    ) -> Poll<
+        Result<super::LoweringStep<T>, verter_execution::dependency::DependencyStop>,
+    >,
+) -> Result<T, verter_execution::dependency::DependencyStop> {
+    loop {
+        match finish(|waker| poll(waker))? {
+            super::LoweringStep::Work(work) => work.run(),
+            super::LoweringStep::Value(value) => return Ok(value),
+        }
+    }
+}
+
+struct InlineProbe(super::inline::InlineWork<usize>);
+impl verter_execution::dependency::DependencyPoll for InlineProbe {
+    type Output = Result<usize, super::LoweringFailure>;
+    fn poll_dependency(&mut self, waker: &Waker) -> Poll<Self::Output> {
+        super::poll_lowering(|| self.0.poll(waker))
+    }
+}
+fn owned_inline(
+    operation: Box<dyn FnOnce() -> usize + Send>,
+    registry: &verter_execution::tasks::TaskRegistry,
+    stop: verter_execution::cancellation::CancellationToken,
+) -> super::OwnedLoweringHandoff<InlineProbe> {
+    let mut reply = super::inline::InlineWork::new(operation);
+    let work = reply.take_work();
+    let dependency = verter_execution::dependency::OwnedDependency::new(
+        InlineProbe(reply),
+        registry.register_task(),
+        registry.register_task(),
+        stop,
+    );
+    super::OwnedLoweringHandoff::new(dependency, work)
+}
+#[test]
+fn owned_inline_work_preserves_edge_until_answer_and_contains_drop_and_panic() {
+    use super::{LoweringFailure, LoweringStep};
+    use verter_execution::{cancellation::CancellationToken, tasks::TaskRegistry};
+    for panic in [false, true] {
+        let registry = TaskRegistry::default();
+        let mut demand = owned_inline(
+            Box::new(move || {
+                if panic {
+                    panic!("inline failed");
+                }
+                5
+            }),
+            &registry,
+            CancellationToken::new(),
+        );
+        let (wake, waker, _) = reporting_waker();
+        let work = match demand.poll(&waker) {
+            Poll::Ready(Ok(LoweringStep::Work(work))) => work,
+            _ => panic!("must transfer"),
+        };
+        assert_eq!(registry.wait_graph_occupancy().edges, 1);
+        assert!(demand.poll(&waker).is_pending());
+        if panic {
+            work.run();
+        } else {
+            drop(work);
+        }
+        assert!(wakes(&wake) > 0);
+        let expected = if panic {
+            LoweringFailure::Panicked
+        } else {
+            LoweringFailure::ProducerDropped
+        };
+        assert!(
+            matches!(demand.poll(&waker), Poll::Ready(Ok(LoweringStep::Value(Err(error)))) if error == expected)
+        );
+        assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    }
+}
+#[test]
+fn owned_inline_stop_before_and_after_transfer_preserves_independent_work_and_withdraws() {
+    use super::LoweringStep;
+    use verter_execution::{
+        cancellation::CancellationToken, dependency::DependencyStop, tasks::TaskRegistry,
+    };
+    for before in [false, true] {
+        let registry = TaskRegistry::default();
+        let stop = CancellationToken::new();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let observed = ran.clone();
+        let mut demand = owned_inline(
+            Box::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                7
+            }),
+            &registry,
+            stop.clone(),
+        );
+        let (wake, waker, _) = reporting_waker();
+        let work = if before {
+            None
+        } else {
+            match demand.poll(&waker) {
+                Poll::Ready(Ok(LoweringStep::Work(work))) => Some(work),
+                _ => panic!("must transfer"),
+            }
+        };
+        stop.cancel();
+        assert!(matches!(
+            demand.poll(&waker),
+            Poll::Ready(Err(DependencyStop::Cancelled))
+        ));
+        assert_eq!(registry.wait_graph_occupancy().edges, 0);
+        let wakes_after_stop = wakes(&wake);
+        if let Some(work) = work {
+            work.run();
+        }
+        assert_eq!(
+            wakes(&wake),
+            wakes_after_stop,
+            "abandoned readiness registration must be gone"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), usize::from(!before));
+    }
+}
+#[test]
+fn inline_work_completion_before_repoll_and_abandoned_reply_cleanup_are_exact() {
+    use super::LoweringStep;
+    use verter_execution::{cancellation::CancellationToken, tasks::TaskRegistry};
+    let registry = TaskRegistry::default();
+    let mut demand = owned_inline(Box::new(|| 9), &registry, CancellationToken::new());
+    let work = match demand.poll(Waker::noop()) {
+        Poll::Ready(Ok(LoweringStep::Work(work))) => work,
+        _ => panic!("must transfer"),
+    };
+    fn send<T: Send>(_: &T) {}
+    send(&demand);
+    send(&work);
+    std::thread::spawn(move || work.run()).join().unwrap();
+    assert!(matches!(
+        demand.poll(Waker::noop()),
+        Poll::Ready(Ok(LoweringStep::Value(Ok(9))))
+    ));
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    let mut abandoned = owned_inline(Box::new(|| 10), &registry, CancellationToken::new());
+    let (wake, waker, _) = reporting_waker();
+    let work = match abandoned.poll(&waker) {
+        Poll::Ready(Ok(LoweringStep::Work(work))) => work,
+        _ => panic!("must transfer"),
+    };
+    drop(abandoned);
+    work.run();
+    assert_eq!(wakes(&wake), 0);
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
+}
+
+#[test]
+fn owned_batch_preflight_refuses_all_shares_before_admitting_a_free_shard() {
+    use verter_execution::{
+        cancellation::CancellationToken,
+        tasks::{ExecutionScope, TaskRegistry},
+    };
+    let service = Arc::new(DeclLoweringService::new_with(true, 2));
+    let for_shard = |shard| {
+        (0..100)
+            .map(|i| key(&format!("/ws/shard-{i}.ts"), i as u8))
+            .find(|key| super::shard_index(key, 2) == shard)
+            .unwrap()
+    };
+    let free = for_shard(0);
+    let held = for_shard(1);
+    let lease = acquire(&service, &free);
+    let nested_service = service.clone();
+    let nested_held = held.clone();
+    let ran = Arc::new(AtomicUsize::new(0));
+    let observed = ran.clone();
+    let registry = TaskRegistry::default();
+    let mut outer = service
+        .begin_acquire_lease_and_run(&held, &source(), oxc_span::SourceType::ts(), move |_| {
+            let waiter = ExecutionScope::current_task().unwrap();
+            let mut nested = nested_service
+                .begin_run_leased_batch(vec![
+                    LeasedJob {
+                        key: free,
+                        run: Box::new(move |_| {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            1
+                        }),
+                    },
+                    LeasedJob {
+                        key: nested_held,
+                        run: Box::new(|_| 2),
+                    },
+                ])
+                .owned(waiter, CancellationToken::new());
+            matches!(
+                nested.poll(Waker::noop()),
+                Poll::Ready(Ok(super::LoweringStep::Value(Err(
+                    super::LoweringFailure::Reentrant
+                ))))
+            )
+        })
+        .owned(registry.register_task(), CancellationToken::new());
+    let (outcome, refused) = finish_owned(|waker| outer.poll(waker)).unwrap().unwrap();
+    drop(outcome);
+    drop(lease);
+    service.release_completion().wait().unwrap();
+    assert_eq!(refused, Some(true));
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        0,
+        "preflight must not admit the earlier free shard"
+    );
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
+}
+
+#[test]
+fn held_inline_reply_poll_is_bounded_and_completion_wakes() {
+    let mut reply = super::inline::InlineWork::new(Box::new(|| 42_usize));
+    let work = reply.take_work().unwrap();
+    let (wake, waker, _) = reporting_waker();
+    let (tx, rx) = channel();
+    let poller = std::thread::spawn(move || {
+        tx.send(reply.poll(&waker).is_pending()).unwrap();
+        reply
+    });
+    let pending = rx.recv_timeout(DEADLINE);
+    // Always release and join before asserting, even for a blocking mutant.
+    work.run();
+    let mut reply = poller.join().unwrap();
+    assert_eq!(pending.ok(), Some(true));
+    assert!(
+        wakes(&wake) > 0,
+        "completion must wake readiness registration"
+    );
+    assert_eq!(reply.poll(Waker::noop()), Poll::Ready(42));
+}
+
+#[test]
+fn an_owned_empty_batch_is_immediate_without_work() {
+    use verter_execution::{cancellation::CancellationToken, tasks::TaskRegistry};
+    let service = service(1);
+    let registry = TaskRegistry::default();
+    let mut batch = service
+        .begin_run_leased_batch(Vec::<LeasedJob<usize>>::new())
+        .owned(registry.register_task(), CancellationToken::new());
+    assert!(
+        matches!(batch.poll(Waker::noop()), Poll::Ready(Ok(super::LoweringStep::Value(Ok(values)))) if values.is_empty())
+    );
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
 }

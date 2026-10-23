@@ -708,7 +708,7 @@ impl VerterHost {
             tick: std::sync::atomic::AtomicU64::new(1),
             store_view_epoch: std::sync::atomic::AtomicU64::new(1),
             load_generation: std::sync::atomic::AtomicU64::new(0),
-            store_view_manager: crate::resolver_store::StoreViewManager::new(),
+            store_view_manager: crate::resolver_store::StoreViewManager::with_registry(task_registry.clone()),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             metrics: HostMetrics::default(),
             scheduler,
