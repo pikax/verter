@@ -122,6 +122,42 @@ context; keeping a completed handoff alive does not retain its scheduler tree.
 be the execution that actually produces the completion. It stops only that
 subscriber, preserving the handle's first-writer-wins result and siblings.
 
+`CompletionSubscription::owned_producer(waiter, cancellation)` follows the
+scheduler's actual producer instead of accepting one from the caller. Gated
+stages follow their first admitted prerequisite recursively, in dependency-key
+order. Analysis dependencies not yet admitted follow their Source producer.
+Each prerequisite release, new stage admission or scoped producer replacement
+updates affected ancestor completions through the reverse dependency indexes
+and wakes their subscriptions after the DAG lock releases. Re-polling moves
+the root's single wait edge to that producer; completion and cancellation
+release its readiness registration, stop registration and task pins.
+
+`Scheduler::begin_owned_request` combines pollable inbox admission with this
+completion ownership. Cancellation before admission drops the unsubmitted
+request; cancellation after admission detaches only the waiter. Shared stages
+and sibling requests continue.
+
+### Host load and external integration
+
+`VerterHost::begin_load` returns `HostLoadHandoff`. Its poll advances owned
+scheduler admission/completion and transfers `HostLoadCommit` once Analysis is
+ready. It performs no host integration, stage execution or blocking submission.
+`HostLoadCommit::apply` performs integration externally and refuses another
+host, cancellation, changed source incarnation/generation or a changed canonical
+eviction revision or project authority. This fence also applies to warm commits
+and prevents an old commit reversing a later eviction. Unrelated-file evictions
+and additive load-generation changes remain compatible. The same stop, source,
+project and revision fence is rechecked under the existing derived-state row
+lock immediately before clearing its eviction marker; no callback runs in that
+critical section. The caller assignments above this handoff are DISPATCH for
+shared resolver loading, META for metadata traversal and COMPILE for compilation.
+
+The synchronous `ensure_loaded` entry drives this same handoff. Its external
+driver rechecks cancellation after yielding, parks external native callers on
+the driver, and lets scheduler workers use the existing cooperative pump and
+bounded park cadence. Inline drivers retain typed `NoProgress` when no work
+can advance. These driving operations are absent from the handoff capability.
+
 ### Scheduler request admission
 
 `Scheduler::begin_submit_request` returns an owned
@@ -195,6 +231,54 @@ producer on the existing CPU pool.
   `scoped_handoff_no_blocking_scheduler` denies recovering the blocking
   scheduler from the handoff. These are boundary tests; complete production
   component-meta/compile roots are still synchronous.
+
+### Resolver request flights
+
+`SingleflightGroup::begin_owned_retaining` returns `OwnedResolverFlight`.
+Its only advancing operation, `poll`, returns a complete
+`SingleflightRunResult` or transfers the sole `OwnedResolverProducer`.
+Polling does not compute or run the retention policy. `run_retaining` and
+`run` externally drive the same core with borrowed callbacks.
+
+- **Ownership:** host composition binds every resolver flight family to the
+  host's existing registry. Production compatibility entries install that
+  authority; a transferred producer installs its actual distinct task while
+  running. The waiting parent keeps its edge until terminalization or drop.
+- **Cancellation and errors:** cancellation stops one subscriber without
+  stopping its producer or siblings. `Cycle`, `ProducerUnowned`,
+  `ProducerDropped`, `ProducerPanicked`, `Reset` and the original producer
+  error are typed terminal refusals. The owned producer contains panic;
+  compatibility producers preserve unwinding and their followers re-elect. Same-path
+  owned recursion refuses a cycle; synchronous recursion retains its nested
+  computation escape outside poll.
+- **Publication:** `participate_owned` pins before a warm-cache probe and
+  can survive suspension without borrowing the group. Participation pins retain a stable rendezvous for its
+  concurrent burst. Non-retained results publish to existing followers and
+  leave the table in one locked operation. Pointer-checked retirement cannot
+  remove a successor flight. Reset wakes a held producer's subscribers and
+  prevents its later execution or publication.
+- **Lifetime and backpressure:** each subscriber owns one readiness and stop
+  registration and exactly its own task edge. Terminalization withdraws them
+  and drops retained callbacks, keys, group handles and task pins. Producer
+  transfer has no queue or pool admission. Dropping an unrun producer wakes
+  followers with a typed failure; dropping a follower leaves siblings live.
+
+The metadata request and fallthrough flight callers belong to metadata
+traversal conversion. Module exports, overlay materialization, prepared
+and indexed declarations, imported sources, route names and barrel surfaces
+belong to dispatch conversion; compilation reaches them through dispatch.
+Their existing synchronous calls still need resumable traversal state.
+
+| Higher caller | Conversion owner |
+| --- | --- |
+| `resolver_core/component_meta_request.rs::run_component_meta_request` → `run_stable_request` | META |
+| `resolver_core/fallthrough_request.rs` → `run_stable_request` | META |
+| `host_manage/module_exports.rs` → `module_export_singleflight` | DISPATCH |
+| `host_manage/overlay_materialize.rs` → `indexed_singleflight` | DISPATCH |
+| `host_manage/prepared_decl.rs` → prepared-bundle and indexed flights | DISPATCH |
+| `host_manage/source_request.rs` → imported-root and route-name flights | DISPATCH |
+| `resolver_core/route_db.rs` → barrel-surface flight | DISPATCH |
+| Compile traversal and hydration above these shared dispatch calls | COMPILE |
 
 ### Declaration-lowering owner-shard handoffs
 
@@ -310,10 +394,10 @@ load/index ownership remain incomplete in this inventory.
 | Semantic task drive (`SemanticTask::drive`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
 | Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | owned artifact admission with producer transfer; dispatch callers still synchronous |
 | Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |
-| Resolver request singleflight follower (`SingleflightGroup::run_retaining`; thread-identity owner) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | private owned `FlightJoin::poll`; callers still synchronous |
+| Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |
 | Store-view build park (`StoreViewManager::park_for_build`) | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | private `BuildRelease::poll`; callers still synchronous |
 | Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
-| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `CompletionSubscription::poll` on the handle; the adapter still parks |
+| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; synchronous callers externally drive and integrate |
 | Batch upsert completion (`Scheduler::wait_batch`) | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
 | Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
 | Scheduler inbox submission (`send_submission`) | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |

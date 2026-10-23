@@ -144,6 +144,70 @@ impl Default for CooperativeSchedulerAdapter {
 }
 
 impl CooperativeSchedulerAdapter {
+    /// External synchronous driver for the same owned host-load handoff used
+    /// by suspendable roots. Only this boundary may park or drive stages.
+    pub(crate) fn drive_load(
+        &self,
+        scheduler: &Arc<Scheduler>,
+        load: &mut crate::HostLoadHandoff,
+    ) -> Result<crate::HostLoadCommit, crate::HostLoadError> {
+        let mut offered_native_yield = false;
+        let poll_external = |waker: &std::task::Waker| {
+            if self.cancellation.is_cancelled() {
+                return std::task::Poll::Ready(Err(crate::HostLoadError::Cancelled));
+            }
+            if let std::task::Poll::Ready(result) = load.poll(waker) {
+                return std::task::Poll::Ready(result);
+            }
+            // A driver-backed compatibility call offers its pre-park yield
+            // once, as the existing driver does. Inline calls offer between
+            // each stage; readiness wakes alone are not new yield points.
+            if !scheduler.has_driver_thread() || !offered_native_yield {
+                offered_native_yield = true;
+                if self.yield_hook.yield_to_runtime() == YieldDecision::Cancelled {
+                    return std::task::Poll::Ready(Err(crate::HostLoadError::Cancelled));
+                }
+            }
+            if self.cancellation.is_cancelled() {
+                return std::task::Poll::Ready(Err(crate::HostLoadError::Cancelled));
+            }
+            if scheduler.has_driver_thread() {
+                scheduler.pump_owned_dependency();
+                return std::task::Poll::Pending;
+            }
+            if scheduler.drive_one() {
+                // This external boundary drove one stage; request the next
+                // iteration even if that stage had no completion subscriber.
+                waker.wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            match load.poll(waker) {
+                std::task::Poll::Ready(result) => std::task::Poll::Ready(result),
+                std::task::Poll::Pending => {
+                    std::task::Poll::Ready(Err(crate::HostLoadError::NoProgress))
+                }
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use verter_scheduler::caller_kind::CallerKind;
+            let interval = matches!(
+                CallerKind::current(),
+                CallerKind::CpuWorker | CallerKind::IoWorker
+            )
+            .then_some(std::time::Duration::from_millis(10));
+            verter_execution::blocking::block_on(interval, poll_external)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut poll_external = poll_external;
+            loop {
+                if let std::task::Poll::Ready(result) = poll_external(std::task::Waker::noop()) {
+                    break result;
+                }
+            }
+        }
+    }
     /// Uncancellable adapter with the inline yield hook.
     #[must_use]
     pub fn new() -> Self {

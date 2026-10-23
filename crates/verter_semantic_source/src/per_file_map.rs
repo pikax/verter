@@ -18,17 +18,45 @@ struct Value<V> {
 }
 
 pub struct PerFileMap<K, V> {
+    #[cfg(test)]
+    pin_context: PinContext,
     map: OnceLock<DashMap<K, Value<V>>>,
     backing: parking_lot::Mutex<(GranularPin, [usize; PER_FILE_MAP_SHARDS])>,
 }
 impl<K, V> Default for PerFileMap<K, V> {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
+            pin_context: PinContext::default(),
             map: OnceLock::new(),
             backing: parking_lot::Mutex::new((
                 GranularPin::new(PinContext::default().account(), 1024),
                 [0; PER_FILE_MAP_SHARDS],
             )),
+        }
+    }
+}
+impl<K, V> PerFileMap<K, V> {
+    fn pin_context(&self) -> PinContext {
+        #[cfg(test)]
+        {
+            self.pin_context.clone()
+        }
+        #[cfg(not(test))]
+        {
+            PinContext::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn with_pin_context(pin_context: PinContext) -> Self {
+        Self {
+            map: OnceLock::new(),
+            backing: parking_lot::Mutex::new((
+                GranularPin::new(pin_context.account(), 1024),
+                [0; PER_FILE_MAP_SHARDS],
+            )),
+            pin_context,
         }
     }
 }
@@ -123,7 +151,7 @@ impl<K: Eq + Hash + HeapSize, V: HeapSize> PerFileMap<K, V> {
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         let map = self.written();
         let shard = map.determine_map(&key);
-        let value_pin = PinnedHeap::measure(&value, 0, &PinContext::default());
+        let value_pin = PinnedHeap::measure(&value, 0, &self.pin_context());
         let old = match map.entry(key) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 let held = entry.get_mut();
@@ -132,7 +160,7 @@ impl<K: Eq + Hash + HeapSize, V: HeapSize> PerFileMap<K, V> {
                 Some(old)
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let key_pin = PinnedHeap::measure(entry.key(), 0, &PinContext::default());
+                let key_pin = PinnedHeap::measure(entry.key(), 0, &self.pin_context());
                 entry.insert(Value {
                     value,
                     _key_pin: key_pin,
@@ -189,8 +217,8 @@ impl<'a, K: Eq + Hash + HeapSize, V: HeapSize> MapEntry<'a, K, V> {
             Entry::Occupied(entry) => entry.into_ref(),
             Entry::Vacant(entry) => {
                 let value = build();
-                let key_pin = PinnedHeap::measure(entry.key(), 0, &PinContext::default());
-                let value_pin = PinnedHeap::measure(&value, 0, &PinContext::default());
+                let key_pin = PinnedHeap::measure(entry.key(), 0, &self.owner.pin_context());
+                let value_pin = PinnedHeap::measure(&value, 0, &self.owner.pin_context());
                 entry.insert(Value {
                     value,
                     _key_pin: key_pin,
@@ -237,9 +265,12 @@ mod tests {
 
     #[test]
     fn replacing_a_value_keeps_the_actual_stored_keys_capacity_charged() {
-        let account = PinContext::default().account().clone();
+        let context = PinContext::new(verter_retention::SemanticRetentionAccount::new(
+            verter_retention::RetentionLimits::defaults(),
+        ));
+        let account = context.account().clone();
         let baseline = account.snapshot().pinned_bytes;
-        let map = per_file_map();
+        let map = PerFileMap::with_pin_context(context);
         let mut key = String::with_capacity(1024 * 1024);
         key.push_str("same-key");
         map.insert(key, 1u32);

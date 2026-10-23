@@ -377,6 +377,7 @@ pub struct DedupJoinObservation {
 /// out terminal failures to admitted waiters.
 #[derive(Debug)]
 pub(in crate::dag) struct DagNode {
+    execution_task: verter_execution::tasks::ExecutionTask,
     pub(in crate::dag) identity: WorkNodeIdentity,
     pub(in crate::dag) kind: WorkKind,
     pub(in crate::dag) base_priority: Priority,
@@ -539,6 +540,8 @@ impl DepKey {
 /// A node that has been dequeued for dispatch.
 #[derive(Debug, Clone)]
 pub struct ReadyJob {
+    /// The real producer, minted by the host's execution authority at admission.
+    pub execution_task: verter_execution::tasks::ExecutionTask,
     pub token: SubmissionToken,
     pub identity: WorkNodeIdentity,
     pub kind: WorkKind,
@@ -736,6 +739,7 @@ pub struct DependencyOccupancy {
 }
 
 pub struct SchedulerDag {
+    task_registry: verter_execution::tasks::TaskRegistry,
     /// The scheduler's lock owner takes these callbacks before unlock and
     /// delivers them afterwards. Standalone, exclusively owned DAGs deliver
     /// directly because no enclosing lock exists.
@@ -1188,7 +1192,15 @@ impl SchedulerDag {
 
     /// Create a new empty DAG with an explicit capacity budget.
     pub fn with_budget(budget: DagCapacityBudget) -> Self {
+        Self::with_budget_and_registry(budget, Default::default())
+    }
+
+    pub(crate) fn with_budget_and_registry(
+        budget: DagCapacityBudget,
+        task_registry: verter_execution::tasks::TaskRegistry,
+    ) -> Self {
         Self {
+            task_registry,
             completion_wakes: None,
             nodes: FxHashMap::default(),
             by_identity: FxHashMap::default(),
@@ -1233,6 +1245,216 @@ impl SchedulerDag {
         state: CompletionState<RequestResult>,
     ) {
         send_completion(sender, state, &mut self.completion_wakes);
+    }
+
+    /// Scoped producers already own their identity before inbox admission.
+    pub(crate) fn set_execution_task(
+        &mut self,
+        identity: &WorkNodeIdentity,
+        task: verter_execution::tasks::ExecutionTask,
+    ) {
+        let token = self.by_identity[identity];
+        self.nodes
+            .get_mut(&token)
+            .expect("admitted node")
+            .execution_task = task;
+        self.bind_file_producer(identity);
+    }
+
+    /// Refresh requests affected by this producer or any transitive dependent.
+    /// A gated stage points at its first admitted prerequisite, recursively;
+    /// completion moves it to the next prerequisite before waking its poller.
+    /// Reverse edge indexes also find dependencies whose Analysis is not yet
+    /// admitted while its Source producer is still running.
+    pub(crate) fn bind_file_producer(&mut self, identity: &WorkNodeIdentity) {
+        let mut pending = vec![identity.clone()];
+        let mut visited = FxHashSet::default();
+        while let Some(identity) = pending.pop() {
+            if !visited.insert(identity.clone()) {
+                continue;
+            }
+            let dependents: Vec<_> = match &identity {
+                WorkNodeIdentity::FileStage {
+                    canonical,
+                    incarnation,
+                    generation,
+                    ..
+                }
+                | WorkNodeIdentity::Artifact {
+                    canonical,
+                    incarnation,
+                    generation,
+                    ..
+                } => {
+                    let dependencies = self.dep_edges.file_dependencies(canonical, *generation);
+                    let dependents = dependencies.filter(|dep| matches!(dep,
+                        DepKey::FileStage { incarnation: owner, .. } | DepKey::Artifact { incarnation: owner, .. } if owner == incarnation
+                    )).flat_map(|dep| self.dep_edges.waiters_of(dep)).collect();
+                    self.bind_request_producers(canonical, *incarnation, *generation);
+                    dependents
+                }
+                WorkNodeIdentity::CacheNode { .. } => self
+                    .dep_edges
+                    .waiters_of(&DepKey::from_identity(&identity))
+                    .collect(),
+            };
+            pending.extend(
+                dependents
+                    .into_iter()
+                    .filter_map(|token| self.nodes.get(&token).map(|node| node.identity.clone())),
+            );
+        }
+    }
+
+    fn bind_request_producers(&mut self, canonical: &Arc<str>, incarnation: u64, generation: u64) {
+        let key = FileGenKey {
+            canonical: Arc::clone(canonical),
+            generation,
+        };
+        let Some(waiters) = self.file_waiters.get(&key) else {
+            return;
+        };
+        let mut updates = Vec::new();
+        for group in &waiters.groups {
+            let Some(root) =
+                self.request_producer(canonical, incarnation, generation, &group.target)
+            else {
+                continue;
+            };
+            let producer = self.blocking_producer(root);
+            updates.extend(
+                group
+                    .senders
+                    .iter()
+                    .map(|sender| (sender.clone(), producer.clone())),
+            );
+        }
+        for (sender, producer) in updates {
+            let wakes = sender.set_producer_deferred(&producer);
+            if let Some(batch) = &mut self.completion_wakes {
+                batch.push(wakes);
+            } else {
+                wakes.wake();
+            }
+        }
+    }
+
+    /// Select the furthest admitted stage of this exact file lifetime that
+    /// can satisfy the request. A missing Analysis may still owe Source work.
+    fn request_producer(
+        &self,
+        canonical: &Arc<str>,
+        incarnation: u64,
+        generation: u64,
+        target: &TargetStage,
+    ) -> Option<SubmissionToken> {
+        let mut identity = WorkNodeIdentity::FileStage {
+            canonical: Arc::clone(canonical),
+            incarnation,
+            generation,
+            stage: FileStageKey::Source,
+        };
+        let source = self.by_identity.get(&identity).copied();
+        if *target == TargetStage::Source {
+            return source;
+        }
+        if let WorkNodeIdentity::FileStage { stage, .. } = &mut identity {
+            *stage = FileStageKey::Analysis;
+        }
+        let analysis = self.by_identity.get(&identity).copied().or(source);
+        if let TargetStage::Artifact { profile_hash } = target {
+            let artifact = WorkNodeIdentity::Artifact {
+                canonical: Arc::clone(canonical),
+                incarnation,
+                generation,
+                profile_hash: profile_hash_to_bytes(*profile_hash),
+                content_hash: [0; 16],
+            };
+            return self.by_identity.get(&artifact).copied().or(analysis);
+        }
+        analysis
+    }
+
+    fn dependency_producer(&self, dependency: &DepKey) -> Option<SubmissionToken> {
+        match dependency {
+            DepKey::FileStage {
+                canonical,
+                incarnation,
+                generation,
+                stage,
+            } => self.request_producer(
+                canonical,
+                *incarnation,
+                *generation,
+                &match stage {
+                    FileStageKey::Source => TargetStage::Source,
+                    FileStageKey::Analysis => TargetStage::Analysis,
+                },
+            ),
+            DepKey::Artifact {
+                canonical,
+                incarnation,
+                generation,
+                profile_hash,
+                content_hash,
+            } => self
+                .by_identity
+                .get(&WorkNodeIdentity::Artifact {
+                    canonical: Arc::clone(canonical),
+                    incarnation: *incarnation,
+                    generation: *generation,
+                    profile_hash: *profile_hash,
+                    content_hash: *content_hash,
+                })
+                .copied()
+                .or_else(|| {
+                    self.request_producer(
+                        canonical,
+                        *incarnation,
+                        *generation,
+                        &TargetStage::Analysis,
+                    )
+                }),
+            DepKey::CacheNode {
+                cache_id,
+                key_hash,
+                view_epoch,
+                snapshot_pin_id,
+            } => self
+                .by_identity
+                .get(&WorkNodeIdentity::CacheNode {
+                    cache_id: *cache_id,
+                    key_hash: *key_hash,
+                    view_epoch: *view_epoch,
+                    snapshot_pin_id: *snapshot_pin_id,
+                })
+                .copied(),
+        }
+    }
+
+    fn blocking_producer(
+        &self,
+        mut token: SubmissionToken,
+    ) -> verter_execution::tasks::ExecutionTask {
+        let mut visited = FxHashSet::default();
+        while visited.insert(token) {
+            let node = &self.nodes[&token];
+            let Some(dependency) = node
+                .deps_remaining
+                .keys()
+                .find_map(|dependency| self.dependency_producer(dependency))
+            else {
+                break;
+            };
+            token = dependency;
+        }
+        self.nodes[&token].execution_task.clone()
+    }
+
+    fn bind_waiter_producer(&mut self, token: SubmissionToken) {
+        if let Some(node) = self.nodes.get(&token) {
+            self.bind_file_producer(&node.identity.clone());
+        }
     }
 
     /// Cumulative dependency-edge work counters.
@@ -1635,7 +1857,9 @@ impl SchedulerDag {
         if canonical.as_ref() != node.canonical_id || !node.admits_work(incarnation, generation) {
             return None;
         }
-        Some(self.submit_unchecked(identity, kind, priority, deps, request_context))
+        let token = self.submit_unchecked(identity.clone(), kind, priority, deps, request_context);
+        self.bind_file_producer(&identity);
+        Some(token)
     }
 
     pub(crate) fn submit_cache(
@@ -1759,6 +1983,7 @@ impl SchedulerDag {
         }
 
         let node = DagNode {
+            execution_task: self.task_registry.register_task(),
             identity: identity.clone(),
             kind,
             base_priority: priority,
@@ -1814,6 +2039,7 @@ impl SchedulerDag {
                 // Reconcile the waiter's lane: a cleared dep may make it
                 // dispatch-ready (it will dispatch then fail/retry).
                 self.refresh_ready_membership(waiter_tok);
+                self.bind_waiter_producer(waiter_tok);
             }
         }
         stranded
@@ -2234,6 +2460,7 @@ impl SchedulerDag {
                 // Reconcile the waiter's lane: clearing its last dep
                 // makes it dispatch-ready and inserts it into its lane.
                 self.refresh_ready_membership(waiter_tok);
+                self.bind_waiter_producer(waiter_tok);
             }
         }
         newly_ready
@@ -2576,6 +2803,7 @@ impl SchedulerDag {
             // it through verbatim.
             let failed_blocker_deps = std::mem::take(&mut node.failed_blocker_deps);
             return Some(ReadyJob {
+                execution_task: node.execution_task.clone(),
                 token: tok,
                 identity: node.identity.clone(),
                 kind: node.kind,

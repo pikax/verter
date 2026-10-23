@@ -97,12 +97,24 @@ impl<H: DependencyPoll> OwnedDependency<H> {
         answer: Result<H::Output, DependencyStop>,
     ) -> Poll<Result<H::Output, DependencyStop>> {
         self.finished = true;
-        self.handoff = None;
-        self.cancellation = None;
+        self.release();
+        Poll::Ready(answer)
+    }
+
+    fn release(&mut self) {
+        // Handoff destruction may notify a producer. That callback must not
+        // observe the wait this subscriber has already abandoned.
         self.edge = None;
+        self.cancellation = None;
         self.waiter = None;
         self.producer = None;
-        Poll::Ready(answer)
+        self.handoff = None;
+    }
+}
+
+impl<H: DependencyPoll> Drop for OwnedDependency<H> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 

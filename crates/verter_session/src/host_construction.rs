@@ -124,13 +124,14 @@ impl HostResolverState {
     fn new(
         routes: Arc<crate::resolver_core::RouteDb>,
         imported_roots: Arc<crate::resolver_core::ImportedRootDb>,
+        registry: verter_execution::tasks::TaskRegistry,
     ) -> Self {
-        Self {
-            runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
-                routes,
-                imported_roots,
-            ),
-        }
+        let runtime = crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
+            routes,
+            imported_roots,
+        );
+        runtime.bind_task_registry(registry);
+        Self { runtime }
     }
 
     pub(crate) fn reset_all(&self) {
@@ -601,7 +602,7 @@ impl VerterHost {
         let (project_type_store, engine_grants) =
             crate::project_type_store::ProjectTypeStore::compose(
                 Arc::clone(&provenance),
-                task_registry,
+                task_registry.clone(),
                 memo_family_bound,
             );
         let project_type_store = Arc::new(project_type_store);
@@ -714,7 +715,7 @@ impl VerterHost {
             platform_services,
             cooperative_drive,
             provenance,
-            resolver: HostResolverState::new(routes_handle, imported_roots_handle),
+            resolver: HostResolverState::new(routes_handle, imported_roots_handle, task_registry),
             query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
@@ -1531,7 +1532,7 @@ impl VerterHost {
     /// canonical id; call sites access source-derived caches
     /// (`cached_tsc_extract`, `cached_resolved_meta`, `cached_meta_payload`,
     /// `raw_template_analysis`, `cached_fallthrough`, `import_routes`,
-    /// `evicted`, `evicted_whole_hash`).
+    /// `evicted`, `eviction_revision`, `evicted_whole_hash`).
     #[must_use]
     pub(crate) fn derived_raw_cache(
         &self,

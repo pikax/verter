@@ -327,6 +327,11 @@ impl std::fmt::Debug for ExecutionTask {
 }
 
 impl ExecutionTask {
+    /// Whether both handles name the same live task and execution authority.
+    pub fn same_task(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// The cycle authority that minted this task. Dependency adapters use
     /// this handle instead of creating a private registry.
     pub fn registry(&self) -> &TaskRegistry {

@@ -261,6 +261,7 @@ pub(crate) enum CompletionTarget {
 /// A handle's terminal state and the wakers of the subscriptions polling it.
 struct CompletionSlot<T: Clone> {
     state: Option<CompletionState<T>>,
+    producer: Option<verter_execution::tasks::ExecutionTask>,
     /// Each pending subscription's registration; taken by the completion
     /// that resolves the slot.
     wakers: WakerSet,
@@ -294,6 +295,7 @@ pub fn completion_pair<T: Clone>() -> (CompletionHandle<T>, CompletionSender<T>)
     let inner = Arc::new(CompletionInner {
         slot: Mutex::new(CompletionSlot {
             state: None,
+            producer: None,
             wakers: WakerSet::default(),
         }),
         condvar: Condvar::new(),
@@ -336,6 +338,7 @@ impl<T: Clone> CompletionSender<T> {
                 return None;
             }
             slot.state = Some(state);
+            slot.producer = None;
             slot.wakers.take()
         };
         self.inner.condvar.notify_all();
@@ -361,6 +364,23 @@ impl<T: Clone> CompletionSender<T> {
     /// the admission stamp, but production code does not do so.
     pub(crate) fn set_target(&self, target: CompletionTarget) {
         *self.inner.target.lock() = Some(target);
+    }
+
+    pub(crate) fn set_producer_deferred(
+        &self,
+        producer: &verter_execution::tasks::ExecutionTask,
+    ) -> verter_execution::wake::TakenWakers {
+        let mut slot = self.inner.slot.lock();
+        if slot.state.is_some()
+            || slot
+                .producer
+                .as_ref()
+                .is_some_and(|old| old.same_task(producer))
+        {
+            return WakerSet::default().take();
+        }
+        slot.producer = Some(producer.clone());
+        slot.wakers.take()
     }
 }
 
@@ -446,6 +466,21 @@ pub struct CompletionSubscription<T: Clone> {
 }
 
 impl<T: Clone> CompletionSubscription<T> {
+    /// Bind to the scheduler-stamped producer, including later stage changes.
+    /// The subscriber never supplies or reconstructs a producer identity.
+    pub fn owned_producer(
+        self,
+        waiter: verter_execution::tasks::ExecutionTask,
+        cancellation: verter_execution::cancellation::CancellationToken,
+    ) -> OwnedCompletionSubscription<T> {
+        OwnedCompletionSubscription {
+            subscription: Some(self),
+            waiter: Some(waiter),
+            stop: Some(cancellation.subscribe()),
+            edge: None,
+            producer: None,
+        }
+    }
     /// Attach a completion wait to its execution owners and request stop.
     /// Neither this capability nor its result exposes the blocking handle.
     pub fn owned(
@@ -466,6 +501,96 @@ impl<T: Clone> CompletionSubscription<T> {
         }
         slot.wakers.register(&mut self.registration, waker);
         std::task::Poll::Pending
+    }
+}
+
+/// Exclusive ownership of a cancellable completion dependency. Producer changes
+/// are published atomically with readiness and wake registration. Cancellation
+/// and drop withdraw only this subscriber; terminal values preserve scheduler
+/// failure, supersession and shutdown outcomes without partial payloads.
+pub struct OwnedCompletionSubscription<T: Clone> {
+    subscription: Option<CompletionSubscription<T>>,
+    waiter: Option<verter_execution::tasks::ExecutionTask>,
+    stop: Option<verter_execution::cancellation::CancellationSubscription>,
+    edge: Option<verter_execution::tasks::WaitEdge>,
+    producer: Option<verter_execution::tasks::ExecutionTask>,
+}
+
+impl<T: Clone> OwnedCompletionSubscription<T> {
+    /// Observe readiness without driving or parking on the scheduler.
+    pub fn poll(
+        &mut self,
+        waker: &std::task::Waker,
+    ) -> std::task::Poll<Result<CompletionState<T>, verter_execution::dependency::DependencyStop>>
+    {
+        use std::task::Poll;
+        use verter_execution::dependency::DependencyStop;
+        if self
+            .stop
+            .as_mut()
+            .expect("live completion")
+            .poll(waker)
+            .is_ready()
+        {
+            return self.finish(Err(DependencyStop::Cancelled));
+        }
+        let subscription = self.subscription.as_mut().expect("live completion");
+        let mut slot = subscription.inner.slot.lock();
+        if let Some(state) = slot.state.clone() {
+            drop(slot);
+            return self.finish(Ok(state));
+        }
+        if let Some(producer) = &slot.producer {
+            if !self
+                .producer
+                .as_ref()
+                .is_some_and(|old| old.same_task(producer))
+            {
+                self.edge = None;
+                match self
+                    .waiter
+                    .as_ref()
+                    .expect("live waiter")
+                    .wait_for(producer)
+                {
+                    Ok(edge) => {
+                        self.edge = Some(edge);
+                        self.producer = Some(producer.clone());
+                    }
+                    Err(_) => {
+                        drop(slot);
+                        return self.finish(Err(DependencyStop::Cycle));
+                    }
+                }
+            }
+        }
+        slot.wakers.register(&mut subscription.registration, waker);
+        Poll::Pending
+    }
+
+    fn finish(
+        &mut self,
+        answer: Result<CompletionState<T>, verter_execution::dependency::DependencyStop>,
+    ) -> std::task::Poll<Result<CompletionState<T>, verter_execution::dependency::DependencyStop>>
+    {
+        self.release();
+        std::task::Poll::Ready(answer)
+    }
+
+    fn release(&mut self) {
+        // The last subscription can destroy a terminal payload. Release the
+        // abandoned wait before any destructor can notify its producer.
+        self.edge = None;
+        self.stop = None;
+        self.waiter = None;
+        self.producer = None;
+        self.subscription = None;
+    }
+}
+
+impl<T: Clone> Drop for OwnedCompletionSubscription<T> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -508,6 +633,65 @@ impl<T: Clone> Clone for CompletionSender<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_completion_releases_its_edge_before_dropping_terminal_payloads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use verter_execution::tasks::{ExecutionTask, TaskRegistry};
+        #[derive(Clone)]
+        struct NotifyOnDrop {
+            waiter: ExecutionTask,
+            producer: ExecutionTask,
+            observed: Arc<AtomicUsize>,
+        }
+        impl Drop for NotifyOnDrop {
+            fn drop(&mut self) {
+                self.observed.store(
+                    if self.producer.wait_for(&self.waiter).is_ok() {
+                        1
+                    } else {
+                        2
+                    },
+                    Ordering::SeqCst,
+                );
+            }
+        }
+        for abandon in [false, true] {
+            let registry = TaskRegistry::default();
+            let waiter = registry.register_task();
+            let producer = registry.register_task();
+            let observed = Arc::new(AtomicUsize::new(0));
+            let (handle, sender) = completion_pair::<NotifyOnDrop>();
+            sender.set_producer_deferred(&producer).wake();
+            let mut owned = handle.subscribe().owned_producer(
+                waiter.clone(),
+                verter_execution::cancellation::CancellationToken::new(),
+            );
+            drop(handle);
+            assert!(owned.poll(std::task::Waker::noop()).is_pending());
+            sender.send(CompletionState::Ready(NotifyOnDrop {
+                waiter,
+                producer,
+                observed: observed.clone(),
+            }));
+            drop(sender);
+            let answer = if abandon {
+                drop(owned);
+                None
+            } else {
+                let answer = owned.poll(std::task::Waker::noop());
+                assert!(answer.is_ready());
+                Some(answer)
+            };
+            assert_eq!(
+            observed.load(Ordering::SeqCst),
+            1,
+            "terminal cell destruction may notify a producer waiting back on its former subscriber"
+        );
+            assert_eq!(registry.wait_graph_occupancy().edges, 0);
+            drop(answer);
+        }
+    }
 
     #[test]
     fn completion_handle_resolves_on_send() {

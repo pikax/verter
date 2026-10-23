@@ -810,7 +810,7 @@ impl CompileCacheDb {
 /// Stores [`crate::types::DerivedRawState`] keyed by canonical id. Holds
 /// source-content-derived caches (`cached_tsc_extract`, `cached_resolved_meta`,
 /// `cached_meta_payload`, `raw_template_analysis`, `cached_fallthrough`,
-/// `import_routes`, `evicted`, `evicted_whole_hash`). Source-content changes
+/// `import_routes`, `evicted`, `eviction_revision`, `evicted_whole_hash`). Source-content changes
 /// invalidate this entry; profile-flag changes preserve it; dep-closure
 /// changes preserve it. The unified `bump_project_generation_and_evict`
 /// cascade clears all three domain DBs together.
