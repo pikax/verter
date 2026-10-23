@@ -1072,9 +1072,7 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                     .position(|key| !ledger.unique_keys.contains(key))
                 {
                     new_keys.reserve(delta.len() - first);
-                    new_keys.push(delta[first].clone());
-                    new_key_bytes = input_key_spelling_bytes(&delta[first]);
-                    for key in &delta[first + 1..] {
+                    for key in &delta[first..] {
                         if !ledger.unique_keys.contains(key) {
                             new_keys.push(key.clone());
                             new_key_bytes =

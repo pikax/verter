@@ -203,13 +203,19 @@ pub(crate) fn recovery_scope_chain(path: &str) -> Arc<[ConsumedResolutionObserva
         }
         #[cfg(test)]
         SCOPE_CHAIN_BUILDS.set(SCOPE_CHAIN_BUILDS.get() + 1);
-        let chain: Arc<[ConsumedResolutionObservationKey]> = ancestor_scope_prefixes(path)
-            .map(|prefix| ConsumedResolutionObservationKey::RecoveryScope {
-                canonical_prefix: Arc::from(prefix),
-            })
-            .collect();
+        let chain: Arc<[ConsumedResolutionObservationKey]> = recovery_scope_keys(path).collect();
         chains.insert(&chain);
         chain
+    })
+}
+
+/// The recovery-scope witness keys of `path`, nearest ancestor first: the
+/// one spelling of the keys, which both the shared chains and a discarded
+/// candidate's budget check build from the [`ancestor_scope_prefixes`]
+/// walk. Counting the scopes needs no keys; walk the prefixes for that.
+fn recovery_scope_keys(path: &str) -> impl Iterator<Item = ConsumedResolutionObservationKey> + '_ {
+    ancestor_scope_prefixes(path).map(|prefix| ConsumedResolutionObservationKey::RecoveryScope {
+        canonical_prefix: Arc::from(prefix),
     })
 }
 
@@ -274,34 +280,31 @@ fn record_scope_chain(
     Ok(())
 }
 
-/// The recovery-scope chains one frontier recorded whole into its output
-/// most recently, most recent first. Recording one again changes nothing,
-/// so it is skipped; a chain that fell out is recorded again, which is
-/// still exact, only slower.
+/// The recovery-scope chains one frontier has recorded whole into its
+/// output. Recording one again changes nothing, so it is skipped. A probe
+/// frontier records at most three distinct chains — its base's directory,
+/// its index directory, and the directory a hit's real path lies in — so
+/// the slots never run out; a chain past them would be recorded again,
+/// which is still exact, only slower.
 #[derive(Default)]
 struct RecordedChains {
     slots: [Option<Arc<[ConsumedResolutionObservationKey]>>; RECORDED_CHAIN_SLOTS],
 }
 
-const RECORDED_CHAIN_SLOTS: usize = 8;
+const RECORDED_CHAIN_SLOTS: usize = 4;
 
 impl RecordedChains {
-    /// Whether `chain` is held, moving it to the front when it is.
-    fn contains(&mut self, chain: &Arc<[ConsumedResolutionObservationKey]>) -> bool {
-        let Some(index) = self.slots.iter().position(|slot| {
-            slot.as_ref()
-                .is_some_and(|recorded| Arc::ptr_eq(recorded, chain))
-        }) else {
-            return false;
-        };
-        self.slots[..=index].rotate_right(1);
-        true
+    fn contains(&self, chain: &Arc<[ConsumedResolutionObservationKey]>) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|recorded| Arc::ptr_eq(recorded, chain))
     }
 
-    /// Remembers `chain` as the most recent, forgetting the least recent.
     fn remember(&mut self, chain: Arc<[ConsumedResolutionObservationKey]>) {
-        self.slots.rotate_right(1);
-        self.slots[0] = Some(chain);
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(chain);
+        }
     }
 }
 
@@ -365,8 +368,8 @@ impl ProbeRecorder<'_> {
         })
     }
 
-    /// Records `path`'s recovery scopes, unless this frontier recorded that
-    /// chain whole recently.
+    /// Records `path`'s recovery scopes, unless this frontier already
+    /// recorded that chain whole.
     fn record_chain(
         &mut self,
         output: &mut AttemptOutput,
@@ -400,16 +403,16 @@ impl CandidateRecorder<Option<CanonicalId>, ()> for ProbeRecorder<'_> {
                 path: Arc::clone(self.candidate),
             },
         )?;
-        let candidate = Arc::clone(self.candidate);
-        self.record_chain(output, &candidate)?;
+        let candidate = self.candidate;
+        self.record_chain(output, candidate)?;
         self.record_chain(output, &resolved_id)?;
         Ok(resolved_id)
     }
 
     fn record_miss(mut self, (): (), output: &mut AttemptOutput) -> Result<(), AttemptFailure> {
         self.record_probe(output)?;
-        let candidate = Arc::clone(self.candidate);
-        self.record_chain(output, &candidate)
+        let candidate = self.candidate;
+        self.record_chain(output, candidate)
     }
 
     fn admit_discarded_miss(self, (): ()) -> Result<(), AttemptFailure> {
@@ -422,11 +425,7 @@ impl CandidateRecorder<Option<CanonicalId>, ()> for ProbeRecorder<'_> {
                 std::iter::once(ConsumedResolutionObservationKey::PathProbe {
                     path: Arc::clone(self.candidate),
                 })
-                .chain(ancestor_scope_prefixes(self.candidate).map(|prefix| {
-                    ConsumedResolutionObservationKey::RecoveryScope {
-                        canonical_prefix: Arc::from(prefix),
-                    }
-                }))
+                .chain(recovery_scope_keys(self.candidate))
                 .map(CompletedWitnessRetentionKey::ConsumedResolutionObservation)
                 .collect()
             },

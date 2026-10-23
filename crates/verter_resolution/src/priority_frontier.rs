@@ -101,6 +101,11 @@ pub(crate) enum CandidateRead<H, M> {
 /// It is reached only with a [`CandidateRead::Hit`] or
 /// [`CandidateRead::Miss`], so a candidate that needs an input never holds
 /// the frontier's output.
+///
+/// A recorder only records what the read settled: it must not read the
+/// attempt view itself. A read made while holding the output could need an
+/// input after witnesses were recorded, which is exactly what the split
+/// rules out.
 pub(crate) trait CandidateRecorder<H, M> {
     type Answer;
 
@@ -150,7 +155,14 @@ impl PriorityFrontierState {
                 self.accumulated = Some(output);
                 Ok(())
             }
-            None => self.accumulated_mut().merge(output),
+            None => {
+                // Installed only once the merge succeeds: a failed merge
+                // drops the new output and releases what it retained.
+                let mut accumulated = AttemptOutput::new_in(self.retention.clone());
+                accumulated.merge(output)?;
+                self.accumulated = Some(accumulated);
+                Ok(())
+            }
         }
     }
 
@@ -216,9 +228,16 @@ impl PriorityFrontierState {
     ) -> Option<KernelAttempt<Option<R::Answer>>> {
         match read {
             CandidateRead::Hit(hit) => Some(match self.blocked.take() {
+                // Rule 5: a lower-priority hit after a higher block cannot
+                // win.
                 Some(blocked) => self.blocked_outcome(blocked),
                 None => match recorder.record_hit(hit, self.accumulated_mut()) {
-                    Ok(answer) => self.hit(answer),
+                    // Rule 2: hit before any block — return it with the
+                    // output.
+                    Ok(answer) => AttemptOutcome::Complete(CompletedAttempt::new(
+                        Some(answer),
+                        self.take_accumulated(),
+                    )),
                     // Rule 6.
                     Err(failure) => AttemptOutcome::Terminal(failure),
                 },

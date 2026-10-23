@@ -388,8 +388,8 @@ fn barrel_import_resolution_work_stays_flat_as_the_barrel_grows() {
     assert_eq!(chains(&large), 1, "one directory, one recovery-scope chain");
 
     // Revert controls: building an output per candidate puts one output per
-    // discarded candidate on every blocked attempt; spelling the recovery
-    // scopes per candidate builds a chain per import.
+    // discarded candidate on every blocked attempt; a chain memo that does
+    // not keep the directory's chain across imports builds one per import.
 }
 
 /// The probe frontier as it was built before candidates recorded into the
@@ -651,6 +651,13 @@ fn the_probe_frontier_matches_building_an_output_per_candidate() {
             candidates("/r/src/a"),
             vec![],
             None,
+        ),
+        (
+            "a kept hit over the budget is terminal",
+            known_world_view(&[("/r/src/a.ts", "")], &[("/r/src/a.ts", "/r/src/a.ts")]),
+            candidates("/r/src/a"),
+            vec![],
+            Some(maximum),
         ),
         (
             "a hit after a block cannot win",
