@@ -65,6 +65,10 @@ impl FingerprintHasher {
     /// word, so its rotations are written as shifts, which a debug build
     /// emits in place rather than as a call per rotation.
     #[inline]
+    #[expect(
+        clippy::manual_rotate,
+        reason = "a debug build calls out for every `rotate_left`; the shifts are emitted in place"
+    )]
     fn round(&mut self) {
         self.v0 = self.v0.wrapping_add(self.v1);
         self.v1 = (self.v1 << 13) | (self.v1 >> 51);
