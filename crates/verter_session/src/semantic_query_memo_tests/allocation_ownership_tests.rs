@@ -56,7 +56,6 @@ fn key() -> SemanticQueryKey {
 fn unbounded() -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: usize::MAX / 2,
-        active_ceiling_bytes: usize::MAX / 2,
         max_entry_bytes: usize::MAX / 2,
         pin_threshold_bytes: usize::MAX / 2,
     })
@@ -286,7 +285,6 @@ fn a_cloned_delivered_name_alone_keeps_its_charge_until_its_own_drop() {
         let host = host();
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: ceiling,
-            active_ceiling_bytes: ceiling,
             max_entry_bytes: ceiling,
             pin_threshold_bytes: ceiling,
         });
@@ -422,7 +420,6 @@ fn a_cloned_identity_from_a_delivered_value_keeps_its_charge_until_its_own_drop(
             let host = host();
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 aggregate_ceiling_bytes: ceiling,
-                active_ceiling_bytes: ceiling,
                 max_entry_bytes: ceiling,
                 pin_threshold_bytes: ceiling,
             });
@@ -485,7 +482,6 @@ fn a_nested_copy_of_a_delivered_member_keeps_its_names_charged_until_its_own_dro
         let host = host();
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: ceiling,
-            active_ceiling_bytes: ceiling,
             max_entry_bytes: ceiling,
             pin_threshold_bytes: ceiling,
         });
@@ -781,24 +777,26 @@ fn a_sealed_refusal_hands_its_delivered_rail_to_a_surviving_read() {
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
-/// A flight's cell is live work: pinned from its claim, and released when
-/// the aborted flight's last holder drops it.
+/// A flight's cell is in-flight work: charged ACTIVE from its claim, and
+/// released when the aborted flight's last holder drops it.
 #[test]
-fn an_aborted_flight_releases_its_storage_pin() {
+fn an_aborted_flight_releases_its_storage_charge() {
     let account = unbounded();
     let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
-    let before = caller_pinned(&harness, &account);
+    let before = account.snapshot().active_bytes;
     harness.run(|store| {
         let flight = store
             .begin_inline_member_flight_for_tests(key())
             .expect("no other producer owns the key");
-        let account_pinned = account.snapshot().pinned_bytes - store.graph_storage_charge_bytes();
-        assert!(account_pinned > before, "the open flight's cell is charged");
+        assert!(
+            account.snapshot().active_bytes > before,
+            "the open flight's cell is charged as in-flight work"
+        );
         store.abort_inline_member_flight(&flight);
         drop(flight);
     });
     assert_eq!(
-        caller_pinned(&harness, &account),
+        account.snapshot().active_bytes,
         before,
         "the aborted flight's cell is released with its last holder"
     );
@@ -820,7 +818,6 @@ fn an_scc_batch_never_publishes_without_a_member_whose_family_was_evicted_meanwh
     const CEILING: usize = 64 * 1024 * 1024;
     let account = SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: CEILING,
-        active_ceiling_bytes: CEILING,
         max_entry_bytes: CEILING,
         pin_threshold_bytes: CEILING,
     });

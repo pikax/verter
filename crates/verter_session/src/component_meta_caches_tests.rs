@@ -2187,7 +2187,6 @@ mod cached_result_footprint {
         let account = verter_session_query::retention::SemanticRetentionAccount::new(
             verter_session_query::retention::RetentionLimits {
                 aggregate_ceiling_bytes: usize::MAX,
-                active_ceiling_bytes: usize::MAX,
                 max_entry_bytes: usize::MAX,
                 pin_threshold_bytes: usize::MAX,
             },

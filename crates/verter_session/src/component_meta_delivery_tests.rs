@@ -164,7 +164,6 @@ mod nested_publication_allocations {
             for leaf_first in [false, true] {
                 let account = SemanticRetentionAccount::new(RetentionLimits {
                     aggregate_ceiling_bytes: 0,
-                    active_ceiling_bytes: 0,
                     max_entry_bytes: 0,
                     pin_threshold_bytes: 0,
                 });
@@ -338,7 +337,6 @@ mod nested_source_allocations {
                         );
                         let account = SemanticRetentionAccount::new(RetentionLimits {
                             aggregate_ceiling_bytes: 0,
-                            active_ceiling_bytes: 0,
                             max_entry_bytes: 0,
                             pin_threshold_bytes: 0,
                         });

@@ -303,10 +303,12 @@ impl CacheHold {
         }
     }
 
-    /// Take ownership of a refusable charge a cache was just granted. An
-    /// active charge is committed to retention. A pin is a caller's
-    /// obligation, never a cache grant: a cache adopts one only through
-    /// [`CallerHold::adopt`], which decides the adoption refusably.
+    /// Take ownership of a refusable charge a cache was just granted: the
+    /// charge is already retained, and becomes this hold's shared charge.
+    /// A pin is a caller's obligation, never a cache grant: a cache adopts
+    /// one only through [`CallerHold::adopt`], which decides the adoption
+    /// refusably. An in-flight charge is decided the same way — its owner
+    /// hands it to the cache through [`CallerHold::adopt`] too.
     #[must_use]
     pub fn from_retained(charge: RetentionCharge) -> Self {
         let class = charge.class();
@@ -314,6 +316,11 @@ impl CacheHold {
             class,
             ChargeClass::Pinned,
             "a cache hold is minted from a granted refusable charge"
+        );
+        verter_debug_assert::verter_debug_assert_ne!(
+            class,
+            ChargeClass::Active,
+            "a cache hold adopts in-flight charges through CallerHold::adopt"
         );
         Self(Arc::new(SharedCharge::new(charge.commit_retained())))
     }
@@ -399,6 +406,38 @@ impl CallerHold {
     #[must_use]
     pub fn pin(account: &Arc<SemanticRetentionAccount>, bytes: usize) -> Self {
         Self(Arc::new(SharedCharge::with_holds(account.pin(bytes), 0, 1)))
+    }
+
+    /// A new caller-first charge of IN-FLIGHT `bytes`: the computation
+    /// that owns them has not yet published or handed its value over, so
+    /// they are charged [`ChargeClass::Active`] — unconditionally, never
+    /// refused — until a cache retaining the allocation adopts them
+    /// (committing the charge to retention) or the delivery hands them to
+    /// their caller ([`Self::hand_off_in_flight`], transferring the
+    /// charge to a pin).
+    #[must_use]
+    pub fn in_flight(account: &Arc<SemanticRetentionAccount>, bytes: usize) -> Self {
+        Self(Arc::new(SharedCharge::with_holds(
+            account.reserve_in_flight(bytes),
+            0,
+            1,
+        )))
+    }
+
+    /// Settle this hold's still-in-flight charge at its caller handoff:
+    /// an [`ChargeClass::Active`] charge becomes
+    /// [`ChargeClass::Pinned`] — the delivery is complete and its
+    /// callers hold it — while a retained or pinned charge keeps its
+    /// class. Never released, never charged twice.
+    pub fn hand_off_in_flight(&self) {
+        let mut state = self.0.state.lock();
+        if state.cache_holds == 0 {
+            if let Some(charge) = state.charge.as_mut() {
+                if charge.class() == ChargeClass::Active {
+                    charge.transfer_to_pinned();
+                }
+            }
+        }
     }
 
     /// A cache retaining the allocation this caller already holds: shares a
