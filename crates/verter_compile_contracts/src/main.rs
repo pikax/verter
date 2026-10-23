@@ -15,6 +15,7 @@ const PASS_FIXTURES: &[&str] = &[
     "public_owned_carriers_borrow_and_own.rs",
     "host_release_completion_in_production_build.rs",
     "work_observation_behavior.rs",
+    "root_external_consumer_positive.rs",
 ];
 
 fn workspace_root() -> PathBuf {
