@@ -722,6 +722,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Few distinct roots: compared linearly until a set pays.
         let mut seen: Option<FxHashSet<crate::semantic_query_memo::ObservedGraphSelfRoot>> = None;
         for node in nodes {
+            super::call_resolve::note_root_union_work(1);
             if let Some(NodeScopeId::File {
                 canonical_id,
                 whole_hash,

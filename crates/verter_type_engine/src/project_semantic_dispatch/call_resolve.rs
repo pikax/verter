@@ -5578,9 +5578,34 @@ pub(crate) fn union_self_roots(
     target: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     source: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
 ) {
+    note_root_union_work(source.len());
     for root in source {
         if !target.iter().any(|(canonical, _)| canonical == &root.0) {
             target.push(root.clone());
         }
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static ROOT_UNION_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `entries` roots or operand nodes read to compose a published
+/// carrier's self-roots on this thread. Optional test observation: no state
+/// exists outside test builds.
+#[inline]
+pub(crate) fn note_root_union_work(entries: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    ROOT_UNION_WORK.with(|work| work.set(work.get() + entries as u64));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = entries;
+}
+
+/// The roots and operand nodes this thread has read to compose published
+/// carriers' self-roots ([`union_self_roots`] and
+/// `ProjectSemanticDispatch::observed_self_roots_from_nodes`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn root_union_work_for_tests() -> u64 {
+    ROOT_UNION_WORK.with(std::cell::Cell::get)
 }

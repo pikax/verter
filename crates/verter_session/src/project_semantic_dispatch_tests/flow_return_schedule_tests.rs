@@ -1779,6 +1779,38 @@ fn a_128_level_chain_returning_a_same_name_function_type_answers() {
     assert_same_name_generic_chain_answers(source, 128, "id", identity_of_its_own_t, 8 << 20);
 }
 
+/// Every root close of a chain publishes on the roots of the members its
+/// transaction queued so far. Those roots are composed as members queue, so
+/// the reads that compose every close's carrier grow with the chain, not
+/// with its square: four times the levels read under five times the roots
+/// and operands. Re-reading every queued member at every close reads about
+/// sixteen times as many.
+#[test]
+fn chain_root_closes_compose_their_carriers_in_linear_work() {
+    let work = |levels: usize| {
+        let host = host_with(&[(PATH, local_arrow_chain(levels).as_str())]);
+        on_stack(8 << 20, move || {
+            with_dispatch(&host, |dispatch| {
+                let before =
+                    verter_type_engine::project_semantic_dispatch::call_resolve::root_union_work_for_tests();
+                let outcome = eval_key_on(&host, dispatch, key_of(dispatch, PATH, "witness"));
+                assert!(
+                    matches!(outcome, Outcome::Value { .. }),
+                    "{levels} levels answer: {outcome:?}"
+                );
+                verter_type_engine::project_semantic_dispatch::call_resolve::root_union_work_for_tests()
+                    - before
+            })
+        })
+    };
+    let (short, long) = (work(16), work(64));
+    eprintln!("ROOT_UNION_WORK levels=16 work={short} levels=64 work={long}");
+    assert!(
+        long <= short * 5,
+        "carrier composition must grow linearly: {short} at 16 levels, {long} at 64"
+    );
+}
+
 /// A binder named `T`.
 fn is_t(ty: &TypeExpr) -> bool {
     matches!(ty, TypeExpr::TypeParameter(param) if param.name == "T")
