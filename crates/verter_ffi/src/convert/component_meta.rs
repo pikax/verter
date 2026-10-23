@@ -1151,6 +1151,7 @@ fn result_completeness_to_ffi(
                     FfiSurfacePartialReason::ConnectedMemoryLimit
                 }
                 PartialReason::OperationBudget => FfiSurfacePartialReason::OperationBudget,
+                PartialReason::FanoutLimit => FfiSurfacePartialReason::FanoutLimit,
             })
             .collect(),
         },

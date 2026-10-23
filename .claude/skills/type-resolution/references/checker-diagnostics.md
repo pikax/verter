@@ -60,8 +60,15 @@ property, an array element, a tuple position, a parameter, a return, a predicate
 on it; so does an intersection target's pair, a union source's pair unless it has fewer than four
 constituents (`boolean` counting two) against a non-union target (`isRelatedTo`'s `skipCaching`), and the
 failing pair itself when it lacks properties or either side is structured or instantiable — never two
-primitives, nor an object type against a primitive. Past it the checker reports TS2321 instead, which is
-not modelled, so nothing is reported.
+primitives, nor an object type against a primitive. Past it the checker reports TS2321
+(`Excessive stack depth comparing types`, both types printed) in place of the relation's message,
+twice: at the call expression (`CheckerDiagnosticSite::expression_start`), where it compares the types
+while choosing the candidate with no error node of its own, then at the argument. An elaborated argument
+whose whole relation overflows keeps TS2321 at the call beside its
+elaborated parts. An overflowing part keeps TS2321 at that part. Under TS2769,
+candidate selection's TS2321 remains at the call and the argument's own failure
+appears in the last-overload chain. When the two printed operands of an elaborated
+assignment coincide, its head is TS2719, retaining the complete failure chain.
 
 Types print as the checker's `typeToString` prints them (`print_diagnostic_type`,
 `DisplayContext::for_checker`): the display walk keeps the node builder's running `approximateLength`
@@ -72,13 +79,80 @@ object its braces after its members, each list entry two bytes before it) and it
 or an intersection's remaining members then print as `... N more ...` before the last, an object's
 remaining properties likewise, a member it begins past the length as `{ ...; }`, a type-argument or
 tuple list as `...` — and the whole text is clipped to its first 317 bytes and `...` at 320. An object
+with no property or index signature and exactly one call (or one construct) signature prints as that
+signature's function (or constructor) type (`createTypeNodeFromObjectType`): a `typeof` of a declared
+function prints `() => void`, never `{ (): void; }`. An object
 prints its call, construct and index signatures before its properties, an index signature by its
 declared parameter name (`IndexSignature::key_name`; `x` for one no declaration wrote), and under
-`strictNullChecks` an optional tuple element's type with `undefined` added. A node kind whose count is
-not modelled (mapped and `typeof` types, predicates, computed keys, …) bounds its count by twice its
-printed text; a type whose bound could reach the truncation
-length, or whose depth-cap cut lands inside the kept text, is not reported rather than abbreviated where
-the checker's is not.
+`strictNullChecks` an optional tuple element's type with `undefined` added. A query (`typeof a.b`) and a class-expression instance (`(Anonymous class)`)
+count their symbol chain — each name and separator, the first twice — after their type arguments; an
+import type its specifier and ten, then each qualifier name and separator; a type predicate its type
+alone. A part with no checker type (an `Opaque` error carrier) is cut. Generic mapped types count their key constraint, parameter name, remap and template
+in builder order, then ten bytes for the mapping. Closed mappings, spread
+alternatives and anonymous peer-merged declarations are prepared by the consumer
+before display; display itself never evaluates. The shared spread evaluator
+composes each nested construction's evaluated type before its parent. Generic
+spreads print ordered intersections with closed property groups. Canonical
+intersection construction deduplicates repeated generic operands across nested
+intersections; a non-generic right operand merges only with the left
+intersection's final non-generic group, through the shared spread producer.
+Independent generic right operands retain their own groups, including property
+conflicts. The canonical discriminant reduction recognizes `boolean` as the
+implicit union of literal types, so conflicting groups can reduce to `never`.
+Primitive-target relations read the same evaluated type, preserving bottom
+assignability. A spread of `any` retains the ordinary dynamic relation. Open positive evidence is never
+interned as a closed object. An authored `infer` constraint
+prints with `extends` unless its position already infers that constraint (a
+template span, rest element/parameter, mapped key or a mapped value matched
+against a mapped check type). Multiple inference sites contribute their
+intersection. The consumer compares that canonical inferred constraint with the
+authored constraint through the shared identity relation after ordered use-site
+substitution; display only reads the resulting decision. Its name is counted again
+as a parameter declaration, once rather than as a reference. Unique-symbol
+indexed-access types print `unique symbol`.
+
+Computed property names use the same consumer preparation worklist: non-nominal
+`typeof` keys evaluate through the shared owner and enum-member keys use their
+literal base. Display reads these settled forms without dispatching queries;
+unique-symbol keys retain their nominal spelling and deterministic symbol count.
+
+A symbol-keyed property's abbreviation contribution is the UTF-8 byte length
+of its leaf symbol spelling plus five fixed bytes. Both unique-symbol keys and
+computed keys resolved to a nominal symbol use this rule; qualification remains
+in the visible `[namespace.symbol]` spelling. No allocation id, external checker
+session or query history contributes to the count. Printable symbol-keyed types
+always retain their diagnostic, including at abbreviation boundaries.
+
+### Deterministic symbol abbreviation (2026-10-22)
+
+**Context.** TypeScript 7.0.2 counts an internal symbol name containing a decimal,
+process-global symbol id. Checking an unrelated project can change the number of
+digits and therefore the abbreviation of the same type in the same diagnostic.
+`node scripts/checker-symbol-history.mjs` reproduces this with fresh and prewarmed
+native sessions and verifies unchanged codes, locations, order and unaffected
+messages under both nullability settings.
+
+**Intent contract.** The shared printer preserves deterministic full messages
+from provider-free inputs. Only abbreviation boundaries, omitted-member counts
+and consequent clipping may differ from the checker where its length accounting
+depends on symbol ids. Visible names and type spelling, member and diagnostic
+order, codes, authored locations, recovery and all unaffected text remain exact.
+The exception never permits withholding a printable diagnostic.
+
+**Changes and legacy deletions.** The stable leaf-spelling contribution above
+replaces the symbol-id digit bound and its ambiguous-abbreviation withholding
+state in `DisplayContext`. There is no alternate printer or checker-history input.
+
+**Verification.** `symbol_abbreviation_keeps_diagnostics_across_query_histories`
+checks full consumer messages and recovery cold/warm, with unrelated symbol work
+first and at two authored call sites. The existing residual-kind, wide-argument
+and deep-chain consumer controls retain exact-checker coverage. The native
+experiment is optional oracle evidence; the Rust regressions are provider-free.
+
+### Unprintable carriers
+
+Unresolved computed keys and non-type error carriers likewise remain outside a
+faithful print. A depth-cap cut inside the kept text still withholds the message.
 
 Decided by the recipe's producer: arity errors from `ArityEvidence` (`getArgumentArityError`) — TS2575
 for a count in a gap between the candidates' arities, else TS2554/TS2555 with `min`, `min-max` or the
@@ -115,8 +189,11 @@ lines with their chains, cold and warm, two call sites),
 property path, reference arguments, index signatures and a long tuple label at their abbreviation
 boundaries, cold and warm, two call sites of one body),
 `messages_print_tuple_elements_and_object_members_as_the_checker_does`,
+`wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abbreviates_them` (wide
+function-query, qualified-query, class-expression and predicate-method objects at their elision and
+clip, cold and warm),
 `deep_chains_report_until_the_checker_relation_stack_overflows` (the relation stack's boundary per
-leaf kind),
+leaf kind, TS2321 at the call and the argument past it),
 `call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability` (the explicit-overload
 recovery with a differing return), `a_diagnostic_the_route_cannot_place_is_not_reported`, the `checker_diagnostic::tests` recipe-binding
 units, `resolve_symbol_graph_reports_the_checkers_ts2456_at_the_alias_name`,

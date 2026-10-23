@@ -235,6 +235,7 @@ const SURFACE_PARTIAL_REASON_BY_WIRE: Readonly<
   [SurfacePartialReason.UNDECIDED_CONDITIONAL]: "undecidedConditional",
   [SurfacePartialReason.CONNECTED_MEMORY_LIMIT]: "connectedMemoryLimit",
   [SurfacePartialReason.OPERATION_BUDGET]: "operationBudget",
+  [SurfacePartialReason.FANOUT_LIMIT]: "fanoutLimit",
 };
 
 const ACCEPTED_PROP_KIND_DECLARED_PROP = 1;

@@ -5892,6 +5892,10 @@ impl PartialReasonSet {
     /// stop, never a complete answer: it is never admitted to a shared memo
     /// or result cache.
     pub const OPERATION_BUDGET: Self = Self(1 << 19);
+    /// A route or registry fan-out fuse stopped work outside the operation
+    /// account. Cold-only accounting can heal as dependencies warm, so this
+    /// cause vetoes shared retention, including alongside operation refusals.
+    pub const FANOUT_LIMIT: Self = Self(1 << 20);
 
     /// Both flow-return DEGRADED-SUCCESS classes — the partials that leave
     /// the resolved SHAPE intact.
@@ -6014,11 +6018,13 @@ pub enum PartialReason {
     ConnectedMemoryLimit,
     /// [`PartialReasonSet::OPERATION_BUDGET`].
     OperationBudget,
+    /// [`PartialReasonSet::FANOUT_LIMIT`].
+    FanoutLimit,
 }
 
 impl PartialReason {
     /// Every reason, in [`PartialReasonSet`] bit order.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::BudgetExceeded,
         Self::Cancelled,
         Self::SupersededGeneration,
@@ -6039,6 +6045,7 @@ impl PartialReason {
         Self::UndecidedConditional,
         Self::ConnectedMemoryLimit,
         Self::OperationBudget,
+        Self::FanoutLimit,
     ];
 
     /// The single-reason set this variant names.
@@ -6065,6 +6072,7 @@ impl PartialReason {
             Self::UndecidedConditional => PartialReasonSet::UNDECIDED_CONDITIONAL,
             Self::ConnectedMemoryLimit => PartialReasonSet::CONNECTED_MEMORY_LIMIT,
             Self::OperationBudget => PartialReasonSet::OPERATION_BUDGET,
+            Self::FanoutLimit => PartialReasonSet::FANOUT_LIMIT,
         }
     }
 
@@ -6094,6 +6102,7 @@ impl PartialReason {
             Self::UndecidedConditional => "undecidedConditional",
             Self::ConnectedMemoryLimit => "connectedMemoryLimit",
             Self::OperationBudget => "operationBudget",
+            Self::FanoutLimit => "fanoutLimit",
         }
     }
 }

@@ -4131,6 +4131,11 @@ pub struct HostRetentionSnapshot {
     /// references, so after a close this counts only identities a live
     /// reader still holds.
     pub identity_pool_entries: usize,
+    /// The part of [`Self::retained_bytes`] the intern pool charges for the
+    /// entries [`Self::identity_pool_entries`] counts: each pooled string's
+    /// cell and its map slot. Test-only backing observation for charge witnesses.
+    #[cfg(any(test, feature = "test-support"))]
+    pub identity_pool_bytes: usize,
     /// Registered source snapshots (the base registration per document plus
     /// the current overlay; superseded overlays are retracted).
     pub registered_sources: usize,

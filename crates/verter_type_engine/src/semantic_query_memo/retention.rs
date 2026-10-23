@@ -449,11 +449,14 @@ impl SemanticGraphStore {
     }
 
     /// Bytes the store's own storage is pinned for: its graph storage and
-    /// its memo bookkeeping. Everything else a store's account pins is a
+    /// its memo bookkeeping, including the per-node structure-bit table.
+    /// Everything else a store's account pins is a
     /// caller's: the allocations live deliveries hold and their metadata.
     #[cfg(any(test, feature = "test-support"))]
     pub fn store_storage_pins_for_tests(&self) -> usize {
-        self.graph_storage_charge_bytes() + self.bookkeeping_storage_charge_bytes()
+        self.graph_storage_charge_bytes()
+            + self.bookkeeping_storage_charge_bytes()
+            + self.unresolved_reach.lock().storage_charge_bytes()
     }
 
     /// The registry of shared allocation charges this store's candidates

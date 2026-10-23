@@ -53,6 +53,7 @@ impl CheckerDiagnostic {
             | CheckerDiagnosticCode::TupleTooLarge
             | CheckerDiagnosticCode::ExpressionTupleTooLarge => Some(PrimitiveKind::Any),
             CheckerDiagnosticCode::TypeNotAssignable
+            | CheckerDiagnosticCode::UnrelatedTypesWithSameName
             | CheckerDiagnosticCode::NoMatchingOverload
             | CheckerDiagnosticCode::ArgumentNotAssignable
             | CheckerDiagnosticCode::ArgumentCount
@@ -63,7 +64,8 @@ impl CheckerDiagnostic {
             | CheckerDiagnosticCode::NoOverloadExpectsArgumentCount
             | CheckerDiagnosticCode::ExcessProperty
             | CheckerDiagnosticCode::ExcessPropertySuggestion
-            | CheckerDiagnosticCode::RelationTooComplex => None,
+            | CheckerDiagnosticCode::RelationTooComplex
+            | CheckerDiagnosticCode::ExcessiveStackDepth => None,
         }
     }
 }
@@ -76,6 +78,8 @@ pub enum CheckerDiagnosticCode {
     /// TS2322: a contextually typed callback's return is not assignable to
     /// the return its contextual signature requires.
     TypeNotAssignable,
+    /// TS2719: a failed relation whose two reported type spellings agree.
+    UnrelatedTypesWithSameName,
     /// TS2589: an instantiation nested deeper than the checker's
     /// instantiation depth, or a conditional tail run longer than its tail
     /// limit ([`checker_policy`](super::checker_policy)) — including the lib
@@ -145,6 +149,11 @@ pub enum CheckerDiagnosticCode {
     /// TS2561: as [`Self::ExcessProperty`], where the target has a property
     /// whose name is a likely misspelling of it.
     ExcessPropertySuggestion,
+    /// TS2321: a relation nested deeper than the checker's relation stack
+    /// ([`checker_policy::RELATION_STACK_DEPTH`](super::checker_policy::RELATION_STACK_DEPTH)),
+    /// reported in place of the relation's own message. A checker result,
+    /// not an allowance Verter chose: the relation is false.
+    ExcessiveStackDepth,
 }
 
 // Diagnostic codes and message templates, including TS2769 and TS2322:
@@ -167,6 +176,7 @@ impl CheckerDiagnosticCode {
             | Self::CannotFindName
             | Self::NoMatchingOverload
             | Self::TypeNotAssignable
+            | Self::UnrelatedTypesWithSameName
             | Self::RecursiveFulfillmentCallback
             | Self::ArgumentNotAssignable
             | Self::ArgumentCount
@@ -176,7 +186,8 @@ impl CheckerDiagnosticCode {
             | Self::ManyPropertiesMissing
             | Self::NoOverloadExpectsArgumentCount
             | Self::ExcessProperty
-            | Self::ExcessPropertySuggestion => false,
+            | Self::ExcessPropertySuggestion
+            | Self::ExcessiveStackDepth => false,
         }
     }
 
@@ -186,6 +197,7 @@ impl CheckerDiagnosticCode {
         match self {
             Self::NoMatchingOverload => 2769,
             Self::TypeNotAssignable => 2322,
+            Self::UnrelatedTypesWithSameName => 2719,
             Self::ExcessivelyDeepInstantiation => 2589,
             Self::CircularTypeAlias => 2456,
             Self::CannotFindName => 2304,
@@ -203,6 +215,7 @@ impl CheckerDiagnosticCode {
             Self::NoOverloadExpectsArgumentCount => 2575,
             Self::ExcessProperty => 2353,
             Self::ExcessPropertySuggestion => 2561,
+            Self::ExcessiveStackDepth => 2321,
         }
     }
 
@@ -220,6 +233,7 @@ impl CheckerDiagnosticCode {
         match self {
             Self::NoMatchingOverload => "No overload matches this call.",
             Self::TypeNotAssignable => "Type '{0}' is not assignable to type '{1}'.",
+            Self::UnrelatedTypesWithSameName => "Type '{0}' is not assignable to type '{1}'. Two different types with this name exist, but they are unrelated.",
             Self::ExcessivelyDeepInstantiation => {
                 "Type instantiation is excessively deep and possibly infinite."
             }
@@ -264,6 +278,7 @@ impl CheckerDiagnosticCode {
                 "Object literal may only specify known properties, but '{0}' does not exist in \
                  type '{1}'. Did you mean to write '{2}'?"
             }
+            Self::ExcessiveStackDepth => "Excessive stack depth comparing types '{0}' and '{1}'.",
         }
     }
 }
@@ -492,6 +507,14 @@ impl CheckerDiagnosticRecipe {
                 failures
                     .into_iter()
                     .map(|failure| {
+                        // Candidate selection's overflow belongs to the call;
+                        // only the argument's own failure is an overload error.
+                        if failure.diagnostic.code == CheckerDiagnosticCode::ExcessiveStackDepth
+                            && Some(failure.start) == site.expression_start
+                            && Some(failure.end) == site.expression_end
+                        {
+                            return failure;
+                        }
                         let mut chain = Vec::with_capacity(failure.chain.len() + 2);
                         chain.push(CheckerDiagnosticChainLine::new(
                             1,
@@ -529,6 +552,7 @@ impl CheckerDiagnosticRecipe {
                         target,
                         self.diagnostic,
                         argument(ordinal)?,
+                        site.expression_start.zip(site.expression_end),
                     );
                 }
                 let (source, target) = printer.relation_operands(source, target)?;
@@ -598,13 +622,16 @@ pub(crate) trait CheckerDiagnosticPrinter {
     /// expression with the relation's message chain
     /// (`checkTypeRelatedToAndOptionallyElaborate`). `None` when the
     /// failure runs through a form or a relation whose elaboration is not
-    /// modelled.
+    /// modelled. `expression` is the whole operation expression's span,
+    /// where the checker reports a relation that overflows its stack while
+    /// it chooses a candidate.
     fn relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         head: CheckerDiagnostic,
         site: &verter_type_expr::IndexedReportSite,
+        expression: Option<(u32, u32)>,
     ) -> Option<Vec<CheckerDiagnosticOccurrence>>;
 }
 
@@ -617,6 +644,13 @@ pub(crate) struct CheckerDiagnosticSite {
     pub(crate) operation_start: Option<u32>,
     /// The end of the node `operation_start` starts.
     pub(crate) operation_end: Option<u32>,
+    /// The start of the whole operation expression (a call expression),
+    /// where the checker reports what it reports at the node it is checking
+    /// rather than at an argument: a relation it compares with no error
+    /// node of its own while it chooses a candidate.
+    pub(crate) expression_start: Option<u32>,
+    /// The end of the expression `expression_start` starts.
+    pub(crate) expression_end: Option<u32>,
     /// Each authored call argument's report site, in argument order.
     pub(crate) arguments: Arc<[verter_type_expr::IndexedReportSite]>,
 }
@@ -792,6 +826,7 @@ mod tests {
             target: SemanticNodeId,
             head: CheckerDiagnostic,
             site: &verter_type_expr::IndexedReportSite,
+            _expression: Option<(u32, u32)>,
         ) -> Option<Vec<CheckerDiagnosticOccurrence>> {
             let (source, target) = self.relation_operands(source, target)?;
             Some(vec![CheckerDiagnosticOccurrence::new(
@@ -808,6 +843,8 @@ mod tests {
         CheckerDiagnosticSite {
             operation_start: Some(operation),
             operation_end: Some(operation + 1),
+            expression_start: None,
+            expression_end: None,
             arguments: arguments
                 .iter()
                 .map(|&point| verter_type_expr::IndexedReportSite {

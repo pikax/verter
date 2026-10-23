@@ -1794,6 +1794,7 @@
             "kind": "bulk",
             "to": "pub(crate)",
             "consumersAffected": [
+              "crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs",
               "crates/verter_bench/src/soak/run.rs",
               "crates/verter_bench/src/soak/isolation.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/connected_demand_tests.rs",

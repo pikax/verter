@@ -544,6 +544,12 @@ pub fn mark_request_result_inference_budget_exceeded() {
     mark_request_result_partial_with(PartialReasonSet::BUDGET_EXCEEDED);
 }
 
+/// A fixed route/registry fan-out fuse stopped this request. Unlike an
+/// operation-account refusal, its result cannot be retained across requests.
+pub fn mark_request_result_fanout_limit() {
+    mark_request_result_partial_with(PartialReasonSet::FANOUT_LIMIT);
+}
+
 /// Mark the active result partial for the exact cancellation reason.
 pub(crate) fn mark_request_result_cancelled() {
     observe_execution_abort(crate::semantic_query::ExecutionAbort::Cancelled);

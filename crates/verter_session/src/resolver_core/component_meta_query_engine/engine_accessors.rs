@@ -24,32 +24,36 @@ impl<'a, M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'a, M> 
         exhausted
     }
 
-    /// Check wildcard route fanout budget. Returns `true` if within budget.
+    /// Check wildcard route fanout budget. Returns `true` if within budget; a trip marks the request result fan-out partial, the class the imported-root and registry-deepening fuses record, so the symbol it never looked up is never admitted warm.
     pub fn allow_wildcard_route(&mut self) -> bool {
-        !self.fuse_state.check_wildcard_route_fanout::<M>(
+        let tripped = self.fuse_state.check_wildcard_route_fanout::<M>(
             verter_type_engine::resolver_core::resolver_context::capture_targets(self.ctx),
             &self.fuse_budgets,
-        )
+        );
+        if tripped {
+            verter_type_engine::request_context::mark_request_result_fanout_limit();
+        }
+        !tripped
     }
 
-    /// Check imported-root fanout budget. Returns `true` if within budget; a trip marks the request result budget-partial so the truncated registry is never admitted warm.
+    /// Check imported-root fanout budget. Returns `true` if within budget; a trip marks the request result fan-out partial so the truncated registry is never admitted warm.
     pub fn allow_imported_root(&mut self) -> bool {
         let tripped = self
             .fuse_state
             .check_imported_root_fanout(&self.fuse_budgets);
         if tripped {
-            verter_type_engine::request_context::mark_request_result_inference_budget_exceeded();
+            verter_type_engine::request_context::mark_request_result_fanout_limit();
         }
         !tripped
     }
 
-    /// Check registry deepening fanout budget. Returns `true` if within budget; a trip marks the request result budget-partial so the truncated registry is never admitted warm.
+    /// Check registry deepening fanout budget. Returns `true` if within budget; a trip marks the request result fan-out partial so the truncated registry is never admitted warm.
     pub fn allow_registry_deepening(&mut self) -> bool {
         let tripped = self
             .fuse_state
             .check_registry_deepening_fanout(&self.fuse_budgets);
         if tripped {
-            verter_type_engine::request_context::mark_request_result_inference_budget_exceeded();
+            verter_type_engine::request_context::mark_request_result_fanout_limit();
         }
         !tripped
     }

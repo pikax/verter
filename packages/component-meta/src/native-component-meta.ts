@@ -576,7 +576,8 @@ export type NativeSurfacePartialReason =
   | "flowReturnNoSurface"
   | "undecidedConditional"
   | "connectedMemoryLimit"
-  | "operationBudget";
+  | "operationBudget"
+  | "fanoutLimit";
 
 /**
  * Typed completeness of a published component surface. Without it an

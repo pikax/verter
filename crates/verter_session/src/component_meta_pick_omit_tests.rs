@@ -2270,11 +2270,11 @@ defineProps<Props>()
     src
 }
 
-/// A registry-deepening fan-out trip publishes the named budget class
+/// A registry-deepening fan-out trip publishes the named fan-out class
 /// (not the generic propagated marker), and the result is refused warm
 /// admission; a below-cap control stays complete.
 #[test]
-fn fanout_fuse_trip_publishes_named_budget_reason_and_is_not_warm() {
+fn fanout_fuse_trip_publishes_named_fanout_reason_and_is_not_warm() {
     #[cfg(feature = "semantic-observe")]
     use std::sync::atomic::Ordering::Relaxed;
     use verter_type_engine::semantic_query::PartialReason;
@@ -2308,10 +2308,22 @@ fn fanout_fuse_trip_publishes_named_budget_reason_and_is_not_warm() {
             .completeness
             .reasons()
             .iter()
-            .any(|r| r == PartialReason::BudgetExceeded),
-        "the fan-out trip must carry BUDGET_EXCEEDED, got {:?}",
+            .any(|r| r == PartialReason::FanoutLimit),
+        "the fan-out trip must carry FANOUT_LIMIT, got {:?}",
         tripped.completeness
     );
+
+    let cold_entries =
+        || crate::host_manage::component_meta_entry::COLD_BODY_ENTRIES.with(|count| count.get());
+    let before = cold_entries();
+    let (_, repeated) = host
+        .get_component_meta_with_resolution("/workspace/src/Over.vue")
+        .expect("same-profile repeat");
+    assert!(
+        cold_entries() > before,
+        "a fan-out refusal must re-enter the cold body"
+    );
+    assert_eq!(repeated.completeness, tripped.completeness);
 
     // Reads optional audit capture: runs in the instrumentation lane.
     #[cfg(feature = "semantic-observe")]
