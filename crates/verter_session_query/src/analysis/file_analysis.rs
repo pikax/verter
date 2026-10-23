@@ -49,6 +49,11 @@ impl AnalysisSourceRevision {
     pub fn is_unstamped(&self) -> bool {
         *self == Self::default()
     }
+
+    /// Exact served source identity; an unstamped snapshot supplies no proof.
+    pub fn whole_hash(&self) -> Option<Hash16> {
+        (!self.is_unstamped()).then_some(self.0)
+    }
 }
 
 /// Serializable snapshot of file analysis data, suitable for WASM export.

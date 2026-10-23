@@ -156,6 +156,10 @@ pub trait IndexedInputs {
     /// still reaches every enclosing traced admission point through the
     /// `note_non_cacheable_read_fan_out` chokepoint flag).
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe>;
+    /// File loading and source environment only; exposes no content payload.
+    fn source_is_available(&self, canonical_id: &str) -> bool {
+        self.ensure_indexed_ready_serve(canonical_id).is_some()
+    }
 
     /// The canonical's post-parse artifact read through the **base-store**
     /// pin rather than the request view's overlay-priority read.
@@ -560,6 +564,18 @@ pub trait ExpressionSourceSelection: OwnedLowering {
 }
 
 pub trait OwnedLowering {
+    /// A source-owned selected member with complete narrow dependency proof.
+    /// Unsupported sources retain the ordinary whole-content read.
+    fn class_member_input(
+        &self,
+        _canonical: &str,
+        _owner: verter_type_expr::TopLevelOwnerId,
+        _class: &str,
+        _name: &str,
+    ) -> Option<verter_session_query::source::deref::ClassMemberInput> {
+        None
+    }
+
     fn member_presence_for_observed_content(
         &self,
         canonical: &str,

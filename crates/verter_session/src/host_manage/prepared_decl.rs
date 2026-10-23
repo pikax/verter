@@ -995,11 +995,15 @@ impl VerterHost {
         {
             return None;
         }
-        let dep_edges = self.prepared_decl_bundle_route_dep_edges_with_context(
-            ctx,
-            route_canonical_id,
-            state.as_ref(),
-        )?;
+        let (dep_edges, overlay_route_witness) = {
+            let scope = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
+            let edges = self.prepared_decl_bundle_route_dep_edges_with_context(
+                ctx,
+                route_canonical_id,
+                state.as_ref(),
+            )?;
+            (edges, scope.collected())
+        };
 
         // Script-setup type bindings are ADAPTER-DECLARED registry data: the
         // materializer asks the composed registry whether the admitting
@@ -1029,6 +1033,11 @@ impl VerterHost {
                 import_canonicalization,
                 self.project_type_store().identity_interner(),
             ),
+        );
+
+        bundle.seal_resolution_facts(
+            (state.owner_import_targets.is_empty() || !overlay_route_witness.is_empty())
+                .then_some(overlay_route_witness),
         );
 
         // R17: do NOT insert into the shared `prepared_decl_bundles`
@@ -1310,6 +1319,7 @@ impl VerterHost {
         // and `framework::script_facts` producers do.
         let import_route_witness =
             self.owner_import_route_witness_in::<M>(observation, canonical_id);
+        bundle.seal_resolution_facts(import_route_witness.clone());
         let mut facts = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.into(),
@@ -1520,6 +1530,7 @@ impl VerterHost {
         // this rail exists to provide.
         let import_route_witness =
             self.owner_import_route_witness_in::<M>(observation, canonical_id);
+        bundle.seal_resolution_facts(import_route_witness.clone());
         let whole_hash = facts.whole_hash;
         let mut fact_versions = vec![
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
@@ -1659,6 +1670,7 @@ impl VerterHost {
         ) else {
             return Ok(None);
         };
+        bundle.observe_read();
         let result = bundle.prepared_type_decls.get_in(owner, symbol_name);
         component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"prepared_type_decl_result",
             format!(
@@ -1692,6 +1704,7 @@ impl VerterHost {
         else {
             return Ok(None);
         };
+        bundle.observe_read();
         bundle.prepared_type_decls.get_in(owner, symbol_name)
     }
 
@@ -1762,6 +1775,7 @@ impl VerterHost {
         ) else {
             return Ok(None);
         };
+        bundle.observe_read();
         bundle.prepared_value_decls.get_in(owner, symbol_name)
     }
 
@@ -1786,6 +1800,7 @@ impl VerterHost {
         else {
             return Ok(None);
         };
+        bundle.observe_read();
         bundle.prepared_value_decls.get_in(owner, symbol_name)
     }
 
@@ -3269,48 +3284,35 @@ impl VerterHost {
                 snapshot.downcast_data::<crate::host_executor::HostSourceData>()
             });
             if let Some(source_data) = source_data {
-                let has_direct_local_export =
-                    source_data.parse.export_signatures.iter().any(|signature| {
-                        signature.name == imported_name && signature.reexport_source.is_none()
-                    });
-                if has_direct_local_export {
-                    let mut exact_owner = None;
-                    let mut ambiguous_owner = false;
-                    for declaration in source_data
-                        .parse
-                        .script_analysis
-                        .declaration_entries
-                        .iter()
-                        .filter(|declaration| declaration.name == imported_name)
-                    {
-                        match exact_owner {
-                            None => exact_owner = Some(declaration.owner),
-                            Some(owner) if owner == declaration.owner => {}
-                            Some(_) => {
-                                ambiguous_owner = true;
-                                break;
-                            }
-                        }
-                    }
-                    if !ambiguous_owner {
-                        if let Some(owner) = exact_owner {
-                            let dep_id: Arc<str> = Arc::from(dep_canonical);
-                            let mut facts =
-                                vec![verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                if let Some((owner, header_hash)) =
+                    crate::resolver_store::direct_declaration_export_proof(
+                        &source_data.parse,
+                        imported_name,
+                    )
+                {
+                    let dep_id: Arc<str> = Arc::from(dep_canonical);
+                    let mut facts = Vec::new();
+                    facts.push(verter_session_query::facts::fact_cache::FactVersionRef::Parse(
+                                verter_session_query::facts::fact_cache::ParseFactRef {
                                     canonical_id: Arc::clone(&dep_id),
-                                    hash: source_data.parse.whole_hash,
-                                }];
-                            // Cross-file ROUTE fact — recorded ONLY from an
-                            // already-materialized, content-pinned, parse-current
-                            // artifact (a `get`, never an `ensure`): the fast
-                            // path must not index the dependency just to derive
-                            // the hash. When available, the fact
-                            // uses the SAME `hash_route_surface` derivation the
-                            // store-view root lookup publishes, so warm validation
-                            // round-trips; when the artifact is absent, the
-                            // dep's `FileWholeHash` remains the (sufficient)
-                            // covering fact for a direct local export.
-                            let dep_key =
+                                    key: verter_session_query::facts::FactKey::DirectDeclarationExport {
+                                        name: verter_session_query::facts::registry::InternedName::from(imported_name),
+                                    },
+                                    lane: verter_session_query::facts::FactLane::Semantic,
+                                    expected_hash: header_hash,
+                                },
+                            ));
+                    // Cross-file ROUTE fact — recorded ONLY from an
+                    // already-materialized, content-pinned, parse-current
+                    // artifact (a `get`, never an `ensure`): the fast
+                    // path must not index the dependency just to derive
+                    // the hash. When available, the fact
+                    // uses the SAME `hash_route_surface` derivation the
+                    // store-view root lookup publishes, so warm validation
+                    // round-trips. The source-header fact proves direct
+                    // declaration existence without indexing; each content
+                    // consumer supplies its own exact served-content proof.
+                    let dep_key =
                                 verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
                                     Arc::clone(&dep_id),
                                     source_data.parse.whole_hash,
@@ -3319,36 +3321,38 @@ impl VerterHost {
                                     source_data.framework_parse.as_deref(),
                                     verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
                                 );
-                            if let Some(indexed) = dep_key.as_ref().and_then(|key| {
-                                self.project_type_store.indexed().get_in::<M>(
-                                    verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
-                                    dep_canonical,
-                                    key.content_hash,
-                                    &key.parse_key,
-                                    &key.file_language_id,
+                    if let Some(indexed) = dep_key.as_ref().and_then(|key| {
+                        self.project_type_store.indexed().get_in::<M>(
+                            verter_type_engine::resolver_core::resolver_context::capture_targets(
+                                ctx,
+                            ),
+                            dep_canonical,
+                            key.content_hash,
+                            &key.parse_key,
+                            &key.file_language_id,
+                        )
+                    }) {
+                        if self.indexed_surface_is_current(dep_canonical, &indexed)
+                            && indexed.shallow_state.has_resolvable_surface()
+                        {
+                            if let Some(parse_fact) = self
+                                .syntactic_route_interface_fact_for_indexed(
+                                    Arc::clone(&dep_id),
+                                    &indexed,
                                 )
-                            }) {
-                                if self.indexed_surface_is_current(dep_canonical, &indexed)
-                                    && indexed.shallow_state.has_resolvable_surface()
-                                {
-                                    if let Some(parse_fact) = self
-                                        .syntactic_route_interface_fact_for_indexed(
-                                            Arc::clone(&dep_id),
-                                            &indexed,
-                                        )
-                                    {
-                                        facts.push(verter_session_query::facts::fact_cache::FactVersionRef::Parse(
-                                            parse_fact,
-                                        ));
-                                    }
-                                }
+                            {
+                                facts.push(
+                                    verter_session_query::facts::fact_cache::FactVersionRef::Parse(
+                                        parse_fact,
+                                    ),
+                                );
                             }
-                            return Some((
-                                (dep_canonical.to_string(), owner, imported_name.to_string()),
-                                facts,
-                            ));
                         }
                     }
+                    return Some((
+                        (dep_canonical.to_string(), owner, imported_name.to_string()),
+                        facts,
+                    ));
                 }
             }
         }
@@ -3368,9 +3372,7 @@ impl VerterHost {
             verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name } => {
                 let Some(import_target) = shallow.import_target_in(*owner, symbol_name.as_str())
                 else {
-                    if !shallow.has_type_symbol_in(*owner, symbol_name.as_str())
-                        && !shallow.has_value_symbol_in(*owner, symbol_name.as_str())
-                    {
+                    if !shallow.declares_local_binding_in(*owner, symbol_name.as_str()) {
                         return None;
                     }
 
@@ -3410,7 +3412,8 @@ impl VerterHost {
                     symbol_name,
                 } if target_state
                     .import_target_in(*owner, symbol_name.as_str())
-                    .is_none() =>
+                    .is_none()
+                    && target_state.declares_local_binding_in(*owner, symbol_name.as_str()) =>
                 {
                     (
                         *owner,

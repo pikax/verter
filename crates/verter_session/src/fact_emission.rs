@@ -440,12 +440,12 @@ impl LazyBodyFactSource {
             space: SymbolSpace::Type,
         } = key
         {
-            let read = self.memo.class_member_read_hash_in(
+            let read = self.memo.class_member_read_hashes_in(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 exporter.as_ref(),
                 member,
             );
-            let Some(outcome) = read.value else {
+            let Some((outcome, display)) = read.value else {
                 return SourceRead {
                     value: None,
                     refusal: read.refusal,
@@ -453,7 +453,7 @@ impl LazyBodyFactSource {
             };
             // A truncated fingerprint cannot certify the elements it did not
             // fully walk: decline, so the read keeps conservative evidence.
-            if outcome.budget_exceeded {
+            if outcome.budget_exceeded || display.budget_exceeded {
                 return SourceRead {
                     value: None,
                     refusal: read.refusal,
@@ -462,7 +462,7 @@ impl LazyBodyFactSource {
             let fact = Fact {
                 key: key.clone(),
                 semantic_hash: outcome.hash,
-                display_hash: compute_display_hash(&outcome.hash),
+                display_hash: display.hash,
             };
             self.computed.insert(key.clone(), fact.clone());
             return SourceRead {

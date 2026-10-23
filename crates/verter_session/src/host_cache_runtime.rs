@@ -179,7 +179,16 @@ impl VerterHost {
         };
         let any_non_empty = |target: AugmentationTargetKind| {
             !crate::host_manage::source_augmentation::AugmentationRequestDriver::new(store)
-                .ensure_populated(&make_key(target), memoised_resolve, None)
+                .ensure_populated(&make_key(target), memoised_resolve, None, Some(&|canonical| {
+                    let serve = self.ensure_indexed_ready_serve(canonical)?;
+                    if !serve.store_published {
+                        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe);
+                        return None;
+                    }
+                    let identity = self.authoritative_current_artifact_key(canonical)?;
+                    (identity.content_hash == serve.indexed.whole_hash).then_some(identity)
+                }))
                 .entries
                 .is_empty()
         };

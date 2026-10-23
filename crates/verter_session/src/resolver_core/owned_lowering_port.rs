@@ -12,6 +12,34 @@ use verter_session_query::{QueryHostAdmission, QueryHostError, QueryHostServe};
 use verter_type_engine::resolver_core::request_ports::OwnedLowering;
 use verter_type_expr::locators::AuthoredBodyLocator;
 
+pub(crate) fn observe_whole_content(
+    canonical: &str,
+    hash: verter_session_query::analysis::types::Hash16,
+) {
+    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.into(),
+            hash,
+        },
+    );
+}
+
+fn observe_source_content(source: &super::ShallowFileState) {
+    observe_whole_content(&source.source_identity.canonical, source.whole_hash);
+}
+
+pub(crate) fn observe_analysis_revision(
+    canonical: &str,
+    revision: &verter_session_query::analysis::file_analysis::AnalysisSourceRevision,
+) {
+    match revision.whole_hash() {
+        Some(hash) => observe_whole_content(canonical, hash),
+        None => verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
+        ),
+    }
+}
+
 fn lower_authored(
     inputs: &impl SourceInputProvider,
     locator: &AuthoredBodyLocator,
@@ -28,6 +56,7 @@ fn lower_authored(
             outcome: Err(QueryHostError::UnknownFile),
         };
     };
+    observe_whole_content(canonical, serve.indexed.whole_hash);
     QueryHostServe {
         admission: QueryHostAdmission::from_store_published(serve.store_published),
         outcome: serve
@@ -56,6 +85,7 @@ fn prepare_structure(
         return Ok(None);
     };
     let indexed = serve.indexed;
+    observe_whole_content(&key.canonical_id, indexed.whole_hash);
     let memo = indexed.shallow_state.decl_bodies();
     let index = crate::host_source_demand::consume_walked_read(memo.function_program_index());
     let Some(matched) = index.get(&key.function) else {
@@ -574,6 +604,86 @@ impl<
 macro_rules! owned_lowering_from_source_inputs {
     ([$($generics:tt)*] $ty:ty $(where [$($bounds:tt)*])?) => {
         impl<$($generics)*> OwnedLowering for $ty $(where $($bounds)*)? {
+            fn class_member_input(
+                &self,
+                canonical: &str,
+                owner: verter_type_expr::TopLevelOwnerId,
+                class: &str,
+                name: &str,
+            ) -> Option<verter_session_query::source::deref::ClassMemberInput> {
+                use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
+                use verter_type_engine::resolver_core::request_ports::RouteLookup;
+                use verter_type_expr::locators::*;
+                if owner != verter_type_expr::TopLevelOwnerId::ordinary_file() { return None; }
+                let serve = SourceInputProvider::raw_serve(self, canonical)?;
+                if !serve.store_published {
+                    verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe);
+                }
+                let source = &serve.indexed.shallow_state;
+                if verter_session_query::inputs::contributors::classify_shallow_module_kind(source)
+                    == verter_session_query::inputs::contributors::FileModuleKind::Script {
+                    let answer = self.global_contributor_answer(canonical, class, SymbolSpace::Type);
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                        verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
+                            verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
+                                canonical_id: canonical.into(),
+                                key: verter_session_query::inputs::contributors::population_contributor_fact_key(
+                                    &verter_session_query::resolution::AugmentationTargetKind::GlobalAugmentation, class),
+                                lane: FactLane::Semantic,
+                                expected_hash: answer.population_fingerprint,
+                            }));
+                    if answer.contributors.entries.len() != 1 || !answer.contributors.entries.iter().all(|entry|
+                        entry.artifact_key.canonical.as_ref() == canonical && entry.owner == owner) { return None; }
+                }
+                let fact = self.parse_fact_for_observed_content(canonical, serve.indexed.whole_hash,
+                    FactKey::Member { exporter: class.into(), name: verter_type_expr::facts::FactPropertyKey::identifier(name), space: SymbolSpace::Type }, FactLane::Semantic)?;
+                if fact.expected_hash == [0;16] { return None; }
+                let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+                    anchor: AuthoredAnchor { canonical_id: canonical.into(), owner, symbol: class.into(), space: LocatorSymbolSpace::Type },
+                    path: vec![TypeBodyPathStep::ClassMembersNamed { name_hash: class_member_name_hash(name) }].into(),
+                });
+                let selected = source.decl_bodies().deref_locator_body(&locator).ok()?;
+                let verter_session_query::source::deref::DerefedBodyShape::Single(body) = &selected.shape else { return None; };
+                let refs = verter_type_expr::referenced_names(body);
+                let mut name_resolution = rustc_hash::FxHashMap::default();
+                for reference in refs.type_names {
+                    if reference.qualified || selected.type_parameters.iter().any(|param| param.name == reference.head)
+                        || source.headers.type_header_in(owner, &reference.head).is_some() { return None; }
+                    let target = source.import_target_in(owner, &reference.head)?;
+                    if target.is_namespace { return None; }
+                    let (publication, witness) = {
+                        let scope = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
+                        let publication = SourceInputProvider::type_dependency_publication(self, canonical, &target.source_specifier);
+                        (publication, scope.collected())
+                    };
+                    let verter_workspace::ResolutionPublication::Admitted(admitted) = publication else { return None; };
+                    let dep = admitted.into_result()?;
+                    if witness.is_empty() { return None; }
+                    let (identity, route_facts) = RouteLookup::resolve_imported_type_root_with_facts(self, &dep, &target.imported_name);
+                    let identity = identity?;
+                    if identity.canonical_id.as_ref() == canonical || route_facts.is_empty() { return None; }
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(&witness);
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(&route_facts);
+                    name_resolution.insert(reference.head.into(), identity);
+                }
+                let verter_type_expr::TypeExpr::Object(members) = body else { return None; };
+                if members.properties.iter().filter(|member| matches!(member, verter_type_expr::ObjectMember::Method(_))).count() > 1 {
+                    // Overload groups and accessor pairs retain authored
+                    // occurrences and ordered multiplicity on the full path.
+                    return None;
+                }
+                if !members.properties.iter().all(|member|
+                    verter_session_query::source::deref::independent_class_member(member, &name_resolution)) { return None; }
+                // The Member lens covers authored references; the route fact
+                // covers their owner-qualified binding geometry.
+                let route = self.parse_fact_for_observed_content(canonical, serve.indexed.whole_hash, FactKey::SyntacticRouteInterface, FactLane::Semantic)?;
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(verter_session_query::facts::fact_cache::FactVersionRef::Parse(route));
+                let display = self.parse_fact_for_observed_content(canonical, serve.indexed.whole_hash,
+                    fact.key.clone(), FactLane::Display)?;
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact));
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(verter_session_query::facts::fact_cache::FactVersionRef::Parse(display));
+                Some(verter_session_query::source::deref::ClassMemberInput { selected, name_resolution })
+            }
             fn script_setup_type_params(
                 &self,
                 serve: &verter_session_query::inputs::indexed::IndexedInputServe,
@@ -688,6 +798,16 @@ macro_rules! owned_lowering_from_source_inputs {
                         answer
                     },
                     discriminator,
+                    Some(&|canonical| {
+                        let serve = SourceInputProvider::raw_serve(self, canonical)?;
+                        if !serve.store_published {
+                            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                                verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe);
+                            return None;
+                        }
+                        let identity = verter_type_engine::resolver_core::request_ports::IndexedInputs::artifact_key_for_current_content(self, canonical)?;
+                        (identity.content_hash == serve.indexed.whole_hash).then_some(identity)
+                    }),
                 );
                 (key, answer, resolutions.into_inner())
             }
@@ -805,10 +925,15 @@ macro_rules! owned_lowering_from_source_inputs {
                 observed_hash: verter_session_query::analysis::types::Hash16,
             ) -> Option<verter_type_engine::resolver_core::request_ports::AugmenterArtifactAnswer> {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::augmenter_artifact_answer");
+                let current = verter_type_engine::resolver_core::request_ports::IndexedInputs::artifact_key_for_current_content(self, &captured.canonical)?;
+                if current.content_hash != observed_hash {
+                    return None;
+                }
                 let (artifact, refreshed_key) = SourceInputProvider::source_host(self)
                     .project_type_store()
                     .indexed()
-                    .augmenter_artifacts_self_healing(captured, observed_hash)?;
+                    .augmenter_artifacts_for_served_identity(captured, &current)?;
+                observe_whole_content(&current.canonical, current.content_hash);
                 Some(verter_type_engine::resolver_core::request_ports::AugmenterArtifactAnswer {
                     augmentations: Arc::clone(&artifact.augmentations),
                     refreshed_key,
@@ -846,6 +971,8 @@ macro_rules! owned_lowering_from_source_inputs {
                     Some(view) => host.registered_structure_for_view(canonical, view),
                     None => host.registered_file_structure(canonical),
                 }?;
+                let revision = verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(structure.source().bytes());
+                observe_analysis_revision(canonical, &revision);
                 Some(crate::host_resolve::ordered_sfc_structure_analysis(
                     &structure,
                 ))
@@ -907,6 +1034,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return Default::default();
                 };
+                observe_source_content(&source);
                 source.decl_bodies().recover_member_spans_or_absent(origin)
             }
 
@@ -923,6 +1051,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return Err(verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss);
                 };
+                observe_source_content(&source);
                 source.decl_bodies().deref_locator_body(locator)
             }
 
@@ -949,7 +1078,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::batch_type_bodies");
                 let sources: Vec<_> = demands
                     .iter()
-                    .map(|demand| SourceInputProvider::source(self, demand.source))
+                    .map(|demand| SourceInputProvider::source(self, demand.source).inspect(|source| observe_source_content(source)))
                     .collect();
                 let batch: Vec<_> = demands
                     .iter()
@@ -1041,6 +1170,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return verter_session_query::source::demand::DemandOutcome::LeaseMiss;
                 };
+                observe_source_content(&source);
                 source.decl_bodies().transient_type_parts_in(owner, name)
             }
             fn transient_value_parts(
@@ -1056,6 +1186,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return verter_session_query::source::demand::DemandOutcome::LeaseMiss;
                 };
+                observe_source_content(&source);
                 source.decl_bodies().transient_value_parts_in(owner, name)
             }
 
@@ -1070,6 +1201,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return None;
                 };
+                observe_source_content(&source);
                 source.value_decl_in(owner, name)
             }
             fn effective_type_decl(
@@ -1083,6 +1215,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return None;
                 };
+                observe_source_content(&source);
                 source.effective_type_decl_in(owner, name)
             }
             fn effective_value_decl(
@@ -1096,6 +1229,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return None;
                 };
+                observe_source_content(&source);
                 source.effective_value_decl_in(owner, name)
             }
             fn type_dependencies(
@@ -1109,6 +1243,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return None;
                 };
+                observe_source_content(&source);
                 source.type_deps_in(owner, name)
             }
             fn deref_type_argument(
@@ -1124,6 +1259,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return Err(verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss);
                 };
+                observe_source_content(&source);
                 source.decl_bodies().deref_type_arg(locator)
             }
         }

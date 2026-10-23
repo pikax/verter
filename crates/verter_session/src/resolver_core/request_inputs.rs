@@ -269,6 +269,10 @@ impl InputArtifactLeases {
         &self,
         serve: crate::host_manage::prepared_decl::IndexedReadyServe,
     ) -> IndexedInputServe {
+        super::owned_lowering_port::observe_whole_content(
+            &serve.indexed.shallow_state.source_identity.canonical,
+            serve.indexed.whole_hash,
+        );
         let input = serve.indexed.input_record();
         let mut retained = self.retained.write();
         retained
@@ -288,6 +292,10 @@ impl InputArtifactLeases {
         &self,
         source: Arc<super::ShallowFileState>,
     ) -> Arc<ShallowInputRecord> {
+        super::owned_lowering_port::observe_whole_content(
+            &source.source_identity.canonical,
+            source.whole_hash,
+        );
         let input = source.input_record();
         self.retained
             .write()
@@ -309,7 +317,12 @@ impl InputArtifactLeases {
         &self,
         input: &IndexedInputRecord,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
-        self.retained.read().indexed.get(&input.identity).cloned()
+        let indexed = self.retained.read().indexed.get(&input.identity).cloned()?;
+        super::owned_lowering_port::observe_whole_content(
+            &indexed.shallow_state.source_identity.canonical,
+            indexed.whole_hash,
+        );
+        Some(indexed)
     }
     pub(crate) fn source(
         &self,
@@ -321,7 +334,14 @@ impl InputArtifactLeases {
             .sources
             .get(&input.observation_id())
             .cloned()?;
-        (source.source_identity == input.source_identity).then_some(source)
+        if source.source_identity != input.source_identity {
+            return None;
+        }
+        super::owned_lowering_port::observe_whole_content(
+            &source.source_identity.canonical,
+            source.whole_hash,
+        );
+        Some(source)
     }
 }
 
@@ -340,6 +360,7 @@ impl InputArtifactLeases {
         &self,
         bundle: crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>,
     ) -> verter_session_query::inputs::prepared::PreparedInputRef {
+        bundle.observe_read();
         let input = bundle.input_record();
         self.retained
             .write()
@@ -358,7 +379,11 @@ impl InputArtifactLeases {
             .prepared
             .get(&input.observation_id)
             .cloned()?;
-        (bundle.owner_whole_hash == input.owner_whole_hash).then_some(bundle)
+        if bundle.owner_whole_hash != input.owner_whole_hash {
+            return None;
+        }
+        bundle.observe_read();
+        Some(bundle)
     }
 }
 
@@ -366,6 +391,7 @@ impl verter_type_engine::resolver_core::bare_name_resolve::PreparedInputSource
     for super::prepared_decl::PreparedDeclBundle
 {
     fn scope_inputs(&self) -> verter_session_query::inputs::prepared::PreparedInputRef {
+        self.observe_read();
         self.input_record()
     }
 }

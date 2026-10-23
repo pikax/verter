@@ -40,6 +40,31 @@ pub struct ModuleAugmentationFact {
     pub declaring_file: FileModuleKind,
 }
 
+/// Content-free ownership and binding membership of an augmentation set.
+/// Authored member headers and body versions belong to the consuming reads.
+pub fn augmentation_population_hash<'a>(
+    facts: impl IntoIterator<Item = &'a ModuleAugmentationFact>,
+) -> Hash16 {
+    use std::hash::Hash;
+    let mut rows: Vec<Hash16> = facts
+        .into_iter()
+        .map(|fact| {
+            crate::inputs::route_surface::hash16_from_sorted(|hasher| {
+                fact.specifier.hash(hasher);
+                fact.owner.hash(hasher);
+                fact.augmented_name.hash(hasher);
+                fact.space.hash(hasher);
+                fact.declaring_file.hash(hasher);
+            })
+        })
+        .collect();
+    rows.sort_unstable();
+    crate::inputs::route_surface::hash16_from_sorted(|hasher| {
+        b"verter:augmentation-population:v1".hash(hasher);
+        rows.hash(hasher);
+    })
+}
+
 /// Special marker the parse-domain emission uses for `declare global
 /// { ... }` blocks (see `fact_emission::GLOBAL_AUGMENTATION_TAG`).
 /// Duplicated here to keep the matcher free-standing of fact_emission.

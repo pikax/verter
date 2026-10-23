@@ -1392,6 +1392,9 @@ pub struct PreparedDeclBundle {
     /// The engine's input record, minted on first read after admission:
     /// its own cell, held by the bundle (see [`Held`]).
     input_projection: OnceLock<Held<verter_session_query::inputs::prepared::PreparedInputRecord>>,
+    /// Immutable producing route witnesses, replayed even on committed
+    /// declaration slots and request-memo/shared/follower bundle hits.
+    resolution_facts: OnceLock<verter_session_query::facts::fact_cache::OwnedFactSignature>,
     /// The account the cells this bundle commits after admission are
     /// retained on.
     account: StoreAccount,
@@ -1431,6 +1434,7 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
     ) -> usize {
         let Self {
             input_projection: _,
+            resolution_facts: _, // the witness rail owns its charge
             account: _,
             owner_whole_hash: _,
             prepared_type_decls,
@@ -1554,6 +1558,34 @@ fn base_table_heap<'t>(
 }
 
 impl PreparedDeclBundle {
+    pub(crate) fn seal_resolution_facts(
+        &self,
+        witness: Option<Vec<verter_session_query::facts::fact_cache::FactVersionRef>>,
+    ) {
+        if let Some(witness) = witness {
+            let _ = self.resolution_facts.set(witness.into());
+        }
+    }
+
+    pub(crate) fn observe_read(&self) {
+        super::owned_lowering_port::observe_whole_content(
+            &self.prepared_type_decls.canonical_id,
+            self.owner_whole_hash,
+        );
+        if let Some(facts) = self.resolution_facts.get() {
+            verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(facts);
+        } else if !self
+            .prepared_type_decls
+            .state
+            .owner_import_targets
+            .is_empty()
+        {
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
+            );
+        }
+    }
+
     pub(crate) fn input_record(&self) -> verter_session_query::inputs::prepared::PreparedInputRef {
         if let Some(record) = self.input_projection.get() {
             return record.value.clone();
@@ -1710,6 +1742,7 @@ pub fn build_prepared_decl_bundle(
     let owner_whole_hash = state.whole_hash;
     PreparedDeclBundle {
         input_projection: OnceLock::new(),
+        resolution_facts: OnceLock::new(),
         account: StoreAccount::default(),
         owner_whole_hash,
         prepared_type_decls: build_prepared_type_decl_cache(

@@ -264,6 +264,7 @@ fn an_augmentation_scan_over_an_unretained_resolution_stores_no_index_entry() {
                 )
             },
             None,
+            None,
         );
         (set.entries.len(), store.get_augmenter_set(&key).is_some())
     };
