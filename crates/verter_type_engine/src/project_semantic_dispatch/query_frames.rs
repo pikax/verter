@@ -22,11 +22,11 @@
 //! build's tracer and taint frame when it ran on the native stack.
 //!
 //! A body projection that reaches a conditional type needs its decision as
-//! well. The decision runs as a frame whose reads of instantiations and
-//! `typeof`s are answered by the deliveries it received; one it has no
+//! well. The decision runs as a frame whose reads of instantiations,
+//! `typeof`s and nested conditionals are answered by the deliveries it received; one it has no
 //! answer for becomes its need. The unfinished stage runs again once that
-//! need is delivered; completed operand preparation and its observations
-//! stay on the frame. A chain of conditionals each
+//! need is delivered; completed operand preparation, distribution members
+//! and their observations stay on the frame. A chain of conditionals each
 //! deciding over the one before is therefore a chain of frames too.
 //!
 //! A call an initializer's evaluation reaches resolves as a frame too,
@@ -376,6 +376,24 @@ pub(super) struct DecisionSeam {
     /// any other evaluates as it would anywhere: a query evaluated in place
     /// keeps what it builds, so it never reads a gap.
     nested: u32,
+    /// Only an explicit member or inferred winner has supplied an owned
+    /// conditional child. Operand and relation probes retain their own
+    /// temporary checker context and cannot transfer it through this seam.
+    conditional_children: bool,
+}
+
+pub(super) struct ConditionalChildQueries<'d> {
+    restore: Option<(&'d std::cell::RefCell<Option<DecisionSeam>>, bool)>,
+}
+
+impl Drop for ConditionalChildQueries<'_> {
+    fn drop(&mut self) {
+        if let Some((cell, previous)) = self.restore {
+            if let Some(seam) = cell.borrow_mut().as_mut() {
+                seam.conditional_children = previous;
+            }
+        }
+    }
 }
 
 /// A query the running decision reached, evaluating in place; the seam is
@@ -1653,6 +1671,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             needs: SeamNeeds::default(),
             depth,
             nested: 0,
+            conditional_children: false,
         }));
         verter_debug_assert!(installed.is_none(), "one decision runs per step");
         let output = self.build_conditional_with_state(
@@ -1707,11 +1726,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// needs, its claim kept for the runtime to produce it, and reads as a
     /// typed gap nothing built from it keeps. A query the decision evaluates in place reads only the frame's
     /// answers here and evaluates anything else as it would anywhere.
+    /// Nested conditional decisions, including distributed members and
+    /// inferred winners, use the same delivery boundary.
     /// `None` when no decision runs here, or for any other query.
     pub(super) fn read_at_decision_seam(&self, key: &SemanticQueryKey) -> Option<ValueRead> {
         if !matches!(
             key,
-            SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. }
+            SemanticQueryKey::Instantiate(_)
+                | SemanticQueryKey::TypeOf { .. }
+                | SemanticQueryKey::Conditional { .. }
         ) {
             return None;
         }
@@ -1726,6 +1749,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (seam, depth) = {
             let installed = self.decision_seam.borrow();
             let seam = installed.as_ref()?;
+            if matches!(key, SemanticQueryKey::Conditional { .. }) && !seam.conditional_children {
+                return None;
+            }
             let answered = seam
                 .answers
                 .get(&(key.clone(), self.checking_site.get()))
@@ -1765,6 +1791,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .as_mut()
                 .expect("the decision's seam stays installed for its run"),
         );
+    }
+
+    /// The caller supplies the complete materialized key of a member or
+    /// inferred winner. Other conditional probes must retain their checker
+    /// context in their owning continuation before they can suspend.
+    pub(super) fn conditional_child_queries(&self) -> ConditionalChildQueries<'_> {
+        let restore = self.decision_seam.borrow_mut().as_mut().map(|seam| {
+            let previous = std::mem::replace(&mut seam.conditional_children, true);
+            (&self.decision_seam, previous)
+        });
+        ConditionalChildQueries { restore }
     }
 
     /// The gap a read the running decision waits on reads as.
@@ -2278,6 +2315,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             needs: SeamNeeds::default(),
             depth,
             nested: 0,
+            conditional_children: false,
         }));
         let demanded = self.observe_read(|| {
             let _ = self.demand_relation_operands(operands);

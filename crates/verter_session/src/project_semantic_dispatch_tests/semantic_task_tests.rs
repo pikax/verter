@@ -567,6 +567,223 @@ fn a_conditional_retains_prepared_operands_across_a_dependency_wait() {
     drop(other);
 }
 
+/// A distributed conditional suspends at a held member without blocking its
+/// poller or revisiting a completed sibling. Resume on another thread and
+/// compare the full read with an independent cold synchronous decision.
+#[test]
+fn a_distributed_conditional_retains_completed_members_across_a_wait() {
+    use verter_type_engine::semantic_query::{
+        CacheRead, DeclIdentity, InstantiateKey, LiteralValue, PayloadArray, SemanticNodeId,
+    };
+
+    let fixture = || {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            TASK_FILE,
+            "type Later<T> = T; export {};",
+            crate::FileLanguage::script_ts(),
+        );
+        assert!(host.ensure_indexed_ready(TASK_FILE).is_some());
+        host
+    };
+    let keys =
+        |host: &crate::VerterHost,
+         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
+            let graph = host.project_type_store().semantic_graph();
+            let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+            let [yes, no] = [true, false].map(|value| {
+                graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(value)))
+            });
+            let SemanticQueryKey::Conditional {
+                true_branch,
+                false_branch,
+                ..
+            } = primitive_conditional_key(dispatch, yes, yes)
+            else {
+                unreachable!();
+            };
+            let binder = graph.alloc_infer_binder_id();
+            let infer = graph.intern_node(SemanticNodeData::Infer {
+                name: "U".into(),
+                binder: binder.clone(),
+                constraint: None,
+            });
+            let inferred = graph.intern_node(SemanticNodeData::InferRef {
+                name: "U".into(),
+                binder,
+            });
+            let late = graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: TASK_FILE.into(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: host.shallow_file_state(TASK_FILE).unwrap().whole_hash,
+                    decl_name: "Later".into(),
+                },
+                args: PayloadArray::from(vec![inferred]),
+            });
+            let selected = graph.intern_node(SemanticNodeData::Conditional {
+                check: late,
+                extends: yes,
+                true_branch_ref: true_branch,
+                false_branch_ref: false_branch,
+                distributive: false,
+                pending: None,
+            });
+            // boolean extends infer U ? (Later<U> extends true ? string : number) : number
+            let key = SemanticQueryKey::Conditional {
+                check: boolean,
+                extends: infer,
+                true_branch: selected,
+                false_branch,
+                distributive: true,
+                pending: None,
+            };
+            let held = SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(
+                    TASK_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    "Later",
+                ),
+                Arc::from([no]),
+                dispatch.instantiate_context_for(
+                    TASK_FILE,
+                    ProjectionReductionContext::structural_transit(),
+                ),
+            ));
+            (key, held)
+        };
+    let proof = |read: &CacheRead<QueryResult<SemanticNodeId>>| {
+        assert!(
+            read.walker_diagnostics().is_empty(),
+            "the closed union has no diagnostics"
+        );
+        (
+            *read.fact_status(),
+            read.cache_suppress(),
+            read.dep_signature().clone(),
+            read.receipt()
+                .priced()
+                .expect("a decision receipt")
+                .exclusive(),
+        )
+    };
+    let (expected, expected_proof) = {
+        let host = fixture();
+        let view = host.resolver_store_view_read().into_owned_view();
+        let ctx = crate::resolver_core::HostResolverContext::new(
+            &host,
+            &view,
+            Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        let _builder = dispatch.enter_construction_scope();
+        let read = dispatch.execute_read(keys(&host, &dispatch).0);
+        let QueryResult::Value(node) = read.value() else {
+            panic!("the cold synchronous conditional must answer: {read:?}");
+        };
+        (
+            display(
+                &dispatch,
+                &QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
+            ),
+            proof(&read),
+        )
+    };
+    assert_eq!(expected, "Union(number | string)");
+    let host = fixture();
+    let view = host.resolver_store_view_read().into_owned_view();
+    let ctx = crate::resolver_core::HostResolverContext::new(
+        &host,
+        &view,
+        Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&ctx);
+    let _builder = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let (key, held) = keys(&host, &dispatch);
+    let (other, lease) = hold_producer(&host, graph, held);
+    let waker = Waker::from(Arc::new(CountingWaker::default()));
+    let folds = || {
+        ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::conditional_distributed_members_for_tests()
+    };
+    let (answer, completed) = dispatch
+        .with_semantic_task_for_tests(key.clone(), |slot| {
+            let task = slot.as_mut().expect("the task is lent");
+            assert_send(task);
+            let (pending, before_release) = std::thread::scope(|scope| {
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let task = &mut *task;
+                let waker = &waker;
+                let poller = scope.spawn(move || {
+                    let before = folds();
+                    let pending = task.poll_read_for_tests(waker);
+                    let _ = tx.send((pending, folds() - before));
+                });
+                let observed = rx.recv_timeout(std::time::Duration::from_secs(5));
+                // Release and join on timeout or assertion failure as well.
+                drop(lease);
+                poller
+                    .join()
+                    .expect("the initial poll returns after release");
+                observed.expect("a held distributed member must yield before release")
+            });
+            assert!(pending.is_pending(), "the member must suspend: {pending:?}");
+            assert_eq!(before_release, 1, "the first sibling already completed");
+            let before = folds();
+            let Poll::Ready(Ok(answer)) = task.poll_read_for_tests(&waker) else {
+                panic!("the released distributed conditional must answer");
+            };
+            (answer, before_release + folds() - before)
+        })
+        .expect("the cold conditional runs as a task");
+    assert_eq!(completed, 2, "each member is folded exactly once");
+    assert_eq!(display(&dispatch, answer.value()), expected);
+    assert!(
+        !answer.result_is_partial(),
+        "the union is complete: {answer:?}"
+    );
+    assert!(answer.walker_diagnostics().is_empty());
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    drop(other);
+    let synchronous = dispatch.execute_read(key);
+    let answer = answer.map_value(|value| match value {
+        QueryResult::Value(SemanticQueryValue::TypeNode(node)) => QueryResult::Value(node),
+        other => panic!("a conditional answers a type: {other:?}"),
+    });
+    assert_eq!(
+        proof(&answer),
+        expected_proof,
+        "suspension preserves the cold answer's evidence and exclusive logical work",
+    );
+    let (QueryResult::Value(answered), QueryResult::Value(expected)) =
+        (answer.value(), synchronous.value())
+    else {
+        panic!("both conditional entries must answer a type");
+    };
+    assert_eq!(answered, expected);
+    assert_eq!(answer.fact_status(), synchronous.fact_status());
+    assert_eq!(answer.cache_suppress(), synchronous.cache_suppress());
+    assert_eq!(
+        answer.walker_diagnostics(),
+        synchronous.walker_diagnostics()
+    );
+    assert_eq!(answer.dep_signature(), synchronous.dep_signature());
+    assert_eq!(
+        answer
+            .receipt()
+            .priced()
+            .expect("a resumed receipt")
+            .exclusive(),
+        synchronous
+            .receipt()
+            .priced()
+            .expect("a synchronous receipt")
+            .exclusive(),
+    );
+}
+
 /// The free-type-variable summaries a request composes are request state
 /// like every other the semantic task borrows: the task's dispatcher starts
 /// from the summaries its lender already composed, the summaries its own

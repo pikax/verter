@@ -35,6 +35,7 @@ pub(super) fn has_children(data: &SemanticNodeData) -> bool {
 std::thread_local! {
     static OPERAND_WALK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static OPERAND_PREPARATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DISTRIBUTED_MEMBERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MEMBER_QUERIES_FORCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -297,6 +298,25 @@ struct PreparedConditionalOperands {
 #[derive(Default)]
 pub(super) struct ConditionalDecisionState {
     prepared: Option<PreparedConditionalOperands>,
+    selection_started: bool,
+    distribution: Option<Box<ConditionalDistribution>>,
+}
+
+/// A distribution owns its completed prefix, including the evidence that
+/// distinguishes a positional answer from an incomplete member. Its next
+/// position is the length of `per_member`; an unanswered position is never
+/// appended or folded into the accumulated output.
+struct ConditionalDistribution {
+    members: Arc<[SemanticNodeId]>,
+    per_member: Vec<SemanticNodeId>,
+    output: super::walk::QueryBuildOutput,
+    positions_complete: bool,
+}
+
+enum DistributionStep {
+    Pending,
+    Complete,
+    NotDistributed,
 }
 
 /// How the decision procedure reaches a conditional's branches.
@@ -422,6 +442,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
                 },
             );
         }
+        let _children = dispatch.conditional_child_queries();
         dispatch.conditional_query_output(key)
     }
 
@@ -535,6 +556,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     #[cfg(any(test, feature = "test-support"))]
     pub fn conditional_operand_preparations_for_tests() -> usize {
         OPERAND_PREPARATIONS.with(std::cell::Cell::get)
+    }
+
+    /// Completed distributed members folded on this thread. Count at the
+    /// production fold, so retaining memo answers alone cannot hide a replay.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn conditional_distributed_members_for_tests() -> usize {
+        DISTRIBUTED_MEMBERS.with(std::cell::Cell::get)
     }
 
     construction_ordinal_seam! {
@@ -708,17 +736,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             }
         };
-        // Only this unfinished stage is speculative. Completed preparation
-        // and its observations stay on the owning frame across a later need.
-        let selection = self.observe_read(|| {
-            self.select_prepared_conditional(check, prepared, distributive, branches)
-        });
-        let output = if self.decision_waits() {
-            selection.discard()
-        } else {
-            selection.adopt(self)
-        };
-        output.unwrap_or_else(|abort| self.aborted_build_output(abort))
+        self.select_prepared_conditional(check, prepared, distributive, branches, state)
     }
 
     fn prepare_conditional_decision(
@@ -847,29 +865,81 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         prepared: PreparedConditionalOperands,
         distributive: bool,
         branches: &mut dyn ConditionalBranches<C>,
+        state: &mut ConditionalDecisionState,
+    ) -> super::walk::QueryBuildOutput {
+        if !state.selection_started {
+            let start = self.observe_read(|| {
+                if let Some(absorbed) = self.absorb_conditional(
+                    prepared.operands.absorbed_check,
+                    prepared.operands.extends,
+                    distributive,
+                    |take_true| branches.branch(self, take_true),
+                ) {
+                    return Err(Box::new(absorbed));
+                }
+                Ok(distributive
+                    .then(|| {
+                        self.begin_conditional_distribution(
+                            prepared.operands.declared_check,
+                            prepared.operands.extends,
+                        )
+                    })
+                    .flatten())
+            });
+            if self.decision_waits() {
+                return match start.discard() {
+                    Ok(_) => self.waiting_decision_output(),
+                    Err(abort) => self.aborted_build_output(abort),
+                };
+            }
+            match start.adopt(self) {
+                Ok(Ok(distribution)) => state.distribution = distribution,
+                Ok(Err(output)) => return *output,
+                Err(abort) => return self.aborted_build_output(abort),
+            }
+            state.selection_started = true;
+        }
+        if let Some(distribution) = &mut state.distribution {
+            match self.advance_conditional_distribution(distribution, &mut |member| {
+                branches.member(self, member, prepared.operands.extends)
+            }) {
+                DistributionStep::Pending => return self.waiting_decision_output(),
+                DistributionStep::Complete => {
+                    return state
+                        .distribution
+                        .take()
+                        .expect("the distribution is retained")
+                        .output;
+                }
+                DistributionStep::NotDistributed => state.distribution = None,
+            }
+        }
+        // The relation and winner remain speculative until their outstanding
+        // reads are answered. Completed classification and distributed members
+        // have already joined the owning frame and are never replayed here.
+        let selection = self.observe_read(|| {
+            self.select_conditional_branch(authored_check, prepared, distributive, branches)
+        });
+        let output = if self.decision_waits() {
+            selection.discard()
+        } else {
+            selection.adopt(self)
+        };
+        output.unwrap_or_else(|abort| self.aborted_build_output(abort))
+    }
+
+    fn select_conditional_branch(
+        &self,
+        authored_check: SemanticNodeId,
+        prepared: PreparedConditionalOperands,
+        distributive: bool,
+        branches: &mut dyn ConditionalBranches<C>,
     ) -> super::walk::QueryBuildOutput {
         let PreparedConditionalOperands {
             demanded_check,
             operands,
         } = prepared;
         let extends = operands.extends;
-        if let Some(absorbed) = self.absorb_conditional(
-            operands.absorbed_check,
-            extends,
-            distributive,
-            |take_true| branches.branch(self, take_true),
-        ) {
-            return absorbed;
-        }
-        if distributive {
-            if let Some(output) =
-                self.distribute_conditional(operands.declared_check, extends, &mut |member| {
-                    branches.member(self, member, extends)
-                })
-            {
-                return output;
-            }
-        }
         let check = operands.check;
         // A decision running as its frame demands the operands its relation
         // relates first, as the checker instantiates a conditional's check
@@ -1580,17 +1650,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         output
     }
 
-    /// The sole union distributor for materialized and lowering-time
-    /// conditionals. Each member disables distribution; materialized operands
-    /// re-enter the conditional family, while syntax lowers only its winner.
-    fn distribute_conditional(
+    /// Classify a distribution once. Materialized and lowering-time entries
+    /// use the same ordered member walk; only their branch supplier differs.
+    fn begin_conditional_distribution(
         &self,
         check: SemanticNodeId,
         extends: SemanticNodeId,
-        reduce_member: &mut dyn FnMut(SemanticNodeId) -> super::walk::QueryBuildOutput,
-    ) -> Option<super::walk::QueryBuildOutput> {
+    ) -> Option<Box<ConditionalDistribution>> {
         let (resolved_check, members) = self.distributive_check_union_members(check)?;
-        let mut output = super::walk::QueryBuildOutput::from((
+        let output = super::walk::QueryBuildOutput::from((
             QueryResult::Error(QueryError::Miss),
             self.project_generation_signature(),
         ))
@@ -1599,14 +1667,46 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             resolved_check,
             extends,
         ]));
-        let mut per_member = Vec::with_capacity(members.len());
-        let mut positions_complete = true;
-        for &member in members.iter() {
+        Some(Box::new(ConditionalDistribution {
+            per_member: Vec::with_capacity(members.len()),
+            members,
+            output,
+            positions_complete: true,
+        }))
+    }
+
+    /// Advance only the unfinished suffix. Adopt each completed member's
+    /// observations before retaining its value, so a later wait neither loses
+    /// its evidence nor requires executing that member again.
+    fn advance_conditional_distribution(
+        &self,
+        distribution: &mut ConditionalDistribution,
+        reduce_member: &mut dyn FnMut(SemanticNodeId) -> super::walk::QueryBuildOutput,
+    ) -> DistributionStep {
+        while let Some(&member) = distribution.members.get(distribution.per_member.len()) {
             if self.cancellation.is_cancelled() {
-                return Some(self.cancelled_build_output());
+                distribution.output = self.cancelled_build_output();
+                return DistributionStep::Complete;
             }
-            let member_output = reduce_member(member);
-            positions_complete &= !member_output.result_is_partial()
+            let member_read = self.observe_read(|| reduce_member(member));
+            let read = if self.decision_waits() {
+                match member_read.discard() {
+                    Ok(_) => return DistributionStep::Pending,
+                    Err(abort) => Err(abort),
+                }
+            } else {
+                member_read.adopt(self)
+            };
+            let member_output = match read {
+                Ok(output) => output,
+                Err(abort) => {
+                    distribution.output = self.aborted_build_output(abort);
+                    return DistributionStep::Complete;
+                }
+            };
+            #[cfg(any(test, feature = "test-support"))]
+            DISTRIBUTED_MEMBERS.with(|count| count.set(count.get() + 1));
+            distribution.positions_complete &= !member_output.result_is_partial()
                 || matches!(
                     member_output.approximation,
                     Some(
@@ -1614,6 +1714,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             | super::projection_fact::ProjectionInterpretation::CheckerRecovery
                     )
                 );
+            let output = &mut distribution.output;
             output.cache_suppress |= member_output.cache_suppress;
             output.fold_partial(member_output.result_is_partial());
             output.add_partial_reasons(member_output.partial_reasons());
@@ -1621,24 +1722,42 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .observed_self_roots
                 .extend(member_output.observed_self_roots);
             match member_output.result {
-                QueryResult::Value(node) => per_member.push(node),
+                QueryResult::Value(node) => distribution.per_member.push(node),
                 _ => {
                     self.fold_into_top_build_local_taint_with(true, true, output.partial_reasons());
                     self.deposit_operand_self_roots(&output.observed_self_roots);
-                    return None;
+                    return DistributionStep::NotDistributed;
                 }
             }
         }
-        let normalized = self.conditional_query_output(SemanticQueryKey::ReduceUnion {
-            members: Arc::from(per_member),
-            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        let normalization = self.observe_read(|| {
+            self.conditional_query_output(SemanticQueryKey::ReduceUnion {
+                members: Arc::from(distribution.per_member.as_slice()),
+                nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            })
         });
+        let read = if self.decision_waits() {
+            match normalization.discard() {
+                Ok(_) => return DistributionStep::Pending,
+                Err(abort) => Err(abort),
+            }
+        } else {
+            normalization.adopt(self)
+        };
+        let normalized = match read {
+            Ok(output) => output,
+            Err(abort) => {
+                distribution.output = self.aborted_build_output(abort);
+                return DistributionStep::Complete;
+            }
+        };
+        let output = &mut distribution.output;
         output.cache_suppress |= normalized.cache_suppress;
         output.fold_partial(normalized.result_is_partial());
         output.add_partial_reasons(normalized.partial_reasons());
         // Every distributed branch produced its position; gaps remain in
         // their own branches rather than being interpreted as absent arms.
-        positions_complete &= !normalized.result_is_partial()
+        distribution.positions_complete &= !normalized.result_is_partial()
             || matches!(
                 normalized.approximation,
                 Some(
@@ -1647,9 +1766,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 )
             );
         output.result = normalized.result;
-        output.approximation = positions_complete
+        output.approximation = distribution
+            .positions_complete
             .then_some(super::projection_fact::ProjectionInterpretation::Positional);
-        Some(output)
+        DistributionStep::Complete
     }
 
     /// Selection side effects have one owner at both forcing sites. Only a
@@ -1688,6 +1808,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 graph.node_data(result).as_deref(),
                 Some(SemanticNodeData::Conditional { .. })
             ) {
+                let _children = self.conditional_child_queries();
                 let output = self
                     .evaluate_deferred_semantic_node_with_context(
                         result,

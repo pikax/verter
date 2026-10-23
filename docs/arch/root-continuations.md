@@ -405,6 +405,17 @@ own resumable traversal state.
 
 ## Boundaries that still block
 
+Conditional frames retain operand preparation, absorption/distribution
+classification and the completed prefix of a distributed check. An explicit
+distributed member or inferred winner transfers its nested conditional to another frame;
+it no longer evaluates that member synchronously inside the parent. Each
+completed member's observations join the parent before its result is
+retained. An unanswered member neither advances the cursor nor contributes
+a partial value to the accumulated union. Resumption continues at that
+member, and the final union uses the same reduction as an uninterrupted
+decision. The relation and winner stages, and nested queries evaluated
+inside other synchronous adapters, still require continuation conversion.
+
 These are the production waits a component-meta or compile root can reach
 in the current tree. Each one parks the polling thread inside whatever poll
 reaches it, so a root that reaches one is not yet pollable. Semantic memo
