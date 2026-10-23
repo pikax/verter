@@ -513,6 +513,68 @@ fn root_continuations_cancelling_a_suspended_follower_spares_its_producer() {
     );
 }
 
+/// Resetting the scheduler while a compile root follows another root's
+/// held producer wakes the follower, whose next poll answers the shutdown
+/// without entering a wait; the producer handed out before the reset still
+/// runs, and its own root answers too.
+#[test]
+fn root_continuations_a_reset_answers_a_suspended_follower_root() {
+    let host = host();
+    let unpark = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
+    let producer = loop {
+        assert!(producing.poll(&unpark).is_pending());
+        match producing.take_work() {
+            Some(work) if work.is_producer() => break work,
+            Some(dispatch) => {
+                let _ = dispatch.run();
+            }
+            None => std::thread::park(),
+        }
+    };
+    let mut following = host.begin_compile_request(OWNER, owner_compile_request());
+    let (wake_tx, wake_rx) = mpsc::channel::<()>();
+    let follower = Waker::from(Arc::new(ChannelWaker(parking_lot::Mutex::new(wake_tx))));
+    assert!(following.poll(&follower).is_pending());
+    drop(following.take_work());
+    while wake_rx.try_recv().is_ok() {}
+    host.scheduler().reset();
+    wake_rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("the reset wakes the follower");
+    let answer = {
+        let _forbid = WaitProbe::forbid();
+        following.poll(&follower)
+    };
+    assert!(
+        matches!(
+            answer,
+            Poll::Ready(Err(crate::types::CompileRequestFailure::Host(
+                crate::types::HostError::Shutdown
+            )))
+        ),
+        "the follower answers the shutdown: {answer:?}",
+    );
+    assert!(producer.run());
+    let produced = loop {
+        if let Poll::Ready(answer) = producing.poll(&unpark) {
+            break answer;
+        }
+        if let Some(work) = producing.take_work() {
+            let _ = work.run();
+        }
+    };
+    assert!(
+        matches!(
+            produced,
+            Err(crate::types::CompileRequestFailure::Host(
+                crate::types::HostError::Shutdown
+            ))
+        ),
+        "the producing root answers the shutdown too: {produced:?}",
+    );
+}
+
 /// The synchronous compile entry drives the same root at its boundary: it
 /// enters the root driver's wait and runs the handed-out producer on the
 /// scheduler's CPU pool, cold or warm.

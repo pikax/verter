@@ -115,10 +115,21 @@ store-view build and resumes warm without entering a wait; dropping it there
 withdraws its wait; the compile root's polls enter no wait under a
 forbidding probe, cold and warm, handing out its producer once; and a second
 compile root following the first's held producer answers `Pending` and
-completes once that producer runs. Planted controls fail the same checks:
-the synchronous capture behind a held build is refused, and running the
-macro producer inside the compile root's poll fails all three compile
-cases.
+completes once that producer runs. One thread drives three compile roots
+— two of one request and one of another — begun before driving starts:
+every poll answers or suspends without entering a wait, each shared
+bundle is produced once by the work its first root hands out while the
+other waits, a follower's wake arrives while the driver runs that work and
+only queues a later poll, and every answer is the synchronous entry's.
+Cancelling a suspended follower root's request wakes it to its
+cancellation while the producing root completes, and a scheduler reset
+wakes it to the shutdown. Planted controls fail the same checks: the
+synchronous capture behind a held build is refused, and running the macro
+producer inside the compile root's poll fails the compile cases. The
+compile contracts `root_external_consumer_positive` (a plain external
+consumer drives both roots, with no support feature) and
+`root_poll_no_blocking_driver` (the boundary driver is unreachable from a
+root) pin the polling surface; making the driver public fails the second.
 
 ## Execution tasks across suspension
 
