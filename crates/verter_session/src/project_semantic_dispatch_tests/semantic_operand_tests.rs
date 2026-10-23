@@ -4103,3 +4103,34 @@ fn a_cold_import_sibling_contributes_no_dispatches_or_facts_to_a_residual_path_f
         "the sibling-value counter must move when the key is actually dispatched"
     );
 }
+
+/// A deferred demand over an operand this graph no longer holds is refused,
+/// never admitted as an operand that evaluates to itself: a released literal
+/// reads as the shared placeholder, which would otherwise complete as itself.
+#[test]
+fn a_released_self_evaluating_operand_is_refused() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let graph = host.project_type_store().semantic_graph();
+    let released = {
+        let _scope = graph.enter_node_root_scope();
+        graph.intern_node(SemanticNodeData::Literal(
+            verter_type_expr::LiteralValue::String("released".into()),
+        ))
+    };
+    assert!(
+        !graph.node_is_live(released),
+        "fixture invariant: the literal's only owner was its scope"
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let (node, completeness, suppressed) =
+        dispatch.evaluate_deferred_outcome_for_tests(released, context);
+    assert_ne!(
+        node, released,
+        "a released operand never completes as itself"
+    );
+    assert!(
+        completeness.is_partial() && suppressed,
+        "the refusal is partial and never cached: {completeness:?}"
+    );
+}

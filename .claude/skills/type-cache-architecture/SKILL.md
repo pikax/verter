@@ -1329,14 +1329,28 @@ as an unpublished root does. Guarded by
 `mixed_component_member_entry_self_roots_cover_all_component_files` and the
 tier's own reclamation and pressure tests (`request_completions_tests.rs`).
 
-Instantiation serves: every instantiation reads its declaration file's
-`IndexedReady` record (`ProjectSemanticDispatch::transaction_indexed_record`), as do its global-interface, member-index and augmentation-candidate reads.
+Transaction file serves: every instantiation reads its declaration file's
+`IndexedReady` record (`ProjectSemanticDispatch::transaction_indexed_record`), as do its global-interface, member-index and augmentation-candidate reads,
+and so do the other dispatcher reads that need only the record: a `typeof`
+build's and a `LowerLocator` build's own file, module-kind, exported-function
+augmentation and value-signature reads, namespace merging, a call's pending
+state and the flow evaluator's callee-augmentation check (through
+`FlowDemandDriver::transaction_indexed_record`).
 The first serve of a canonical on a transaction is recorded with
 `record_transaction_read` and kept in `CheckerDispatchTransaction::indexed_serves`
-under the workspace edit clocks it was served at; a later instantiation under
-the same clocks replays that read (`replay_transaction_read`: its facts,
-refusal and self-roots) instead of re-serving. An edit moves the clocks and the
-file is served afresh; a refused or non-reusable serve is never kept.
+under the workspace edit clocks it was served at; a later read under the same
+clocks replays that read (`replay_transaction_read`: its facts, refusal,
+self-roots and canonical evidence) into the scopes live at the later read
+instead of re-serving. The replay is the authority for what the later read
+depends on: the record alone carries none of the serve's facts, so a reader
+that skipped it would publish a carrier missing the file's parse and route
+facts (`a_replayed_declaration_serve_publishes_the_facts_its_first_serve_does`,
+`a_sibling_declaration_answered_from_the_recorded_serve_publishes_its_facts`
+fail with the replay removed). Lifetime: a kept serve lives as long as its
+transaction; an edit moves the clocks and the file is served afresh; a refused
+or non-reusable serve is never kept, and a read where no channel is
+observable (no live tracer or build-local frame, or an already partial
+cold-compute scope) is served directly and never kept.
 
 Paged signature evidence: a `fact_dep_signature` is never refused for its
 width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature

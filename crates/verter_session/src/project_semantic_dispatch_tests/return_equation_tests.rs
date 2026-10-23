@@ -193,6 +193,90 @@ fn mixed_seeded_component_close_stages_both_domains() {
     );
 }
 
+/// A root close publishes on a carrier that covers the members its
+/// transaction queued earlier for the batched publish, not only the members
+/// it drains itself: a call member queued by an earlier close names a file
+/// no member of the later root observes, and an edit to that file must still
+/// invalidate what the later root publishes.
+#[test]
+fn a_later_root_carrier_covers_members_queued_earlier_in_the_transaction() {
+    const QUEUED: &str = "/ws/queued-member/other.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = dispatch.graph_arc();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let callee = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+    let first_key = dispatch.flow_return_key_for(&flow_identity("queuesACall"));
+    let queued_call = call_key(&dispatch, callee, 31);
+    let first = {
+        let mut txn = dispatch.dispatch_txn.borrow_mut();
+        let idx = txn.reentry_mut().push_flow_return(first_key.clone(), 0);
+        txn.obligations.pending_mut().deposit(PendingObligation {
+            identity: ObligationIdentity::ResolveCall(queued_call.clone()),
+            domain: PendingObligationDomain::ResolveCall(Box::new(ResolveCallPendingState {
+                selection: ResolveCallSelection::DynamicAny,
+                concrete_seeds: Vec::new(),
+                holds: vec![ReturnObligationIdentity::FlowReturn(first_key.clone())],
+                staged_session: None,
+                replay_applicability: false,
+                inline_flight: None,
+                self_roots: vec![(verter_type_expr::OwnedStr::from(QUEUED), [7; 16])],
+                proof_complete: true,
+            })),
+        });
+        idx
+    };
+    let _ = dispatch.flow_frame_close_for_tests(
+        first,
+        FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
+            dispatch.graph().store(),
+            number,
+            verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
+            None,
+        )),
+        vec![ReturnObligationIdentity::ResolveCall(queued_call)],
+    );
+    assert_eq!(
+        dispatch.dispatch_txn.borrow().call.completed_members.len(),
+        1,
+        "fixture invariant: the first close queues its call member"
+    );
+
+    *host
+        .flow_fault_injection
+        .flow_root_carrier_probe
+        .lock()
+        .expect("the flow-root carrier probe is never poisoned") = Some(Vec::new());
+    let later_key = dispatch.flow_return_key_for(&flow_identity("closesLater"));
+    let later = dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .reentry_mut()
+        .push_flow_return(later_key, 0);
+    let _ = dispatch.flow_frame_close_for_tests(
+        later,
+        FlowReturnPendingOutcome::EvaluatedValue(FlowReturnResult::new(
+            dispatch.graph().store(),
+            number,
+            verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
+            None,
+        )),
+        Vec::new(),
+    );
+    let roots = host
+        .flow_fault_injection
+        .flow_root_carrier_probe
+        .lock()
+        .expect("the flow-root carrier probe is never poisoned")
+        .take()
+        .expect("the probe stays armed");
+    assert!(
+        roots.iter().any(|root| root.as_ref() == QUEUED),
+        "the later root's carrier covers the queued call member's file: {roots:?}"
+    );
+    dispatch.relation_abort_completed_members();
+}
+
 /// A flow-owned indexed call contributes a tagged ResolveCall hold, even when
 /// the nested call already has a stable result. Mutation recipe: return the
 /// call node directly without recording the tagged hold; the frame has no
