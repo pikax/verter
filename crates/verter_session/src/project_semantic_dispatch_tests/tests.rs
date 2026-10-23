@@ -17374,11 +17374,13 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
             surface_member("tag", string, false, false),
         ],
     );
+    // A non-discriminant mismatch keeps the intersection from reducing to
+    // never before relation descent can exercise projection rollback.
     let losing_source_arm = intern_object_with_members(
         &graph,
         vec![
             surface_member("capture", number, false, false),
-            surface_member("tag", boolean, false, false),
+            surface_member("tag", number, false, false),
         ],
     );
     let winning_source_arm = intern_object_with_members(

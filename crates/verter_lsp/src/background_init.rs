@@ -472,7 +472,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // scan is re-armed under this generation; otherwise nothing walks the
     // workspace — an open document is served by its own import-dependency
     // publication, and the complete carrier inventory is built only when a
-    // request that needs it (frontier, workspace-wide enumeration) asks.
+    // request that needs it (frontier, workspace-wide enumeration) asks or the
+    // client negotiated the store-fill demand (`carrierStoreFill`): a client
+    // running a consumer over the durable carrier store subscribed to keep it
+    // filled. That subscription is fulfilled only where a carrier publisher
+    // exists — every tsserver-store tier, including the editor-owned plugin
+    // route and managed TSGO — and through this same idempotent lifecycle, so
+    // it re-arms per generation exactly like a request's demand; a session
+    // with no publisher has no store to fill and the demand stays inert.
     {
         let published_basis = vfs_workspace
             .read()
@@ -493,9 +500,12 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             server.workspace_scan_settled.notify_waiters();
         }
     }
+    let store_fill_demanded =
+        server.subscriptions.carrier_store_fill() && server.carrier_publish_coordinator.is_some();
     if server
         .workspace_scan_demanded
         .load(std::sync::atomic::Ordering::Acquire)
+        || store_fill_demanded
     {
         server.activate_workspace_scan().await;
     }
@@ -639,12 +649,14 @@ pub(super) async fn finish_post_scan(server: std::sync::Weak<ServerCore>, my_gen
 }
 
 impl super::VerterLanguageServer {
-    /// Start the workspace scanner — idempotently — because a request needs
-    /// the complete workspace inventory: the owning project's carrier frontier
-    /// (references/rename) or a workspace-wide enumeration (workspace symbols,
-    /// auto-import candidates, project overview, route tree, component
-    /// parents, global CSS classes). Nothing else starts it: initialization,
-    /// document open and edits never walk the workspace.
+    /// Start the workspace scanner — idempotently — because the complete
+    /// workspace inventory is demanded: either a request needs it (the owning
+    /// project's carrier frontier for references/rename, or a workspace-wide
+    /// enumeration: workspace symbols, auto-import candidates, project
+    /// overview, route tree, component parents, global CSS classes) or the
+    /// client negotiated the store-fill demand (`carrierStoreFill`) and a
+    /// carrier publisher exists. Absent both, initialization, document open
+    /// and edits never walk the workspace.
     ///
     /// The demand is sticky for the server's lifetime: a later init
     /// generation re-arms the scan over its own snapshot. Before the first
@@ -682,6 +694,17 @@ impl super::VerterLanguageServer {
             return;
         };
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        // The settle ping's basis: durable store publications are counted at the
+        // coordinator's single sealed commit seam, so this snapshot sees EVERY fill
+        // the scan window causes — the scanner's direct publishes AND the recovery
+        // writes the carrier-phase / completion drains commit after a transient
+        // first failure. The scanner's own companion count cannot: a retry that
+        // publishes through a drain is invisible to it, and the ping would be
+        // suppressed even though the store just filled.
+        let store_publications_at_arm = self
+            .carrier_publish_coordinator
+            .as_ref()
+            .map(|coordinator| coordinator.store_publication_count());
         let scanner = crate::workspace_scanner::spawn_workspace_scanner(
             crate::workspace_scanner::WorkspaceScannerConfig {
                 root_paths,
@@ -743,6 +766,22 @@ impl super::VerterLanguageServer {
             server.workspace_scan_settled.notify_waiters();
             server.rearm_open_document_diagnostics();
             server.refresh_deferred_decorations();
+            // The scan is an editor-membership publication like any interactive
+            // one: a client that subscribed to carrier-store changes runs its
+            // own TypeScript service over the store and refreshes it on this
+            // ping. On the editor-owned tier the scan is the ONLY publisher, so
+            // without this settle ping the store's first fill stays invisible
+            // to the editor plugin. The decision is the coordinator's
+            // publication count diff, so a fill a retry drain recovered counts
+            // exactly like a direct publication. One trailing ping covers the
+            // whole batch (the client's refresh coalesces).
+            let store_publications_now = server
+                .carrier_publish_coordinator
+                .as_ref()
+                .map(|coordinator| coordinator.store_publication_count());
+            if store_publications_now != store_publications_at_arm {
+                server.notify_editor_carrier_store_changed().await;
+            }
         });
     }
 
