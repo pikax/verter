@@ -30,6 +30,144 @@ fn request() -> ScopedCacheNodeRequest {
 }
 
 #[test]
+fn transferred_producer_clears_an_unrelated_executor_request() {
+    use verter_execution::request_context::{
+        current_request_id, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike,
+        TlsUninstall,
+    };
+    struct Request(u64);
+    impl RequestContextLike for Request {
+        fn request_id(&self) -> u64 {
+            self.0
+        }
+        fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+            struct Installed {
+                _guard: OpaqueContextGuard,
+            }
+            impl TlsUninstall for Installed {
+                fn uninstall(self: Box<Self>) {}
+            }
+            Box::new(Installed {
+                _guard: OpaqueContextGuard::install(OpaqueRequestContext(self)),
+            })
+        }
+    }
+    for captured in [None, Some(11)] {
+        for driver_request in [None, Some(999)] {
+            for panics in [false, true] {
+                let scheduler = scheduler();
+                let mut submitted = request();
+                submitted.request_context =
+                    captured.map(|id| OpaqueRequestContext(Arc::new(Request(id))));
+                let mut root = scheduler
+                    .begin_scoped_cache_node::<Option<u64>>(submitted)
+                    .unwrap();
+                assert!(root.poll(Waker::noop()).is_pending());
+                scheduler.drive_all();
+                let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) =
+                    root.poll(Waker::noop())
+                else {
+                    panic!("dispatch transfers the producer");
+                };
+                let _driver = driver_request.map(|id| {
+                    OpaqueContextGuard::install(OpaqueRequestContext(Arc::new(Request(id))))
+                });
+                producer.run(|_| {
+                    let observed = current_request_id();
+                    if panics {
+                        panic!("producer failure");
+                    }
+                    observed
+                });
+                assert_eq!(current_request_id(), driver_request, "restore driver TLS");
+                match root.poll(Waker::noop()) {
+                    Poll::Ready(Ok(ScopedCacheNodeStep::Value(observed))) if !panics => {
+                        assert_eq!(*observed, captured, "work observes its captured request");
+                    }
+                    Poll::Ready(Err(ScopedCacheNodeError::Panicked)) if panics => {}
+                    _ => panic!("producer settles with the expected terminal"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn aggregate_cancellation_wakes_after_scoped_teardown_unlocks() {
+    struct Probe {
+        scheduler: std::sync::Weak<Scheduler>,
+        flight: std::sync::Weak<ScopedCacheFlight>,
+        calls: AtomicUsize,
+        locked: AtomicBool,
+    }
+    impl Wake for Probe {
+        fn wake(self: Arc<Self>) {
+            let scheduler = self.scheduler.upgrade().unwrap();
+            let flight = self.flight.upgrade().unwrap();
+            // Avoid hanging the test if a regression invokes this callback
+            // under a hold. The unlocked branch exercises actual re-entry.
+            if scheduler.scoped_cache_gate.try_lock().is_none()
+                || scheduler.dag.try_lock().is_none()
+                || flight.state.try_lock().is_none()
+            {
+                self.locked.store(true, Ordering::SeqCst);
+            } else {
+                drop(scheduler.begin_scoped_cache_node::<u64>(request()).unwrap());
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    for terminal in [
+        "success",
+        "panic",
+        "producer_drop",
+        "follower_drop",
+        "reset",
+    ] {
+        let scheduler = scheduler();
+        let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+        assert!(root.poll(Waker::noop()).is_pending());
+        scheduler.drive_all();
+        let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop())
+        else {
+            panic!("dispatch transfers the producer");
+        };
+        let flight = Arc::clone(
+            scheduler
+                .scoped_cache_flights
+                .get(&request().identity())
+                .unwrap()
+                .value(),
+        );
+        let aggregate = flight.state.lock().aggregate.clone().unwrap();
+        let probe = Arc::new(Probe {
+            scheduler: Arc::downgrade(&scheduler),
+            flight: Arc::downgrade(&flight),
+            calls: AtomicUsize::new(0),
+            locked: AtomicBool::new(false),
+        });
+        let mut stop = aggregate.subscribe();
+        assert!(stop.poll(&Waker::from(Arc::clone(&probe))).is_pending());
+        match terminal {
+            "success" => producer.run(|_| 41),
+            "panic" => producer.run(|_| panic!("producer failure")),
+            "producer_drop" => drop(producer),
+            "follower_drop" => {
+                drop(root);
+                drop(producer);
+            }
+            "reset" => {
+                scheduler.reset();
+                drop(producer);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1, "{terminal}");
+        assert!(!probe.locked.load(Ordering::SeqCst), "{terminal}");
+    }
+}
+
+#[test]
 fn scoped_handoff_suspends_without_running_its_producer_and_resumes_elsewhere() {
     let scheduler = scheduler();
     let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();

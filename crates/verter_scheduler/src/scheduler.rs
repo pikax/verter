@@ -503,6 +503,9 @@ pub struct Scheduler {
     /// from every build without it.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) reset_wake_posts: AtomicU64,
+    /// Test-only observation of a contested lifecycle acquisition or driver join.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    lifecycle_boundary: Mutex<Option<std::sync::mpsc::Sender<&'static str>>>,
     /// Test-only monotonic counter bumped once per admission-lock
     /// acquisition inside [`Self::handle_new_request_batch`] (co-located
     /// with the `dag.lock()` call via [`Self::acquire_dag_for_admission`]
@@ -654,6 +657,8 @@ impl Scheduler {
             batch_admit_seam: BatchAdmitSeamHook::default(),
             #[cfg(any(test, feature = "test-support"))]
             reset_wake_posts: AtomicU64::new(0),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            lifecycle_boundary: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -768,6 +773,8 @@ impl Scheduler {
             batch_admit_seam: BatchAdmitSeamHook::default(),
             #[cfg(any(test, feature = "test-support"))]
             reset_wake_posts: AtomicU64::new(0),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            lifecycle_boundary: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -1326,6 +1333,10 @@ impl Scheduler {
                 if let Some(serial) = self.reset_serial.try_lock() {
                     break serial;
                 }
+                #[cfg(test)]
+                if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                    let _ = boundary.send("reset-contended");
+                }
                 // A stopping lifecycle owner may be joining this very
                 // callback. A healthy restart, however, may merely be
                 // returning without resetting anything: do not lose reset
@@ -1342,7 +1353,13 @@ impl Scheduler {
                 }
             }
         } else {
-            self.reset_serial.lock()
+            self.reset_serial.try_lock().unwrap_or_else(|| {
+                #[cfg(test)]
+                if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                    let _ = boundary.send("reset-contended");
+                }
+                self.reset_serial.lock()
+            })
         };
         // 1. Stop the driver thread. The dedicated teardown signal — not
         //    the inbox wake, which any cooperative pump may consume first —
@@ -1428,6 +1445,10 @@ impl Scheduler {
         }
         let handle = self.driver_handle.lock().take();
         if let Some(handle) = handle {
+            #[cfg(test)]
+            if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                let _ = boundary.send("restart-join");
+            }
             let _ = handle.join();
         }
         *self.driver_thread_id.lock() = None;

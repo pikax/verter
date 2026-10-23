@@ -682,8 +682,9 @@ fn root_continuations_cold_component_meta_root_suspends_on_its_owners_index_buil
 fn hold_store_view_build<'s>(
     scope: &'s std::thread::Scope<'s, '_>,
     host: &'s VerterHost,
-) -> std::thread::ScopedJoinHandle<'s, ()> {
+) -> (std::thread::ScopedJoinHandle<'s, ()>, Hold<impl FnOnce()>) {
     let gate = &crate::resolver_store::TEST_BUILD_GATE;
+    let release = Hold(Some(|| crate::resolver_store::TEST_BUILD_GATE.release()));
     // The cached view goes stale, so the next read builds.
     host.bump_store_view_epoch();
     gate.arm();
@@ -695,7 +696,23 @@ fn hold_store_view_build<'s>(
         gate.wait_for_builder_parked(POLL_DEADLINE),
         "the builder holds the store-view build claim",
     );
-    builder
+    (builder, release)
+}
+
+#[test]
+fn held_store_view_builder_is_released_when_a_poll_panics() {
+    let host = host();
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        std::thread::scope(|scope| {
+            let (_builder, _release) = hold_store_view_build(scope, &host);
+            let _forbid = WaitProbe::forbid();
+            // The synchronous boundary panics under this probe. Cleanup must
+            // release the held builder before the scope joins it on unwind.
+            let _ = host.resolver_store_view_read();
+        });
+    }));
+    assert!(refused.is_err(), "the blocking poll was refused");
+    let _ = host.resolver_store_view_read();
 }
 
 /// The component-metadata root suspends on a store-view build another
@@ -707,7 +724,7 @@ fn root_continuations_component_meta_root_suspends_behind_a_held_store_view_buil
     let host = host();
     let cold = owner_output_through_root(&host);
     let answer = std::thread::scope(|scope| {
-        let builder = hold_store_view_build(scope, &host);
+        let (builder, _release) = hold_store_view_build(scope, &host);
         pending_before_release(
             POLL_DEADLINE,
             host.begin_component_meta_output(OWNER),
@@ -756,8 +773,7 @@ fn component_meta_request_snapshot_suspends_behind_a_held_store_view_build() {
         .expect("warm resolution");
         let answer = std::thread::scope(|scope| {
             // Release even if an assertion or poll panics, before scope joins.
-            let _release = Hold(Some(|| crate::resolver_store::TEST_BUILD_GATE.release()));
-            let builder = hold_store_view_build(scope, &host);
+            let (builder, _release) = hold_store_view_build(scope, &host);
             let request = async {
                 let flights = host.resolver_runtime().component_meta.singleflight();
                 if let Some(view) = session_view {
@@ -886,8 +902,7 @@ fn dropping_a_component_meta_request_withdraws_its_pending_snapshot() {
     let host = host();
     let view = crate::session_view::HostViewRef::new(&host);
     std::thread::scope(|scope| {
-        let _release = Hold(Some(|| crate::resolver_store::TEST_BUILD_GATE.release()));
-        let builder = hold_store_view_build(scope, &host);
+        let (builder, _release) = hold_store_view_build(scope, &host);
         let mut root = crate::root_continuation::RootTask::new(
             &host.task_registry,
             host.resolve_component_meta_with_view_and_fixed_admission_pollable(
@@ -920,7 +935,7 @@ fn root_continuations_synchronous_capture_behind_a_held_build_is_refused() {
     let host = host();
     let _ = host.resolver_store_view_read();
     let verdict = std::thread::scope(|scope| {
-        let builder = hold_store_view_build(scope, &host);
+        let (builder, _release) = hold_store_view_build(scope, &host);
         pending_before_release(
             POLL_DEADLINE,
             (),
@@ -951,7 +966,7 @@ fn root_continuations_dropping_a_suspended_component_meta_root_withdraws_its_wai
     let host = host();
     let _ = owner_output_through_root(&host);
     std::thread::scope(|scope| {
-        let builder = hold_store_view_build(scope, &host);
+        let (builder, _release) = hold_store_view_build(scope, &host);
         let mut root = host.begin_component_meta_output(OWNER);
         let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
         let first = {

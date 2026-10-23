@@ -28,6 +28,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 #[cfg(any(test, feature = "test-support"))]
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Poll, Wake, Waker};
 use std::time::Duration;
@@ -194,22 +195,42 @@ impl Drop for WaitProbe {
     }
 }
 
-/// Wakes the thread that created it.
-struct UnparkThread(std::thread::Thread);
+/// One drive's notification, independent of nested drives on the same thread.
+struct UnparkThread {
+    thread: std::thread::Thread,
+    notified: AtomicBool,
+}
 
-impl Wake for UnparkThread {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
+impl UnparkThread {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            thread: std::thread::current(),
+            notified: AtomicBool::new(false),
+        })
     }
 
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
+    fn park(&self, slice: Option<Duration>) {
+        // Another drive can consume the thread's park token, but cannot
+        // consume this drive's notification. A wake after this check leaves
+        // a park token, so the check-to-park race is safe as well.
+        if !self.notified.swap(false, Ordering::AcqRel) {
+            match slice {
+                Some(slice) => std::thread::park_timeout(slice),
+                None => std::thread::park(),
+            }
+        }
     }
 }
 
-thread_local! {
-    /// This thread's driving waker, built once per thread.
-    static PARK_WAKER: Waker = Waker::from(Arc::new(UnparkThread(std::thread::current())));
+impl Wake for UnparkThread {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notified.store(true, Ordering::Release);
+        self.thread.unpark();
+    }
 }
 
 /// Poll `poll` to completion on this thread, parking whenever it is pending
@@ -230,15 +251,14 @@ pub fn block_on<T>(
     mut poll: impl FnMut(&Waker) -> Poll<T>,
 ) -> T {
     enter_wait(family);
-    PARK_WAKER.with(|waker| loop {
-        match poll(waker) {
+    let notification = UnparkThread::new();
+    let waker = Waker::from(Arc::clone(&notification));
+    loop {
+        match poll(&waker) {
             Poll::Ready(outcome) => return outcome,
-            Poll::Pending => match slice {
-                Some(slice) => std::thread::park_timeout(slice),
-                None => std::thread::park(),
-            },
+            Poll::Pending => notification.park(slice),
         }
-    })
+    }
 }
 
 thread_local! {
@@ -272,17 +292,17 @@ pub fn drive_pending<F: std::future::Future + ?Sized>(
     fallback: WaitFamily,
     mut computation: std::pin::Pin<&mut F>,
 ) -> F::Output {
-    PARK_WAKER.with(|waker| {
-        let mut cx = std::task::Context::from_waker(waker);
-        loop {
-            PENDING_ON.with(|slot| slot.set(None));
-            if let Poll::Ready(outcome) = computation.as_mut().poll(&mut cx) {
-                return outcome;
-            }
-            enter_wait(PENDING_ON.with(std::cell::Cell::take).unwrap_or(fallback));
-            std::thread::park();
+    let notification = UnparkThread::new();
+    let waker = Waker::from(Arc::clone(&notification));
+    let mut cx = std::task::Context::from_waker(&waker);
+    loop {
+        PENDING_ON.with(|slot| slot.set(None));
+        if let Poll::Ready(outcome) = computation.as_mut().poll(&mut cx) {
+            return outcome;
         }
-    })
+        enter_wait(PENDING_ON.with(std::cell::Cell::take).unwrap_or(fallback));
+        notification.park(None);
+    }
 }
 
 /// The computation `build` returns, placed on the heap from a frame that
@@ -324,23 +344,90 @@ pub fn complete_now<F: std::future::Future + ?Sized>(
 ///
 /// Under a forbidding `WaitProbe`, once the first poll is pending.
 pub fn block_on_when_pending<T>(family: WaitFamily, mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
-    PARK_WAKER.with(|waker| {
-        if let Poll::Ready(outcome) = poll(waker) {
+    let notification = UnparkThread::new();
+    let waker = Waker::from(Arc::clone(&notification));
+    if let Poll::Ready(outcome) = poll(&waker) {
+        return outcome;
+    }
+    enter_wait(family);
+    loop {
+        notification.park(None);
+        if let Poll::Ready(outcome) = poll(&waker) {
             return outcome;
         }
-        enter_wait(family);
-        loop {
-            std::thread::park();
-            if let Poll::Ready(outcome) = poll(waker) {
-                return outcome;
-            }
-        }
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each compatibility driver must retain its own notification even if
+    /// a nested pending drive consumes the thread's unpark token.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn nested_drives_preserve_the_outer_notification() {
+        #[derive(Clone, Copy, Debug)]
+        enum Driver {
+            Blocking,
+            WhenPending,
+            Future,
+        }
+        fn drive(driver: Driver, mut poll: impl FnMut(&Waker) -> Poll<usize>) -> usize {
+            match driver {
+                Driver::Blocking => block_on(WaitFamily::SemanticDrive, None, poll),
+                Driver::WhenPending => block_on_when_pending(WaitFamily::SemanticDrive, poll),
+                Driver::Future => drive_pending(
+                    WaitFamily::SemanticDrive,
+                    std::pin::pin!(std::future::poll_fn(|cx| poll(cx.waker()))),
+                ),
+            }
+        }
+
+        for outer in [Driver::Blocking, Driver::WhenPending, Driver::Future] {
+            for inner in [Driver::Blocking, Driver::WhenPending, Driver::Future] {
+                let (wake, waking) = std::sync::mpsc::channel();
+                let (done, completed) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    let mut polls = 0;
+                    let answer = drive(outer, |waker| {
+                        polls += 1;
+                        if polls > 1 {
+                            return Poll::Ready(polls);
+                        }
+                        wake.send(waker.clone()).unwrap();
+                        waker.wake_by_ref();
+                        let mut nested_polls = 0;
+                        assert_eq!(
+                            drive(inner, |nested_waker| {
+                                nested_polls += 1;
+                                if nested_polls == 1 {
+                                    nested_waker.wake_by_ref();
+                                    Poll::Pending
+                                } else {
+                                    Poll::Ready(nested_polls)
+                                }
+                            }),
+                            2
+                        );
+                        Poll::Pending
+                    });
+                    done.send(answer).unwrap();
+                });
+                let waker = waking.recv_timeout(Duration::from_secs(1));
+                let answer = completed.recv_timeout(Duration::from_secs(1));
+                // Rescue a lost notification before joining, including on failure.
+                if let Ok(waker) = waker {
+                    waker.wake();
+                }
+                worker.join().unwrap();
+                assert_eq!(
+                    answer.unwrap_or_else(|error| panic!("{outer:?}/{inner:?}: {error}")),
+                    2
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_ready_poll_answers_without_parking() {

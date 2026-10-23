@@ -82,7 +82,10 @@ back into the host for a service it was not given.
   producers and semantic producers share task identity and wait-cycle
   detection, keeps it on the host (`VerterHost.task_registry`) for the
   pollable roots, and hands it to every resolver flight group, whose leaders
-  and followers are tasks. Final CPU-service integration remains separate;
+  and followers are tasks. A suspended follower owns its lane pin through an
+  RAII guard, releasing it together with its wake and wait edge on drop so
+  completed values drain and later independent calls start a fresh burst.
+  Final CPU-service integration remains separate;
   see [`root-continuations.md`](../../../docs/arch/root-continuations.md).
 - Public requests that can suspend are pollable roots:
   `begin_component_meta_output` and `begin_compile_request` return owned,

@@ -245,4 +245,53 @@ fn dropping_a_suspended_follower_withdraws_its_wait() {
         (SingleflightRole::Leader, 1)
     );
     assert_eq!(computes.load(Ordering::SeqCst), 1);
+    assert_eq!(group.test_flight_strong_count(&"k", token()), 0);
+    let fresh = group.run("k", token(), || Ok(29)).unwrap();
+    assert_eq!((fresh.role, *fresh.value), (SingleflightRole::Leader, 29));
+}
+
+#[test]
+fn dropping_a_suspended_follower_releases_the_completed_value() {
+    for abandon in [false, true] {
+        let group = SingleflightGroup::<&str, Arc<usize>, ()>::default();
+        let registry = group.task_registry();
+        let leading = registry.register_task();
+        let gate = Gate::default();
+        let value = Arc::new(11);
+        let weak = Arc::downgrade(&value);
+        let mut leader = Box::pin(group.run_retaining_pollable(
+            "k",
+            token(),
+            || async {
+                gate.passed().await;
+                Ok(value)
+            },
+            |_| true,
+        ));
+        assert!(poll_as(registry, &leading, leader.as_mut()).is_pending());
+        let following = registry.register_task();
+        let mut follower = Box::pin(group.run_retaining_pollable(
+            "k",
+            token(),
+            || async {
+                panic!("a follower must not compute");
+            },
+            |_| true,
+        ));
+        assert!(poll_as(registry, &following, follower.as_mut()).is_pending());
+        if abandon {
+            drop(follower);
+        } else {
+            gate.release();
+            assert!(poll_as(registry, &leading, leader.as_mut()).is_ready());
+            assert!(poll_as(registry, &following, follower.as_mut()).is_ready());
+            drop(follower);
+        }
+        if abandon {
+            gate.release();
+            assert!(poll_as(registry, &leading, leader.as_mut()).is_ready());
+        }
+        drop(leader);
+        assert!(weak.upgrade().is_none(), "abandon={abandon}");
+    }
 }

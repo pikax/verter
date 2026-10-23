@@ -294,10 +294,12 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeProducer<T> {
     /// Run the admitted producer outside its waiting root's poll.
     pub fn run(mut self, build: impl FnOnce(&CancellationToken) -> T) {
         let _task = ExecutionScope::install(&self.scheduler.task_registry, &self.task);
-        let _request = self
-            .context
-            .as_ref()
-            .map(|context| Arc::clone(&context.0).install_tls());
+        let _request = match self.context.as_ref() {
+            Some(context) => InlineTlsGuard::Install(Arc::clone(&context.0).install_tls()),
+            None => InlineTlsGuard::ClearAll(
+                verter_execution::request_context::AllSlotsClearGuard::clear_all(),
+            ),
+        };
         let _job =
             verter_execution::cancellation::JobCancellationGuard::install(self.aggregate.clone());
         let terminal = if self.aggregate.is_cancelled() {

@@ -41,7 +41,9 @@ follows the same rules:
   check and the registration therefore still wakes the poller.
 - **Wake after unlock.** A producer takes the registered wakers under its
   lock and wakes them only after releasing it. No wake runs under a
-  producer, queue, flight or publication lock.
+  producer, queue, flight or publication lock. Nested cancellation-owner
+  probes latch discovered cancellations immediately and defer their callbacks
+  until the enclosing owner and subscription locks have all released.
 - **One registration per subscriber.** Re-polling with a waker that wakes the
   same task keeps the registration. Any other waker replaces it. Dropping
   the subscriber withdraws exactly its own registration and leaves a
@@ -101,8 +103,11 @@ re-exported from the crate root with `RootWork`.
   dispatch step — and polls again; `RootWork::run` answers whether the work
   made progress (a dispatch step that dispatched nothing returns `false`,
   and the dependency's own settlement then wakes the root). Nothing else
-  wakes a root that handed out work. Dropping the work abandons the
-  dependency it carried, and the next poll answers that abandonment.
+  wakes a root that handed out work. Dropping a transferred producer abandons
+  its dependency, and the next poll answers that abandonment. Dropping a
+  dispatch opportunity leaves the admitted dependency live; a later poll may
+  offer another dispatch step or producer, or remain pending. Dropping the
+  root withdraws its subscription and request ownership.
 - **Backpressure.** A root waits on admission like any other pending
   dependency; it adds no queue of its own.
 - **External driving.** The synchronous entry drives the same root with
@@ -281,7 +286,9 @@ register on their cancellation and park untimed.
 
 `verter_execution::blocking::block_on(family, slice, poll)` drives a
 pollable computation to completion by blocking. It polls with a waker that
-unparks the calling thread, and parks while the poll is pending. Every
+unparks the calling thread, and parks while the poll is pending. Each drive
+retains its own notification, so a synchronous nested drive cannot consume
+an outer computation's wake through the thread's shared park token. Every
 driver over a cancellable wait passes no `slice`: the poll registers on its
 cancellation, which wakes the thread. The `slice` parameter remains for a
 caller that must bound its park for another reason.

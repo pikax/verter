@@ -336,6 +336,8 @@ fn a_driver_reset_does_not_wait_for_the_reset_that_may_be_joining_it() {
 fn another_schedulers_driver_still_waits_for_this_schedulers_reset_barrier() {
     let scheduler = scheduler();
     let serial = scheduler.reset_serial.lock();
+    let (boundary, observed) = std::sync::mpsc::channel();
+    *scheduler.lifecycle_boundary.lock() = Some(boundary);
     let (done, completed) = std::sync::mpsc::channel();
     let resetting = Arc::clone(&scheduler);
     let driver = std::thread::spawn(move || {
@@ -343,9 +345,11 @@ fn another_schedulers_driver_still_waits_for_this_schedulers_reset_barrier() {
         resetting.reset();
         done.send(()).unwrap();
     });
+    let attempted = observed.recv_timeout(std::time::Duration::from_secs(1));
     let premature = completed.recv_timeout(std::time::Duration::from_millis(100));
     drop(serial);
     driver.join().unwrap();
+    assert_eq!(attempted.unwrap(), "reset-contended");
     assert!(
         matches!(premature, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
         "a foreign driver must honor this reset barrier"

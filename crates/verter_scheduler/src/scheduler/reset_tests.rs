@@ -326,15 +326,19 @@ fn external_restart_joins_a_self_reset_driver_before_reopening_work() {
     // publish the real identity and handle before invoking this callback.
     scheduler.restart_driver();
     let retained = resetting.recv_timeout(std::time::Duration::from_secs(1));
+    let (boundary, observed) = std::sync::mpsc::channel();
+    *scheduler.lifecycle_boundary.lock() = Some(boundary);
     let (done, completed) = std::sync::mpsc::channel();
     let restarting = Arc::clone(&scheduler);
     cleanup.restarter = Some(std::thread::spawn(move || {
         restarting.restart_driver();
         done.send(()).unwrap();
     }));
+    let attempted = observed.recv_timeout(std::time::Duration::from_secs(1));
     let before_release = completed.recv_timeout(std::time::Duration::from_millis(100));
     cleanup.release.take().unwrap().send(()).unwrap();
     cleanup.restarter.take().unwrap().join().unwrap();
+    assert_eq!(attempted.unwrap(), "restart-join");
     assert!(retained.unwrap(), "reset must retain the join handle");
     assert!(
         matches!(
@@ -360,6 +364,8 @@ fn a_driver_reset_waits_for_a_healthy_lifecycle_owner_instead_of_losing_the_rese
     let _request = scheduler.submit_request(request("/must-retire.ts"));
     scheduler.drive_all();
     let serial = scheduler.reset_serial.lock();
+    let (boundary, observed) = std::sync::mpsc::channel();
+    *scheduler.lifecycle_boundary.lock() = Some(boundary);
     let (done, completed) = std::sync::mpsc::channel();
     let resetting = Arc::clone(&scheduler);
     let driver = std::thread::spawn(move || {
@@ -368,9 +374,11 @@ fn a_driver_reset_waits_for_a_healthy_lifecycle_owner_instead_of_losing_the_rese
         *resetting.driver_thread_id.lock() = None;
         done.send(()).unwrap();
     });
+    let attempted = observed.recv_timeout(std::time::Duration::from_secs(1));
     let before_release = completed.recv_timeout(std::time::Duration::from_millis(100));
     drop(serial);
     driver.join().unwrap();
+    assert_eq!(attempted.unwrap(), "reset-contended");
     assert!(
         matches!(
             before_release,

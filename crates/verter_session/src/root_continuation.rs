@@ -108,8 +108,10 @@ impl RootAmbient {
 /// for its driver. The driver runs it on whichever thread it chooses —
 /// [`Self::is_producer`] tells CPU work apart from a dispatch step — and
 /// polls the root again; nothing else wakes a root that handed out work.
-/// Dropping the work instead abandons the dependency it carried, and the
-/// root's next poll answers that abandonment.
+/// Dropping a transferred producer abandons its dependency, and the root's
+/// next poll answers that abandonment. Dropping a dispatch opportunity leaves
+/// the admitted dependency live: a later poll may offer more work or remain
+/// pending. Drop the root itself to withdraw its subscription and ownership.
 #[must_use = "a root that handed out work waits for it to run"]
 pub struct RootWork<'h>(RootWorkKind<'h>);
 
