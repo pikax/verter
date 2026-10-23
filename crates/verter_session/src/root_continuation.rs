@@ -162,12 +162,21 @@ impl<'h> RootWorkSlot<'h> {
     }
 
     /// Hand `work` to the driver; the computation then returns `Pending`.
+    ///
+    /// A driver that polls again without taking what it was handed keeps
+    /// the one piece of work that matters: a dispatch step replaces an
+    /// earlier dispatch step, but never a producer still waiting to run,
+    /// which only the driver may run or drop.
     pub(crate) fn offer(&self, work: RootWork<'h>) {
-        let previous = self.0.lock().replace(work);
-        verter_debug_assert!(
-            previous.is_none(),
-            "a root hands out one piece of work per poll"
-        );
+        let replaced = {
+            let mut slot = self.0.lock();
+            if matches!(&*slot, Some(held) if held.is_producer()) && !work.is_producer() {
+                return;
+            }
+            slot.replace(work)
+        };
+        // A replaced dispatch step drops outside the slot's lock.
+        drop(replaced);
     }
 
     fn take(&self) -> Option<RootWork<'h>> {
@@ -553,5 +562,42 @@ mod tests {
         let scope = ExecutionScope::enter(&registry);
         let nested = observing_root(&registry).ambient.task.id();
         assert_eq!(nested, scope.task().id());
+    }
+}
+
+#[cfg(test)]
+mod work_slot_tests {
+    use super::{RootWork, RootWorkSlot};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A driver that polls again without taking its work keeps the producer
+    /// it was handed: a later dispatch step never displaces it, while a
+    /// dispatch step does replace an earlier one.
+    #[test]
+    fn a_dispatch_step_never_displaces_a_producer_waiting_to_run() {
+        let ran = AtomicUsize::new(0);
+        let slot = RootWorkSlot::new();
+        slot.offer(RootWork::dispatch(|| {
+            ran.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        slot.offer(RootWork::dispatch(|| {
+            ran.fetch_add(10, Ordering::SeqCst);
+            true
+        }));
+        let step = slot.take().expect("the newer step is held");
+        assert!(!step.is_producer());
+        assert!(step.run());
+        assert_eq!(ran.load(Ordering::SeqCst), 10);
+
+        slot.offer(RootWork::produce(|| {
+            ran.fetch_add(100, Ordering::SeqCst);
+        }));
+        slot.offer(RootWork::dispatch(|| true));
+        let producer = slot.take().expect("the producer is kept");
+        assert!(producer.is_producer());
+        assert!(producer.run());
+        assert_eq!(ran.load(Ordering::SeqCst), 110);
+        assert!(slot.take().is_none());
     }
 }
