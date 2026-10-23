@@ -573,16 +573,21 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             }
 
             let weak = Arc::downgrade(&server.core);
-            let weak_fill = Arc::downgrade(&server.core);
+            let fill_tail = StoreFillTail::capture(&server);
             drop(server);
             // Level 2 closing hands the store-fill announcement tail its weak
             // reference: every publication recovered after this point (a
             // detached successor pass, a later external drain) still owes the
             // subscribed editor its `carrierStoreChanged` refresh, and nothing
             // else observes those — the scan settle compared its window once
-            // and this task's own completion loop just exited.
+            // and this task's own completion loop just exited. The tail's
+            // baseline is captured BELOW, BEFORE the completion gate waits: a
+            // successor pass may publish while the gate is still parked open
+            // (the post-init drain left the carrier queued), and a baseline
+            // taken only when the gate closed would already include that
+            // publication and swallow its ping.
             if finish_post_scan(weak, my_gen).await {
-                announce_recovered_store_fills(weak_fill, my_gen).await;
+                announce_recovered_store_fills(fill_tail, my_gen).await;
             }
         });
     }
@@ -657,7 +662,38 @@ pub(super) async fn finish_post_scan(server: std::sync::Weak<ServerCore>, my_gen
     }
 }
 
-/// Announce store publications that commit AFTER the completion gate closed.
+/// The captured starting point of [`announce_recovered_store_fills`]: the
+/// weak server reference, the pending-sync progress subscription, and the
+/// publication baseline, all taken BEFORE the completion gate begins to
+/// wait. A successor pass can publish while that gate is still parked open
+/// (the post-init drain left the carrier queued); a baseline captured only
+/// when the gate closed would already include that publication and swallow
+/// the ping. The progress subscription rides along for the same reason —
+/// every wake the gate parks through stays visible to the tail.
+struct StoreFillTail {
+    server: std::sync::Weak<ServerCore>,
+    progress: tokio::sync::watch::Receiver<()>,
+    announced: u64,
+}
+
+impl StoreFillTail {
+    fn capture(server: &VerterLanguageServer) -> Self {
+        Self {
+            server: Arc::downgrade(&server.core),
+            progress: server
+                .carrier_transaction_coordinator
+                .subscribe_pending_sync_progress(),
+            announced: server
+                .carrier_publish_coordinator
+                .as_ref()
+                .map(|coordinator| coordinator.store_publication_count())
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// Announce store publications that commit AFTER the completion gate's
+/// baseline was captured.
 ///
 /// A publication the scan settle compared as "unchanged" can still commit
 /// later: the failed drain armed a bounded successor chain
@@ -669,28 +705,21 @@ pub(super) async fn finish_post_scan(server: std::sync::Weak<ServerCore>, my_gen
 /// project view until an unrelated refresh.
 ///
 /// This tail parks on the same progress signal every drain pass emits and
-/// diffs the coordinator's monotonic publication count against a baseline
-/// captured when the gate closed, so a recovered fill counts exactly like a
-/// direct one. It may duplicate the settle ping for fills that landed inside
-/// the scan's own window; the client's refresh coalesces, and one trailing
-/// ping per batch remains the contract. Parks with only a weak server
-/// reference, like [`finish_post_scan`]: it neither keeps a closed session
-/// alive nor establishes a new readiness owner, and it exits when the
-/// generation is superseded or the session drops.
-async fn announce_recovered_store_fills(server: std::sync::Weak<ServerCore>, my_gen: u64) {
-    let (mut progress, mut announced) = {
-        let Some(core) = server.upgrade() else {
-            return;
-        };
-        (
-            core.carrier_transaction_coordinator
-                .subscribe_pending_sync_progress(),
-            core.carrier_publish_coordinator
-                .as_ref()
-                .map(|coordinator| coordinator.store_publication_count())
-                .unwrap_or(0),
-        )
-    };
+/// diffs the coordinator's monotonic publication count against the baseline
+/// [`StoreFillTail`] captured BEFORE the completion gate began to wait, so a
+/// publication recovered while that gate was still open counts exactly like
+/// one recovered after it closed. It may duplicate the settle ping for fills
+/// that landed inside the scan's own window; the client's refresh coalesces,
+/// and one trailing ping per batch remains the contract. Parks with only a
+/// weak server reference, like [`finish_post_scan`]: it neither keeps a
+/// closed session alive nor establishes a new readiness owner, and it exits
+/// when the generation is superseded or the session drops.
+async fn announce_recovered_store_fills(tail: StoreFillTail, my_gen: u64) {
+    let StoreFillTail {
+        server,
+        mut progress,
+        mut announced,
+    } = tail;
     loop {
         let Some(core) = server.upgrade() else {
             return;
