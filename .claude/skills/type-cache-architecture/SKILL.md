@@ -2658,3 +2658,15 @@ keys and a membership index, distinguishes broad domains from finite empty
 ones, and never reads member values. Deferred evaluation separately keys shell
 and selected-value demands with the complete projection context and retains
 its ordinary dependency proof and cost receipt.
+
+The deferred-evaluation entry directly owns its counted operand/result roots
+and retains their owned handles in its entry charge. A serve captures the root
+owner into the active construction scope before dropping the map hold; the
+root owner returns to pinned accounting if eviction leaves only that scope.
+Internal serves carry only the node and priced receipt. They allocate no
+public delivery owner, metadata pin or metadata cache-hold slice. A warm
+operand replays its validated proof into the consuming frame's tracer and
+pays the same first step and receipt as a stepped operand; only a cold operand
+creates a continuation and tracer. Proof recording, strict validation, cost
+admission and counted ownership are REQUIRED work. Frame-start counters are
+test-only work evidence; optional audit capture remains OPTIONAL.
