@@ -1353,7 +1353,13 @@ impl Scheduler {
                 }
             }
         } else {
-            self.reset_serial.lock()
+            self.reset_serial.try_lock().unwrap_or_else(|| {
+                #[cfg(test)]
+                if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                    let _ = boundary.send("reset-contended");
+                }
+                self.reset_serial.lock()
+            })
         };
         // 1. Stop the driver thread. The dedicated teardown signal — not
         //    the inbox wake, which any cooperative pump may consume first —
