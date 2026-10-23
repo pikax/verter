@@ -1800,6 +1800,9 @@ where
     K: Eq + Hash,
 {
     flights: Mutex<FlightTable<K, V, E>>,
+    /// The registry whose tasks lead and follow this group's flights: the
+    /// host's one cycle authority in production.
+    tasks: verter_execution::tasks::TaskRegistry,
     /// **Test-only.** A rendezvous hook fired on the LEADER thread inside the
     /// NON-RETAINED (`keep == false`) terminal, strictly between the `Done`
     /// publish and the lane removal, WHILE the `flights` lock is held. Tests
@@ -1865,8 +1868,9 @@ enum FlightInner<V, E> {
     /// caller has claimed leadership yet. The first `run` caller
     /// transitions this to `Running` and becomes the leader.
     Pending,
+    /// A leader is computing: the execution task that owns the lane.
     Running {
-        owner: std::thread::ThreadId,
+        owner: verter_execution::tasks::TaskId,
     },
     Done(Result<Arc<V>, E>),
     /// The leader's `compute`/`retain` PANICKED before it could publish a
@@ -2039,8 +2043,19 @@ where
     K: Eq + Hash,
 {
     fn default() -> Self {
+        Self::with_task_registry(verter_execution::tasks::TaskRegistry::default())
+    }
+}
+
+impl<K, V, E> SingleflightGroup<K, V, E>
+where
+    K: Eq + Hash,
+{
+    /// A group whose flights are led and joined by tasks of `tasks`.
+    pub fn with_task_registry(tasks: verter_execution::tasks::TaskRegistry) -> Self {
         Self {
             flights: Mutex::new(FlightTable::default()),
+            tasks,
             #[cfg(test)]
             non_retained_seam_hook: SeamHookSlot::default(),
             #[cfg(test)]
@@ -2169,8 +2184,69 @@ where
         F: FnOnce() -> Result<V, E>,
         R: FnOnce(&V) -> bool,
     {
+        // A synchronous entry runs as the task installed on this thread, or
+        // as one of its own for its extent, so a nested entry on this stack
+        // joins it; it drives the one flight protocol to its terminal.
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.tasks);
+        let mut compute = Some(compute);
+        let mut flight = std::pin::pin!(self.run_retaining_pollable(
+            key,
+            token,
+            move || std::future::ready((compute.take().expect("compute consumed at most once"))()),
+            retain,
+        ));
+        verter_execution::blocking::block_on_when_pending(
+            verter_execution::blocking::WaitFamily::ResolverFlight,
+            |waker| {
+                std::future::Future::poll(
+                    flight.as_mut(),
+                    &mut std::task::Context::from_waker(waker),
+                )
+            },
+        )
+    }
+
+    /// [`Self::run_retaining`] as a pollable computation, whose leader
+    /// computes with the future `compute` returns.
+    ///
+    /// The flight runs as the execution task installed on the polling
+    /// thread for this group's registry: the task of the root that polls
+    /// it. That task owns the lane while it leads, across every
+    /// suspension of `compute`, and is the waiter while it follows. A
+    /// claim by the task that already leads the lane — same-path re-entry
+    /// — computes inline as a nested leader. A follower registers its
+    /// `follower -> leader` wait edge in the registry before it waits; an
+    /// edge that would close a wait cycle is refused, and the follower then
+    /// computes inline too instead of waiting on a leader that waits on
+    /// it. A follower whose leader has not published returns `Pending` with
+    /// its waker registered on the flight. Dropping the computation while
+    /// it leads aborts the lane, so its followers re-elect; dropping it
+    /// while it follows withdraws its registration and its edge.
+    pub async fn run_retaining_pollable<F, Fut, R>(
+        &self,
+        key: K,
+        token: StoreViewCompatToken,
+        compute: F,
+        retain: R,
+    ) -> Result<SingleflightRunResult<V>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<V, E>>,
+        R: FnOnce(&V) -> bool,
+    {
         let lane_key = (key.clone(), token);
-        let current_thread = std::thread::current().id();
+        // The task this flight runs as. A root installs its task on every
+        // poll and the synchronous entry installs one for its extent; a
+        // computation polled with neither runs as a task of its own.
+        let task =
+            verter_execution::tasks::ExecutionScope::current(&self.tasks).unwrap_or_else(|| {
+                verter_debug_assert!(
+                    false,
+                    "a resolver flight is polled without an installed execution task"
+                );
+                self.tasks.register_task()
+            });
+        let current_task = task.id();
 
         // `compute` / `retain` are `FnOnce`; a re-electing waiter (one woken
         // to a leader's `Aborted` lane) may itself become the fresh leader
@@ -2207,13 +2283,13 @@ where
                         .pins
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     // Claim a Pending lane (created by a participation pin)
-                    // by transitioning it to Running under this thread.
+                    // by transitioning it to Running under this task.
                     let mut leader = false;
                     {
                         let mut inner = existing.inner.lock();
                         if matches!(&*inner, FlightInner::Pending) {
                             *inner = FlightInner::Running {
-                                owner: current_thread,
+                                owner: current_task,
                             };
                             leader = true;
                         }
@@ -2222,7 +2298,7 @@ where
                 } else {
                     let state = Arc::new(FlightState {
                         inner: Mutex::new(FlightInner::Running {
-                            owner: current_thread,
+                            owner: current_task,
                         }),
                         wakers: Mutex::default(),
                         pins: std::sync::atomic::AtomicUsize::new(1),
@@ -2235,22 +2311,24 @@ where
             };
 
             if leader {
-                // Run `compute` + `retain` under a panic-abort guard. If
-                // either panics, the guard's `Drop` aborts the lane (sets
-                // `Aborted`, notifies waiters, releases this self-pin,
-                // removes the lane) so no waiter blocks forever behind a
-                // leader that never publishes — then the panic resumes. On
-                // the success path the guard is disarmed BEFORE the real
-                // terminal is published, so it is a no-op and the normal
-                // logic below owns the lane transition.
+                // Run `compute` + `retain` under an abort guard. If either
+                // panics, or the computation is dropped while `compute` is
+                // suspended, the guard's `Drop` aborts the lane (sets
+                // `Aborted`, wakes waiters, releases this self-pin, removes
+                // the lane) so no waiter waits forever behind a leader that
+                // never publishes — then the panic resumes. On the success
+                // path the guard is disarmed BEFORE the real terminal is
+                // published, so it is a no-op and the normal logic below
+                // owns the lane transition.
                 let mut abort_guard = LeaderAbortGuard {
                     group: self,
                     lane_key: &lane_key,
                     state: &state,
                     armed: true,
                 };
-                let result =
-                    (compute.take().expect("compute consumed at most once"))().map(Arc::new);
+                let result = (compute.take().expect("compute consumed at most once"))()
+                    .await
+                    .map(Arc::new);
                 // Decide retention from the freshly-computed value. A
                 // retained (stable) result stays in the map as a joinable
                 // rendezvous; a non-retained result (an error, or a value
@@ -2346,43 +2424,49 @@ where
                 });
             }
 
-            let led_here = matches!(
-                &*state.inner.lock(),
-                FlightInner::Running { owner } if *owner == current_thread
-            );
-            if led_here {
-                // Same-thread re-entry on a flight this thread itself leads
-                // (recursion sentinel): compute inline as a nested leader.
-                // Release the self-pin taken above. A thread waiting below
-                // claims nothing, so the check holds for the whole wait.
+            let owner = match &*state.inner.lock() {
+                FlightInner::Running { owner } => Some(*owner),
+                _ => None,
+            };
+            // Same-path re-entry on a flight this task itself leads
+            // (recursion sentinel), or a wait that would close a cycle of
+            // waiting tasks: compute inline as a nested leader instead of
+            // waiting on a leader that cannot publish first. Release the
+            // self-pin taken above.
+            let edge = match owner {
+                Some(owner) if owner == current_task => None,
+                Some(owner) => match self.tasks.register_wait(current_task, owner) {
+                    Ok(edge) => Some(Some(edge)),
+                    Err(verter_execution::tasks::WaitCycle) => None,
+                },
+                // A `Pending` lane is claimed by the first `run` caller in
+                // the block above, and a published one answers at once; a
+                // follower that finds no leader owning the lane waits for
+                // its terminal like any other follower.
+                None => Some(None),
+            };
+            let Some(_edge) = edge else {
                 self.unpin(&lane_key, &state);
-                return (compute.take().expect("compute consumed at most once"))().map(|value| {
-                    SingleflightRunResult {
+                return (compute.take().expect("compute consumed at most once"))()
+                    .await
+                    .map(|value| SingleflightRunResult {
                         value: Arc::new(value),
                         role: SingleflightRole::Leader,
                         forked_lane,
-                    }
-                });
-            }
-            // A `Pending` lane is claimed by the first `run` caller in the
-            // block above; a follower that finds it `Pending` is racing a
-            // sibling about to claim leadership and waits for the terminal
-            // like any other follower.
+                    });
+            };
             let mut join = FlightJoin::new(state);
-            let terminal = verter_execution::blocking::block_on(
-                verter_execution::blocking::WaitFamily::ResolverFlight,
-                None,
-                |waker| {
-                    let polled = join.poll(waker);
-                    #[cfg(test)]
-                    if polled.is_pending() {
-                        if let Some(tx) = self.joiner_park_tx.lock().clone() {
-                            let _ = tx.send(());
-                        }
+            let terminal = std::future::poll_fn(|cx| {
+                let polled = join.poll(cx.waker());
+                #[cfg(test)]
+                if polled.is_pending() {
+                    if let Some(tx) = self.joiner_park_tx.lock().clone() {
+                        let _ = tx.send(());
                     }
-                    polled
-                },
-            );
+                }
+                polled
+            })
+            .await;
             match terminal {
                 FlightTerminal::Done(result) => {
                     self.unpin(&lane_key, &join.state);
@@ -2393,14 +2477,15 @@ where
                     });
                 }
                 FlightTerminal::Aborted => {
-                    // The leader this follower joined PANICKED and aborted
-                    // the lane. Release this follower's self-pin and
-                    // re-elect against a fresh lane: the aborted lane was
-                    // removed from the map as part of the abort, so the next
-                    // claim creates a new flight (one re-electing follower
-                    // becomes the fresh leader and runs its own `compute`;
-                    // the rest join it). This is what keeps a leader-panic
-                    // from wedging every follower forever.
+                    // The leader this follower joined PANICKED (or was
+                    // dropped) and aborted the lane. Release this follower's
+                    // self-pin and re-elect against a fresh lane: the
+                    // aborted lane was removed from the map as part of the
+                    // abort, so the next claim creates a new flight (one
+                    // re-electing follower becomes the fresh leader and runs
+                    // its own `compute`; the rest join it). This is what
+                    // keeps a leader-panic from wedging every follower
+                    // forever.
                     self.unpin(&lane_key, &join.state);
                     continue 'reelect;
                 }
@@ -2586,6 +2671,10 @@ impl ResolverCounters {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+#[path = "singleflight_task_tests.rs"]
+mod singleflight_task_tests;
 
 #[cfg(test)]
 mod tests {

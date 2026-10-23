@@ -124,11 +124,13 @@ impl HostResolverState {
     fn new(
         routes: Arc<crate::resolver_core::RouteDb>,
         imported_roots: Arc<crate::resolver_core::ImportedRootDb>,
+        tasks: verter_execution::tasks::TaskRegistry,
     ) -> Self {
         Self {
             runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
                 routes,
                 imported_roots,
+                tasks,
             ),
         }
     }
@@ -700,7 +702,7 @@ impl VerterHost {
                 envelope_ingest: registered_envelope_ingest,
             },
             block_content: crate::block_content::BlockContentHostLane::default(),
-            task_registry,
+            task_registry: task_registry.clone(),
             language_classifier,
             workspace: workspace_lock,
             workspace_services,
@@ -716,7 +718,11 @@ impl VerterHost {
             platform_services,
             cooperative_drive,
             provenance,
-            resolver: HostResolverState::new(routes_handle, imported_roots_handle),
+            resolver: HostResolverState::new(
+                routes_handle,
+                imported_roots_handle,
+                task_registry.clone(),
+            ),
             query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
