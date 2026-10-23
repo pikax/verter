@@ -241,6 +241,46 @@ pub fn block_on<T>(
     })
 }
 
+thread_local! {
+    /// The family the pollable boundary that last returned `Pending` on
+    /// this thread waits on, for the synchronous driver of the computation
+    /// that reached it.
+    static PENDING_ON: std::cell::Cell<Option<WaitFamily>> = const { std::cell::Cell::new(None) };
+}
+
+/// Record that the dependency boundary returning `Pending` from this poll
+/// waits on `family`. A synchronous driver over the computation that
+/// reached it ([`drive_pending`]) announces that family when it parks.
+pub fn note_pending(family: WaitFamily) {
+    PENDING_ON.with(|slot| slot.set(Some(family)));
+}
+
+/// Drive `computation` to completion on this thread: the synchronous form of
+/// a pollable computation, for a caller that is not itself pollable yet.
+///
+/// Each poll that returns `Pending` enters the wait of the family its
+/// pending boundary noted ([`note_pending`]), or `fallback` when none did,
+/// and parks until the computation's waker fires. A computation that
+/// answers without waiting enters no wait.
+///
+/// # Panics
+///
+/// Under a forbidding `WaitProbe`, once a poll is pending.
+pub fn drive_pending<F: std::future::Future>(fallback: WaitFamily, computation: F) -> F::Output {
+    let mut computation = std::pin::pin!(computation);
+    PARK_WAKER.with(|waker| {
+        let mut cx = std::task::Context::from_waker(waker);
+        loop {
+            PENDING_ON.with(|slot| slot.set(None));
+            if let Poll::Ready(outcome) = computation.as_mut().poll(&mut cx) {
+                return outcome;
+            }
+            enter_wait(PENDING_ON.with(std::cell::Cell::take).unwrap_or(fallback));
+            std::thread::park();
+        }
+    })
+}
+
 /// Poll `poll` to completion on this thread, entering the `family` wait only
 /// if its first poll is pending.
 ///
@@ -405,6 +445,53 @@ mod tests {
         }));
         assert!(refused.is_err(), "a pending drive is refused");
         assert_eq!(polls, 1, "the refusal comes before the thread parks");
+    }
+
+    /// A driven computation enters the wait its pending boundary noted, the
+    /// fallback when none did, and nothing when it answers at once.
+    #[test]
+    fn a_driven_computation_enters_the_wait_its_pending_boundary_noted() {
+        struct PendingOnce {
+            noted: Option<WaitFamily>,
+            polls: usize,
+        }
+        impl std::future::Future for PendingOnce {
+            type Output = usize;
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> Poll<usize> {
+                self.polls += 1;
+                if self.polls > 1 {
+                    return Poll::Ready(self.polls);
+                }
+                if let Some(family) = self.noted {
+                    note_pending(family);
+                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+        let probe = WaitProbe::record();
+        assert_eq!(drive_pending(WaitFamily::CpuPool, std::future::ready(1)), 1);
+        assert!(
+            probe.reached().is_empty(),
+            "a ready computation waits on nothing"
+        );
+        let noted = PendingOnce {
+            noted: Some(WaitFamily::DeclLowering),
+            polls: 0,
+        };
+        assert_eq!(drive_pending(WaitFamily::CpuPool, noted), 2);
+        let unnoted = PendingOnce {
+            noted: None,
+            polls: 0,
+        };
+        assert_eq!(drive_pending(WaitFamily::CpuPool, unnoted), 2);
+        assert_eq!(
+            probe.reached(),
+            [WaitFamily::DeclLowering, WaitFamily::CpuPool]
+        );
     }
 
     /// A probe observes its own thread only.

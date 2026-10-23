@@ -2461,8 +2461,11 @@ where
             let mut join = FlightJoin::new(state);
             let terminal = std::future::poll_fn(|cx| {
                 let polled = join.poll(cx.waker());
-                #[cfg(test)]
                 if polled.is_pending() {
+                    verter_execution::blocking::note_pending(
+                        verter_execution::blocking::WaitFamily::ResolverFlight,
+                    );
+                    #[cfg(test)]
                     if let Some(tx) = self.joiner_park_tx.lock().clone() {
                         let _ = tx.send(());
                     }

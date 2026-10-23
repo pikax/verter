@@ -3834,6 +3834,9 @@ impl<'m> BuildRelease<'m> {
             return std::task::Poll::Ready(());
         }
         state.build_waiters.register(&mut self.registration, waker);
+        verter_execution::blocking::note_pending(
+            verter_execution::blocking::WaitFamily::StoreViewBuild,
+        );
         std::task::Poll::Pending
     }
 }
