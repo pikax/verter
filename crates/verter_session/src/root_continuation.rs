@@ -212,3 +212,11 @@ impl VerterHost {
         }
     }
 }
+
+#[cfg(test)]
+static_assertions::assert_impl_all!(
+    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        'static,
+        crate::resolver_core::HostCapabilities,
+    >: Sync
+);

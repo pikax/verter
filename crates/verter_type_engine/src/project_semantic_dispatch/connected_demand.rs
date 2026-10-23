@@ -24,6 +24,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
+use verter_execution::sync_cell::{SyncCell, SyncRefCell};
 
 use rustc_hash::FxHashSet;
 
@@ -298,43 +299,43 @@ impl<'a> DemandCancellation<'a> {
 /// only outside a demand) are enforced by the operations, not by convention.
 pub struct ConnectedDemandLedger<'a> {
     cancellation: DemandCancellation<'a>,
-    active: Cell<bool>,
-    work_used: Cell<usize>,
-    work_limit: Cell<usize>,
+    active: SyncCell<bool>,
+    work_used: SyncCell<usize>,
+    work_limit: SyncCell<usize>,
     /// Every construction byte the demand charged: the bytes it reserved
     /// and the advisory footprint (`advisory_bytes_used`).
-    bytes_used: Cell<u64>,
+    bytes_used: SyncCell<u64>,
     /// The part of `bytes_used` charged while the advisory
     /// construction-byte rail is off: accounted, never enforced, so no
     /// later reservation is refused for it.
-    advisory_bytes_used: Cell<u64>,
-    bytes_limit: Cell<u64>,
+    advisory_bytes_used: SyncCell<u64>,
+    bytes_limit: SyncCell<u64>,
     /// Whether a canonical construction's footprint
     /// ([`Self::charge_construction`]) may be refused at `bytes_limit`: the
     /// advisory construction-byte rail, off unless explicitly enabled. Off,
     /// the footprint is still charged to `bytes_used`, as advisory bytes.
-    construction_byte_refusal: Cell<bool>,
-    query_depth: Cell<u16>,
-    query_depth_limit: Cell<u16>,
+    construction_byte_refusal: SyncCell<bool>,
+    query_depth: SyncCell<u16>,
+    query_depth_limit: SyncCell<u16>,
     instantiation_depth_limit: u32,
     tail_steps_limit: u32,
-    tripped: Cell<PartialReasonSet>,
+    tripped: SyncCell<PartialReasonSet>,
     /// The cold computations recording their exclusive cost, innermost
     /// last; `scope_open` mirrors "the stack is not empty" so a charge
     /// taken outside any recording pays one flag read.
-    scopes: RefCell<Vec<CostScope>>,
-    scope_open: Cell<bool>,
+    scopes: SyncRefCell<Vec<CostScope>>,
+    scope_open: SyncCell<bool>,
     /// The computations whose receipt, and its whole prerequisite closure,
     /// this connected demand has paid.
-    paid: RefCell<CostIdentitySet>,
+    paid: SyncRefCell<CostIdentitySet>,
     /// What this connected demand itself did to its request: the request
     /// operations it spent and the computations it was first to pay.
-    request_effects: Cell<RequestEffects>,
+    request_effects: SyncCell<RequestEffects>,
     /// Whether one of this demand's reads was answered with a recursion
     /// carrier another task's schedule decided — a cross-task wait cycle,
     /// or a joined producer's own re-entry: the demand went on without work
     /// it alone would have done, so where it stopped is not its own.
-    schedule_cut: Cell<bool>,
+    schedule_cut: SyncCell<bool>,
 }
 
 /// What one connected demand did to its request
@@ -636,22 +637,22 @@ impl<'a> ConnectedDemandLedger<'a> {
     pub(super) fn new(cancellation: DemandCancellation<'a>) -> Self {
         Self {
             cancellation,
-            active: Cell::new(false),
-            work_used: Cell::new(0),
+            active: SyncCell::new(false),
+            work_used: SyncCell::new(0),
             #[cfg(not(any(test, feature = "test-support")))]
-            work_limit: Cell::new(MAX_CONNECTED_PROJECTION_WORK),
+            work_limit: SyncCell::new(MAX_CONNECTED_PROJECTION_WORK),
             #[cfg(any(test, feature = "test-support"))]
-            work_limit: Cell::new(
+            work_limit: SyncCell::new(
                 WORK_FOR_TESTS
                     .with(Cell::get)
                     .unwrap_or(MAX_CONNECTED_PROJECTION_WORK),
             ),
-            bytes_used: Cell::new(0),
-            advisory_bytes_used: Cell::new(0),
-            bytes_limit: Cell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
-            construction_byte_refusal: Cell::new(false),
-            query_depth: Cell::new(0),
-            query_depth_limit: Cell::new(MAX_CONNECTED_QUERY_DEPTH),
+            bytes_used: SyncCell::new(0),
+            advisory_bytes_used: SyncCell::new(0),
+            bytes_limit: SyncCell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
+            construction_byte_refusal: SyncCell::new(false),
+            query_depth: SyncCell::new(0),
+            query_depth_limit: SyncCell::new(MAX_CONNECTED_QUERY_DEPTH),
             #[cfg(not(any(test, feature = "test-support")))]
             instantiation_depth_limit: MAX_CONNECTED_INSTANTIATION_DEPTH,
             #[cfg(any(test, feature = "test-support"))]
@@ -664,12 +665,12 @@ impl<'a> ConnectedDemandLedger<'a> {
             tail_steps_limit: TAIL_STEPS_FOR_TESTS
                 .with(Cell::get)
                 .unwrap_or(MAX_CONNECTED_TAIL_STEPS),
-            tripped: Cell::new(PartialReasonSet::empty()),
-            scopes: RefCell::new(Vec::new()),
-            scope_open: Cell::new(false),
-            paid: RefCell::new(CostIdentitySet::default()),
-            request_effects: Cell::new(RequestEffects::default()),
-            schedule_cut: Cell::new(false),
+            tripped: SyncCell::new(PartialReasonSet::empty()),
+            scopes: SyncRefCell::new(Vec::new()),
+            scope_open: SyncCell::new(false),
+            paid: SyncRefCell::new(CostIdentitySet::default()),
+            request_effects: SyncCell::new(RequestEffects::default()),
+            schedule_cut: SyncCell::new(false),
         }
     }
 

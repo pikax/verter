@@ -382,8 +382,8 @@ pub(super) struct DecisionSeam {
 /// A query the running decision reached, evaluating in place; the seam is
 /// the decision's own again when it returns.
 pub(super) struct NestedDecisionQuery<'d> {
-    seam: Option<&'d std::cell::RefCell<Option<DecisionSeam>>>,
-    flow: Option<&'d std::cell::RefCell<Option<FlowSeam>>>,
+    seam: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<DecisionSeam>>>,
+    flow: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<FlowSeam>>>,
 }
 
 impl Drop for NestedDecisionQuery<'_> {
