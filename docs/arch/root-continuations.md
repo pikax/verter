@@ -119,7 +119,9 @@ another request's flight or store-view build has to be in progress. The
 tests pin each path's reached set: a conversion that removes a family from
 a path fails its pin until this table and the pin move together.
 
-The same group holds the Pending-before-release harness. It polls once on
+The same group holds the Pending-before-release harness; its cases over a
+held semantic flight (`root_continuations_harness_*`) live in
+`semantic_task_tests`, beside the fixtures that hold the flight. It polls once on
 its own thread under a forbidding probe and a bounded deadline while the
 test holds a real dependency (another task's semantic flight). A pollable
 subscriber answers `Pending`, is woken by the release and answers. Two

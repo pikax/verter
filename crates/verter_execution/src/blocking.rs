@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn a_recording_probe_lists_the_waits_entered_in_order() {
         let outer = WaitProbe::record();
-        let _ = block_on(WaitFamily::DeclLowering, None, |_| Poll::Ready(()));
+        block_on(WaitFamily::DeclLowering, None, |_| Poll::Ready(()));
         {
             let inner = WaitProbe::record();
             enter_wait(WaitFamily::SemanticFlight);

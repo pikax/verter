@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{DepSignature, QueryError, QueryResult, SemanticQueryValue};
@@ -500,7 +500,7 @@ pub struct FlightRendezvousObservation {
 pub(super) struct FlightRendezvousShared {
     key: crate::semantic_query::SemanticQueryKey,
     state: Mutex<FlightRendezvousState>,
-    changed: Condvar,
+    changed: parking_lot::Condvar,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
@@ -829,7 +829,7 @@ impl super::SemanticGraphStore {
         let shared = Arc::new(FlightRendezvousShared {
             key,
             state: Mutex::new(FlightRendezvousState::default()),
-            changed: Condvar::new(),
+            changed: parking_lot::Condvar::new(),
         });
         self.flight_rendezvous.lock().push(Arc::clone(&shared));
         self.flight_rendezvous_armed

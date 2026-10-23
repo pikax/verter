@@ -17,7 +17,8 @@
 //! and the poll continues to its answer. A poll that instead enters a
 //! synchronous wait fails at once under the probe, and one that blocks
 //! somewhere the probe cannot see fails at the deadline. Either way the
-//! harness releases the hold and joins its thread before reporting.
+//! harness releases the hold and joins its thread before reporting. Its
+//! cases over a held semantic flight live with the semantic task tests.
 
 use std::collections::BTreeSet;
 use std::sync::mpsc;
@@ -26,12 +27,6 @@ use std::task::{Poll, Wake, Waker};
 use std::time::Duration;
 
 use verter_execution::blocking::{WaitFamily, WaitProbe};
-use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
-use verter_type_engine::resolver_core::fact_validation_port::FactValidation as _;
-use verter_type_engine::semantic_query::{
-    ProjectionMode, ProjectionReductionContext, ScopeId, SemanticQueryKey, ValueRootKey,
-};
-use verter_type_engine::semantic_query_memo::{Claim, Joined, ReadCapture};
 
 use crate::host_compile::{
     CompileBatchInput, CompileBatchOptions, CompileBatchOutcome, CompileManyTarget,
@@ -58,10 +53,10 @@ defineProps<Props>()
 
 /// How long a poll that must suspend may take before the harness calls it
 /// blocked. Only a failing run waits this long.
-const POLL_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const POLL_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The injected deadline of the test that proves a blocked poll fails.
-const PLANTED_DEADLINE: Duration = Duration::from_millis(50);
+pub(crate) const PLANTED_DEADLINE: Duration = Duration::from_millis(50);
 
 fn upsert(host: &VerterHost, id: &str, source: &str, language: crate::FileLanguage) {
     let _ = host
@@ -323,7 +318,7 @@ fn root_continuations_batch_compile_inventory() {
 
 /// Why a poll did not suspend on its held dependency.
 #[derive(Debug, PartialEq, Eq)]
-enum NotSuspended {
+pub(crate) enum NotSuspended {
     /// The poll entered a synchronous wait the probe refused.
     EnteredWait(String),
     /// The poll was still running at the deadline.
@@ -369,7 +364,7 @@ impl<R: FnOnce()> Drop for Hold<R> {
 /// harness re-polls once per wake, each poll again under the probe, until
 /// the answer. Whatever happens, the hold is released and the thread joined
 /// before this returns.
-fn pending_before_release<S, T, P, R>(
+pub(crate) fn pending_before_release<S, T, P, R>(
     deadline: Duration,
     state: S,
     poll: P,
@@ -443,167 +438,4 @@ where
             (None, Err(panic)) => std::panic::resume_unwind(panic),
         }
     })
-}
-
-const FLIGHT_FILE: &str = "/src/flight.ts";
-
-fn flight_host() -> VerterHost {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    upsert(
-        &host,
-        FLIGHT_FILE,
-        "const a = \"held\" as const;\nconst b = a;\n",
-        crate::FileLanguage::script_ts(),
-    );
-    host
-}
-
-fn typeof_key(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    name: &str,
-) -> SemanticQueryKey {
-    dispatch.typeof_key_for(
-        ValueRootKey {
-            scope: ScopeId::file(
-                FLIGHT_FILE,
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            ),
-            name: verter_type_expr::OwnedStr::from(name),
-        },
-        ProjectionReductionContext::published(ProjectionMode::Navigate),
-    )
-}
-
-/// How the subscriber to a held semantic flight is driven.
-#[derive(Clone, Copy)]
-enum FollowerDrive {
-    /// The pollable subscription.
-    Poll,
-    /// The synchronous wait: the planted blocking wait the probe refuses.
-    SynchronousWait,
-    /// A park the probe cannot see: the planted blocking wait only the
-    /// deadline catches.
-    UnannouncedPark,
-}
-
-/// Hold another task's semantic flight and drive its subscriber as `drive`
-/// says, through the harness.
-fn drive_semantic_follower(drive: FollowerDrive, deadline: Duration) -> Result<bool, NotSuspended> {
-    let host = flight_host();
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let key = typeof_key(&dispatch, "a");
-    let graph = host.project_type_store().semantic_graph();
-    let registry = graph.task_registry_for_tests();
-    let producer_task = registry.register_task();
-    let follower_task = registry.register_task();
-    let mut capture = ReadCapture::default();
-    let mut producer_claim = graph
-        .begin_query_claim(&host, host.request_flags(), key.clone(), &mut capture)
-        .unwrap_or_else(|_| panic!("the typeof is cold"));
-    let Claim::Produce(lease) = graph.claim_query(
-        &host,
-        host.request_flags(),
-        &mut producer_claim,
-        &producer_task,
-        &mut capture,
-    ) else {
-        panic!("the producer task owns the flight");
-    };
-    let mut follower_capture = ReadCapture::default();
-    let mut follower_claim = graph
-        .begin_query_claim(&host, host.request_flags(), key, &mut follower_capture)
-        .unwrap_or_else(|_| panic!("the flight is held"));
-    let Claim::Subscribed(subscription) = graph.claim_query(
-        &host,
-        host.request_flags(),
-        &mut follower_claim,
-        &follower_task,
-        &mut follower_capture,
-    ) else {
-        panic!("the follower subscribes to the held flight");
-    };
-    let parked = Arc::new((parking_lot::Mutex::new(false), parking_lot::Condvar::new()));
-    let release_park = Arc::clone(&parked);
-    let host_ref = &host;
-    let verdict = pending_before_release(
-        deadline,
-        (Some(subscription), follower_claim, follower_capture),
-        move |(subscription, claim, capture), waker| match drive {
-            FollowerDrive::Poll => subscription
-                .as_mut()
-                .expect("polled until its answer")
-                .poll(host_ref, host_ref.request_flags(), claim, capture, waker)
-                .map(|joined| matches!(joined, Joined::Retry | Joined::Read(_))),
-            FollowerDrive::SynchronousWait => {
-                let joined = subscription.take().expect("waited once").wait(
-                    host_ref,
-                    host_ref.request_flags(),
-                    claim,
-                    capture,
-                );
-                Poll::Ready(matches!(joined, Joined::Retry | Joined::Read(_)))
-            }
-            FollowerDrive::UnannouncedPark => {
-                let (released, changed) = &*parked;
-                let mut released = released.lock();
-                while !*released {
-                    changed.wait(&mut released);
-                }
-                Poll::Ready(true)
-            }
-        },
-        move || {
-            let (released, changed) = &*release_park;
-            *released.lock() = true;
-            changed.notify_all();
-            drop(lease);
-        },
-    );
-    drop((producer_claim, capture, producer_task, follower_task));
-    assert_eq!(
-        graph.wait_graph_counts_for_tests(),
-        (0, 0),
-        "the harness leaves no wait edge or task open",
-    );
-    verdict
-}
-
-/// The pollable subscriber of a held semantic flight returns `Pending`
-/// before the producer releases it, is woken by the release, and answers.
-#[test]
-fn root_continuations_harness_passes_a_suspending_flight_subscriber() {
-    assert_eq!(
-        drive_semantic_follower(FollowerDrive::Poll, POLL_DEADLINE),
-        Ok(true)
-    );
-}
-
-/// Planted blocking wait, announced: the synchronous form of the same
-/// subscription fails the harness at once, naming its family, and the
-/// harness still releases the producer and joins its thread.
-#[test]
-fn root_continuations_harness_fails_a_planted_synchronous_wait() {
-    match drive_semantic_follower(FollowerDrive::SynchronousWait, POLL_DEADLINE) {
-        Err(NotSuspended::EnteredWait(message)) => assert!(
-            message.contains("SemanticFlight"),
-            "the refusal names the family: {message}",
-        ),
-        other => panic!("a synchronous wait cannot pass for a suspension: {other:?}"),
-    }
-}
-
-/// Planted blocking wait, unannounced: a park the probe cannot see fails
-/// the harness at the deadline, and releasing the hold lets the parked
-/// thread finish, so the harness joins it and returns.
-#[test]
-fn root_continuations_harness_fails_a_planted_unannounced_park_at_the_deadline() {
-    let started = std::time::Instant::now();
-    assert_eq!(
-        drive_semantic_follower(FollowerDrive::UnannouncedPark, PLANTED_DEADLINE),
-        Err(NotSuspended::Blocked),
-    );
-    assert!(
-        started.elapsed() < POLL_DEADLINE,
-        "the harness returns soon after its injected deadline",
-    );
 }
