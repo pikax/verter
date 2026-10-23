@@ -195,7 +195,7 @@ mod tests {
             assert_eq!((first.len(), second.len()), (1, 1));
             assert_eq!(cell.try_borrow_mut().err(), Some(AlreadyBorrowed));
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = cell.borrow_mut();
+                let _held = cell.borrow_mut();
             }))
             .is_err());
         }
@@ -203,7 +203,7 @@ mod tests {
         {
             let _held = cell.borrow_mut();
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = cell.borrow();
+                let _held = cell.borrow();
             }))
             .is_err());
         }

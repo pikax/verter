@@ -8,20 +8,14 @@ use std::future::Future;
 use std::pin::{pin, Pin};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use verter_execution::tasks::{ExecutionScope, ExecutionTask, TaskRegistry};
 
 use super::{SingleflightGroup, SingleflightRole, SingleflightRunResult, StoreViewCompatToken};
 
-struct Noop;
-
-impl Wake for Noop {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn waker() -> Waker {
-    Waker::from(Arc::new(Noop))
+    Waker::noop().clone()
 }
 
 fn token() -> StoreViewCompatToken {

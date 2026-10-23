@@ -1163,14 +1163,7 @@ mod handoff_tests {
 mod refusal_recording_tests {
     use super::*;
     use std::future::Future;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct Noop;
-
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
+    use std::task::{Context, Poll, Waker};
 
     /// Refuses its stack on its second poll, after suspending once.
     struct RefusesAfterSuspending(bool);
@@ -1192,14 +1185,14 @@ mod refusal_recording_tests {
     /// that made it, and leaves the polling thread's record as it was.
     #[test]
     fn a_suspending_operation_answers_the_refusal_it_made_after_resuming() {
-        let waker = Waker::from(Arc::new(Noop));
+        let waker = Waker::noop();
         let mut operation = std::pin::pin!(refusals_within_pollable(RefusesAfterSuspending(false)));
         let (first, before) =
-            refusals_within(|| operation.as_mut().poll(&mut Context::from_waker(&waker)));
+            refusals_within(|| operation.as_mut().poll(&mut Context::from_waker(waker)));
         assert!(first.is_pending());
         assert_eq!(before, None);
         let (second, enclosing) =
-            refusals_within(|| operation.as_mut().poll(&mut Context::from_waker(&waker)));
+            refusals_within(|| operation.as_mut().poll(&mut Context::from_waker(waker)));
         let refused = StackUnavailable { needed: 64 };
         match second {
             Poll::Ready((answer, recorded)) => assert_eq!((answer, recorded), (9, Some(refused))),

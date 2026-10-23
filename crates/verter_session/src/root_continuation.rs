@@ -434,13 +434,6 @@ static_assertions::assert_impl_all!(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::task::Wake;
-
-    struct Noop;
-
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
 
     /// A request context whose installation is observable through the
     /// scheduler's request-id slot.
@@ -520,7 +513,7 @@ mod tests {
             let task = root.ambient.task.id();
             (root, task)
         };
-        let waker = Waker::from(Arc::new(Noop));
+        let waker = Waker::noop().clone();
         assert!(root.poll(&waker).is_pending());
         assert!(ExecutionScope::current(&registry).is_none());
         assert_eq!(
