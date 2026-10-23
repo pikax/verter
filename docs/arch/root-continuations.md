@@ -37,9 +37,9 @@ follows the same rules:
 `verter_execution::blocking::block_on(slice, poll)` is the only place a
 pollable computation is driven to completion by blocking. It polls with a
 waker that unparks the calling thread, and parks while the poll is pending.
-With a `slice`, each park is bounded, so a computation whose stop is
-observed only at its next poll (a cancelled request) is re-polled at least
-that often.
+With a `slice`, each park is bounded, so a computation without its own
+stop registration is re-polled at least that often. Semantic tasks register
+their cancellation wakes directly and do not require timed re-polling.
 
 The driver is reached only from synchronous public entries outside the
 computation. No poll-facing value hands a computation a way to call it.
@@ -84,6 +84,23 @@ cross-family cycles.
 
 Terminal scoped handoffs also release their scheduler, identity and request
 context; keeping a completed handoff alive does not retain its scheduler tree.
+
+The semantic task retains cancellation subscriptions beside its suspended
+execution. A request stop or the final shared-job owner's cancellation or
+withdrawal wakes its latest poller, including after a move to another thread.
+A job that has accepted request owners decides cancellation for shared work;
+otherwise the bound request decides, with an ownerless job as fallback. The
+job subscription remains armed while it is ownerless, so accepting owners
+during a suspension cannot lose a later stop. An unselected ownerless job
+may cause a harmless extra wake. Every terminal poll or task drop withdraws
+the task's stop registrations. This does not make the nested synchronous
+semantic callers in the inventory below pollable.
+
+Semantic memo subscriptions use one polling implementation for both task
+polls and synchronous joins. `Subscription::wait` applies the external
+driver to `Subscription::poll`; flight cells hold only readiness wakers,
+with no separate condition-variable wait implementation. The synchronous
+join retains its bounded park for callers without task-owned stop wakes.
 
 ### Scheduler completions
 

@@ -487,6 +487,11 @@ pub struct SemanticTask<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilitie
     /// The scheduler job the task was lent under: its aggregate token
     /// decides cancellation on every thread the task is polled on.
     job_cancellation: Option<verter_execution::cancellation::CancellationToken>,
+    /// Stop registrations travel with the task just like its flight wait.
+    /// An ownerless job can acquire owners while the task is suspended, so
+    /// keep its subscription even while the request decides cancellation.
+    job_cancellation_wake: Option<verter_execution::cancellation::CancellationSubscription>,
+    request_cancellation_wake: Option<verter_execution::cancellation::CancellationSubscription>,
     accounting: TaskAccounting,
     /// Where a task dropped without being returned leaves its request state
     /// for the dispatcher that lent it.
@@ -536,14 +541,30 @@ struct UnreturnedTask<'a, C: crate::resolver_core::ResolverCapabilities> {
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p, 'a, C> {
     /// Advance the task as far as it can go: `Ready` with its root's
     /// delivery (`Err` when a stop abandoned it), or `Pending` once it
-    /// waits on a producer outside it that will wake `waker`. Cancelling
-    /// the request wakes nothing: the stop is seen at the next poll, so the
-    /// executor re-polls or drops a pending task its request cancelled
-    /// ([`crate::semantic_execution::SemanticExecution::poll`]).
+    /// waits on a producer outside it that will wake `waker`. The selected
+    /// request or shared job's cancellation also wakes the task, so a stop
+    /// does not depend on the outside producer completing or a timer tick.
     pub(super) fn poll(
         &mut self,
         waker: &std::task::Waker,
     ) -> std::task::Poll<Result<QueryDelivery, ()>> {
+        // Aggregate ownership is monotonic. Once a job has accepted owners,
+        // their aggregate decides: an individual request cannot stop shared
+        // work, and need not wake it. Readiness is still checked by the
+        // execution's cancellation checkpoint under its bound context.
+        if self
+            .job_cancellation
+            .as_ref()
+            .is_some_and(|job| job.has_registered_owners())
+        {
+            self.request_cancellation_wake = None;
+        }
+        if let Some(stop) = &mut self.job_cancellation_wake {
+            let _ = stop.poll(waker);
+        }
+        if let Some(stop) = &mut self.request_cancellation_wake {
+            let _ = stop.poll(waker);
+        }
         let program = self
             .program
             .as_mut()
@@ -563,6 +584,10 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         let _refusals = self.accounting.refusals.install();
         let _completeness = self.accounting.completeness.install();
         let poll = self.execution.poll(program, self.root.take(), waker);
+        if poll.is_ready() {
+            self.job_cancellation_wake = None;
+            self.request_cancellation_wake = None;
+        }
         // Each frame step keeps its partiality to its own frame, reaching a
         // consumer through the delivery it reads. The lender consumes the
         // root's: its partiality returns to the lender with the task.
@@ -774,6 +799,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             held_call_needs: None,
         };
         program.retries.insert(root.clone(), attempt);
+        let job_cancellation = verter_execution::cancellation::current_job_cancellation_token();
+        let job_cancellation_wake = job_cancellation.as_ref().map(|job| job.subscribe());
+        let request_cancellation_wake =
+            crate::request_context::current_request_cancellation_token()
+                .filter(|_| {
+                    !job_cancellation
+                        .as_ref()
+                        .is_some_and(|job| job.has_registered_owners())
+                })
+                .map(|request| request.subscribe());
         SemanticTask {
             execution,
             program: Some(program),
@@ -783,7 +818,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             ),
             validity: crate::request_context::TaskExecutionValidity::inherit(),
-            job_cancellation: verter_execution::cancellation::current_job_cancellation_token(),
+            job_cancellation,
+            job_cancellation_wake,
+            request_cancellation_wake,
             accounting: TaskAccounting::lend(),
             home: Arc::new(parking_lot::Mutex::new(None)),
             root: Some(root),

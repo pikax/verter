@@ -342,7 +342,10 @@ fn a_pending_semantic_task_dropped_on_another_thread_releases_its_frames() {
     ) else {
         panic!("the other task produces the cold typeof");
     };
-    let waker = Waker::from(Arc::new(CountingWaker::default()));
+    let _request =
+        verter_type_engine::request_context::RequestContextGuard::install(budgeted_request(1));
+    let counter = Arc::new(CountingWaker::default());
+    let waker = Waker::from(Arc::clone(&counter));
     dispatch
         .with_semantic_task_for_tests(typeof_key(&dispatch, "x5"), |slot| {
             let mut task = slot.take().expect("the task is lent");
@@ -355,6 +358,11 @@ fn a_pending_semantic_task_dropped_on_another_thread_releases_its_frames() {
             });
             assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
             assert_eq!(graph.resident_flight_keys_for_tests(), vec![x2.clone()]);
+            assert_eq!(
+                Arc::strong_count(&counter),
+                2,
+                "dropping a pending task withdraws readiness and cancellation wakers"
+            );
         })
         .expect("the cold root runs as a task");
     drop(lease);
@@ -664,6 +672,124 @@ fn a_pending_semantic_task_keeps_its_jobs_cancellation_on_another_thread() {
         .expect("the cold root runs as a task");
     assert_eq!(display(&dispatch, &answer), "\"ok\"");
     drop(other);
+}
+
+/// Cancellation wakes a suspended task without its unrelated producer
+/// completing. The same registration follows the exclusive poller to a
+/// different thread and is withdrawn when the task stops.
+#[test]
+fn pending_semantic_task_cancellation_wakes_without_producer_release() {
+    use verter_execution::cancellation::{CancellationToken, JobCancellationGuard};
+    use verter_type_engine::request_context::RequestContextGuard;
+
+    for (request_installed, shared_job, withdraw_owner) in [
+        (true, false, false),
+        (false, false, false),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let host = chain_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let x2 = typeof_key(&dispatch, "x2");
+        let (other, lease) = hold_producer(&host, graph, x2.clone());
+        let request = budgeted_request(1);
+        let sibling = budgeted_request(2);
+        let job = if shared_job {
+            CancellationToken::aggregate()
+        } else {
+            CancellationToken::new()
+        };
+        let first_owner = shared_job.then(|| {
+            job.register_owner(Some(request.cancellation_token()))
+                .expect("the job accepts the first owner")
+        });
+        let second_owner = shared_job.then(|| {
+            job.register_owner(Some(sibling.cancellation_token()))
+                .expect("the job accepts the second owner")
+        });
+        let job_guard = JobCancellationGuard::install(job.clone());
+        let request_guard =
+            request_installed.then(|| RequestContextGuard::install(Arc::clone(&request)));
+        let first = Arc::new(CountingWaker::default());
+        let first_waker = Waker::from(Arc::clone(&first));
+        let latest = Arc::new(CountingWaker::default());
+        let latest_waker = Waker::from(Arc::clone(&latest));
+        dispatch
+            .with_semantic_task_for_tests(typeof_key(&dispatch, "x5"), |slot| {
+                let task = slot.as_mut().expect("the task is lent");
+                assert!(task.poll_for_tests(&first_waker).is_pending());
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| assert!(task.poll_for_tests(&latest_waker).is_pending()))
+                        .join()
+                        .expect("the pending task moves to its next poller");
+                });
+                if shared_job {
+                    request.cancel();
+                    assert_eq!(latest.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+                    if withdraw_owner {
+                        drop(second_owner);
+                    } else {
+                        sibling.cancel();
+                    }
+                } else if request_installed {
+                    // An ownerless job's token does not decide this request.
+                    job.cancel();
+                    assert!(task.poll_for_tests(&latest_waker).is_pending());
+                    latest.0.store(0, std::sync::atomic::Ordering::SeqCst);
+                    request.cancel();
+                } else {
+                    job.cancel();
+                }
+                assert_eq!(first.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert!(
+                    latest.0.load(std::sync::atomic::Ordering::SeqCst) > 0,
+                    "cancellation wakes the current poller before the producer is released"
+                );
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            assert!(matches!(
+                                task.poll_for_tests(&latest_waker),
+                                Poll::Ready(TaskOutcomeForTests::Stopped)
+                            ));
+                        })
+                        .join()
+                        .expect("the woken task stops on another thread");
+                });
+                assert_eq!(task.live_frames_for_tests(), 0);
+                assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+                assert_eq!(graph.resident_flight_keys_for_tests(), vec![x2.clone()]);
+                assert_eq!(
+                    Arc::strong_count(&latest),
+                    2,
+                    "a terminal task retains neither readiness nor cancellation wakers"
+                );
+            })
+            .expect("the cold root runs as a task");
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        drop(first_owner);
+        drop(request_guard);
+        drop(job_guard);
+        drop(lease);
+        drop(other);
+        let read = dispatch.execute_read(typeof_key(&dispatch, "x5"));
+        let QueryResult::Value(node) = read.value() else {
+            panic!("cancellation cannot publish a reusable answer: {read:?}");
+        };
+        assert_eq!(
+            display(
+                &dispatch,
+                &QueryResult::Value(SemanticQueryValue::TypeNode(*node))
+            ),
+            "\"ok\""
+        );
+        assert_eq!(
+            read.fact_status(),
+            &verter_type_engine::semantic_query::FactStatus::Complete
+        );
+    }
 }
 
 /// The work, spend and paid computations a task's frames charge on

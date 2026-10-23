@@ -270,7 +270,7 @@ struct Parked {
     _edge: verter_execution::tasks::WaitEdge,
     /// When a polled subscriber began waiting, for the `waits_ms` stat.
     /// Observation only: a default build keeps no timer across `Pending`.
-    #[cfg(feature = "semantic-observe")]
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     since: Option<Instant>,
     /// The subscription's own waker registration on the flight.
     waker: verter_execution::wake::WakeRegistration,
@@ -746,32 +746,7 @@ impl Subscription<'_> {
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
-        let inflight = Arc::clone(&self.inflight);
-        let mut state = inflight.state.lock();
-        // The wait time is a measurement-only counter; without the
-        // observation gate the clock is never read.
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        let wait_start = super::records_telemetry::<C::Observe>().then(Instant::now);
-        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
-        let wait_start = None;
-        if !flight_resolved(&state, flags) {
-            if let Err(WaitCycle) = self.park::<C::Observe>(&state, attempt.prepared.key()) {
-                return Joined::Recursive(Recursion::WaitCycle);
-            }
-            // Cooperative wait on the flight's condvar until it completes,
-            // is aborted by a canonical-invalidation sweep, or this request
-            // is cancelled. Subscribers never busy-spin.
-            while !flight_resolved(&state, flags) {
-                // Timed parking is the cancellation observation rail. A
-                // canceled subscriber detaches by returning; it never marks
-                // the shared flight aborted, so it cannot disturb an
-                // uncancelled producer or sibling.
-                inflight
-                    .ready
-                    .wait_for(&mut state, std::time::Duration::from_millis(2));
-            }
-        }
-        self.resolve(state, ctx, flags, attempt, capture, wait_start)
+        crate::semantic_execution::block_on(|waker| self.poll(ctx, flags, attempt, capture, waker))
     }
 
     /// Poll the producer's completion without blocking: `Ready` once the
@@ -794,7 +769,7 @@ impl Subscription<'_> {
         if flight_resolved(&state, flags) {
             // A polled wait is timed only in an observing build, from when
             // its subscriber parked.
-            #[cfg(feature = "semantic-observe")]
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             let wait_start = if super::records_telemetry::<C::Observe>() {
                 self.parked
                     .as_ref()
@@ -803,7 +778,7 @@ impl Subscription<'_> {
             } else {
                 None
             };
-            #[cfg(not(feature = "semantic-observe"))]
+            #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
             let wait_start = None;
             return std::task::Poll::Ready(
                 self.resolve(state, ctx, flags, attempt, capture, wait_start),
@@ -851,15 +826,14 @@ impl Subscription<'_> {
             None => super::inflight::SubscriberRegistration::inactive(),
         };
         // Test-only: record that this subscriber is about to SUSPEND (it
-        // holds `state`, and either parks on the condvar, which atomically
-        // releases `state`, or returns pending with its waker registered).
+        // holds `state` and returns pending with its waker registered).
         #[cfg(any(test, feature = "test-support"))]
         self.store
             .joiner_on_condvar_count
             .fetch_add(1, Ordering::SeqCst);
         self.parked = Some(Parked {
             _edge: edge,
-            #[cfg(feature = "semantic-observe")]
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             since: super::records_telemetry::<M>().then(Instant::now),
             waker: verter_execution::wake::WakeRegistration::default(),
             #[cfg(any(test, feature = "test-support", feature = "soak-support"))]

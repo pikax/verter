@@ -10,7 +10,9 @@
 
 use std::sync::Arc;
 
-use parking_lot::{Condvar, Mutex};
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+use parking_lot::Condvar;
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{DepSignature, QueryError, QueryResult, SemanticQueryValue};
@@ -20,14 +22,13 @@ use super::prepared::PreparedKeyHandle;
 
 /// Same-key production cell for one in-flight semantic query.
 ///
-/// The inner mutex guards `state` exclusively; `ready` is signalled when
-/// the winner publishes. Joiners wait on `ready` via `wait_while`, so they
-/// do not busy-retry. Ownership is released when the cell is retired from
+/// The inner mutex guards `state` and readiness registrations exclusively.
+/// Publication takes the registered wakers and wakes them after unlocking.
+/// Ownership is released when the cell is retired from
 /// the store's flight table after completion, abort, or panic.
 pub struct FlightCell {
     pub(super) site: crate::semantic_query::checker_policy::TupleSplicePosition,
     pub(super) state: Mutex<InflightState>,
-    pub(super) ready: Condvar,
     /// The cell's block and its slot in the flight table, pinned for as
     /// long as the cell lives — through every subscriber that still holds
     /// it after the flight retires. A flight is live work, never refused.
@@ -107,12 +108,12 @@ pub(super) struct InflightState {
     /// register a temporary wait-for edge to this task before parking, so a
     /// cycle of waiting tasks escapes through ReturnOnly.
     pub(super) owner: Option<super::tasks::TaskId>,
-    /// `true` once some thread owns the build. Subsequent threads wait on
-    /// `ready` rather than trying to own it themselves.
+    /// `true` once some task owns the build. Subsequent tasks subscribe
+    /// rather than trying to own it themselves.
     pub(super) claimed: bool,
     /// Set by [`super::SemanticGraphStore::invalidate_canonical`] when this
     /// in-flight entry's `(family, slot)` matched the sweep. Joiners that
-    /// wake from the condvar observe this flag and re-enter dispatch from
+    /// wake from the flight observe this flag and re-enter dispatch from
     /// step 1 rather than returning the (now stale) winner result. The
     /// cold winner skips warm publish when the flag is set so the stale
     /// result never re-populates the cache.
@@ -128,13 +129,11 @@ pub(super) struct InflightState {
 
 impl FlightCell {
     /// Wake every subscriber after the flight resolved (completed or
-    /// aborted) under its lock: the blocking ones on the condvar, the
-    /// polling ones through their registered wakers. A poll registers its
+    /// aborted) under its lock through their registered wakers. A poll registers its
     /// waker only after finding the flight unresolved under the same lock,
     /// so every waker registered before the resolution is taken here and
     /// none is registered after it.
     pub(super) fn wake_subscribers(&self) {
-        self.ready.notify_all();
         let wakers = self.state.lock().wakers.take();
         wakers.wake();
     }
@@ -146,7 +145,6 @@ impl FlightCell {
         Self {
             site: Default::default(),
             state: Mutex::new(InflightState::default()),
-            ready: Condvar::new(),
             _storage: Some(account.pin(flight_storage_bytes())),
         }
     }
@@ -159,7 +157,6 @@ impl FlightCell {
         Self {
             site: Default::default(),
             state: Mutex::new(InflightState::default()),
-            ready: Condvar::new(),
             _storage: None,
         }
     }

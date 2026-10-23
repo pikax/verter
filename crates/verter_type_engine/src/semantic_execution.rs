@@ -441,10 +441,10 @@ impl<P: Program> SemanticExecution<P> {
     /// producer that will wake `waker`. The only way an execution runs:
     /// frames never drive, and a poll never runs inside a frame's step.
     ///
-    /// Only a producer wakes `waker`: cancelling the request does not. A stop
-    /// is observed at the next poll, so an executor holding a pending drive
-    /// re-polls it (or drops it) when its request is cancelled, as
-    /// [`block_on`] does by parking for at most [`PARK_SLICE`].
+    /// The runtime registers producer wakes; its owner supplies stop wakes
+    /// (as `SemanticTask` does), or re-polls or drops a pending drive when
+    /// cancelled. The compatibility driver [`block_on`] bounds each park
+    /// by [`PARK_SLICE`] for owners without a stop subscription.
     pub(crate) fn poll(
         &mut self,
         program: &mut P,
