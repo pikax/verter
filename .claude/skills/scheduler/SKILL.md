@@ -21,6 +21,16 @@ reset additionally defers them through its serialization hold and driver join.
 Directly owned standalone DAGs deliver immediately. A reset already joining
 its own driver permits that driver's callback to return instead of waiting
 for its joiner; another scheduler's driver retains the normal reset barrier.
+An own-driver reset that acquires the lifecycle hold clears state, retains
+the driver's identity and join handle, and leaves shutdown set until the
+loop exits. External restart joins that outgoing driver before reopening
+work. Reset followed by restart on the driver itself reuses the same loop;
+it never spawns an overlapping driver. A healthy restart's serialization
+hold cannot swallow an own-driver reset: reset parks in bounded slices until
+it acquires the hold or observes another lifecycle owner's shutdown. Startup
+is gated until identity/handle publication and lifecycle unlock, so an
+immediate completion wake can safely reset. `scheduler::reset_tests` covers
+exit, retained-handle recovery, startup, and same-driver reset/restart.
 
 `Scheduler::begin_scoped_cache_node<T>` similarly exposes a poll-only
 `ScopedCacheNodeHandoff<T>`. Admission/result waits yield; dispatch transfers

@@ -93,6 +93,10 @@ pub use submission::SchedulerSubmission;
 mod submission_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "scheduler/reset_tests.rs"]
+mod reset_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "scheduler/scoped_handoff_tests.rs"]
 mod scoped_handoff_tests;
 
@@ -658,20 +662,8 @@ impl Scheduler {
             io_submit_attempts: std::sync::atomic::AtomicUsize::new(0),
         });
 
-        // Driver holds Weak so it doesn't prevent Drop.
-        // Also clones the receiver so it can block on it without upgrading.
-        let weak = Arc::downgrade(&scheduler);
-        let receiver = scheduler.inbox.receiver.clone();
-        let teardown = scheduler.driver_teardown.1.clone();
-        let handle = std::thread::Builder::new()
-            .name("verter-scheduler".to_string())
-            .spawn(move || {
-                Self::driver_loop_native(weak, receiver, teardown);
-            })
-            .expect("failed to spawn scheduler driver");
-
-        *scheduler.driver_thread_id.lock() = Some(handle.thread().id());
-        *scheduler.driver_handle.lock() = Some(handle);
+        let start = scheduler.spawn_native_driver();
+        let _ = start.send(());
         scheduler
     }
 
@@ -1291,8 +1283,10 @@ impl Scheduler {
     /// Full reset: stop the driver, drain inbox, remove all nodes, clear
     /// all state. Call `restart_driver()` after to resume processing.
     ///
-    /// Provides a true quiesce barrier — no concurrent processing during
-    /// the clear phase because the driver thread is joined first.
+    /// External callers join the driver before clearing state. From a wake on
+    /// this scheduler's own driver, reset clears state and leaves shutdown set;
+    /// that driver exits after the wake returns. Its handle remains joinable
+    /// until an external reset or restart completes the quiesce barrier.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reset(&self) {
         let wake_deferral = self.dag.defer_wakes();
@@ -1303,13 +1297,25 @@ impl Scheduler {
         // callback must instead leave an already active reset to its joiner.
         let is_own_driver = *self.driver_thread_id.lock() == Some(std::thread::current().id());
         let _serial = if is_own_driver {
-            // Another reset may already be joining this driver, including a
-            // completion callback currently running on it. That reset owns
-            // the quiesce barrier; waiting for its hold here forms a cycle.
-            let Some(serial) = self.reset_serial.try_lock() else {
-                return;
-            };
-            serial
+            loop {
+                if let Some(serial) = self.reset_serial.try_lock() {
+                    break serial;
+                }
+                // A stopping lifecycle owner may be joining this very
+                // callback. A healthy restart, however, may merely be
+                // returning without resetting anything: do not lose reset
+                // in that case. Park in bounded slices so a joiner's stop
+                // remains observable, without spinning or waiting on it.
+                if self.shutdown.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(serial) = self
+                    .reset_serial
+                    .try_lock_for(std::time::Duration::from_millis(2))
+                {
+                    break serial;
+                }
+            }
         } else {
             self.reset_serial.lock()
         };
@@ -1321,12 +1327,13 @@ impl Scheduler {
         let _ = self.inbox.sender.try_send(Submission::Wake);
         #[cfg(any(test, feature = "test-support"))]
         self.reset_wake_posts.fetch_add(1, Ordering::Release);
-        if let Some(handle) = self.driver_handle.lock().take() {
-            if should_join_driver_thread(handle.thread().id(), std::thread::current().id()) {
+        if !is_own_driver {
+            let handle = self.driver_handle.lock().take();
+            if let Some(handle) = handle {
                 let _ = handle.join();
             }
+            *self.driver_thread_id.lock() = None;
         }
-        *self.driver_thread_id.lock() = None;
 
         // 2. Drain queued requests; cooperative admission validates their stamps.
         while let Ok(submission) = self.inbox.receiver.try_recv() {
@@ -1363,32 +1370,75 @@ impl Scheduler {
             self.shutdown_drained_submission(submission);
         }
 
-        // 6. Unset shutdown so the next driver can run.
-        self.shutdown.store(false, Ordering::Release);
+        // A self-reset cannot join its own active stack. Keep both shutdown
+        // and the join handle until an external lifecycle call observes exit;
+        // otherwise this very driver resumes pumping after its reset returns.
+        if !is_own_driver {
+            self.shutdown.store(false, Ordering::Release);
+        }
         drop(_serial);
         self.inbox.notify_space();
         drop(wake_deferral);
     }
 
     /// Restart the driver thread after a `reset()`. Must be called on
-    /// `Arc<Self>` because the driver needs a `Weak` reference.
+    /// `Arc<Self>` because the driver needs a `Weak` reference. An external
+    /// restart joins a self-reset driver before reopening work. On the driver
+    /// itself, restart reopens the retained loop without spawning a second one.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn restart_driver(self: &Arc<Self>) {
+        if *self.driver_thread_id.lock() == Some(std::thread::current().id()) {
+            // An external reset/restart may already be joining this callback.
+            // Leave its stop intact rather than waiting for the joiner.
+            let Some(_serial) = self.reset_serial.try_lock() else {
+                return;
+            };
+            while self.driver_teardown.1.try_recv().is_ok() {}
+            self.shutdown.store(false, Ordering::Release);
+            return;
+        }
+        let _serial = self.reset_serial.lock();
+        if !self.shutdown.load(Ordering::Acquire) && self.driver_handle.lock().is_some() {
+            return;
+        }
+        let handle = self.driver_handle.lock().take();
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
+        *self.driver_thread_id.lock() = None;
         // The outgoing driver may have exited on the shutdown flag without
         // consuming its teardown signal; a leftover signal would stop the
         // incoming driver on its first park.
         while self.driver_teardown.1.try_recv().is_ok() {}
+        self.shutdown.store(false, Ordering::Release);
+        let start = self.spawn_native_driver();
+        // A completion wake may reset immediately on startup. Its identity
+        // and join handle must already be installed, and reset must not see
+        // this startup serialization hold as an external joiner's reset.
+        drop(_serial);
+        let _ = start.send(());
+    }
+
+    /// Publish one driver's identity and handle before letting it run.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_native_driver(self: &Arc<Self>) -> crossbeam_channel::Sender<()> {
+        // Driver holds Weak so it doesn't prevent Drop. A dropped startup
+        // sender abandons the thread without executing scheduler work.
+        let (start, started) = crossbeam_channel::bounded(1);
         let weak = Arc::downgrade(self);
         let receiver = self.inbox.receiver.clone();
         let teardown = self.driver_teardown.1.clone();
         let handle = std::thread::Builder::new()
             .name("verter-scheduler".to_string())
             .spawn(move || {
-                Self::driver_loop_native(weak, receiver, teardown);
+                if started.recv().is_ok() {
+                    Self::driver_loop_native(weak, receiver, teardown);
+                }
             })
             .expect("failed to restart scheduler driver");
         *self.driver_thread_id.lock() = Some(handle.thread().id());
         *self.driver_handle.lock() = Some(handle);
+        start
     }
 
     /// Drain and discard all pending inbox submissions. Used by `close()`
@@ -1969,7 +2019,13 @@ impl Scheduler {
                     PumpReason::ShutdownDrain,
                     crate::caller_kind::CallerKind::Driver,
                 );
-                break;
+                // A drained request's completion wake can explicitly restart
+                // this retained loop. Do not leave a finished driver handle
+                // behind after that callback has reopened work.
+                if scheduler.shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                continue;
             }
 
             // Drive the pump until it reports no progress, then
@@ -1982,7 +2038,7 @@ impl Scheduler {
                     PumpReason::DriverLoop,
                     crate::caller_kind::CallerKind::Driver,
                 );
-                if !stats.made_progress() {
+                if scheduler.shutdown.load(Ordering::Acquire) || !stats.made_progress() {
                     break;
                 }
             }

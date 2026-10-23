@@ -586,7 +586,11 @@ impl Scheduler {
     pub(crate) fn drain_inbox_for_pump(&self) -> usize {
         let mut drained = 0;
         while let Ok(submission) = self.inbox.receiver.try_recv() {
-            self.process_submission(submission);
+            if self.shutdown.load(Ordering::Acquire) {
+                self.shutdown_drained_submission(submission);
+            } else {
+                self.process_submission(submission);
+            }
             drained += 1;
         }
         drained
@@ -634,6 +638,9 @@ impl Scheduler {
         };
 
         loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                break;
+            }
             // Sample DAG depth under the lock so the audit figure
             // matches the depth observed by the entry that is about
             // to leave. Optional capture: without `semantic-observe` the

@@ -81,6 +81,19 @@ with a 2 ms slice so a stop stays observable.
   returns without waiting on its joiner. The exemption uses the exact driver
   thread identity; another scheduler's driver still waits for the reset
   barrier.
+- **Own-driver reset and restart:** when no external reset owns the barrier,
+  a reset from a completion wake clears state and leaves shutdown set. The
+  current driver stops after that callback returns; its identity and join
+  handle remain owned by the scheduler. External restart joins it before
+  reopening work. A reset followed by restart on that same driver reopens
+  its existing loop, without spawning another driver. Native pump teardown
+  rejects queued requests and dispatches no new stages while shutdown is
+  set. A reset racing a healthy lifecycle hold waits in bounded parked
+  slices; it returns early only once shutdown proves the holder may be
+  joining this callback. Startup gates all work until identity and handle
+  publication and lifecycle unlock. Joins hold no driver-handle mutex.
+  `scheduler::reset_tests` exercises these paths using real completion wakes
+  and retains cleanup guards that release dependencies and join test threads.
 - **Backpressure:** none at completion; admission has its own handoff below.
 
 ### Scheduler request admission
