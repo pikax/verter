@@ -62,3 +62,21 @@ synchronous flight wait parks through the same waker registration as a
 poll, with its cancellation registered beside it. The timed cancellation
 slices of the semantic drive, the scoped cache-node driver, the carrier
 lanes and the workspace flight wait are removed with it.
+
+## Host roots and the state they carry across suspension
+
+| item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
+| --- | --- | --- | --- | --- | --- |
+| `RootTask` (`computation`, `ambient`, `work`), `ComponentMetaOutputRoot`, `CompileRequestRoot` | The public pollable roots; `get_component_meta_output` and `compile_request` drive them | REQUIRED | One root, until it answers or is dropped | `verter_session/src/root_continuation.rs` | always |
+| `RootAmbient` (captured request context, job cancellation token, task registry and execution task) | Installed on every poll of its root, restored after it | REQUIRED | One root | `verter_session/src/root_continuation.rs` | always |
+| `RootWorkSlot` and `RootWork` (a transferred producer or a dispatch step) | The compile root's macro bundle hands them to the root's driver; the synchronous driver runs producers through `Scheduler::run_transferred_producer` and steps through `Scheduler::dispatch_for_pending_dependency` | REQUIRED | One handed-out piece of work, until its driver takes and runs or drops it | `verter_session/src/root_continuation.rs` | always |
+| `VerterHost.task_registry` | Roots register or adopt their task in it; resolver flight groups and imported roots take it at construction | REQUIRED | The host | `verter_session/src/lib.rs`, `host_construction.rs` | always |
+| `SingleflightGroup.tasks`, `FlightInner::Running.owner` (`TaskId`), a follower's `WaitEdge` | `run_retaining_pollable` claims, re-entry, cycle refusal and follower waits | REQUIRED | One group; owner until the lane terminates; edge until the follower answers or drops | `verter_session/src/resolver_core/mod.rs` | always |
+| `FlightLease._thread` | Makes a workspace flight lease non-`Send`, so the thread lease count stays exact for the computation polling the thread | REQUIRED | One lease | `verter_workspace/src/resolution_flights.rs` | always |
+| `BuildRelease` as a future, `BuildRole` | `base_view_pollable` waits for a store-view build release, holding no manager lock | REQUIRED | One pending read | `verter_session/src/resolver_store.rs` | always |
+| `StoreViewManager::build_release_registrations` | none; root tests read it | OPTIONAL | Derived | `verter_session/src/resolver_store.rs` | `cfg(test)` |
+| `SyncRefCell`, `SyncCell` (the dispatcher's request state, the connected demand ledger and the guard references to them) | Every dispatcher borrow, with `RefCell`/`Cell` borrow discipline and an atomic flag | REQUIRED | One dispatcher | `verter_execution/src/sync_cell.rs`, `verter_type_engine/src/project_semantic_dispatch` | always |
+| `RefusalsWithin` (the operation's own refusal record) | The compile root's entry records parse-stack refusals across its polls | REQUIRED | One recording operation | `verter_parser/src/oxc_parse/stack.rs` | always |
+| `WaitFamily::Root`, `block_on_when_pending` | The synchronous entries over the roots, and the synchronous store-view read | REQUIRED | Static | `verter_execution/src/blocking.rs` | always |
+
+No trace or history is added, and every item above holds with capture off.

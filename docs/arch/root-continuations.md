@@ -4,9 +4,9 @@ A host root computation (component metadata, compile) must be able to stop
 when it needs work it does not own. A poll returns `Pending` with the
 computation's state owned and suspended, and a race-safe wake subscription
 registered. A later poll continues from that point, on any thread, without
-redoing completed work. This page is the reference for the boundaries that
-already behave this way. It also lists, as an inventory of the current
-tree, the boundaries a root can still block on.
+redoing completed work. This page is the reference for the host roots and
+the boundaries that already behave this way. It also lists, as an inventory
+of the current tree, the boundaries a root can still block on.
 
 ## Protocol shared by every pollable boundary
 
@@ -35,6 +35,132 @@ follows the same rules:
   also registers its waker on that cancellation, so the cancellation itself
   wakes it and the next poll answers the cancellation. No boundary re-polls
   on a timer to notice a stop.
+
+## Host roots
+
+A host root is one public request as an owned computation. It is begun
+without running any of it, and an external driver polls it to its answer.
+
+| Entry | Root | Answer | Synchronous entry over it |
+| --- | --- | --- | --- |
+| `VerterHost::begin_component_meta_output(canonical_or_alias)` | `ComponentMetaOutputRoot<'h>` | `ComponentMetaOutputAnswer` | `get_component_meta_output` |
+| `VerterHost::begin_compile_request(canonical_id, request)` | `CompileRequestRoot<'h>` | `CompileRequestAnswer` | `compile_request` |
+
+All of these are in `crates/verter_session/src/root_continuation.rs` and
+re-exported from the crate root with `RootWork`.
+
+- **Ownership and lifetime.** A root borrows only the host (`'h`). It owns
+  its request, every input it captures (the session view, the store-view
+  capture, the compile input) and the suspended state of the wait it is in,
+  so it outlives the call that began it. It is `Send`, and `poll` takes it
+  exclusively, so a pending root may resume on any thread, one poller at a
+  time. The session crate's tests assert the `Send` bound.
+- **Ambient request state.** A root runs under the request context and the
+  scheduler job its creator ran under, captured when it begins, and as one
+  execution task of the host's `TaskRegistry`: the task its creator runs as,
+  or one registered for it. Each poll installs the three on the polling
+  thread and restores the thread's own afterwards; a root begun outside any
+  request clears the poller's request slots for the poll instead. The task
+  owns every producer the root claims and is the waiter of every flight it
+  joins, so its same-path recursion and its wait cycles are decided by task
+  across threads. Dropping a pending root releases its suspended state
+  under the same ambient state.
+- **Result and errors.** `Ready` carries exactly what the synchronous entry
+  returns, including its typed failures. Polling after `Ready` panics.
+- **Dependency work.** A root never runs a dependency's producer inside its
+  own poll and never drives the scheduler that dispatches its dependencies.
+  When it needs either, the poll returns `Pending` and leaves one
+  `RootWork` for the driver (`take_work`). The driver runs it wherever it
+  chooses — `RootWork::is_producer` separates CPU work from a scheduler
+  dispatch step — and polls again; `RootWork::run` answers whether the work
+  made progress (a dispatch step that dispatched nothing returns `false`,
+  and the dependency's own settlement then wakes the root). Nothing else
+  wakes a root that handed out work. Dropping the work abandons the
+  dependency it carried, and the next poll answers that abandonment.
+- **Backpressure.** A root waits on admission like any other pending
+  dependency; it adds no queue of its own.
+- **External driving.** The synchronous entry drives the same root with
+  `verter_execution::blocking::block_on(WaitFamily::Root, ..)` on its own
+  thread, running handed-out producers where the scheduler runs producers
+  (`Scheduler::run_transferred_producer`: its CPU pool natively, the caller
+  on wasm32) and dispatch steps on its own thread
+  (`Scheduler::dispatch_for_pending_dependency`). That is the only place the
+  pool binding appears; a root's poll never enters it.
+
+What each root suspends on today:
+
+- **Component-metadata output.** The store-view capture it starts with
+  suspends behind a build another thread holds (see
+  [Store-view reads](#store-view-reads)). Its resolution, extraction and
+  output materialization still enter their dependency waits synchronously
+  inside the poll; see [Boundaries that still block](#boundaries-that-still-block).
+- **Compile request.** The macro bundle it compiles with is produced on a
+  pollable path: the store-view read suspends; the scoped cache node
+  suspends while another root produces it and while it waits for dispatch
+  (handing out a dispatch step); and when the node elects this root its
+  producer, the root hands the producer out instead of running it. The
+  backend and its compile arena are created after the bundle is produced,
+  so neither is held across a suspension, and parse-stack refusals are
+  recorded across polls (`refusals_within_pollable`). The macro traversal
+  inside the handed-out producer runs synchronously wherever the driver
+  runs it; its own dependency waits are the semantic engine's.
+
+Evidence in `verter_session`'s `root_continuations_tests` and
+`root_continuation::tests`: a root begun by a function that returns it is
+polled to its answer on another thread and answers what the synchronous
+entry answers; a root resumed on another thread runs under its own task and
+request and leaves the polling thread's state as it was; a root begun inside
+a task adopts it; the component-metadata root suspends behind a held
+store-view build and resumes warm without entering a wait; dropping it there
+withdraws its wait; the compile root's polls enter no wait under a
+forbidding probe, cold and warm, handing out its producer once; and a second
+compile root following the first's held producer answers `Pending` and
+completes once that producer runs. Planted controls fail the same checks:
+the synchronous capture behind a held build is refused, and running the
+macro producer inside the compile root's poll fails all three compile
+cases.
+
+## Execution tasks across suspension
+
+Producers and waits are owned by execution tasks, never by threads, wherever
+a computation can suspend while it holds them:
+
+- **Semantic memo flights and scoped cache nodes** register task wait edges
+  in the host's one `TaskRegistry` (below).
+- **Resolver request flights** (`SingleflightGroup`, used by stable
+  requests, fallthrough requests, imported roots and IndexedReady
+  materialization) take the host registry at construction. A lane's leader
+  is the task that claimed it (`FlightInner::Running { owner: TaskId }`).
+  The flight protocol is one pollable computation
+  (`run_retaining_pollable`), whose leader may suspend inside its compute;
+  `run_retaining` drives it, as a task installed for its extent. A claim by
+  the leading task — same-path re-entry — computes inline as a nested
+  leader; any other task registers its `follower -> leader` edge first and
+  follows, and a wait that would close a cycle computes inline instead.
+  Dropping a suspended leader aborts the lane so followers re-elect;
+  dropping a follower withdraws its registration and edge. Evidence:
+  `resolver_core::singleflight_task_tests` (two tasks on one thread share
+  one leader; re-entry and cycles compute inline; dropped leaders and
+  followers release), each failed by an applied thread-style or edge-less
+  mutation.
+- **Workspace resolution flights** decide "this thread owes a flight, so it
+  resolves directly" from the thread's lease count. A `FlightLease` is not
+  `Send`, so a suspending computation cannot hold one across a suspension
+  and the count is exactly the leases the polling computation owes; a
+  compile-time assertion in `resolution_flights` fails once a lease is
+  `Send`.
+- **Store-view build claims** are taken, built and released within one poll;
+  a reader never suspends while it holds a claim.
+
+## Interior state a suspended computation shares
+
+`ProjectSemanticDispatch` keeps its request state in
+`verter_execution::sync_cell::{SyncRefCell, SyncCell}`, which keep the borrow
+discipline of `RefCell` and `Cell` — a conflicting borrow panics, it never
+waits — with an atomic flag, so the dispatcher is `Sync` and a computation
+that suspends while it holds a shared reference to it is `Send`. Borrow
+guards are not `Send`: a borrow held across a suspension point does not
+compile. The session pins the dispatcher's `Sync` bound.
 
 ## Cancellation subscriptions
 
@@ -65,26 +191,30 @@ register on their cancellation and park untimed.
 
 ## The external-boundary driver
 
-`verter_execution::blocking::block_on(family, slice, poll)` is the only
-place a pollable computation is driven to completion by blocking. It polls
-with a waker that unparks the calling thread, and parks while the poll is
-pending. Every driver over a cancellable wait passes no `slice`: the poll
-registers on its cancellation, which wakes the thread. The `slice`
-parameter remains for a caller that must bound its park for another
-reason.
+`verter_execution::blocking::block_on(family, slice, poll)` drives a
+pollable computation to completion by blocking. It polls with a waker that
+unparks the calling thread, and parks while the poll is pending. Every
+driver over a cancellable wait passes no `slice`: the poll registers on its
+cancellation, which wakes the thread. The `slice` parameter remains for a
+caller that must bound its park for another reason.
+`block_on_when_pending(family, poll)` is the same driver for a computation
+that usually answers at once and waits only behind another caller's work
+(the store-view read): it enters the `family` wait only when its first poll
+is pending.
 
 Each synchronous entry listed below is the driver applied to the pollable
 boundary beside it, so there is one implementation of each handoff, not a
-blocking copy next to a polling one. The semantic runtime's blocking drive
-(`SemanticExecution::drive`, `SemanticTask::drive`) uses the same driver,
-untimed, and is woken by its stop's cancellation.
+blocking copy next to a polling one. The synchronous host entries drive
+their roots ([Host roots](#host-roots)) as `WaitFamily::Root`. The semantic
+runtime's blocking drive (`SemanticExecution::drive`, `SemanticTask::drive`)
+uses the same driver, untimed, and is woken by its stop's cancellation.
 
 The target is that only a synchronous public entry outside the computation
-reaches the driver. The current tree does not meet it: the host roots are
-themselves synchronous, and they reach the driver, and the other waits in
+reaches the driver. The current tree does not meet it: the component-
+metadata root still reaches the driver, and the other waits in
 [Boundaries that still block](#boundaries-that-still-block), from deep
-inside their own computation. No poll-facing value hands a computation a
-way to call it, but no root is pollable yet either.
+inside its resolution, and so does the macro traversal a compile root hands
+its driver. No poll-facing value hands a computation a way to call it.
 
 ## Measuring what a root still reaches
 
@@ -101,15 +231,17 @@ each announcement as an empty inline call.
 
 `verter_session`'s `root_continuations_tests` group runs the public roots
 under a recording probe over an owner component that imports a props
-module and a child component:
+module and a child component. The component-metadata rows poll the root
+directly, with a loop that enters no wait of its own:
 
-| Path | Families reached by the root's own thread |
+| Path | Families reached by the polling thread |
 | --- | --- |
 | Host construction and source registration | `SchedulerCompletion`, `SchedulerAdmission` |
-| Cold component metadata (`get_component_meta_output`) | `SemanticDrive`, `DeclLowering` |
-| Warm component metadata | none, uncontended |
+| Cold component-metadata root | `SemanticDrive`, `DeclLowering` |
+| Warm component-metadata root | none, uncontended |
 | Mixed: child warm, owner cold after a props-module edit | `SemanticDrive`, `DeclLowering` |
-| Single-request compile (`compile_request`, runtime client and IDE companion), cold or warm | `ScopedCacheNode`, `CpuPool` |
+| Compile root polls (runtime client and IDE companion), cold or warm | none: the root hands its macro producer to its driver |
+| Synchronous `compile_request`, cold or warm | `Root` (its driver), `CpuPool` (the handed-out producer, on the scheduler pool) |
 | Batch compile (`compile_many`), cold or warm | `CpuPool`; each input runs on a pool thread outside the probe |
 | Host drop | none |
 
@@ -118,6 +250,20 @@ A single-request run never reaches the contention-only families
 another request's flight or store-view build has to be in progress. The
 tests pin each path's reached set: a conversion that removes a family from
 a path fails its pin until this table and the pin move together.
+
+Beneath the cold component-metadata root's two families, a backtrace of
+every wait it enters on that fixture shows fourteen synchronous waits,
+all but two of them declaration lowering on the owner shards: the owner's
+and its imports' IndexedReady builds (`ensure_indexed_ready_serve_located`
+→ `acquire_lease_and_run`, reached from the request's input capture, the
+local symbol metadata and the owner's direct-import indexing), whole-file
+evaluation environments (`DeclBodyMemo::whole_env`, reached from local type
+declarations, the fallthrough environment and value-export peeling), macro
+type arguments (`transient_macro_type_argument`), and declaration bodies
+demanded by instantiations and locator lowering inside the semantic engine
+(`type_decl_outcome_in`, `transient_type_parts_in`); the remaining two are
+`SemanticTask::drive` for instantiations reached from the shallow path
+walker. They sit between 24 and 138 native frames below the root's poll.
 
 The same group holds the Pending-before-release harness; its cases over a
 held semantic flight (`root_continuations_harness_*`) live in
@@ -266,11 +412,50 @@ producer on the existing CPU pool.
   panic/drop, re-entry, reset with a full successor inbox, and unlocked wake
   delivery. The session compile contract
   `scoped_handoff_no_blocking_scheduler` denies recovering the blocking
-  scheduler from the handoff. These are boundary tests; complete production
-  component-meta/compile roots are still synchronous.
+  scheduler from the handoff.
   `scoped_cache_handoffs_share_the_semantic_wait_graph` holds real semantic
   and scoped producers, closes a cycle in both dependency orders, and runs
   the surviving producer on another thread under its original task.
+- **Production use.** The compile root awaits the Vue macro bundle's node
+  through this handoff and hands its producer and dispatch steps to its
+  driver as `RootWork` ([Host roots](#host-roots)); the synchronous macro
+  bundle entry and the Vue API projector still use
+  `execute_scoped_cache_node`. Both drivers share one request, one producer
+  body and one delivery (`vue_macro_codegen_request`,
+  `build_vue_macro_codegen`, `finish_vue_macro_codegen`), and both place
+  producers through `Scheduler::run_transferred_producer`.
+
+### Store-view reads
+
+`StoreViewManager::base_view_pollable` (`crates/verter_session/src/resolver_store.rs`)
+is the store-view read: a warm hit answers at once; a reader that finds no
+in-flight build claims one, builds and publishes within the same poll; a
+reader that finds another thread's build in flight returns `Pending` with
+its waker registered for the claim's release (`BuildRelease`, a future), and
+holds no manager lock while it waits. `base_view` drives the same
+computation with `block_on_when_pending(StoreViewBuild, ..)`, so a reader
+announces the wait only when it would park. `HostStoreView::from_host_read_pollable`
+and `VerterHost::capture_batch_fixed_view_pollable` are its pollable callers;
+the component-metadata root captures its fixed view through them, and the
+compile root's macro bundle reads its cold seed through them.
+
+- **Lifetime and cancellation.** Dropping a pending read withdraws its
+  registration and its test-only parked-reader count. A claim is never held
+  across a suspension, so the self-await refusal keeps its thread identity.
+- **Evidence:** `root_continuations_component_meta_root_suspends_behind_a_held_store_view_build`
+  holds a real build at the test gate on another thread; the root's first
+  poll answers `Pending` under a forbidding probe, the release wakes it, and
+  it completes warm without entering a wait. Replacing the pollable wait
+  with the synchronous park fails it with `EnteredWait(StoreViewBuild)`.
+
+### Parse-stack refusal recording
+
+`verter_parser::oxc_parse::refusals_within_pollable(operation)` records the
+stack refusals an operation that may suspend makes on whichever thread
+polls it, into the operation's own record, carries it across suspensions,
+and answers it with the result; each poll also carries a refusal into the
+recording that encloses that poll, as `refusals_within` does when it
+returns. The compile root's entry records through it.
 
 ### Declaration-lowering owner-shard handoffs
 
@@ -320,9 +505,9 @@ All of these are in `crates/verter_semantic_source/src/decl_lowering.rs`.
 These are the production waits a component-meta or compile root can reach
 in the current tree, with the `WaitFamily` each announces. Each one parks
 the polling thread inside whatever poll reaches it, so a root that reaches
-one is not yet pollable. Semantic memo flights and scoped cache-node
-followers share `TaskRegistry` wait edges; the remaining families do not
-yet register their waits there.
+one is not yet pollable at that point. Semantic memo flights, scoped
+cache-node followers and resolver request followers share `TaskRegistry`
+wait edges; the remaining families do not yet register their waits there.
 
 | Wait | Family | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- | --- |
@@ -330,33 +515,56 @@ yet register their waits there.
 | Semantic task drive (`SemanticTask::drive`) | `SemanticDrive` | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
 | Artifact cache singleflight joiner (`cooperative_admit_impl`) | `CacheFlight` | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | private `SlotJoin::poll`; synchronous callers still drive it to completion |
 | Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `CacheFlight` | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | same `SlotJoin::poll`; callers still synchronous |
-| Resolver request singleflight follower (`SingleflightGroup::run_retaining`; thread-identity owner) | `ResolverFlight` | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | private owned `FlightJoin::poll`; callers still synchronous |
-| Store-view build park (`StoreViewManager::park_for_build`) | `StoreViewBuild` | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | private `BuildRelease::poll`; callers still synchronous |
+| Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | `ResolverFlight` | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; IndexedReady materialization; imported roots | `run_retaining_pollable`, led and followed by task; callers still synchronous |
+| Store-view build park, synchronous reads | `StoreViewBuild` | `verter_session/src/resolver_store.rs` | `resolver_store_view_read` and the synchronous capture, from inside resolution | `base_view_pollable`; the roots' own captures already use it |
 | Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `CarrierPublication` | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
 | Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`), a completion handle's `wait` | `SchedulerCompletion` | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs`, `verter_scheduler/src/job.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `CompletionSubscription::poll` on the handle; the adapter still parks |
 | Batch upsert completion (`Scheduler::wait_batch`) | `SchedulerCompletion` | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
-| Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | `ScopedCacheNode`, then `CpuPool` | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
+| Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a CPU-pool `install`) | `ScopedCacheNode`, then `CpuPool` | `verter_scheduler/src/scheduler/scoped_handoff.rs` | the synchronous macro bundle entry and the Vue API projector | the compile root awaits the handoff and hands out its producer |
 | Scheduler inbox submission (`send_submission`) | `SchedulerAdmission` | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
 | Workspace import-resolution flight (`FlightSubscription::wait`) | `WorkspaceResolution` | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` registers a waker; callers still synchronous |
-| Declaration-lowering synchronous entries (`acquire_lease*`, `run_leased*`) | `DeclLowering` | `verter_semantic_source/src/decl_lowering.rs` | the declaration body memo, from inside semantic evaluation | the `begin_*` handoffs above; callers still synchronous |
-| Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) and the scheduler pool's `install` | `CpuPool` | `verter_session/src/host_batch_coordinator.rs`, `verter_scheduler/src/execution/` | `compile_many`, `get_component_meta_batch`, scoped cache-node producers | none; the batch topology itself is the executor's to replace |
+| Declaration-lowering synchronous entries (`acquire_lease*`, `run_leased*`) | `DeclLowering` | `verter_semantic_source/src/decl_lowering.rs` | IndexedReady materialization and the declaration body memo, from inside resolution and semantic evaluation | the `begin_*` handoffs above; callers still synchronous |
+| Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) and the scheduler pool's `install` | `CpuPool` | `verter_session/src/host_batch_coordinator.rs`, `verter_scheduler/src/execution/` | `compile_many`, `get_component_meta_batch`, and the synchronous drivers' handed-out producers | none; the batch topology itself is the executor's to replace |
 
 The declaration-lowering row's handoffs are pollable; what still blocks is
-their synchronous entries, which the declaration body memo calls from
-inside semantic evaluation. What remains is to make the computations that
-call them suspend instead.
+their synchronous entries, which IndexedReady materialization and the
+declaration body memo call from inside resolution and semantic evaluation.
+What remains is to make the computations that call them suspend instead.
 
 ## What a pollable root still needs
 
-The cold component-meta root (`VerterHost::component_meta_via_view_cold`)
-is one synchronous computation. It resolves macros through
+The cold component-metadata root resolves macros through
 `ProjectSemanticDispatch`, extracts the analysis (which recurses into
 imported components' fallthrough), and publishes through
-`ComponentMetaResultPublish`. Compile is synchronous in the same way. Every
-wait in the table above can be reached from inside a nested synchronous
-call. A root becomes pollable only when each such call either answers
-without waiting or suspends as owned state. The suspended state includes
-the frames of the semantic runtime (`SemanticExecution`), and resumption
-continues the suspended computation; it does not re-run it from the root.
-Converting the low-level waits alone does not achieve this. The callers
-that reach them have to become resumable steps too.
+`ComponentMetaResultPublish`, all synchronously inside the poll that follows
+its capture; the compile root's handed-out macro producer runs the same
+kind of traversal. Every wait in the table above can be reached from inside
+that nested synchronous call graph — the measured fixture alone reaches
+fourteen, up to 138 frames deep. A root becomes fully pollable only when
+each such call either answers without waiting or suspends as owned state,
+and resumption continues the suspended computation rather than re-running
+it. Converting the low-level waits alone does not achieve this; the callers
+that reach them have to become resumable too.
+
+The conversion that remains runs from each wait upward to the root, one
+caller at a time, as compiler-generated continuation state (`async` bodies
+polled by the root), so a suspended call keeps its locals, its traversal
+position and its completed results, and resuming it repeats none of them.
+What is already in place for that:
+
+- the roots themselves, their ambient installation, their task identity
+  and the `RootWork` handoff;
+- a `Sync` dispatcher, so continuation state that borrows it is `Send`;
+- task-owned resolver flights whose leader may suspend inside its compute,
+  and workspace leases that cannot cross a suspension;
+- pollable forms of every leaf wait in the table.
+
+Each scope a converted caller holds across a suspension point — a fact
+tracer, a spend or span log, a refusal recording, a request budget, a
+construction lane — needs the per-poll carry `SemanticTask` and
+`refusals_within_pollable` use: the scope's state is owned by the suspended
+computation and installed for each poll on the polling thread. Where a
+scope's guard is thread-bound — the spend log, a workspace lease, a borrow of
+the dispatcher's state — the compiler rejects holding it across a
+suspension; a scope whose guard is `Send` has to be given its carry
+explicitly before a caller that holds it is converted.

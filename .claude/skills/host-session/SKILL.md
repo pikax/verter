@@ -80,8 +80,16 @@ back into the host for a service it was not given.
   neither. The root hands both to `SessionAttachment` alone. It also injects
   that registry into the scheduler's scoped cache-node handoffs, so their
   producers and semantic producers share task identity and wait-cycle
-  detection. Final CPU-service integration remains separate; see
-  [`root-continuations.md`](../../../docs/arch/root-continuations.md).
+  detection, keeps it on the host (`VerterHost.task_registry`) for the
+  pollable roots, and hands it to every resolver flight group, whose leaders
+  and followers are tasks. Final CPU-service integration remains separate;
+  see [`root-continuations.md`](../../../docs/arch/root-continuations.md).
+- Public requests that can suspend are pollable roots:
+  `begin_component_meta_output` and `begin_compile_request` return owned,
+  `Send` roots an external driver polls, which run under their creator's
+  request context, job and task, and hand their driver dependency work as
+  `RootWork`. `get_component_meta_output` and `compile_request` drive the
+  same roots at the synchronous boundary.
 - `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
   is the only route by which a workspace receives it, both at construction and on
   `set_workspace`. Resident resolution state needs no service: every workspace
