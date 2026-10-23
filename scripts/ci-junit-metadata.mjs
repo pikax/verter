@@ -89,6 +89,7 @@ export function describeArgv(argv) {
     return at >= 0 && at + 1 < argv.length ? argv[at + 1] : undefined;
   };
   return {
+    argv: ["cargo", ...argv],
     command: ["cargo", ...argv].join(" "),
     features: valueOf("--features"),
     filter: valueOf("-E"),
@@ -180,6 +181,8 @@ export function buildMetadata(options, env = process.env) {
   const toolNames = (options.tools ?? REQUIRED_TOOLS.join(",")).split(",").filter(Boolean);
   const argv = options["argv-json"] ? describeArgv(JSON.parse(options["argv-json"])) : null;
   const command = argv?.command ?? options.command ?? "";
+  // The exact vector when the run gave one; a bare --command string cannot be split back, so it is kept whole.
+  const commandArgv = argv?.argv ?? (command ? [command] : []);
   const filter = argv ? argv.filter : options.filter;
   const features = argv ? argv.features : options.features;
   return {
@@ -200,6 +203,7 @@ export function buildMetadata(options, env = process.env) {
       job: env.GITHUB_JOB ?? "none",
       matrix: options["matrix-json"] ? JSON.parse(options["matrix-json"]) : {},
       command,
+      argv: commandArgv,
       cargoFeatures: features ?? "none",
       nextestProfile: options.profile ?? "",
       testFilter: filter ?? "none",
@@ -253,6 +257,10 @@ export function checkMetadata(meta, junitXml) {
   ]) {
     need(`runConfiguration.${key}`, nonEmpty(r[key]));
   }
+  need(
+    "runConfiguration.argv (the exact command vector as an array of strings)",
+    Array.isArray(r.argv) && r.argv.length > 0 && r.argv.every(nonEmpty),
+  );
   need("runConfiguration.matrix", r.matrix !== null && typeof r.matrix === "object");
   need("runConfiguration.nextestProfile is 'ci'", r.nextestProfile === "ci");
   need(

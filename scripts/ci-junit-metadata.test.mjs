@@ -111,6 +111,8 @@ test("each missing required field is reported", () => {
     (m) => (m.runConfiguration.nextestProfile = "default"),
     (m) => (m.environment.variables.NEXTEST_PROFILE = null),
     (m) => (m.runConfiguration.testFilter = "none"),
+    (m) => delete m.runConfiguration.argv,
+    (m) => (m.runConfiguration.argv = []),
   ];
   for (const mutate of mutations) {
     const meta = structuredClone(valid);
@@ -132,6 +134,17 @@ test("command, features, filter and partition are read from the run's argument v
     meta.runConfiguration.command,
     "cargo nextest run --partition hash:1/4 --features a/x,b/x -E all()",
   );
+  assert.deepEqual(meta.runConfiguration.argv, [
+    "cargo",
+    "nextest",
+    "run",
+    "--partition",
+    "hash:1/4",
+    "--features",
+    "a/x,b/x",
+    "-E",
+    "all()",
+  ]);
   assert.equal(meta.runConfiguration.cargoFeatures, "a/x,b/x");
   assert.equal(meta.runConfiguration.testFilter, "all()");
   assert.equal(meta.runConfiguration.partition, "hash:1/4");
