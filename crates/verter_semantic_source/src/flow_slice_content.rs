@@ -767,24 +767,71 @@ struct NamespaceBlockScope {
     names: rustc_hash::FxHashMap<String, bool>,
 }
 
-/// The namespace declaration a statement is — `namespace N { … }` or
-/// `export namespace N { … }` — with its block body.
-fn namespace_block_of<'s, 'a>(
-    statement: &'s Statement<'a>,
-) -> Option<(&'s str, &'s oxc_ast::ast::TSModuleBlock<'a>)> {
-    let module = match statement {
-        Statement::TSNamespaceDeclaration(module) => module,
-        Statement::ExportDeclaration(export) => match &export.declaration {
-            oxc_ast::ast::Declaration::TSNamespaceDeclaration(module) => module,
-            _ => return None,
-        },
-        _ => return None,
-    };
-    match &module.body {
-        oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-            Some((module.id.name.as_str(), block))
+/// One statement of a namespace block, or the namespace a dotted name's
+/// next segment declares (`Inner` in `namespace N.Inner { … }`): an
+/// implicitly exported namespace member of the segment before it.
+#[derive(Clone, Copy)]
+enum NamespaceItem<'s, 'a> {
+    Statement(&'s Statement<'a>),
+    Segment(&'s oxc_ast::ast::TSNamespaceDeclaration<'a>),
+}
+
+/// A namespace's body: its block, or the namespace its dotted name's next
+/// segment declares.
+#[derive(Clone, Copy)]
+enum NamespaceBody<'s, 'a> {
+    Block(&'s oxc_ast::ast::TSModuleBlock<'a>),
+    Segment(&'s oxc_ast::ast::TSNamespaceDeclaration<'a>),
+}
+
+impl<'s, 'a> NamespaceBody<'s, 'a> {
+    fn of(module: &'s oxc_ast::ast::TSNamespaceDeclaration<'a>) -> Self {
+        match &module.body {
+            oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => Self::Block(block),
+            oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
+                Self::Segment(inner)
+            }
         }
-        oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => None,
+    }
+
+    fn items(self) -> Vec<NamespaceItem<'s, 'a>> {
+        match self {
+            Self::Block(block) => block.body.iter().map(NamespaceItem::Statement).collect(),
+            Self::Segment(inner) => vec![NamespaceItem::Segment(inner)],
+        }
+    }
+
+    fn same(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Block(a), Self::Block(b)) => std::ptr::eq(a, b),
+            (Self::Segment(a), Self::Segment(b)) => std::ptr::eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl<'s, 'a> NamespaceItem<'s, 'a> {
+    /// The namespace this item declares — `namespace N { … }`,
+    /// `export namespace N { … }` or a dotted name's segment — with its body.
+    fn namespace(self) -> Option<(&'s str, NamespaceBody<'s, 'a>)> {
+        let module = match self {
+            Self::Segment(module) => module,
+            Self::Statement(Statement::TSNamespaceDeclaration(module)) => module,
+            Self::Statement(Statement::ExportDeclaration(export)) => match &export.declaration {
+                oxc_ast::ast::Declaration::TSNamespaceDeclaration(module) => module,
+                _ => return None,
+            },
+            Self::Statement(_) => return None,
+        };
+        Some((module.id.name.as_str(), NamespaceBody::of(module)))
+    }
+
+    /// The value names this item declares, and whether it exports them.
+    fn value_names(self) -> (Vec<&'s str>, bool) {
+        match self {
+            Self::Statement(statement) => namespace_statement_value_names(statement),
+            Self::Segment(module) => (vec![module.id.name.as_str()], true),
+        }
     }
 }
 
@@ -835,79 +882,82 @@ fn namespace_statement_value_names<'s>(statement: &'s Statement<'_>) -> (Vec<&'s
 /// `statement`, outermost first: at each level the block the descent
 /// enters, with the names it declares and the names every same-name sibling
 /// block at that level exports (a namespace declared in several blocks is
-/// one namespace whose EXPORTED members every block sees).
+/// one namespace whose EXPORTED members every block sees). A dotted name
+/// (`namespace A.B { … }`) is one level per segment, its step entering the
+/// last segment's block.
 fn enclosing_namespace_scopes(
     program: &Program<'_>,
     contributor: usize,
     descent: &[FunctionDescentStep],
 ) -> Vec<NamespaceBlockScope> {
     let mut scopes = Vec::new();
-    let Some(mut statement) = program.body.get(contributor) else {
+    let Some(statement) = program.body.get(contributor) else {
         return scopes;
     };
-    let mut siblings: &[Statement<'_>] = &program.body;
-    let mut parent_siblings: Vec<&oxc_ast::ast::TSModuleBlock<'_>> = Vec::new();
+    let mut item = NamespaceItem::Statement(statement);
+    // The items every same-name sibling body of the enclosing level holds;
+    // the top level's own statements first.
+    let mut siblings: Vec<NamespaceItem<'_, '_>> =
+        program.body.iter().map(NamespaceItem::Statement).collect();
     let mut qualified = String::new();
     for step in descent {
         let FunctionDescentStep::NamespaceMember { statement_ordinal } = step else {
             break;
         };
-        let Some((name, block)) = namespace_block_of(statement) else {
-            break;
-        };
-        if !qualified.is_empty() {
-            qualified.push('.');
-        }
-        qualified.push_str(name);
-        let mut scope = NamespaceBlockScope {
-            qualified: qualified.clone(),
-            names: rustc_hash::FxHashMap::default(),
-        };
-        for inner in &block.body {
-            let (names, exported) = namespace_statement_value_names(inner);
-            for declared in names {
-                let entry = scope.names.entry(declared.to_string()).or_insert(false);
-                *entry |= exported;
-            }
-        }
-        // Same-name sibling blocks at this level: the top level's own
-        // statements, or every same-name sibling of the enclosing block.
-        let sibling_statements: Vec<&Statement<'_>> = if parent_siblings.is_empty() {
-            siblings.iter().collect()
-        } else {
-            parent_siblings
-                .iter()
-                .flat_map(|sibling| sibling.body.iter())
-                .collect()
-        };
-        let mut same_name_blocks = Vec::new();
-        for sibling in sibling_statements {
-            let Some((sibling_name, sibling_block)) = namespace_block_of(sibling) else {
-                continue;
+        let block = loop {
+            let Some((name, body)) = item.namespace() else {
+                return scopes;
             };
-            if sibling_name != name {
-                continue;
+            if !qualified.is_empty() {
+                qualified.push('.');
             }
-            same_name_blocks.push(sibling_block);
-            if std::ptr::eq(sibling_block, block) {
-                continue;
+            qualified.push_str(name);
+            let mut scope = NamespaceBlockScope {
+                qualified: qualified.clone(),
+                names: rustc_hash::FxHashMap::default(),
+            };
+            for inner in body.items() {
+                let (names, exported) = inner.value_names();
+                for declared in names {
+                    let entry = scope.names.entry(declared.to_string()).or_insert(false);
+                    *entry |= exported;
+                }
             }
-            for inner in &sibling_block.body {
-                let (names, exported) = namespace_statement_value_names(inner);
-                if exported {
-                    for declared in names {
-                        scope.names.insert(declared.to_string(), true);
+            let mut same_name_bodies = Vec::new();
+            for sibling in &siblings {
+                let Some((sibling_name, sibling_body)) = sibling.namespace() else {
+                    continue;
+                };
+                if sibling_name != name {
+                    continue;
+                }
+                same_name_bodies.push(sibling_body);
+                if sibling_body.same(body) {
+                    continue;
+                }
+                for inner in sibling_body.items() {
+                    let (names, exported) = inner.value_names();
+                    if exported {
+                        for declared in names {
+                            scope.names.insert(declared.to_string(), true);
+                        }
                     }
                 }
             }
-        }
-        scopes.push(scope);
-        parent_siblings = same_name_blocks;
-        siblings = &[];
+            scopes.push(scope);
+            siblings = same_name_bodies
+                .into_iter()
+                .flat_map(NamespaceBody::items)
+                .collect();
+            match body {
+                NamespaceBody::Block(block) => break block,
+                NamespaceBody::Segment(inner) => item = NamespaceItem::Segment(inner),
+            }
+        };
         let Some(next) = block.body.get(*statement_ordinal as usize) else {
             break;
         };
-        statement = next;
+        item = NamespaceItem::Statement(next);
     }
     scopes
 }

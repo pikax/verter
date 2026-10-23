@@ -11,7 +11,7 @@
 use oxc_ast::ast::{
     ArrowFunctionExpression, BlockStatement, CatchClause, Class, Expression, ForInStatement,
     ForOfStatement, ForStatement, FormalParameter, Function, Statement, SwitchStatement,
-    TSModuleBlock, TSNamespaceDeclaration, TSType, VariableDeclaration,
+    TSModuleBlock, TSNamespaceDeclaration, TSNamespaceDeclarationBody, TSType, VariableDeclaration,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
@@ -77,7 +77,8 @@ impl<'w, 's, 'ast> DiscoveryWalk<'w, 's, 'ast> {
     /// Discover the served positions of a namespace's members — each
     /// qualified under the namespace, each locator extending `descent` by
     /// one namespace-member step — and record the classes of its block.
-    /// A dotted namespace serves none of its members.
+    /// A dotted namespace (`namespace A.B { … }`) qualifies its members
+    /// under every segment, its step entering the last segment's block.
     fn namespace(
         &mut self,
         module: &'ast TSNamespaceDeclaration<'ast>,
@@ -85,14 +86,19 @@ impl<'w, 's, 'ast> DiscoveryWalk<'w, 's, 'ast> {
         descent: &FunctionDescent,
         prefix: Option<&str>,
     ) {
-        let Some(block) = namespace_block(module) else {
-            walk::walk_ts_namespace_declaration(self, module);
-            return;
-        };
-        let qualified = match prefix {
-            Some(prefix) => format!("{prefix}.{}", module.id.name),
-            None => module.id.name.to_string(),
-        };
+        let block = namespace_block(module);
+        let mut qualified = prefix.map(str::to_owned).unwrap_or_default();
+        let mut segment = module;
+        loop {
+            if !qualified.is_empty() {
+                qualified.push('.');
+            }
+            qualified.push_str(&segment.id.name);
+            match &segment.body {
+                TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => segment = inner,
+                TSNamespaceDeclarationBody::TSModuleBlock(_) => break,
+            }
+        }
         self.ctx.classes.enter_scope();
         for (statement_ordinal, statement) in block.body.iter().enumerate() {
             let descent = descent.then(namespace_member_step(statement_ordinal));

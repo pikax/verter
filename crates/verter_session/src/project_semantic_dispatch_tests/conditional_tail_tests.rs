@@ -324,7 +324,8 @@ fn the_named_demand_answers_a_spread_recursion_as_the_checker_does() {
 }
 
 /// One application both spread into a tuple and written plainly, in either
-/// order and in every projection mode: the spread splices its instantiation
+/// order and in every projection mode: under `Navigate` and `Expanded` the
+/// spread splices its instantiation, under `Shallow` it stays its carrier,
 /// and the plain occurrence keeps its own reading, so neither answer depends
 /// on which occurrence the projection meets first.
 ///
@@ -358,6 +359,7 @@ fn a_spread_application_beside_its_plain_occurrence_answers_in_either_order() {
         None,
         Some(ProjectionMode::Navigate),
         Some(ProjectionMode::Shallow),
+        Some(ProjectionMode::Expanded),
     ] {
         for (probe, expected) in [
             (r#"[Deep<[0, 0]>, ...Deep<[0, 0]>]["length"]"#, "3"),
@@ -379,12 +381,72 @@ fn a_spread_application_beside_its_plain_occurrence_answers_in_either_order() {
                 "{mode:?}: the members read {forward:?} in one order, {backward:?} in the other"
             ));
         }
-        if forward.values().nth(1).map(String::as_str) != Some("[1, 1]") {
+        let spread_member = if mode == Some(ProjectionMode::Shallow) {
+            "[...Deep<[0, 0]>]"
+        } else {
+            "[1, 1]"
+        };
+        if forward.values().nth(1).map(String::as_str) != Some(spread_member) {
             failures.push(format!(
-                "{mode:?}: the spread member is unspliced in {forward:?}"
+                "{mode:?}: the spread member is not `{spread_member}` in {forward:?}"
             ));
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A closed application in a tuple's rest slot is spliced only where a
+/// navigation reads the tuple's shape: `Shallow` publishes it as its
+/// carrier, a declared alias exactly as the builtin `Parameters`, while a
+/// tuple already settled splices; `Navigate`, and a `Shallow` demand
+/// whose indexed access reads the tuple's length or a position, instantiate
+/// it so the tuple splices.
+///
+/// TypeScript 7.0.2, `--strict --noLib` over the benchmark's library:
+/// `[...Deep<[0, 0]>, 2]` is `[1, 1, 2]`, its `"length"` is `3` and its
+/// `1` is `1`; `[...Parameters<F2>, 3]` and `[...Params<F2>, 3]` are
+/// `[a: 1, b: 2, 3]`, their `"length"` `3` and their `1` `2`.
+#[test]
+fn a_rest_slot_application_splices_only_under_a_navigation() {
+    use super::mapped_expand_tests::{display, named_answer_with_library};
+    use verter_type_engine::semantic_query::ProjectionMode;
+    let source = format!(
+        "{SPREADS}type F2 = (a: 1, b: 2) => void;\n\
+         type Params<F> = F extends (...args: infer P) => any ? P : never;\n"
+    );
+    let mut failures = Vec::new();
+    let mut expect = |mode, probe: &str, expected: &str| {
+        let answer = display(&named_answer_with_library(&source, probe, Some(mode), true).answer);
+        if answer != expected {
+            failures.push(format!(
+                "{mode:?} `{probe}`: expected `{expected}`, got `{answer}`"
+            ));
+        }
+    };
+    for (application, spliced, second) in [
+        ("Deep<[0, 0]>", "1, 1", "1"),
+        ("Parameters<F2>", "a: 1, b: 2", "2"),
+        ("Params<F2>", "a: 1, b: 2", "2"),
+    ] {
+        let tuple = format!("[...{application}, 9]");
+        expect(ProjectionMode::Shallow, &tuple, &tuple);
+        expect(
+            ProjectionMode::Shallow,
+            &format!("{{ b: {tuple} }}"),
+            &format!("{{ b: {tuple} }}"),
+        );
+        expect(ProjectionMode::Navigate, &tuple, &format!("[{spliced}, 9]"));
+        expect(
+            ProjectionMode::Navigate,
+            &format!("{{ b: {tuple} }}"),
+            &format!("{{ b: [{spliced}, 9] }}"),
+        );
+        for mode in [ProjectionMode::Navigate, ProjectionMode::Shallow] {
+            expect(mode, &format!(r#"{tuple}["length"]"#), "3");
+            expect(mode, &format!("{tuple}[1]"), second);
+        }
+    }
+    expect(ProjectionMode::Shallow, "[...[1, 1], 9]", "[1, 1, 9]");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

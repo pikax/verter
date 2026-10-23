@@ -351,10 +351,10 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
 
 /// Resolve exact direct local call targets after discovery: a bare
 /// identifier callee whose name binds a served function in the same index
-/// (same file, same namespace qualification) targets the highest-ordinal
-/// entry for that name — the trailing implementation of its overload
-/// group. Computed callees, member calls, and unresolved names are never
-/// direct calls.
+/// (same file, the caller's namespace or an enclosing one, innermost
+/// first) targets the highest-ordinal entry for that name — the trailing
+/// implementation of its overload group. Computed callees, member calls,
+/// and unresolved names are never direct calls.
 fn resolve_direct_calls(entries: &mut [FunctionProgramDiscovery]) {
     let candidates: Vec<(
         verter_type_expr::OwnedStr,
@@ -384,29 +384,7 @@ fn resolve_direct_calls(entries: &mut [FunctionProgramDiscovery]) {
             let FunctionEffectCallee::Identifier(callee) = &effect.callee else {
                 continue;
             };
-            // Lexical preference: the namespace-qualified binding
-            // (`N.callee`) shadows the file-global one, exactly like
-            // scoped name resolution — never the globally-highest overload
-            // ordinal across both spellings.
-            let best_for = |spelling: &str| {
-                candidates
-                    .iter()
-                    .filter(|(name, part, _, _)| {
-                        name.as_ref() == spelling
-                            && matches!(
-                                part,
-                                FunctionPartIdentity::DeclarationBody
-                                    | FunctionPartIdentity::Initializer
-                            )
-                    })
-                    .max_by_key(|(_, _, ordinal, _)| *ordinal)
-                    .map(|(_, _, _, key)| key.clone())
-            };
-            let target = caller_ns
-                .as_ref()
-                .and_then(|ns| best_for(&format!("{ns}.{callee}")))
-                .or_else(|| best_for(callee));
-            if let Some(target) = target {
+            if let Some(target) = scoped_call_target(&candidates, caller_ns.as_deref(), callee) {
                 direct.push(FunctionDirectCall {
                     span: effect.span,
                     target,
@@ -415,6 +393,46 @@ fn resolve_direct_calls(entries: &mut [FunctionProgramDiscovery]) {
         }
         entry.direct_calls = Arc::from(direct.into_boxed_slice());
     }
+}
+
+/// The served function a bare-identifier call binds from a caller declared
+/// in namespace `caller_ns`: lexical preference, so the innermost
+/// namespace-qualified binding (`N.A.B.callee`) shadows each enclosing
+/// namespace's (`N.A.callee`, then `N.callee`) and those the file-global
+/// one, exactly like scoped name resolution. Within the binding scope the
+/// highest overload ordinal wins — the trailing implementation — never the
+/// globally-highest ordinal across spellings.
+fn scoped_call_target(
+    candidates: &[(
+        verter_type_expr::OwnedStr,
+        FunctionPartIdentity,
+        u32,
+        FunctionProgramKey,
+    )],
+    caller_ns: Option<&str>,
+    callee: &str,
+) -> Option<FunctionProgramKey> {
+    let best_for = |spelling: &str| {
+        candidates
+            .iter()
+            .filter(|(name, part, _, _)| {
+                name.as_ref() == spelling
+                    && matches!(
+                        part,
+                        FunctionPartIdentity::DeclarationBody | FunctionPartIdentity::Initializer
+                    )
+            })
+            .max_by_key(|(_, _, ordinal, _)| *ordinal)
+            .map(|(_, _, _, key)| key.clone())
+    };
+    let mut scope = caller_ns;
+    while let Some(ns) = scope {
+        if let Some(key) = best_for(&format!("{ns}.{callee}")) {
+            return Some(key);
+        }
+        scope = ns.rsplit_once('.').map(|(outer, _)| outer);
+    }
+    best_for(callee)
 }
 
 /// Whether `scope` lexically contains `site`.
@@ -1160,33 +1178,11 @@ fn resolve_call_site_targets(entries: &mut [FunctionProgramDiscovery]) {
             let FunctionEffectCallee::Identifier(callee) = &site.callee else {
                 continue;
             };
-            // Lexical preference: the namespace-qualified binding
-            // (`N.callee`) shadows the file-global one, exactly like
-            // scoped name resolution — never the globally-highest overload
-            // ordinal across both spellings.
-            let best_for = |spelling: &str| {
-                candidates
-                    .iter()
-                    .filter(|(name, part, _, _)| {
-                        name.as_ref() == spelling
-                            && matches!(
-                                part,
-                                FunctionPartIdentity::DeclarationBody
-                                    | FunctionPartIdentity::Initializer
-                            )
-                    })
-                    .max_by_key(|(_, _, ordinal, _)| *ordinal)
-                    .map(|(_, _, _, key)| key.clone())
-            };
             let nested = nested_declarations.iter().find_map(|(parent, name, key)| {
                 (parent == &entry.key && name.as_ref() == callee.as_ref()).then(|| key.clone())
             });
-            site.target = nested.or_else(|| {
-                caller_ns
-                    .as_ref()
-                    .and_then(|ns| best_for(&format!("{ns}.{callee}")))
-                    .or_else(|| best_for(callee))
-            });
+            site.target =
+                nested.or_else(|| scoped_call_target(&candidates, caller_ns.as_deref(), callee));
         }
         entry.call_sites = Arc::from(sites.into_boxed_slice());
     }
@@ -1618,6 +1614,99 @@ fn discover_function_declaration_named<'ast>(
     );
 }
 
+/// Record the program expression a variable's initializer `init` is, at
+/// `descent` under the contributor, for the declaration `name` (qualified
+/// by its enclosing namespaces). An initializer the flow evaluator types —
+/// a call holding a callback, a literal holding a block-bodied function or
+/// a call, a member read it names — is served as an expression body of its
+/// own, so a module variable and a namespace's variable take the one
+/// served path; any other initializer's call arguments are discovered
+/// where they stand.
+fn discover_variable_initializer<'ast>(
+    init: &'ast Expression<'ast>,
+    name: &str,
+    kind: oxc_ast::ast::VariableDeclarationKind,
+    contributor_index: usize,
+    descent: &FunctionDescent,
+    ctx: &mut DiscoveryCtx<'_, 'ast>,
+) {
+    let Some(anchor) = ctx.anchor(contributor_index) else {
+        return;
+    };
+    let mut source = program_expression_source(&ctx.walks, init);
+    let contextual_call = matches!(&source, ProgramExpressionSource::SemanticCall { site, .. }
+        if site.args.iter().any(|argument| argument.is_function_value))
+        || matches!(unwrap_program_expression(init), Expression::CallExpression(call)
+            if call.arguments.iter().any(|argument|
+                super::type_eval_build::indexed_context_sensitive(argument.as_expression())
+                    || argument.as_expression().is_some_and(
+                        super::type_eval_build::literal_holds_block_bodied_function)));
+    // A literal holding a block-bodied function value is typed by the
+    // flow evaluator, which owns that function's body-derived return.
+    let contextual_literal = super::type_eval_build::contextual_object_initializer(init)
+        || (super::type_eval_build::literal_holds_block_bodied_function(init)
+            && !super::type_eval_build::has_authoritative_value_assertion(init));
+    // An object or array literal holding a call is typed by the
+    // flow evaluator, which evaluates each call where the literal
+    // holds it, so the literal is a served expression body too.
+    let call_literal = matches!(source, ProgramExpressionSource::UnsupportedCall)
+        && matches!(
+            unwrap_program_expression(init),
+            Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
+        )
+        && !super::type_eval_build::has_authoritative_value_assertion(init);
+    // A member read through a computed key or an optional chain is
+    // typed by the flow evaluator too, which reads the member it names.
+    let member_read = super::type_eval_build::flow_typed_member_read(init)
+        && !super::type_eval_build::has_authoritative_value_assertion(init);
+    let served_initializer = contextual_literal || call_literal || member_read;
+    if contextual_call || served_initializer {
+        // The initializer is a served expression body. Its callbacks
+        // use the same flow evaluator and call continuation as bodies.
+        discover_initializer_inner(
+            init,
+            name,
+            FunctionPartIdentity::Initializer,
+            contributor_index,
+            descent.clone(),
+            ctx,
+        );
+        let served = verter_session_query::function_program::ProgramInitializerSource {
+            function: FlowFunctionReturnIdentity {
+                anchor: AuthoredAnchor {
+                    canonical_id: verter_type_expr::OwnedStr::from(ctx.canonical_id.clone()),
+                    owner: anchor.owner,
+                    symbol: verter_type_expr::OwnedStr::from(name),
+                    space: LocatorSymbolSpace::Value,
+                },
+                function_part: FunctionPartIdentity::Initializer,
+                overload_ordinal: 0,
+            },
+            preserve_literals: kind == oxc_ast::ast::VariableDeclarationKind::Const,
+        };
+        if let ProgramExpressionSource::SemanticCall { initializer, .. } = &mut source {
+            *initializer = Some(served);
+        } else {
+            source = ProgramExpressionSource::VariableInitializer(served);
+        }
+    }
+    ctx.expressions.push(ProgramExpressionRecord {
+        point: ProgramExpressionIdentity {
+            canonical_id: Arc::clone(&ctx.canonical_id),
+            offset: init.span().start,
+        },
+        span: verter_span::Span::new(init.span().start, init.span().end),
+        locator: FunctionBodyLocator {
+            contributor: anchor,
+            descent: descent.clone(),
+        },
+        source,
+    });
+    if !contextual_call && !served_initializer {
+        discover_top_level_call_arg_positions(init, name, anchor, descent, ctx);
+    }
+}
+
 fn discover_variable_declaration<'ast>(
     var_decl: &'ast VariableDeclaration<'ast>,
     contributor_index: usize,
@@ -1638,83 +1727,14 @@ fn discover_variable_declaration<'ast>(
         let declarator_ordinal = u32::try_from(declarator_ordinal).unwrap_or(u32::MAX);
         let base_descent = FunctionDescent::new()
             .then(FunctionDescentStep::VariableInitializer { declarator_ordinal });
-        if let Some(anchor) = ctx.anchor(contributor_index) {
-            let mut source = program_expression_source(&ctx.walks, init);
-            let contextual_call = matches!(&source, ProgramExpressionSource::SemanticCall { site, .. }
-                if site.args.iter().any(|argument| argument.is_function_value))
-                || matches!(unwrap_program_expression(init), Expression::CallExpression(call)
-                    if call.arguments.iter().any(|argument|
-                        super::type_eval_build::indexed_context_sensitive(argument.as_expression())
-                            || argument.as_expression().is_some_and(
-                                super::type_eval_build::literal_holds_block_bodied_function)));
-            // A literal holding a block-bodied function value is typed by the
-            // flow evaluator, which owns that function's body-derived return.
-            let contextual_literal = super::type_eval_build::contextual_object_initializer(init)
-                || (super::type_eval_build::literal_holds_block_bodied_function(init)
-                    && !super::type_eval_build::has_authoritative_value_assertion(init));
-            // An object or array literal holding a call is typed by the
-            // flow evaluator, which evaluates each call where the literal
-            // holds it, so the literal is a served expression body too.
-            let call_literal = matches!(source, ProgramExpressionSource::UnsupportedCall)
-                && matches!(
-                    unwrap_program_expression(init),
-                    Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
-                )
-                && !super::type_eval_build::has_authoritative_value_assertion(init);
-            // A member read through a computed key or an optional chain is
-            // typed by the flow evaluator too, which reads the member it names.
-            let member_read = super::type_eval_build::flow_typed_member_read(init)
-                && !super::type_eval_build::has_authoritative_value_assertion(init);
-            let served_initializer = contextual_literal || call_literal || member_read;
-            if contextual_call || served_initializer {
-                // The initializer is a served expression body. Its callbacks
-                // use the same flow evaluator and call continuation as bodies.
-                discover_initializer_inner(
-                    init,
-                    &name,
-                    FunctionPartIdentity::Initializer,
-                    contributor_index,
-                    base_descent.clone(),
-                    ctx,
-                );
-                let served = verter_session_query::function_program::ProgramInitializerSource {
-                    function: FlowFunctionReturnIdentity {
-                        anchor: AuthoredAnchor {
-                            canonical_id: verter_type_expr::OwnedStr::from(
-                                ctx.canonical_id.clone(),
-                            ),
-                            owner: anchor.owner,
-                            symbol: verter_type_expr::OwnedStr::from(name.as_str()),
-                            space: LocatorSymbolSpace::Value,
-                        },
-                        function_part: FunctionPartIdentity::Initializer,
-                        overload_ordinal: 0,
-                    },
-                    preserve_literals: var_decl.kind
-                        == oxc_ast::ast::VariableDeclarationKind::Const,
-                };
-                if let ProgramExpressionSource::SemanticCall { initializer, .. } = &mut source {
-                    *initializer = Some(served);
-                } else {
-                    source = ProgramExpressionSource::VariableInitializer(served);
-                }
-            }
-            ctx.expressions.push(ProgramExpressionRecord {
-                point: ProgramExpressionIdentity {
-                    canonical_id: Arc::clone(&ctx.canonical_id),
-                    offset: init.span().start,
-                },
-                span: verter_span::Span::new(init.span().start, init.span().end),
-                locator: FunctionBodyLocator {
-                    contributor: anchor,
-                    descent: base_descent.clone(),
-                },
-                source,
-            });
-            if !contextual_call && !served_initializer {
-                discover_top_level_call_arg_positions(init, &name, anchor, &base_descent, ctx);
-            }
-        }
+        discover_variable_initializer(
+            init,
+            &name,
+            var_decl.kind,
+            contributor_index,
+            &base_descent,
+            ctx,
+        );
         let descent = |extra: FunctionDescentStep| base_descent.then(extra);
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
@@ -2025,21 +2045,7 @@ fn discover_variable_declaration_ns<'ast>(
         };
         let declarator_ordinal = u32::try_from(declarator_ordinal).unwrap_or(u32::MAX);
         let base = descent.then(FunctionDescentStep::VariableInitializer { declarator_ordinal });
-        if let Some(anchor) = ctx.anchor(contributor_index) {
-            ctx.expressions.push(ProgramExpressionRecord {
-                point: ProgramExpressionIdentity {
-                    canonical_id: Arc::clone(&ctx.canonical_id),
-                    offset: init.span().start,
-                },
-                span: verter_span::Span::new(init.span().start, init.span().end),
-                locator: FunctionBodyLocator {
-                    contributor: anchor,
-                    descent: base.clone(),
-                },
-                source: program_expression_source(&ctx.walks, init),
-            });
-            discover_top_level_call_arg_positions(init, &name, anchor, &base, ctx);
-        }
+        discover_variable_initializer(init, &name, var_decl.kind, contributor_index, &base, ctx);
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
                 discover_arrow_inner(
@@ -3864,8 +3870,8 @@ enum DeclRef<'a> {
     /// A class declaration.
     #[cfg(any(test, feature = "test-support"))]
     Class(&'a Class<'a>),
-    /// A namespace or module declaration's block (`None` for a bodiless
-    /// module or a dotted namespace, whose body is the inner namespace).
+    /// A namespace or module declaration's block, past a dotted name's
+    /// segments (`None` for a bodiless module).
     Module(Option<&'a oxc_ast::ast::TSModuleBlock<'a>>),
     /// An `export default { … }` object expression.
     #[cfg(any(test, feature = "test-support"))]
@@ -3889,13 +3895,18 @@ fn class_declaration_of<'a>(statement: &'a Statement<'a>) -> Option<&'a Class<'a
     }
 }
 
-/// A namespace declaration's own block (`None` for a dotted namespace).
+/// A namespace declaration's block, past a dotted name's segments
+/// (`namespace A.B.C { … }` is `C`'s block).
 fn namespace_block<'a>(
-    module: &'a oxc_ast::ast::TSNamespaceDeclaration<'a>,
-) -> Option<&'a oxc_ast::ast::TSModuleBlock<'a>> {
-    match &module.body {
-        oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => Some(block),
-        oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => None,
+    mut module: &'a oxc_ast::ast::TSNamespaceDeclaration<'a>,
+) -> &'a oxc_ast::ast::TSModuleBlock<'a> {
+    loop {
+        match &module.body {
+            oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => return block,
+            oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
+                module = inner;
+            }
+        }
     }
 }
 
@@ -3906,7 +3917,9 @@ fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
         Statement::VariableDeclaration(decl) => Some(DeclRef::Variable(decl)),
         #[cfg(any(test, feature = "test-support"))]
         Statement::ClassDeclaration(class) => Some(DeclRef::Class(class)),
-        Statement::TSNamespaceDeclaration(module) => Some(DeclRef::Module(namespace_block(module))),
+        Statement::TSNamespaceDeclaration(module) => {
+            Some(DeclRef::Module(Some(namespace_block(module))))
+        }
         Statement::TSExternalModuleDeclaration(module) => {
             Some(DeclRef::Module(module.body.as_deref()))
         }
@@ -3916,7 +3929,7 @@ fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
             #[cfg(any(test, feature = "test-support"))]
             Declaration::ClassDeclaration(class) => Some(DeclRef::Class(class)),
             Declaration::TSNamespaceDeclaration(module) => {
-                Some(DeclRef::Module(namespace_block(module)))
+                Some(DeclRef::Module(Some(namespace_block(module))))
             }
             Declaration::TSExternalModuleDeclaration(module) => {
                 Some(DeclRef::Module(module.body.as_deref()))

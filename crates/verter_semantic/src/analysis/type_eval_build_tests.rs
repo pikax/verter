@@ -4778,15 +4778,22 @@ fn object_shape_preserves_spread_entries_in_order() {
 
 /// Getter / setter / method / shorthand members of a literal are all direct
 /// `FreshOwn` members in the ordered IR — every authored member form is an
-/// excess candidate until a spread overlaps it.
+/// excess candidate until a spread overlaps it. A literal holding an
+/// accessor is typed by the flow evaluator, which reads each accessor as
+/// its property, so its value is the indexed initializer, not this IR.
 #[test]
 fn object_literal_accessor_method_and_shorthand_members_are_fresh_own() {
     let parts = lowered(
         r#"const o = { m() { return 1 }, get g() { return 1 }, set s(v: number) {}, short }"#,
     );
     let decl = parts.value_decl("o").expect("lowered o");
-    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
-        panic!("expected the object IR, got {:?}", decl.type_annotation);
+    assert!(
+        decl.type_annotation.is_none() && decl.expression_source_offset.is_some(),
+        "a literal holding an accessor is the flow evaluator's, got {:?}",
+        decl.type_annotation
+    );
+    let Some(obj) = decl.object_shape.as_ref() else {
+        panic!("expected the object IR, got {:?}", decl.object_shape);
     };
     let mut names: Vec<&str> = Vec::new();
     for member in obj.properties.iter() {
@@ -4831,8 +4838,8 @@ fn object_literal_preserves_accessor_kind_duplicates_and_spread_order() {
         }"#;
     let parts = lowered(source);
     let decl = parts.value_decl("o").expect("lowered o");
-    let Some(TypeExpr::Object(object)) = decl.type_annotation.as_ref() else {
-        panic!("expected object IR, got {:?}", decl.type_annotation);
+    let Some(object) = decl.object_shape.as_ref() else {
+        panic!("expected object IR, got {:?}", decl.object_shape);
     };
 
     assert_eq!(object.properties.len(), 5);

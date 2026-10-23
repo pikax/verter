@@ -881,10 +881,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // IS resolvable as the merged global declaration (the prepared-decl
         // builder falls back to the global augmentation inventory), and so is
         // the type of the one `declare module "…"` block declaring the name.
-        let has_global_augmentation = is_ordinary
-            && shallow
-                .type_fallback_augmentation_scope(key.scope.owner, key.name.as_ref())
-                .is_some();
+        // An owner's global-augmentation scope declares exactly its own
+        // `declare global` members.
+        let has_global_augmentation = if key.scope.owner.is_global_augmentation() {
+            shallow.declares_global_augmentation_type_in(key.scope.owner, key.name.as_ref())
+        } else {
+            is_ordinary
+                && shallow
+                    .type_fallback_augmentation_scope(key.scope.owner, key.name.as_ref())
+                    .is_some()
+        };
 
         // A name DECLARED in this file (type / value symbol, or a
         // `declare global` contribution) resolves here. A name that is
@@ -4214,7 +4220,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Recover a module-scoped value root's retained augmentation inventory.
+    /// Recover a value root's retained augmentation inventory: the
+    /// `declare module "…"` or `declare global` block scope it heads in.
     pub(super) fn ambient_value_scope<'headers>(
         scope: &crate::semantic_query::ScopeId,
         headers: &'headers verter_session_query::declarations::header_index::DeclHeaderIndex,
@@ -4224,16 +4231,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         headers.augmentation_blocks.iter().find_map(|block| {
             use verter_session_query::declarations::AugmentationScopeKind;
-            let AugmentationScopeKind::Module(specifier) = &block.scope else {
-                return None;
-            };
-            (block.owner == scope.owner
-                && scope.binder_scope_id
-                    == crate::semantic_query::BinderScopeId::augmentation_module_scope(
+            let block_scope_id = match &block.scope {
+                AugmentationScopeKind::Module(specifier) => {
+                    crate::semantic_query::BinderScopeId::augmentation_module_scope(
                         block.owner,
                         specifier.as_str().into(),
-                    ))
-            .then_some(&block.scope)
+                    )
+                }
+                AugmentationScopeKind::Global => {
+                    crate::semantic_query::BinderScopeId::augmentation_global_scope(block.owner)
+                }
+            };
+            (block.owner == scope.owner && scope.binder_scope_id == block_scope_id)
+                .then_some(&block.scope)
         })
     }
 
@@ -9277,7 +9287,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// ([`Self::lib_global_declaration`]), then the program's files in
     /// program file order, then by canonical path — among every
     /// module's `declare global` contribution and every script's file-scope
-    /// interface. `None` when neither declares such a global type.
+    /// interface, each addressed by its global identity
+    /// ([`Self::global_contribution_identity`]). `None` when none
+    /// declares such a global type.
     ///
     /// A `declare global` block in a SCRIPT is an error that binds nothing.
     /// The declaration's `Instantiate` folds in every later declaration.
@@ -9298,22 +9310,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .entries
             .iter()
             .find(|entry| declares_global_type(entry))?;
-        Some(ResolvedRootIdentity::new_in_owner(
-            Arc::clone(&first.artifact_key.canonical),
-            first.owner,
-            name,
-        ))
+        Some(self.global_contribution_identity(first, name))
     }
 
     /// Whether `(canonical, owner, name)` addresses ONE declaration of the
     /// merged GLOBAL type `name` a reference in `demand_canonical` reads —
-    /// the project's library declaration, a module's `declare global`
+    /// a declaration of the project's library, a module's `declare global`
     /// contribution or a script's file-scope declaration — not only the
     /// first of them ([`Self::first_global_declaration`]): every one of
-    /// them declares the same global symbol. A module's `declare global`
-    /// contribution is not addressed by the identity when the module also
-    /// declares a module-scope type of the name, which the identity names
-    /// instead.
+    /// them declares the same global symbol, and every library that
+    /// declares it is one of them.
     pub(super) fn is_global_type_declaration(
         &self,
         demand_canonical: &str,
@@ -9335,7 +9341,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         population.entries.iter().any(|entry| {
             entry.artifact_key.canonical.as_ref() == canonical
-                && entry.owner == owner
                 && (declares_global_type(entry)
                     || (entry.is_automatic_lib
                         && entry.module_kind == FileModuleKind::Script
@@ -9344,14 +9349,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             ContributorOrigin::FileScopeInterface
                                 | ContributorOrigin::FileScopeType
                         )))
-                && (entry.origin != ContributorOrigin::DeclareGlobal
-                    || self
-                        .ctx
-                        .ensure_indexed_ready_serve(canonical)
-                        .is_some_and(|serve| {
-                            !serve.indexed.shallow_state.has_type_symbol_in(owner, name)
-                        }))
+                && self.global_contribution_identity(entry, name).owner == owner
         })
+    }
+
+    /// The identity that addresses the global contributor `entry`'s
+    /// contribution to the GLOBAL type `name`: `(canonical, owner, name)`,
+    /// except for a module's `declare global` contribution when the module
+    /// also binds the name in module scope, by a type of its own or an
+    /// import — that identity names the module-scope binding, which the
+    /// module's own references (and its importers) read — whose
+    /// contribution is addressed by the owner's
+    /// [`TopLevelOwnerId::global_augmentation`] scope instead.
+    ///
+    /// [`TopLevelOwnerId::global_augmentation`]: verter_type_expr::TopLevelOwnerId::global_augmentation
+    fn global_contribution_identity(
+        &self,
+        entry: &verter_session_query::inputs::contributors::ContributorEntry,
+        name: &str,
+    ) -> ResolvedRootIdentity {
+        let shadowed = entry.origin
+            == verter_session_query::inputs::contributors::ContributorOrigin::DeclareGlobal
+            && self
+                .ctx
+                .ensure_indexed_ready_serve(entry.artifact_key.canonical.as_ref())
+                .is_some_and(|serve| {
+                    serve
+                        .indexed
+                        .shallow_state
+                        .binds_module_scope_type_in(entry.owner, name)
+                });
+        ResolvedRootIdentity::new_in_owner(
+            Arc::clone(&entry.artifact_key.canonical),
+            if shadowed {
+                entry.owner.global_augmentation()
+            } else {
+                entry.owner
+            },
+            name,
+        )
     }
 
     /// Whether the declaration `(canonical, owner, name)` a reference in
@@ -9757,8 +9793,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Whether the TYPE declaration `name` in `canonical` is (one
     /// declaration of) a GLOBAL declaration: a `declare global` interface
-    /// of a module that has no file-scope symbol of the name, or a
-    /// file-scope interface of a script. Every other declaration of the
+    /// of a module that binds the name in no module scope (no type, no
+    /// import), or that its owner's global-augmentation scope addresses, or
+    /// a file-scope interface of a script. Every other declaration of the
     /// same global lives in another file, and its `Instantiate` folds them
     /// in.
     fn declares_global_interface(
@@ -9768,9 +9805,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         name: &str,
         kind: verter_session_query::declarations::TypeDeclKind,
     ) -> bool {
-        if kind != verter_session_query::declarations::TypeDeclKind::Interface
-            || owner != verter_type_expr::TopLevelOwnerId::ordinary_file()
-        {
+        if kind != verter_session_query::declarations::TypeDeclKind::Interface {
+            return false;
+        }
+        if owner.is_global_augmentation() {
+            return self
+                .transaction_indexed_record(canonical)
+                .is_some_and(|indexed| {
+                    indexed
+                        .shallow_state
+                        .declares_global_augmentation_type_in(owner, name)
+                });
+        }
+        if owner != verter_type_expr::TopLevelOwnerId::ordinary_file() {
             return false;
         }
         let Some(indexed) = self.transaction_indexed_record(canonical) else {
@@ -9781,7 +9828,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &indexed.shallow_state,
         ) {
             verter_session_query::inputs::contributors::FileModuleKind::Module => {
-                !shallow.has_type_symbol_in(owner, name) && shallow.has_global_augmentation(name)
+                !shallow.binds_module_scope_type_in(owner, name)
+                    && shallow.has_global_augmentation(name)
             }
             verter_session_query::inputs::contributors::FileModuleKind::Script => {
                 shallow.has_type_symbol_in(owner, name)

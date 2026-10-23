@@ -63,7 +63,7 @@ use verter_type_expr::locators::{
     JsdocTypedefBodyLocator, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
     SymbolBodyLocator, TypeArgLocator, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
 };
-use verter_type_expr::{TopLevelOwnerId, TopLevelOwnerKind};
+use verter_type_expr::{OwnerDeclarationScope, TopLevelOwnerId, TopLevelOwnerKind};
 
 mod sealed {
     /// Private seal: only this module can name it, so `R6KeyDimension` cannot be
@@ -350,6 +350,7 @@ impl_r6_key_safe_leaf!(
 // witness below (a stamp without its `w_*` witness fails to compile).
 impl_r6_key_safe!(
     TopLevelOwnerKind => w_top_level_owner_kind,
+    OwnerDeclarationScope => w_owner_declaration_scope,
     TopLevelOwnerId => w_top_level_owner_id,
     LocatorSymbolSpace => w_locator_symbol_space,
     AuthoredAnchor => w_authored_anchor,
@@ -397,14 +398,22 @@ fn w_top_level_owner_kind(kind: &TopLevelOwnerKind) {
     }
 }
 
+fn w_owner_declaration_scope(scope: &OwnerDeclarationScope) {
+    match scope {
+        OwnerDeclarationScope::Lexical | OwnerDeclarationScope::GlobalAugmentation => {}
+    }
+}
+
 fn w_top_level_owner_id(owner: &TopLevelOwnerId) {
-    // `TopLevelOwnerId` deliberately keeps its two fields private in
+    // `TopLevelOwnerId` deliberately keeps its fields private in
     // `verter_type_expr`; its public, lossless decomposition is the structural
     // witness available to this crate.
     let kind = owner.kind();
     let ordinal = owner.ordinal();
+    let scope = owner.scope();
     key_safe(&kind);
     key_safe(&ordinal);
+    key_safe(&scope);
 }
 
 fn w_locator_symbol_space(s: &LocatorSymbolSpace) {

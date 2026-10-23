@@ -153,6 +153,12 @@ pub(super) fn prepare_type_decl_from_lowered(
         );
         NameResolutionTable::new(table)
     };
+    let name_resolution = match origin {
+        Some(verter_session_query::declarations::AugmentationScopeKind::Global) => {
+            with_global_block_resolutions(name_resolution, canonical_id, state, owner, interner)
+        }
+        _ => name_resolution,
+    };
 
     finish_prepared_type_decl(
         canonical_id,
@@ -165,6 +171,78 @@ pub(super) fn prepare_type_decl_from_lowered(
         name_resolution,
         interner,
     )
+}
+
+/// The `name_resolution` table of a declaration written inside one of
+/// `owner`'s `declare global` blocks: a name the module's global blocks
+/// declare is, inside them, the global declaration — ahead of the module's
+/// own declaration or import of the name, which the module's other
+/// references read. Such a name binds the global-augmentation scope
+/// identity ([`verter_type_expr::TopLevelOwnerId::global_augmentation`])
+/// that addresses the module's contribution to the global: a TYPE the
+/// module binds, and a VALUE the module binds unless the module binds the
+/// name as a type the blocks do not declare (the one entry serves both
+/// spaces, and that type stays the module's). A name the module does not
+/// bind already reaches the global by the bare-name fallback. A
+/// namespace-sibling binding (a qualified identity) stays the innermost
+/// scope's. The table is shared unchanged when no name needs rebinding.
+pub(super) fn with_global_block_resolutions(
+    name_resolution: SharedNameResolutionBase,
+    canonical_id: &verter_type_expr::OwnedStr,
+    state: &ShallowFileState,
+    owner: verter_type_expr::TopLevelOwnerId,
+    interner: &IdentityInterner,
+) -> SharedNameResolutionBase {
+    use verter_session_query::declarations::AugmentationScopeKind;
+    let lexical = owner.lexical();
+    let global = AugmentationScopeKind::Global;
+    let declares_type = |name: &str| state.declares_global_augmentation_type_in(lexical, name);
+    let types = state
+        .augmentation_type_decl_keys()
+        .filter(|(scope, key)| {
+            matches!(scope, AugmentationScopeKind::Global)
+                && key.owner == lexical
+                && state.binds_module_scope_type_in(lexical, key.name.as_ref())
+        })
+        .map(|(_, key)| key.name.as_ref());
+    let values = state
+        .headers
+        .augmentation_value_headers
+        .get(&global)
+        .into_iter()
+        .flat_map(|headers| headers.keys())
+        .filter(|key| {
+            let name = key.name.as_ref();
+            key.owner == lexical
+                && (state.has_value_symbol_in(lexical, name)
+                    || state.is_import_local_in(lexical, name))
+                && (declares_type(name) || !state.binds_module_scope_type_in(lexical, name))
+        })
+        .map(|key| key.name.as_ref());
+    let rebound: Vec<&str> = types
+        .chain(values)
+        .filter(|name| {
+            name_resolution.get(*name).is_none_or(|bound| {
+                bound.canonical_id != *canonical_id || bound.symbol_name.as_ref() == *name
+            })
+        })
+        .collect();
+    if rebound.is_empty() {
+        return name_resolution;
+    }
+    let mut table = (*name_resolution).clone();
+    for name in rebound {
+        let name = interner.intern(name);
+        table.insert(
+            name.clone(),
+            ResolvedRootIdentity::new_in_owner(
+                canonical_id.clone(),
+                lexical.global_augmentation(),
+                name,
+            ),
+        );
+    }
+    NameResolutionTable::new(table)
 }
 
 /// Insert the same-file symbol entries of the `name_resolution` table: every
