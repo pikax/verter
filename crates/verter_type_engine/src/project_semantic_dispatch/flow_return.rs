@@ -15418,8 +15418,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let entries = frame.entries;
         let offset = frame.offset;
-        let mut surface_members = std::mem::take(&mut frame.surface_members);
-        let mut unwidened_members = std::mem::take(&mut frame.unwidened_members);
+        let surface_members = std::mem::take(&mut frame.surface_members);
+        let unwidened_members = std::mem::take(&mut frame.unwidened_members);
         let unwidened_differs = frame.unwidened_differs;
         let mut effects: Vec<_> = std::mem::take(&mut frame.effect_ordinals)
             .into_iter()
@@ -15501,8 +15501,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 },
             ))
         };
+        // A spelling repeated across members (an error the checker still
+        // types) is the one property `checkObjectLiteral` keeps.
+        let mut surface_members =
+            crate::semantic_query::object_literal_members_last_wins(surface_members);
+        let mut unwidened_members =
+            crate::semantic_query::object_literal_members_last_wins(unwidened_members);
         self.apply_accessor_annotation_precedence(entries, &mut surface_members);
         self.apply_accessor_annotation_precedence(entries, &mut unwidened_members);
+        // The literal's type holds each accessor as the one property the
+        // checker gives it (`checkObjectLiteral` keeps the accessor symbol,
+        // whose type is its read type): a getter alone is a `readonly`
+        // property of its return, a setter alone a property of its
+        // parameter, a get / set pair one mutable property at the first's
+        // position — never the accessor function.
+        let graph = self.dispatch.graph();
+        let surface_members = crate::semantic_query::members_with_accessors_as_properties(
+            surface_members,
+            &graph,
+            |signature| self.dispatch.materialize_returned_callable(signature),
+        );
+        let unwidened_members = crate::semantic_query::members_with_accessors_as_properties(
+            unwidened_members,
+            &graph,
+            |signature| self.dispatch.materialize_returned_callable(signature),
+        );
         let identify = |surface: SemanticNodeId| {
             if !recursive {
                 return surface;

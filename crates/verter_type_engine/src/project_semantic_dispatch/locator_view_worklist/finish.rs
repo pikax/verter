@@ -194,12 +194,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// The slot `child`, `parent`'s child at `index`, projects in. An
-    /// application a tuple spreads, under a carrier mode that splices it, is
-    /// [`ProjectionSlot::Spread`]: the tuple's own positions and length are
-    /// the application's, so it is instantiated there as the checker
-    /// instantiates it, while the same application stays a carrier anywhere
-    /// else. Its two readings are memoized apart, so neither depends on
-    /// which occurrence the projection meets first.
+    /// application a tuple spreads, under `Navigate`, is
+    /// [`ProjectionSlot::Spread`]: a navigation reads the tuple's positions
+    /// and length, which are the application's, so it is instantiated there
+    /// as the checker instantiates it, while the same application stays a
+    /// carrier anywhere else. `Shallow` publishes a rest slot's application
+    /// as its carrier, declared and builtin alike, and `Skeleton` keeps
+    /// every application a carrier. The two readings are memoized apart, so
+    /// neither depends on which occurrence the projection meets first.
     pub(super) fn child_projection_slot(
         &self,
         parent: &SemanticNodeData,
@@ -207,19 +209,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         child: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> ProjectionSlot {
-        let spread = matches!(
-            context.mode,
-            ProjectionMode::Navigate | ProjectionMode::Shallow
-        ) && matches!(
-            parent,
-            SemanticNodeData::Tuple { elements, .. }
-                if elements
-                    .get(index)
-                    .is_some_and(|element| element.rest && element.value == child)
-        ) && matches!(
-            self.graph().node_data(child).as_deref(),
-            Some(SemanticNodeData::InstantiationRef { .. })
-        );
+        let spread = context.mode == ProjectionMode::Navigate
+            && matches!(
+                parent,
+                SemanticNodeData::Tuple { elements, .. }
+                    if elements
+                        .get(index)
+                        .is_some_and(|element| element.rest && element.value == child)
+            )
+            && matches!(
+                self.graph().node_data(child).as_deref(),
+                Some(SemanticNodeData::InstantiationRef { .. })
+            );
         if spread {
             ProjectionSlot::Spread
         } else {
@@ -413,8 +414,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ));
         }
         // The carrier modes keep an application a carrier, except one a
-        // tuple spreads over closed arguments, which is instantiated to
-        // splice (`[...Deep<[0, 0]>, 1]`).
+        // tuple spreads over closed arguments under `Navigate`, which is
+        // instantiated to splice (`[...Deep<[0, 0]>, 1]`).
         let keeps_carrier = matches!(
             context.mode,
             ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow

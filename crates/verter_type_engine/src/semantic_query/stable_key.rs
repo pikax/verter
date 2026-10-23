@@ -281,10 +281,17 @@ fn origin_tag(category: CompositeOriginCategory) -> u8 {
 }
 
 fn encode_owner(enc: &mut Recipe, owner: verter_type_expr::TopLevelOwnerId) {
-    enc.u8(match owner.kind() {
+    let kind = match owner.kind() {
         verter_type_expr::TopLevelOwnerKind::Module => 1,
         verter_type_expr::TopLevelOwnerKind::Instance => 2,
         verter_type_expr::TopLevelOwnerKind::Frontmatter => 3,
+    };
+    // A `declare global` contribution's owner takes its own kind bytes, so no
+    // lexical owner's encoding (or stable order) changes.
+    enc.u8(if owner.is_global_augmentation() {
+        kind + 3
+    } else {
+        kind
     });
     enc.u32(owner.ordinal());
 }

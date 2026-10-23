@@ -197,12 +197,7 @@ impl StructuralEncoder<'_> {
             } => {
                 self.buf.push(1);
                 self.push_str(canonical_id);
-                self.buf.push(match owner.kind() {
-                    verter_type_expr::TopLevelOwnerKind::Module => 0,
-                    verter_type_expr::TopLevelOwnerKind::Instance => 1,
-                    verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
-                });
-                self.buf.extend_from_slice(&owner.ordinal().to_le_bytes());
+                self.push_owner(*owner);
                 self.buf.extend_from_slice(whole_hash);
                 match local_scope {
                     Some(verter_type_engine::semantic_query::NodeLocalScopeId::Lexical(s)) => {
@@ -250,15 +245,25 @@ impl StructuralEncoder<'_> {
     /// Encode a [`DeclIdentity`] by content (canonical id + whole-hash + name).
     fn encode_decl_identity(&mut self, identity: &DeclIdentity) {
         self.push_str(&identity.canonical_id);
-        self.buf.push(match identity.owner.kind() {
+        self.push_owner(identity.owner);
+        self.buf.extend_from_slice(&identity.whole_hash);
+        self.push_str(&identity.decl_name);
+    }
+
+    /// Encode a declaration owner: its kind (a `declare global`
+    /// contribution's owner takes its own kind bytes) and ordinal.
+    fn push_owner(&mut self, owner: verter_type_expr::TopLevelOwnerId) {
+        let kind = match owner.kind() {
             verter_type_expr::TopLevelOwnerKind::Module => 0,
             verter_type_expr::TopLevelOwnerKind::Instance => 1,
             verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
+        };
+        self.buf.push(if owner.is_global_augmentation() {
+            kind + 3
+        } else {
+            kind
         });
-        self.buf
-            .extend_from_slice(&identity.owner.ordinal().to_le_bytes());
-        self.buf.extend_from_slice(&identity.whole_hash);
-        self.push_str(&identity.decl_name);
+        self.buf.extend_from_slice(&owner.ordinal().to_le_bytes());
     }
 
     fn encode_value_decl_identity(

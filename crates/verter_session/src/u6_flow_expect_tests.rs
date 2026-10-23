@@ -1279,9 +1279,10 @@ pub(crate) fn check_boundary_refusal(
 /// name matches a resolved `DeclRef`, or a class-expression instance by the
 /// name the checker prints for it — `BareRef` / `TypeParam` reach `_ => false`
 /// (fail-closed). A generic-argument reference matches an
-/// `InstantiationRef` (name + exact argument list). Accessor prints and
+/// `InstantiationRef` (name + exact argument list). An object's printed
+/// accessors compare as the one property each `get` / `set` pair reads as;
 /// elided-member markers PARSE but match NOTHING (fail-closed; see the
-/// variant docs) — re-add those arms only with a control. A live
+/// variant docs) — re-add that arm only with a control. A live
 /// object-spread program is compared through the SAME public
 /// spread-projection consumer the boundary raises through
 /// (`project_object_spread_for_consumer`, `Surface` selector): a
@@ -1406,14 +1407,13 @@ pub(crate) mod checker_syntax {
             params: Vec<CheckerType>,
             ret: Box<CheckerType>,
         },
-        /// `get name(): R`. Parses; matches NOTHING — see [`Self::Set`].
+        /// `get name(): R`. With its `set` (see [`Self::Set`]) it compares
+        /// as the ONE property the checker gives an object literal's
+        /// accessor: the getter's type, `readonly` when there is no setter.
         Get { name: String, ret: Box<CheckerType> },
-        /// `set name(v: T);`. Parses; matches NOTHING: the checker's
-        /// `get`/`set` pair denotes ONE property with paired accessors,
-        /// while the live surface carries the pair as TWO independent
-        /// members (X14's duplicate-key defect), so no canonical member
-        /// mapping exists today. Reintroduce accessor acceptance only
-        /// with a row + control.
+        /// `set name(v: T);`. With its `get` it compares as one mutable
+        /// property of the getter's type; alone, as a mutable property of
+        /// its parameter's type.
         Set {
             name: String,
             params: Vec<CheckerType>,
@@ -2554,7 +2554,9 @@ pub(crate) mod checker_syntax {
     }
 
     /// Whether one live member satisfies one printed member. Accessor
-    /// and elided prints match nothing (see [`CheckerMember`]).
+    /// prints reach here as the properties they read as
+    /// ([`accessors_as_properties`]); elided prints match nothing (see
+    /// [`CheckerMember`]).
     fn member_matches(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         member: &LiveMember<'_>,
@@ -2641,8 +2643,9 @@ pub(crate) mod checker_syntax {
                             )
                     })
             }
-            // The accessor pair and the elided marker have no canonical
-            // live mapping — fail closed, deliberately.
+            // An accessor reaches here only without a type to read as
+            // ([`accessors_as_properties`]); the elided marker has no
+            // canonical live mapping — fail closed, deliberately.
             CheckerMember::Get { .. }
             | CheckerMember::Set { .. }
             | CheckerMember::ElidedMore(_) => false,
@@ -2650,6 +2653,50 @@ pub(crate) mod checker_syntax {
             // [`object_members_match`].
             CheckerMember::Index { .. } => false,
         }
+    }
+
+    /// A printed object's members with each accessor as the ONE property
+    /// the checker gives an object literal's `get` / `set` pair, at the
+    /// first accessor's position: the getter's type, else the setter's
+    /// parameter type, `readonly` when there is no setter. An accessor
+    /// with no type to read as stays as printed, and matches nothing.
+    fn accessors_as_properties(members: &[CheckerMember]) -> Vec<CheckerMember> {
+        let accessor_name = |member: &CheckerMember| match member {
+            CheckerMember::Get { name, .. } | CheckerMember::Set { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        let mut merged = std::collections::BTreeSet::new();
+        let mut properties = Vec::with_capacity(members.len());
+        for member in members {
+            let Some(name) = accessor_name(member) else {
+                properties.push(member.clone());
+                continue;
+            };
+            if !merged.insert(name.clone()) {
+                continue;
+            }
+            let pair = members
+                .iter()
+                .filter(|member| accessor_name(member).as_deref() == Some(name.as_str()));
+            let (mut getter, mut setter) = (None, None);
+            for member in pair {
+                match member {
+                    CheckerMember::Get { ret, .. } => getter = Some(ret.as_ref()),
+                    CheckerMember::Set { params, .. } => setter = Some(params.first()),
+                    _ => {}
+                }
+            }
+            match getter.or(setter.flatten()) {
+                Some(ty) => properties.push(CheckerMember::Property {
+                    name,
+                    optional: false,
+                    readonly: setter.is_none(),
+                    ty: ty.clone(),
+                }),
+                None => properties.push(member.clone()),
+            }
+        }
+        properties
     }
 
     /// Exact member-set equality with injective claiming (duplicate
@@ -2662,6 +2709,7 @@ pub(crate) mod checker_syntax {
         exp: &[CheckerMember],
         depth: usize,
     ) -> bool {
+        let exp = accessors_as_properties(exp);
         let (exp_index, exp): (Vec<&CheckerMember>, Vec<&CheckerMember>) = exp
             .iter()
             .partition(|member| matches!(member, CheckerMember::Index { .. }));
@@ -4717,8 +4765,8 @@ mod expectation_controls {
     }
 
     /// CONTROL — the D14 comparison clauses, verdict-directed on LIVE
-    /// nodes: method-kind, `readonly`, member optionality, accessor
-    /// fail-closure, generic-reference fail-closure, elision
+    /// nodes: method-kind, `readonly`, member optionality, accessors as
+    /// properties, generic-reference fail-closure, elision
     /// fail-closure, and the spread-formula arms.
     #[test]
     fn extended_checker_prints_compare_deliberately() {
@@ -4814,24 +4862,27 @@ mod expectation_controls {
                 );
             },
         );
-        // Accessor prints and accessor-kinded live members on X14's
-        // program: BOTH spellings fail — the accessor arm is
-        // deliberately absent.
+        // Accessor prints on X14's program: the checker's paired accessor
+        // is ONE mutable property of the getter's type, which the live
+        // literal holds; a readonly or duplicate-member spelling is not.
         with_flow_node(
             "function makeProps() { return { get g(): string { return \"s\" }, set g(v: string \
              | number) { }, n: 2 } }",
             "makeProps",
             |dispatch, node| {
                 assert!(
-                    !accepts(
+                    accepts(
                         dispatch,
                         node,
                         "{ get g(): string; set g(v: string | number); n: number; }"
                     ),
-                    "an ACCESSOR print must match NOTHING — the checker's paired accessor is \
-                     one property; the live surface carries the pair as two independent \
-                     members and no canonical mapping exists (measured {})",
+                    "the ACCESSOR print is the one property the pair reads as (measured {})",
                     render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !accepts(dispatch, node, "{ readonly g: string; n: number; }"),
+                    "a READONLY print against the paired accessor must be rejected — a pair \
+                     with a setter is mutable"
                 );
                 assert!(
                     !accepts(
@@ -4839,8 +4890,24 @@ mod expectation_controls {
                         node,
                         "{ g: () => string; g: (v: string | number) => void; n: number; }"
                     ),
-                    "a PROPERTY print against the accessor-kinded live members must be \
-                     rejected — the property clause demands method kind `None`"
+                    "the accessor functions as two members must be rejected — the pair is one \
+                     property"
+                );
+            },
+        );
+        // A getter alone on a literal is a `readonly` property.
+        with_flow_node(
+            "function makeProps() { return { get g(): string { return \"s\" }, n: 2 } }",
+            "makeProps",
+            |dispatch, node| {
+                assert!(
+                    accepts(dispatch, node, "{ get g(): string; n: number; }"),
+                    "the GETTER print is the readonly property it reads as (measured {})",
+                    render_node(dispatch, node, 0)
+                );
+                assert!(
+                    !accepts(dispatch, node, "{ g: string; n: number; }"),
+                    "a mutable print against a getter alone must be rejected"
                 );
             },
         );

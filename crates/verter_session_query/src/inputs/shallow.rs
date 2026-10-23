@@ -858,6 +858,24 @@ impl ShallowInputAssembly {
             .cloned()
     }
 
+    /// Whether the type the identity `(canonical, owner, name)` names in
+    /// `owner`'s global-augmentation scope
+    /// ([`TopLevelOwnerId::global_augmentation`]) exists: a MODULE whose
+    /// `declare global { … }` block declares `name` in `owner`. A script's
+    /// `declare global` binds nothing.
+    pub fn declares_global_augmentation_type_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
+        crate::inputs::contributors::classify_shallow_module_kind(self)
+            == crate::inputs::contributors::FileModuleKind::Module
+            && self
+                .headers
+                .augmentation_type_header_in(
+                    &crate::declarations::AugmentationScopeKind::Global,
+                    owner.lexical(),
+                    name,
+                )
+                .is_some()
+    }
+
     pub fn classify_dependency_paths(
         &self,
         declaration_owner: TopLevelOwnerId,
@@ -1206,6 +1224,15 @@ impl ShallowInputAssembly {
     pub fn is_import_local_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
         self.owner_import_targets
             .contains_key(&DeclBindingKey::new(owner, name))
+    }
+
+    /// Whether `owner`'s module scope binds the type name `name` itself — a
+    /// type declaration or an import — so the owner's `declare global`
+    /// contribution of the name is addressed by its global-augmentation
+    /// scope ([`TopLevelOwnerId::global_augmentation`]), never by the
+    /// module-scope identity.
+    pub fn binds_module_scope_type_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
+        self.has_type_symbol_in(owner, name) || self.is_import_local_in(owner, name)
     }
 
     /// Get the import target for a local import name.
