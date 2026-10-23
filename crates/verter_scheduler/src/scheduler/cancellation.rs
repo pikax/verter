@@ -5,6 +5,22 @@
 //! sibling module.
 
 use super::*;
+use verter_execution::wake::WakerSet;
+
+/// The flight and its DAG token share one callback rail. Keep a weak link:
+/// the DAG itself owns the aggregate, so a strong link would form a cycle.
+#[derive(Debug)]
+struct ScopedCancellationDelivery(std::sync::Weak<DagMutex>);
+
+impl verter_execution::cancellation::CancellationWakeDelivery for ScopedCancellationDelivery {
+    fn deliver(&self, wakers: verter_execution::wake::TakenWakers) {
+        if let Some(delivery) = self.0.upgrade() {
+            delivery.deliver(vec![wakers]);
+        } else {
+            wakers.wake();
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) enum ScopedCacheTerminal {
@@ -24,15 +40,18 @@ pub(super) struct ScopedCacheFlightState {
     pub(super) owners: HashMap<u64, ScopedFlightOwner>,
     pub(super) aggregate: Option<CancellationToken>,
     pub(super) dispatched: bool,
-    pub(super) builder_claimed: bool,
+    /// The transferred producer's execution task and the handoff that claimed
+    /// it. Followers retain their own tasks and register edges to this one.
+    pub(super) producer: Option<(ExecutionTask, u64)>,
     pub(super) terminal: Option<ScopedCacheTerminal>,
+    pub(super) wakers: WakerSet,
 }
 
 impl ScopedCacheFlight {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(delivery: Arc<DagMutex>) -> Self {
         Self {
             state: Mutex::new(ScopedCacheFlightState::default()),
-            changed: Condvar::new(),
+            delivery,
         }
     }
 
@@ -40,6 +59,7 @@ impl ScopedCacheFlight {
     /// this flight is already terminal (including an aggregate token that has
     /// latched cancellation); the caller must retry against a fresh flight.
     pub(super) fn try_add_owner(&self, owner_id: u64, request: Option<CancellationToken>) -> bool {
+        let _wakes = self.delivery.defer_wakes();
         let mut state = self.state.lock();
         if state.terminal.is_some() {
             return false;
@@ -49,8 +69,9 @@ impl ScopedCacheFlight {
                 Some(registration) => Some(registration),
                 None => {
                     state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                    state.producer = None;
                     state.owners.clear();
-                    self.changed.notify_all();
+                    self.delivery.deliver(vec![state.wakers.take()]);
                     return false;
                 }
             },
@@ -70,6 +91,7 @@ impl ScopedCacheFlight {
     /// Bind the DAG node's aggregate token to every owner that arrived before
     /// admission. Later owners register directly in [`Self::try_add_owner`].
     pub(super) fn attach_aggregate(&self, aggregate: CancellationToken) -> bool {
+        let _wakes = self.delivery.defer_wakes();
         let mut state = self.state.lock();
         if state.terminal.is_some() {
             return false;
@@ -77,11 +99,18 @@ impl ScopedCacheFlight {
         if state.aggregate.is_some() {
             return true;
         }
+        // Owner detachment, token probes and explicit DAG cancellation can
+        // all notify aggregate subscribers. Route every path through the same
+        // deferral as flight/completion wakes before registering any owner.
+        aggregate.set_wake_delivery(Arc::new(ScopedCancellationDelivery(Arc::downgrade(
+            &self.delivery,
+        ))));
         for owner in state.owners.values_mut() {
             let Some(registration) = aggregate.register_owner(owner.request.clone()) else {
                 state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                state.producer = None;
                 state.owners.clear();
-                self.changed.notify_all();
+                self.delivery.deliver(vec![state.wakers.take()]);
                 return false;
             };
             owner.aggregate_registration = Some(registration);
@@ -93,6 +122,7 @@ impl ScopedCacheFlight {
     /// Remove one request owner. Returns `true` when this transition made the
     /// flight terminal-cancelled and its DAG node must be cancelled.
     pub(super) fn detach_owner(&self, owner_id: u64) -> bool {
+        let _wakes = self.delivery.defer_wakes();
         let mut state = self.state.lock();
         state.owners.remove(&owner_id);
         if state.terminal.is_some() {
@@ -107,37 +137,30 @@ impl ScopedCacheFlight {
             return false;
         }
         state.terminal = Some(ScopedCacheTerminal::Cancelled);
+        state.producer = None;
         state.owners.clear();
-        self.changed.notify_all();
+        self.delivery.deliver(vec![state.wakers.take()]);
         true
     }
 
     /// Signal that normal DAG dispatch selected this flight. No closure runs on
     /// the driver; one waiting caller claims it and executes on the CPU pool.
     pub(super) fn mark_dispatched(&self, aggregate: CancellationToken) -> bool {
+        let _wakes = self.delivery.defer_wakes();
         let mut state = self.state.lock();
         if state.terminal.is_some() || aggregate.is_cancelled() {
             if state.terminal.is_none() {
                 state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                state.producer = None;
                 state.owners.clear();
-                self.changed.notify_all();
+                self.delivery.deliver(vec![state.wakers.take()]);
             }
             return false;
         }
         state.aggregate.get_or_insert(aggregate);
         state.dispatched = true;
-        self.changed.notify_all();
+        self.delivery.deliver(vec![state.wakers.take()]);
         true
-    }
-
-    pub(super) fn try_claim_builder(&self) -> Option<CancellationToken> {
-        let mut state = self.state.lock();
-        if state.terminal.is_some() || !state.dispatched || state.builder_claimed {
-            return None;
-        }
-        let aggregate = state.aggregate.clone()?;
-        state.builder_claimed = true;
-        Some(aggregate)
     }
 
     pub(super) fn terminal(&self) -> Option<ScopedCacheTerminal> {
@@ -145,21 +168,16 @@ impl ScopedCacheFlight {
     }
 
     pub(super) fn set_terminal(&self, terminal: ScopedCacheTerminal) -> bool {
+        let _wakes = self.delivery.defer_wakes();
         let mut state = self.state.lock();
         if state.terminal.is_some() {
             return false;
         }
         state.terminal = Some(terminal);
+        state.producer = None;
         state.owners.clear();
-        self.changed.notify_all();
+        self.delivery.deliver(vec![state.wakers.take()]);
         true
-    }
-
-    pub(super) fn wait_for_change(&self, timeout: std::time::Duration) {
-        let mut state = self.state.lock();
-        if state.terminal.is_none() && (!state.dispatched || state.builder_claimed) {
-            self.changed.wait_for(&mut state, timeout);
-        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -175,6 +193,7 @@ impl Scheduler {
         flight: &Arc<ScopedCacheFlight>,
         owner_id: u64,
     ) {
+        let _wakes = self.dag.defer_wakes();
         let _gate = self.scoped_cache_gate.lock();
         let lost_all_owners = flight.detach_owner(owner_id);
         if lost_all_owners || flight.terminal().is_some() {
@@ -199,6 +218,7 @@ impl Scheduler {
         terminal: ScopedCacheTerminal,
         success: bool,
     ) {
+        let _wakes = self.dag.defer_wakes();
         let _gate = self.scoped_cache_gate.lock();
         if flight.terminal().is_some() {
             // Already terminal: this flight owns no live DAG node of its own.
@@ -234,14 +254,15 @@ impl Scheduler {
     /// drained-but-unprocessed submission so the corresponding handles
     /// resolve instead of hanging. `Wake` / `StageComplete` carry no
     /// waiter sender and are dropped silently.
-    pub(super) fn shutdown_drained_submission(submission: Submission) {
+    pub(super) fn shutdown_drained_submission(&self, submission: Submission) {
         match submission {
             Submission::NewRequest { sender, .. } => {
-                sender.send(CompletionState::Shutdown);
+                self.dag.send_completion(&sender, CompletionState::Shutdown);
             }
             Submission::NewRequestBatch { requests } => {
                 for req in requests {
-                    req.sender.send(CompletionState::Shutdown);
+                    self.dag
+                        .send_completion(&req.sender, CompletionState::Shutdown);
                 }
             }
             Submission::ScopedCacheNode { flight, .. } => {
@@ -252,6 +273,7 @@ impl Scheduler {
     }
 
     pub(super) fn shutdown_all_scoped_cache_flights(&self) {
+        let _wakes = self.dag.defer_wakes();
         let _gate = self.scoped_cache_gate.lock();
         for flight in self.scoped_cache_flights.iter() {
             let _ = flight.set_terminal(ScopedCacheTerminal::Shutdown);

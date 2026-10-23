@@ -243,7 +243,7 @@ where
         )
     }
 
-    fn snapshot_view(&mut self) -> Self::View {
+    async fn snapshot_view(&mut self) -> Self::View {
         // Each attempt's stability must reflect ONLY that attempt's
         // snapshot. The driver's outer loop calls `snapshot_view()` up to
         // `max_attempts` times on the SAME executor instance: if an earlier
@@ -521,7 +521,8 @@ where
     // return-only. Every caller of this owner-layer entry inherits the
     // guarantee — no caller relies on a host-side special case.
     if !executor.cache_key().is_cacheable() {
-        let store_view = executor.snapshot_view();
+        let store_view =
+            verter_execution::blocking::complete_now(std::pin::pin!(executor.snapshot_view()));
         let value = executor
             .compute(&store_view)
             .expect("fallthrough request execution is infallible");

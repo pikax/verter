@@ -16,6 +16,8 @@
 //!   bookkeeping for in-flight work.
 //! - [`completion`](self::completion) — terminal states: completion
 //!   integration, failure fan-out and same-path self-await refusal.
+//! - [`dag_lock`](self::dag_lock) — lifecycle locking and completion wakes
+//!   delivered after the enclosing scheduler locks release.
 //! - [`dependencies`](self::dependencies) — dependency gating: blocker
 //!   classification, auto-ingest and macro-cycle filtering.
 //! - [`driver`](self::driver) — the driver thread: dispatch, pool submission
@@ -24,6 +26,7 @@
 //!   scoped flight becomes a DAG identity.
 //! - [`lifecycle`](self::lifecycle) — construction, invalidation, removal and
 //!   node-incarnation bookkeeping.
+//! - [`submission`](self::submission) — pollable bounded-inbox admission.
 //!
 //! Each submodule re-exports its items through this root, so a module reaches
 //! a sibling's items only through this surface and never through a sibling
@@ -42,7 +45,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use dashmap::DashMap;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 
 #[cfg(feature = "semantic-observe")]
 use crate::dag::DedupJoinerEvent;
@@ -54,11 +57,13 @@ use crate::driver::{QueuedRequest, Submission, SubmissionInbox};
 use crate::edges::EdgeManager;
 use crate::execution::executor::{DefaultExecutor, StageExecutor};
 use crate::job::{
-    completion_pair, CompletionHandle, CompletionSender, CompletionState, RequestResult,
+    completion_pair, CompletionHandle, CompletionSender, CompletionState, CompletionSubscription,
+    RequestResult,
 };
 use crate::node::{AnalysisSnapshot, ArtifactSnapshot, FileNode, SourceSnapshot};
 use crate::overlay::OverlayMap;
 use verter_execution::cancellation::{CancellationOwner, CancellationToken};
+use verter_execution::tasks::{ExecutionScope, ExecutionTask, TaskRegistry};
 use verter_language::FileLanguage;
 
 use crate::source_loader::SourceLoader;
@@ -71,16 +76,41 @@ use crate::stage::{Priority, TargetStage, TaskKind};
 mod admission;
 mod cancellation;
 mod completion;
+mod dag_lock;
 mod dependencies;
 mod driver;
 mod identity;
 mod lifecycle;
+mod scoped_handoff;
+mod submission;
+
+pub use scoped_handoff::{ScopedCacheNodeHandoff, ScopedCacheNodeProducer, ScopedCacheNodeStep};
+use submission::PendingSubmission;
+pub use submission::SchedulerSubmission;
+
+#[cfg(test)]
+#[path = "scheduler/submission_tests.rs"]
+mod submission_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "scheduler/reset_tests.rs"]
+mod reset_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "scheduler/scoped_handoff_tests.rs"]
+mod scoped_handoff_tests;
 
 use admission::*;
 use cancellation::*;
 use completion::*;
+use dag_lock::*;
 use dependencies::*;
+#[cfg(not(target_arch = "wasm32"))]
 use driver::*;
+// The dispatch pause hook is test instrumentation every build that carries
+// test support compiles, wasm32 included.
+#[cfg(all(target_arch = "wasm32", any(test, feature = "test-support")))]
+use driver::DispatchPauseHook;
 use identity::*;
 // `lifecycle`'s only free export is `num_cpus`, which is native-only; gating
 // the glob with it keeps the wasm32 build free of an unused-import warning.
@@ -216,7 +246,7 @@ pub enum ScopedCacheNodeError {
     Panicked,
     /// The same typed identity was used concurrently for different value types.
     TypeMismatch,
-    /// A producer synchronously requested its own active cache-node identity.
+    /// A request would wait on its own producer or close a task wait cycle.
     Reentrant,
 }
 
@@ -226,7 +256,7 @@ pub enum ScopedCacheNodeError {
 #[doc(hidden)]
 pub struct ScopedCacheFlight {
     state: Mutex<ScopedCacheFlightState>,
-    changed: Condvar,
+    delivery: Arc<DagMutex>,
 }
 
 /// Typed result of a submission attempt.
@@ -299,6 +329,9 @@ impl BatchHandle {
 /// Manages per-file nodes, a priority queue, and a driver thread that
 /// processes submissions and dispatches work to CPU/IO pools.
 pub struct Scheduler {
+    /// Shared with semantic producers by the host composition root. Standalone
+    /// schedulers create one registry for their own producers.
+    task_registry: TaskRegistry,
     /// Per-file nodes (concurrent access via DashMap).
     ///
     /// EXECUTION state: each [`FileNode`] holds only its CURRENT
@@ -408,6 +441,10 @@ pub struct Scheduler {
     /// Driver thread handle (native only).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) driver_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The actual driver identity, retained while reset takes and joins its
+    /// handle. A driver of another scheduler must still honor our barrier.
+    #[cfg(not(target_arch = "wasm32"))]
+    driver_thread_id: Mutex<Option<std::thread::ThreadId>>,
     /// Serializes concurrent `reset()` calls (native only).
     ///
     /// `reset()` takes `&self`, so two threads may enter it at once. The
@@ -415,7 +452,9 @@ pub struct Scheduler {
     /// join and clear `nodes`/the DAG while the still-running driver is
     /// pumping. Holding this guard for the whole body turns the second
     /// reset into a full, ordered rerun after the first has joined the
-    /// driver and finished clearing — never an overlap.
+    /// driver and finished clearing — never an overlap. A callback on this
+    /// scheduler's own driver joins an active reset by returning instead of
+    /// waiting for the reset that may already be joining that driver.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) reset_serial: Mutex<()>,
     /// Out-of-band teardown signal for the parked driver (native only).
@@ -464,6 +503,9 @@ pub struct Scheduler {
     /// from every build without it.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) reset_wake_posts: AtomicU64,
+    /// Test-only observation of a contested lifecycle acquisition or driver join.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    lifecycle_boundary: Mutex<Option<std::sync::mpsc::Sender<&'static str>>>,
     /// Test-only monotonic counter bumped once per admission-lock
     /// acquisition inside [`Self::handle_new_request_batch`] (co-located
     /// with the `dag.lock()` call via [`Self::acquire_dag_for_admission`]
@@ -557,7 +599,30 @@ impl Scheduler {
         cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
         io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
+        Self::with_executor_and_task_registry(
+            config,
+            source_loader,
+            executor,
+            cpu_pool,
+            io_pool,
+            TaskRegistry::default(),
+        )
+    }
+
+    /// Create a threaded scheduler whose scoped producers share the caller's
+    /// wait-cycle authority. A host passes this same registry to its semantic
+    /// store; nested producers then join one execution task across both layers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_executor_and_task_registry(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+        cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+        task_registry: TaskRegistry,
+    ) -> Arc<Self> {
         let scheduler = Arc::new(Self {
+            task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
@@ -581,6 +646,8 @@ impl Scheduler {
             shutdown: AtomicBool::new(false),
             driver_handle: Mutex::new(None),
             #[cfg(not(target_arch = "wasm32"))]
+            driver_thread_id: Mutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
             reset_serial: Mutex::new(()),
             driver_teardown: crossbeam_channel::bounded(1),
             counters: SchedulerCounters::default(),
@@ -590,6 +657,8 @@ impl Scheduler {
             batch_admit_seam: BatchAdmitSeamHook::default(),
             #[cfg(any(test, feature = "test-support"))]
             reset_wake_posts: AtomicU64::new(0),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            lifecycle_boundary: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -602,19 +671,8 @@ impl Scheduler {
             io_submit_attempts: std::sync::atomic::AtomicUsize::new(0),
         });
 
-        // Driver holds Weak so it doesn't prevent Drop.
-        // Also clones the receiver so it can block on it without upgrading.
-        let weak = Arc::downgrade(&scheduler);
-        let receiver = scheduler.inbox.receiver.clone();
-        let teardown = scheduler.driver_teardown.1.clone();
-        let handle = std::thread::Builder::new()
-            .name("verter-scheduler".to_string())
-            .spawn(move || {
-                Self::driver_loop_native(weak, receiver, teardown);
-            })
-            .expect("failed to spawn scheduler driver");
-
-        *scheduler.driver_handle.lock() = Some(handle);
+        let start = scheduler.spawn_native_driver();
+        let _ = start.send(());
         scheduler
     }
 
@@ -652,7 +710,31 @@ impl Scheduler {
         #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
         #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
+        Self::new_sync_with_executor_and_task_registry(
+            config,
+            source_loader,
+            executor,
+            #[cfg(not(target_arch = "wasm32"))]
+            cpu_pool,
+            #[cfg(not(target_arch = "wasm32"))]
+            io_pool,
+            TaskRegistry::default(),
+        )
+    }
+
+    /// Create an inline scheduler sharing the supplied execution-task registry.
+    /// On WASM, the embedding driver polls handoffs and runs dependencies on
+    /// the same thread; task ownership and wait-cycle detection are unchanged.
+    pub fn new_sync_with_executor_and_task_registry(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+        task_registry: TaskRegistry,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
@@ -679,6 +761,8 @@ impl Scheduler {
             #[cfg(not(target_arch = "wasm32"))]
             driver_handle: Mutex::new(None),
             #[cfg(not(target_arch = "wasm32"))]
+            driver_thread_id: Mutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
             reset_serial: Mutex::new(()),
             #[cfg(not(target_arch = "wasm32"))]
             driver_teardown: crossbeam_channel::bounded(1),
@@ -689,6 +773,8 @@ impl Scheduler {
             batch_admit_seam: BatchAdmitSeamHook::default(),
             #[cfg(any(test, feature = "test-support"))]
             reset_wake_posts: AtomicU64::new(0),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            lifecycle_boundary: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -789,6 +875,70 @@ impl Scheduler {
         T: Send + Sync + 'static,
         F: FnOnce(&CancellationToken) -> T + Send,
     {
+        let mut handoff = self.begin_scoped_cache_node(request)?;
+        let mut build = Some(build);
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::ScopedCacheNode,
+            None,
+            |waker| {
+                loop {
+                    match handoff.poll(waker) {
+                        std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) => {
+                            return std::task::Poll::Ready(Ok(value));
+                        }
+                        std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) => {
+                            let operation = build.take().expect("only one producer is transferred");
+                            self.run_transferred_producer(move || producer.run(operation));
+                        }
+                        std::task::Poll::Ready(Err(error)) => {
+                            return std::task::Poll::Ready(Err(error))
+                        }
+                        std::task::Poll::Pending => {
+                            // Execution remains outside the polling capability.
+                            if !self.dispatch_for_pending_dependency() {
+                                return std::task::Poll::Pending;
+                            }
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    /// Run a dependency producer a pollable computation transferred to its
+    /// synchronous driver, where this scheduler runs producers: on its CPU
+    /// pool (natively), blocking the caller until it returns, or on the
+    /// caller itself (wasm32).
+    pub fn run_transferred_producer(&self, producer: impl FnOnce() + Send) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cpu_pool.install(producer);
+        #[cfg(target_arch = "wasm32")]
+        producer();
+    }
+
+    /// Advance this scheduler's dispatch once on behalf of a synchronous
+    /// driver whose computation waits on a dependency it admitted: dispatch
+    /// ready stages this caller may run (natively) or drive one stage
+    /// (wasm32). Answers whether anything progressed; when nothing did, the
+    /// dependency's own settlement wakes the computation.
+    pub fn dispatch_for_pending_dependency(self: &Arc<Self>) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        let progress = self
+            .pump_ready(PumpReason::WaitOrDrive, caller_kind::CallerKind::current())
+            .made_progress();
+        #[cfg(target_arch = "wasm32")]
+        let progress = self.drive_one();
+        progress
+    }
+
+    /// Begin a cache-node computation without waiting for inbox capacity or
+    /// executing its producer. Polling transfers a producer after DAG dispatch;
+    /// the caller runs it outside the root poll, then resumes the handoff.
+    /// See [`ScopedCacheNodeHandoff`] for ownership and cancellation semantics.
+    pub fn begin_scoped_cache_node<T: Send + Sync + 'static>(
+        self: &Arc<Self>,
+        request: ScopedCacheNodeRequest,
+    ) -> Result<ScopedCacheNodeHandoff<T>, ScopedCacheNodeError> {
         let request_token = request
             .request_context
             .as_ref()
@@ -806,12 +956,13 @@ impl Scheduler {
         }
         let owner_id = self.next_scoped_owner_id.fetch_add(1, Ordering::Relaxed);
         let flight = {
+            let _wakes = self.dag.defer_wakes();
             let _gate = self.scoped_cache_gate.lock();
             loop {
                 let candidate = match self.scoped_cache_flights.entry(identity.clone()) {
                     dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
                     dashmap::mapref::entry::Entry::Vacant(entry) => {
-                        let flight = Arc::new(ScopedCacheFlight::new());
+                        let flight = Arc::new(ScopedCacheFlight::new(Arc::clone(&self.dag)));
                         entry.insert(Arc::clone(&flight));
                         flight
                     }
@@ -833,33 +984,15 @@ impl Scheduler {
             flight: Arc::clone(&flight),
             request_context: request.request_context.clone(),
         };
-        if self.send_submission(submission).is_err() {
-            self.terminalize_scoped_cache_flight(
-                &identity,
-                &flight,
-                ScopedCacheTerminal::Shutdown,
-                false,
-            );
-        } else {
-            self.record_inbox_submission();
-        }
-
-        let result = self.wait_for_scoped_cache_node(
-            &identity,
-            &flight,
+        Ok(ScopedCacheNodeHandoff::new(
+            Arc::clone(self),
+            identity,
+            flight,
+            owner_id,
             request.request_context,
-            request_token.clone(),
-            build,
-        );
-        self.detach_scoped_cache_owner(&identity, &flight, owner_id);
-        if request_token
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
-        {
-            Err(ScopedCacheNodeError::Cancelled)
-        } else {
-            result
-        }
+            request_token,
+            submission,
+        ))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -872,6 +1005,30 @@ impl Scheduler {
 
     /// Submit a request. Returns a handle that resolves when the target stage is reached.
     pub fn submit_request(&self, request: Request) -> CompletionHandle<RequestResult> {
+        let (submission, handle) = self.prepare_request_submission(request);
+        if let Err(submission) = self.send_submission(submission) {
+            self.shutdown_drained_submission(*submission);
+        } else {
+            self.record_inbox_submission();
+        }
+        handle
+    }
+
+    /// Begin a request admission without waiting for inbox capacity. Poll the
+    /// returned handoff to obtain a poll-only completion subscription; stage
+    /// execution belongs to the caller's dependency driver.
+    pub fn begin_submit_request(
+        self: &Arc<Self>,
+        request: Request,
+    ) -> SchedulerSubmission<CompletionSubscription<RequestResult>> {
+        let (submission, handle) = self.prepare_request_submission(request);
+        SchedulerSubmission::new(self, Some(submission), handle.subscribe())
+    }
+
+    fn prepare_request_submission(
+        &self,
+        request: Request,
+    ) -> (Submission, CompletionHandle<RequestResult>) {
         verter_audit::attribute!(SchedulerSubmitRequest);
         let (handle, sender) = completion_pair();
         // Attach a request-level completion target so the
@@ -892,23 +1049,11 @@ impl Scheduler {
             priority: request.priority,
             source: request.source,
             file_language: request.file_language,
-            sender: sender.clone(),
+            sender,
             submitted_lifetime,
             request_context: request.request_context,
         };
-        match self.send_submission(submission) {
-            Ok(()) => {
-                // Record the submission + update the peak inbox depth
-                // observed (contention instrumentation).
-                self.record_inbox_submission();
-                handle
-            }
-            Err(_) => {
-                // Inbox closed (scheduler shutting down)
-                sender.send(CompletionState::Shutdown);
-                handle
-            }
-        }
+        (submission, handle)
     }
 
     /// Atomically submit a batch of requests as ONE inbox item.
@@ -934,6 +1079,32 @@ impl Scheduler {
     /// Returns a [`BatchHandle`] whose completion handles are in input
     /// order; drain it via [`Self::wait_batch`].
     pub fn submit_batch_atomic(&self, requests: Vec<Request>) -> BatchHandle {
+        let (submission, batch) = self.prepare_batch(requests);
+        if let Some(submission) = submission {
+            match self.send_submission(submission) {
+                Ok(()) => self.record_inbox_submission(),
+                Err(submission) => self.shutdown_drained_submission(*submission),
+            }
+        }
+        batch
+    }
+
+    /// Begin admission of one atomic inbox item, yielding while the inbox is
+    /// full. An empty batch is immediately ready and consumes no capacity.
+    pub fn begin_submit_batch_atomic(
+        self: &Arc<Self>,
+        requests: Vec<Request>,
+    ) -> SchedulerSubmission<Vec<CompletionSubscription<RequestResult>>> {
+        let (submission, batch) = self.prepare_batch(requests);
+        let subscriptions = batch
+            .handles
+            .iter()
+            .map(CompletionHandle::subscribe)
+            .collect();
+        SchedulerSubmission::new(self, submission, subscriptions)
+    }
+
+    fn prepare_batch(&self, requests: Vec<Request>) -> (Option<Submission>, BatchHandle) {
         verter_audit::attribute_n!(SchedulerSubmitBatch, requests.len());
         let mut handles = Vec::with_capacity(requests.len());
         let mut queued = Vec::with_capacity(requests.len());
@@ -965,22 +1136,12 @@ impl Scheduler {
         if queued.is_empty() {
             // Nothing to submit — no wake, no accounting (mirrors the
             // empty-batch contract of `account_batch_submission`).
-            return BatchHandle { handles };
+            return (None, BatchHandle { handles });
         }
-
-        match self.send_submission(Submission::NewRequestBatch { requests: queued }) {
-            Ok(()) => {
-                // ONE batch == ONE submission for contention accounting,
-                // regardless of how many items it carries.
-                self.record_inbox_submission();
-            }
-            Err(submission) => {
-                // Inbox closed (scheduler shutting down): signal every
-                // handle so callers don't hang.
-                Self::shutdown_drained_submission(*submission);
-            }
-        }
-        BatchHandle { handles }
+        (
+            Some(Submission::NewRequestBatch { requests: queued }),
+            BatchHandle { handles },
+        )
     }
 
     /// Wait for a submitted batch to complete. Drains each
@@ -1154,16 +1315,52 @@ impl Scheduler {
     /// Full reset: stop the driver, drain inbox, remove all nodes, clear
     /// all state. Call `restart_driver()` after to resume processing.
     ///
-    /// Provides a true quiesce barrier — no concurrent processing during
-    /// the clear phase because the driver thread is joined first.
+    /// External callers join the driver before clearing state. From a wake on
+    /// this scheduler's own driver, reset clears state and leaves shutdown set;
+    /// that driver exits after the wake returns. Its handle remains joinable
+    /// until an external reset or restart completes the quiesce barrier.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn reset(&self) {
+        let wake_deferral = self.dag.defer_wakes();
         // Serialize concurrent resets: the driver handle is `take()`n
         // exactly once, so without this the loser would skip the join and
         // clear `nodes`/the DAG while the still-running driver pumps.
-        // Held for the whole body; `reset()` never re-enters itself and
-        // the driver never calls it, so this cannot deadlock.
-        let _serial = self.reset_serial.lock();
+        // External callers hold this through quiescence. An own-driver
+        // callback must instead leave an already active reset to its joiner.
+        let is_own_driver = *self.driver_thread_id.lock() == Some(std::thread::current().id());
+        let _serial = if is_own_driver {
+            loop {
+                if let Some(serial) = self.reset_serial.try_lock() {
+                    break serial;
+                }
+                #[cfg(test)]
+                if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                    let _ = boundary.send("reset-contended");
+                }
+                // A stopping lifecycle owner may be joining this very
+                // callback. A healthy restart, however, may merely be
+                // returning without resetting anything: do not lose reset
+                // in that case. Park in bounded slices so a joiner's stop
+                // remains observable, without spinning or waiting on it.
+                if self.shutdown.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(serial) = self
+                    .reset_serial
+                    .try_lock_for(std::time::Duration::from_millis(2))
+                {
+                    break serial;
+                }
+            }
+        } else {
+            self.reset_serial.try_lock().unwrap_or_else(|| {
+                #[cfg(test)]
+                if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                    let _ = boundary.send("reset-contended");
+                }
+                self.reset_serial.lock()
+            })
+        };
         // 1. Stop the driver thread. The dedicated teardown signal — not
         //    the inbox wake, which any cooperative pump may consume first —
         //    is what guarantees a parked driver observes this.
@@ -1172,15 +1369,17 @@ impl Scheduler {
         let _ = self.inbox.sender.try_send(Submission::Wake);
         #[cfg(any(test, feature = "test-support"))]
         self.reset_wake_posts.fetch_add(1, Ordering::Release);
-        if let Some(handle) = self.driver_handle.lock().take() {
-            if should_join_driver_thread(handle.thread().id(), std::thread::current().id()) {
+        if !is_own_driver {
+            let handle = self.driver_handle.lock().take();
+            if let Some(handle) = handle {
                 let _ = handle.join();
             }
+            *self.driver_thread_id.lock() = None;
         }
 
         // 2. Drain queued requests; cooperative admission validates their stamps.
         while let Ok(submission) = self.inbox.receiver.try_recv() {
-            Self::shutdown_drained_submission(submission);
+            self.shutdown_drained_submission(submission);
         }
         self.shutdown_all_scoped_cache_flights();
 
@@ -1210,31 +1409,82 @@ impl Scheduler {
         //    step 3, so handle_stage_complete will no-op), but draining
         //    keeps the channel clean.
         while let Ok(submission) = self.inbox.receiver.try_recv() {
-            Self::shutdown_drained_submission(submission);
+            self.shutdown_drained_submission(submission);
         }
 
-        // 6. Unset shutdown so the next driver can run.
-        self.shutdown.store(false, Ordering::Release);
+        // A self-reset cannot join its own active stack. Keep both shutdown
+        // and the join handle until an external lifecycle call observes exit;
+        // otherwise this very driver resumes pumping after its reset returns.
+        if !is_own_driver {
+            self.shutdown.store(false, Ordering::Release);
+        }
+        drop(_serial);
+        self.inbox.notify_space();
+        drop(wake_deferral);
     }
 
     /// Restart the driver thread after a `reset()`. Must be called on
-    /// `Arc<Self>` because the driver needs a `Weak` reference.
+    /// `Arc<Self>` because the driver needs a `Weak` reference. An external
+    /// restart joins a self-reset driver before reopening work. On the driver
+    /// itself, restart reopens the retained loop without spawning a second one.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn restart_driver(self: &Arc<Self>) {
+        if *self.driver_thread_id.lock() == Some(std::thread::current().id()) {
+            // An external reset/restart may already be joining this callback.
+            // Leave its stop intact rather than waiting for the joiner.
+            let Some(_serial) = self.reset_serial.try_lock() else {
+                return;
+            };
+            while self.driver_teardown.1.try_recv().is_ok() {}
+            self.shutdown.store(false, Ordering::Release);
+            return;
+        }
+        let _serial = self.reset_serial.lock();
+        if !self.shutdown.load(Ordering::Acquire) && self.driver_handle.lock().is_some() {
+            return;
+        }
+        let handle = self.driver_handle.lock().take();
+        if let Some(handle) = handle {
+            #[cfg(test)]
+            if let Some(boundary) = self.lifecycle_boundary.lock().as_ref() {
+                let _ = boundary.send("restart-join");
+            }
+            let _ = handle.join();
+        }
+        *self.driver_thread_id.lock() = None;
         // The outgoing driver may have exited on the shutdown flag without
         // consuming its teardown signal; a leftover signal would stop the
         // incoming driver on its first park.
         while self.driver_teardown.1.try_recv().is_ok() {}
+        self.shutdown.store(false, Ordering::Release);
+        let start = self.spawn_native_driver();
+        // A completion wake may reset immediately on startup. Its identity
+        // and join handle must already be installed, and reset must not see
+        // this startup serialization hold as an external joiner's reset.
+        drop(_serial);
+        let _ = start.send(());
+    }
+
+    /// Publish one driver's identity and handle before letting it run.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_native_driver(self: &Arc<Self>) -> crossbeam_channel::Sender<()> {
+        // Driver holds Weak so it doesn't prevent Drop. A dropped startup
+        // sender abandons the thread without executing scheduler work.
+        let (start, started) = crossbeam_channel::bounded(1);
         let weak = Arc::downgrade(self);
         let receiver = self.inbox.receiver.clone();
         let teardown = self.driver_teardown.1.clone();
         let handle = std::thread::Builder::new()
             .name("verter-scheduler".to_string())
             .spawn(move || {
-                Self::driver_loop_native(weak, receiver, teardown);
+                if started.recv().is_ok() {
+                    Self::driver_loop_native(weak, receiver, teardown);
+                }
             })
             .expect("failed to restart scheduler driver");
+        *self.driver_thread_id.lock() = Some(handle.thread().id());
         *self.driver_handle.lock() = Some(handle);
+        start
     }
 
     /// Drain and discard all pending inbox submissions. Used by `close()`
@@ -1244,8 +1494,9 @@ impl Scheduler {
         while let Ok(submission) = self.inbox.receiver.try_recv() {
             // Signal shutdown to any senders in discarded submissions
             // so their CompletionHandles don't hang.
-            Self::shutdown_drained_submission(submission);
+            self.shutdown_drained_submission(submission);
         }
+        self.inbox.notify_space();
     }
 
     /// Register exact resolutions for a file (from bundler/LSP `set_import_dependencies`).
@@ -1814,7 +2065,13 @@ impl Scheduler {
                     PumpReason::ShutdownDrain,
                     crate::caller_kind::CallerKind::Driver,
                 );
-                break;
+                // A drained request's completion wake can explicitly restart
+                // this retained loop. Do not leave a finished driver handle
+                // behind after that callback has reopened work.
+                if scheduler.shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                continue;
             }
 
             // Drive the pump until it reports no progress, then
@@ -1827,7 +2084,7 @@ impl Scheduler {
                     PumpReason::DriverLoop,
                     crate::caller_kind::CallerKind::Driver,
                 );
-                if !stats.made_progress() {
+                if scheduler.shutdown.load(Ordering::Acquire) || !stats.made_progress() {
                     break;
                 }
             }
@@ -2115,6 +2372,9 @@ impl Scheduler {
         handle: &crate::job::CompletionHandle<T>,
         caller_kind: crate::caller_kind::CallerKind,
     ) -> crate::job::CompletionState<T> {
+        verter_execution::blocking::enter_wait(
+            verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        );
         // `caller_kind` discriminates driver/worker/external waiters and is
         // read only on native (the driver-aware park/cooperative paths
         // below). wasm is single-threaded with no driver, so it takes the
@@ -2225,7 +2485,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn scoped_test_context(
+    pub(super) fn scoped_test_context(
         id: u64,
     ) -> (
         verter_execution::request_context::OpaqueRequestContext,
@@ -2354,7 +2614,7 @@ mod tests {
     /// aggregate token latched cancelled and its `by_identity` entry vanished,
     /// so the successor was either force-cancelled (this test) or — when the
     /// stale cancel landed BEFORE the successor's dispatch — never dispatched
-    /// at all, leaving `wait_for_scoped_cache_node` parked forever. That
+    /// at all, leaving its scoped cache-node caller parked forever. That
     /// unbounded park is the >10s `VerterHost::ensure_ide_compiled` block
     /// observed under concurrent LSP load.
     #[cfg(not(target_arch = "wasm32"))]

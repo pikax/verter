@@ -452,7 +452,7 @@ pub(crate) struct ClassAncestryReading {
 
 /// The dispatch-scoped memo behind [`ProjectSemanticDispatch::class_heritage_ancestry`],
 /// keyed by the rooted declaration identity (canonical, owner, name).
-pub(crate) type HeritageAncestryMemo = std::cell::RefCell<
+pub(crate) type HeritageAncestryMemo = verter_execution::sync_cell::SyncRefCell<
     rustc_hash::FxHashMap<
         (
             verter_type_expr::OwnedStr,
@@ -21887,7 +21887,7 @@ enum AwaitedOutcome {
 /// Pops the operands one awaited run pushed onto the dispatch's path when
 /// the run ends, however it ends.
 struct AwaitedPathGuard<'g> {
-    active: &'g std::cell::RefCell<AwaitedPath>,
+    active: &'g verter_execution::sync_cell::SyncRefCell<AwaitedPath>,
     base: usize,
 }
 

@@ -478,55 +478,6 @@ pub(crate) enum DispatchOutcome {
     Skipped,
 }
 
-/// The mutex type guarding the scheduler's central [`SchedulerDag`] — the
-/// single most contended lock in the scheduler (every admission, dispatch,
-/// and completion acquires it).
-///
-/// A dedicated alias rather than reusing the crate-wide `Mutex` import: under
-/// the `hotpath` feature this becomes `hotpath::wrap::parking_lot::Mutex`,
-/// hotpath 0.23's drop-in instrumented wrapper, so the DAG lock's wait/hold
-/// duration is exactly the kind of bottleneck that instrumentation exists to
-/// surface — but the wrapper doesn't implement `Debug`/`Default`, and
-/// `scheduler.rs` has several OTHER, unrelated `Mutex<T>` fields on
-/// `#[derive(Debug, Default)]` structs (dispatch-pause state, cache-call
-/// recording) that would break if the crate-wide import were swapped
-/// instead. Scoping the wrap to this one alias keeps every other lock in the
-/// file byte-identical to the pre-instrumentation code regardless of the
-/// feature.
-#[cfg(feature = "semantic-observe")]
-pub(super) type DagMutex = hotpath::wrap::parking_lot::Mutex<SchedulerDag>;
-
-#[cfg(not(feature = "semantic-observe"))]
-pub(super) type DagMutex = Mutex<SchedulerDag>;
-
-/// Guard type returned by locking a [`DagMutex`]. See [`DagMutex`] for why
-/// this is a dedicated alias rather than a bare `parking_lot::MutexGuard`.
-// `#[allow(dead_code)]` on both branches: rustc's type-alias dead-code check
-// does not credit `acquire_dag_for_admission`'s return-position reference to
-// this alias — reproduces on EITHER branch (whichever is the active cfg), so
-// it is a rustc false positive for a private lifetime-generic alias used
-// only in return position, not an actually-unused alias.
-#[cfg(feature = "semantic-observe")]
-#[allow(dead_code)]
-pub(super) type DagMutexGuard<'a> = hotpath::wrap::parking_lot::MutexGuard<'a, SchedulerDag>;
-
-#[cfg(not(feature = "semantic-observe"))]
-#[allow(dead_code)]
-pub(super) type DagMutexGuard<'a> = parking_lot::MutexGuard<'a, SchedulerDag>;
-
-/// Construct a [`DagMutex`]. Under `hotpath` this routes through
-/// `hotpath::mutex!`; without it, this is a plain `parking_lot::Mutex::new`,
-/// identical to the pre-instrumentation code.
-#[cfg(feature = "semantic-observe")]
-pub(super) fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
-    hotpath::mutex!(parking_lot::Mutex::new(dag), label = "scheduler_dag")
-}
-
-#[cfg(not(feature = "semantic-observe"))]
-pub(super) fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
-    Mutex::new(dag)
-}
-
 impl Scheduler {
     /// Enqueue without parking the sole driver (or a single-threaded inline
     /// pump) behind its own full inbox. Other callers wait for bounded
@@ -534,43 +485,29 @@ impl Scheduler {
     pub(super) fn send_submission(&self, submission: Submission) -> Result<(), Box<Submission>> {
         #[cfg(not(target_arch = "wasm32"))]
         use caller_kind::CallerKind;
-        let mut submission = submission;
-        loop {
-            submission = match self.inbox.sender.try_send(submission) {
-                Ok(()) => return Ok(()),
-                Err(crossbeam_channel::TrySendError::Full(submission)) => submission,
-                Err(crossbeam_channel::TrySendError::Disconnected(submission)) => {
-                    return Err(Box::new(submission))
+        let mut pending = PendingSubmission::new(&self.inbox, Some(submission));
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::SchedulerAdmission,
+            None,
+            |waker| {
+                let polled = pending.poll(self, waker);
+                if polled.is_ready() {
+                    return polled;
                 }
-            };
-            if self.shutdown.load(Ordering::Acquire) {
-                return Err(Box::new(submission));
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if !matches!(
-                CallerKind::current(),
-                CallerKind::Driver | CallerKind::Inline
-            ) && self.driver_handle.lock().is_some()
-            {
-                return self
-                    .inbox
-                    .sender
-                    .send(submission)
-                    .map_err(|error| Box::new(error.0));
-            }
-            let mut select = crossbeam_channel::Select::new();
-            let send = select.send(&self.inbox.sender);
-            select.recv(&self.inbox.receiver);
-            let operation = select.select();
-            if operation.index() == send {
-                return operation
-                    .send(&self.inbox.sender, submission)
-                    .map_err(|error| Box::new(error.0));
-            }
-            if let Ok(older) = operation.recv(&self.inbox.receiver) {
-                self.process_submission(older);
-            }
-        }
+                #[cfg(not(target_arch = "wasm32"))]
+                if !matches!(
+                    CallerKind::current(),
+                    CallerKind::Driver | CallerKind::Inline
+                ) && self.driver_handle.lock().is_some()
+                {
+                    return std::task::Poll::Pending;
+                }
+                if let Ok(older) = self.inbox.receiver.try_recv() {
+                    self.process_submission(older);
+                }
+                std::task::Poll::Pending
+            },
+        )
     }
 
     /// Drain all available submissions from the inbox.
@@ -594,6 +531,7 @@ impl Scheduler {
 
     /// Process a single submission.
     pub(super) fn process_submission(&self, submission: Submission) {
+        self.inbox.notify_space();
         match submission {
             Submission::Wake => {}
             Submission::NewRequest {
@@ -652,7 +590,11 @@ impl Scheduler {
     pub(crate) fn drain_inbox_for_pump(&self) -> usize {
         let mut drained = 0;
         while let Ok(submission) = self.inbox.receiver.try_recv() {
-            self.process_submission(submission);
+            if self.shutdown.load(Ordering::Acquire) {
+                self.shutdown_drained_submission(submission);
+            } else {
+                self.process_submission(submission);
+            }
             drained += 1;
         }
         drained
@@ -700,6 +642,9 @@ impl Scheduler {
         };
 
         loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                break;
+            }
             // Sample DAG depth under the lock so the audit figure
             // matches the depth observed by the entry that is about
             // to leave. Optional capture: without `semantic-observe` the

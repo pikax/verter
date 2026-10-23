@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{DepSignature, QueryError, QueryResult, SemanticQueryValue};
@@ -20,14 +20,14 @@ use super::prepared::PreparedKeyHandle;
 
 /// Same-key production cell for one in-flight semantic query.
 ///
-/// The inner mutex guards `state` exclusively; `ready` is signalled when
-/// the winner publishes. Joiners wait on `ready` via `wait_while`, so they
-/// do not busy-retry. Ownership is released when the cell is retired from
-/// the store's flight table after completion, abort, or panic.
+/// The inner mutex guards `state` exclusively. A joiner registers its waker
+/// in `state` while the flight is unresolved, and the winner wakes every
+/// registration once it publishes or aborts, so joiners do not busy-retry.
+/// Ownership is released when the cell is retired from the store's flight
+/// table after completion, abort, or panic.
 pub struct FlightCell {
     pub(super) site: crate::semantic_query::checker_policy::TupleSplicePosition,
     pub(super) state: Mutex<InflightState>,
-    pub(super) ready: Condvar,
     /// The cell's block and its slot in the flight table, charged for as
     /// long as the cell lives — through every subscriber that still holds
     /// it after the flight retires. A flight is in-flight computation the
@@ -120,60 +120,24 @@ pub(super) struct InflightState {
     /// result never re-populates the cache.
     pub(super) aborted: bool,
     /// The wakers of subscribers that polled the flight while it was
-    /// unresolved, each registered under this lock with its subscription's
-    /// own registration id; the flight wakes every one once it resolves
+    /// unresolved, each registered under this lock by its own
+    /// subscription; the flight wakes every one once it resolves
     /// ([`FlightCell::wake_subscribers`]). Two subscriptions polled with the
     /// same executor waker hold two registrations, so withdrawing one never
     /// withdraws the other.
-    pub(super) wakers: Vec<(WakeRegistration, std::task::Waker)>,
-    /// The id the next waker registration on this flight takes.
-    pub(super) next_registration: u64,
-}
-
-/// One subscription's waker registration on a flight.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct WakeRegistration(u64);
-
-impl InflightState {
-    /// Register `waker` for one subscription, returning its registration.
-    pub(super) fn register_waker(&mut self, waker: std::task::Waker) -> WakeRegistration {
-        let registration = WakeRegistration(self.next_registration);
-        self.next_registration += 1;
-        self.wakers.push((registration, waker));
-        registration
-    }
-
-    /// Withdraw exactly `registration`, leaving every other subscription's.
-    pub(super) fn withdraw_waker(&mut self, registration: WakeRegistration) {
-        self.wakers.retain(|(id, _)| *id != registration);
-    }
-
-    /// Whether `registration` is still on the flight with a waker that wakes
-    /// the same task as `waker`.
-    pub(super) fn holds_waker(
-        &self,
-        registration: WakeRegistration,
-        waker: &std::task::Waker,
-    ) -> bool {
-        self.wakers
-            .iter()
-            .any(|(id, registered)| *id == registration && registered.will_wake(waker))
-    }
+    pub(super) wakers: verter_execution::wake::WakerSet,
 }
 
 impl FlightCell {
     /// Wake every subscriber after the flight resolved (completed or
-    /// aborted) under its lock: the blocking ones on the condvar, the
-    /// polling ones through their registered wakers. A poll registers its
-    /// waker only after finding the flight unresolved under the same lock,
-    /// so every waker registered before the resolution is taken here and
-    /// none is registered after it.
+    /// aborted) under its lock, through their registered wakers. A
+    /// subscriber, polling or blocking, registers its waker only after
+    /// finding the flight unresolved under the same lock, so every waker
+    /// registered before the resolution is taken here and none is
+    /// registered after it.
     pub(super) fn wake_subscribers(&self) {
-        self.ready.notify_all();
-        let wakers = std::mem::take(&mut self.state.lock().wakers);
-        for (_, waker) in wakers {
-            waker.wake();
-        }
+        let wakers = self.state.lock().wakers.take();
+        wakers.wake();
     }
 
     /// An unclaimed cell whose storage is charged as in-flight work
@@ -184,7 +148,6 @@ impl FlightCell {
         Self {
             site: Default::default(),
             state: Mutex::new(InflightState::default()),
-            ready: Condvar::new(),
             _storage: Some(account.reserve_in_flight(flight_storage_bytes())),
         }
     }
@@ -197,7 +160,6 @@ impl FlightCell {
         Self {
             site: Default::default(),
             state: Mutex::new(InflightState::default()),
-            ready: Condvar::new(),
             _storage: None,
         }
     }
@@ -542,7 +504,7 @@ pub struct FlightRendezvousObservation {
 pub(super) struct FlightRendezvousShared {
     key: crate::semantic_query::SemanticQueryKey,
     state: Mutex<FlightRendezvousState>,
-    changed: Condvar,
+    changed: parking_lot::Condvar,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
@@ -871,7 +833,7 @@ impl super::SemanticGraphStore {
         let shared = Arc::new(FlightRendezvousShared {
             key,
             state: Mutex::new(FlightRendezvousState::default()),
-            changed: Condvar::new(),
+            changed: parking_lot::Condvar::new(),
         });
         self.flight_rendezvous.lock().push(Arc::clone(&shared));
         self.flight_rendezvous_armed

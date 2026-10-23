@@ -722,7 +722,7 @@ struct CompositeReduction {
 /// a later demand on the same union replays its roots instead of reducing
 /// it again: a distributive conditional demands its `extends` operand once
 /// per member. The outermost dispatch operation releases the table.
-pub(super) type CompositeFixedPoints = std::cell::RefCell<
+pub(super) type CompositeFixedPoints = verter_execution::sync_cell::SyncRefCell<
     rustc_hash::FxHashMap<SemanticNodeId, Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>>,
 >;
 

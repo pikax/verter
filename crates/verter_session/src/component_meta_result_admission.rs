@@ -156,8 +156,8 @@ impl<'a, 'c, P: Send + Sync + Clone, C: ResolverCapabilities>
     /// retention reservation leaves the admitted carrier unset.
     pub(crate) fn compute_and_admit_with_entry<R, Compute, Decide>(
         &self,
-        _canonical: &str,
-        _path_label: &str,
+        canonical: &str,
+        path_label: &str,
         compute: Compute,
         decide: Decide,
     ) -> (R, Option<AdmittedComponentMetaResult<P>>)
@@ -169,9 +169,38 @@ impl<'a, 'c, P: Send + Sync + Clone, C: ResolverCapabilities>
         ) -> ComponentMetaPublishDecision<P>,
         P: verter_session_query::retention::RetainedFootprint,
     {
-        let (value, finalise) = self
-            .dispatch
-            .traced_component_meta_compute(_canonical, compute);
+        verter_execution::blocking::complete_now(std::pin::pin!(self
+            .compute_and_admit_with_entry_pollable(
+                canonical,
+                path_label,
+                async move { compute() },
+                decide,
+            )))
+    }
+
+    /// [`Self::compute_and_admit_with_entry`] over a compute that may
+    /// suspend: the compute keeps its trace across its suspensions, and the
+    /// admission runs once it completes.
+    pub(crate) async fn compute_and_admit_with_entry_pollable<R, Compute, Decide>(
+        &self,
+        _canonical: &str,
+        _path_label: &str,
+        compute: Compute,
+        decide: Decide,
+    ) -> (R, Option<AdmittedComponentMetaResult<P>>)
+    where
+        Compute: std::future::Future<Output = R>,
+        Decide: FnOnce(
+            &R,
+            &verter_type_engine::project_semantic_dispatch::memo::ComponentMetaEvidence,
+        ) -> ComponentMetaPublishDecision<P>,
+        P: verter_session_query::retention::RetainedFootprint,
+    {
+        let dispatch = self.dispatch;
+        let (value, finalise) = verter_execution::blocking::on_heap(move || {
+            dispatch.traced_component_meta_compute_pollable(_canonical, compute)
+        })
+        .await;
         let mut admitted = None;
         match finalise {
             ComponentMetaTrace::Observed(evidence) => match decide(&value, &evidence) {

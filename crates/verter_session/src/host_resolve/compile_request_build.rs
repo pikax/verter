@@ -393,6 +393,36 @@ fn prepare_vue_execution_inputs(
     let macro_output = host
         .produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand)
         .map_err(HostProductsFailure::Aborted)?;
+    vue_execution_inputs_from_macro_output(host, snapshot, macro_output, axis)
+}
+
+/// [`prepare_vue_execution_inputs`] for a host root: the macro bundle is
+/// produced by the pollable path, which hands the root's driver its
+/// producer and dispatch steps through `work`.
+async fn prepare_vue_execution_inputs_pollable<'h>(
+    host: &'h crate::VerterHost,
+    snapshot: &CompileInput,
+    macro_demand: crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand,
+    axis: SharedDependencyAxis,
+    work: &crate::root_continuation::RootWorkSlot<'h>,
+) -> Result<VueHostExecutionInputs, HostProductsFailure> {
+    let macro_output = host
+        .produce_vue_macro_codegen_pollable(&snapshot.canonical_id, macro_demand, work)
+        .await
+        .map_err(HostProductsFailure::Aborted)?;
+    vue_execution_inputs_from_macro_output(host, snapshot, macro_output, axis)
+}
+
+/// The Vue execution inputs over one produced macro bundle: restate the
+/// dependency axis (when the route owns one), refuse on this file's macro
+/// dependency diagnostics, and build the ephemeral execution-input carrier.
+#[allow(clippy::needless_update)]
+fn vue_execution_inputs_from_macro_output(
+    host: &crate::VerterHost,
+    snapshot: &CompileInput,
+    macro_output: crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
+    axis: SharedDependencyAxis,
+) -> Result<VueHostExecutionInputs, HostProductsFailure> {
     let macro_dependency_diagnostics =
         super::vue_macro_dependency_diagnostics::collect(host, snapshot, &macro_output);
     if axis == SharedDependencyAxis::Restate {
@@ -582,13 +612,13 @@ pub(crate) enum SuppliedRequestFailure {
 /// and is the one demand that pays for per-member broad-runtime
 /// classification; every other demand takes the public binding names.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) fn execute_supplied_host_request(
-    host: &crate::VerterHost,
+pub(crate) async fn execute_supplied_host_request<'h>(
+    host: &'h crate::VerterHost,
     binding: super::native_host_binding::BoundNativeHostRequest,
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
     request: verter_compiler::compile_request::CompileRequest,
     snapshot: &CompileInput,
-    alloc: &oxc_allocator::Allocator,
+    work: &crate::root_continuation::RootWorkSlot<'h>,
 ) -> Result<BoundCompiledProducts, SuppliedRequestFailure> {
     use super::native_host_binding::BoundNativeHostRequest;
     use crate::host_compile_audit::{debug_assert_compile_bound_attribution, BoundCompileRoute};
@@ -605,6 +635,23 @@ pub(crate) fn execute_supplied_host_request(
     });
     match binding {
         BoundNativeHostRequest::Vue(bound) => {
+            let macro_demand = if wants_runtime {
+                VueMacroCodegenDemand::Runtime
+            } else {
+                VueMacroCodegenDemand::RuntimeBindingNames
+            };
+            // The macro bundle is the one input that waits on dependency
+            // work; it is produced before the backend and its compile arena
+            // exist, so neither is held while the root suspends.
+            let inputs = prepare_vue_execution_inputs_pollable(
+                host,
+                snapshot,
+                macro_demand,
+                SharedDependencyAxis::LeaveUntouched,
+                work,
+            )
+            .await
+            .map_err(SuppliedRequestFailure::Products)?;
             let (backend, attribution) = bound.into_host_backend();
             debug_assert_compile_bound_attribution(
                 BoundCompileRoute::HostBacked,
@@ -612,18 +659,8 @@ pub(crate) fn execute_supplied_host_request(
                 artifact,
                 &snapshot.canonical_id,
             );
-            let macro_demand = if wants_runtime {
-                VueMacroCodegenDemand::Runtime
-            } else {
-                VueMacroCodegenDemand::RuntimeBindingNames
-            };
-            let inputs = prepare_vue_execution_inputs(
-                host,
-                snapshot,
-                macro_demand,
-                SharedDependencyAxis::LeaveUntouched,
-            )
-            .map_err(SuppliedRequestFailure::Products)?;
+            let alloc = oxc_allocator::Allocator::new();
+            let alloc = &alloc;
             let admission =
                 backend
                     .admit_canonical_request(artifact, request)
@@ -688,6 +725,8 @@ pub(crate) fn execute_supplied_host_request(
                 None,
                 SharedDependencyAxis::LeaveUntouched,
             );
+            let alloc = oxc_allocator::Allocator::new();
+            let alloc = &alloc;
             let admission = backend
                 .admit_canonical_request(artifact, request)
                 .map_err(|refusal| match refusal {

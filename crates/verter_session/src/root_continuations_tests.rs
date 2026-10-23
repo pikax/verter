@@ -1,0 +1,1232 @@
+//! Root continuations: the pollable host roots, which synchronous
+//! dependency waits they still reach, and the harness that decides whether
+//! a poll returns `Pending` before a held dependency is released.
+//!
+//! The inventory polls the real public roots under a recording
+//! [`WaitProbe`] on cold, warm and mixed paths over cross-file
+//! dependencies, construction and the store-view capture included. Each
+//! path's reached families must stay inside the documented inventory in
+//! `docs/arch/root-continuations.md`, and the families every run reaches
+//! are pinned: converting a dependency family into a suspension removes it
+//! from a path's reached set, and the pin moves with the documentation.
+//!
+//! The harness polls once on its own thread under a forbidding probe and a
+//! bounded deadline, while the test holds a real dependency incomplete. A
+//! poll that suspends answers `Pending`; the harness then releases the hold
+//! and the poll continues to its answer. A poll that instead enters a
+//! synchronous wait fails at once under the probe, and one that blocks
+//! somewhere the probe cannot see fails at the deadline. Either way the
+//! harness releases the hold and joins its thread before reporting. Its
+//! cases over a held semantic flight live with the semantic task tests.
+
+use std::collections::BTreeSet;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::task::{Poll, Wake, Waker};
+use std::time::Duration;
+
+use verter_execution::blocking::{WaitFamily, WaitProbe};
+
+use crate::host_compile::{
+    CompileBatchInput, CompileBatchOptions, CompileBatchOutcome, CompileManyTarget,
+};
+use crate::types::{CompiledProduct, HostConfig, UpsertRequest};
+use crate::{ComponentMetaOutputAnswer, ComponentMetaOutputRoot, VerterHost};
+
+static_assertions::assert_impl_all!(ComponentMetaOutputRoot<'static>: Send);
+
+const PROPS: &str = "/src/props.ts";
+const CHILD: &str = "/src/Child.vue";
+const OWNER: &str = "/src/Owner.vue";
+
+const PROPS_SOURCE: &str = "export interface Base { label: string; size: number }\n\
+export type Props = Pick<Base, 'label'> & { tone?: 'a' | 'b' }\n";
+const CHILD_SOURCE: &str = r#"<script setup lang="ts">
+defineProps<{ caption: string }>()
+</script>
+<template><span>{{ caption }}</span></template>"#;
+const OWNER_SOURCE: &str = r#"<script setup lang="ts">
+import type { Props } from './props'
+import Child from './Child.vue'
+defineProps<Props>()
+</script>
+<template><Child caption="x" /></template>"#;
+
+/// How long a poll that must suspend may take before the harness calls it
+/// blocked. Only a failing run waits this long.
+pub(crate) const POLL_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The injected deadline of the test that proves a blocked poll fails.
+pub(crate) const PLANTED_DEADLINE: Duration = Duration::from_millis(50);
+
+fn upsert(host: &VerterHost, id: &str, source: &str, language: crate::FileLanguage) {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(id.to_owned()),
+            input_id: id.to_owned(),
+            source: Arc::from(source),
+            file_language: language,
+            aliases: Vec::new(),
+        })
+        .expect("fixture upserts");
+}
+
+/// A host carrying the owner, its imported props module and its child
+/// component.
+fn host() -> VerterHost {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(&host, PROPS, PROPS_SOURCE, crate::FileLanguage::script_ts());
+    upsert(&host, CHILD, CHILD_SOURCE, crate::FileLanguage::vue());
+    upsert(&host, OWNER, OWNER_SOURCE, crate::FileLanguage::vue());
+    host
+}
+
+/// The families `run` reaches on this thread, with its answer.
+fn reached<T>(run: impl FnOnce() -> T) -> (BTreeSet<WaitFamily>, T) {
+    let probe = WaitProbe::record();
+    let answer = run();
+    (probe.families(), answer)
+}
+
+/// Wakes the thread that polls a root.
+struct UnparkWaker(std::thread::Thread);
+
+impl Wake for UnparkWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+/// Poll `root` to its answer on this thread, parking while it is pending.
+/// The loop enters no wait of its own, so a probe around it sees only the
+/// waits the root's polls enter.
+fn poll_to_answer(mut root: ComponentMetaOutputRoot<'_>) -> ComponentMetaOutputAnswer {
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    loop {
+        if let Poll::Ready(answer) = root.poll(&waker) {
+            return answer;
+        }
+        std::thread::park();
+    }
+}
+
+/// The owner's output through its pollable root, as text.
+fn owner_output_through_root(host: &VerterHost) -> String {
+    let output = poll_to_answer(host.begin_component_meta_output(OWNER))
+        .expect("the owner's metadata resolves")
+        .expect("the owner is a component");
+    format!("{output:?}")
+}
+
+/// The labels of the owner's published props, sorted, polled through the
+/// owner's root.
+fn owner_props(host: &VerterHost) -> Vec<String> {
+    props_of(poll_to_answer(host.begin_component_meta_output(OWNER)))
+}
+
+fn props_of(answer: ComponentMetaOutputAnswer) -> Vec<String> {
+    let output = answer
+        .expect("the owner's metadata resolves")
+        .expect("the owner is a component");
+    let (analysis, _resolution, _types) = output.into_parts();
+    let mut names: Vec<String> = analysis
+        .props
+        .iter()
+        .map(|prop| prop.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The owner's runtime client and IDE companion demand.
+fn owner_compile_request() -> verter_compiler::compile_request::CompileRequest {
+    use verter_compiler::compile_request::{
+        CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
+        RuntimeProductRequest, VueBackendRequest, VueCompileRequest,
+    };
+    CompileRequest::new(
+        vec![
+            CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+            CompileProduct::IdeCompanion(IdeProductRequest::default()),
+        ],
+        FrameworkCompileRequest::Vue(VueCompileRequest {
+            backend: VueBackendRequest::Inferred,
+            ssr: false,
+            script_custom_element: Some(false),
+            ..VueCompileRequest::default()
+        }),
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+    .expect("the demand constructs")
+}
+
+/// The owner's runtime client and IDE companion through the synchronous
+/// compile entry, as text.
+fn compile_owner(host: &VerterHost) -> Vec<String> {
+    compiled_texts(
+        host.compile_request(OWNER, owner_compile_request())
+            .expect("the owner compiles"),
+    )
+}
+
+/// What the work a compile root handed its driver reached, by kind.
+#[derive(Default)]
+struct HandedOut {
+    producers: usize,
+    dispatch_steps: usize,
+}
+
+/// Drive the owner's compile root on this thread: every poll runs under
+/// `probe`, and the work it hands out runs outside it — a producer on a
+/// thread of its own, a dispatch step here.
+fn compile_owner_through_root(
+    host: &VerterHost,
+    probe: fn() -> WaitProbe,
+) -> (Vec<String>, HandedOut) {
+    let mut root = host.begin_compile_request(OWNER, owner_compile_request());
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut handed = HandedOut::default();
+    loop {
+        let polled = {
+            let _probe = probe();
+            root.poll(&waker)
+        };
+        if let Poll::Ready(answer) = polled {
+            return (compiled_texts(answer.expect("the owner compiles")), handed);
+        }
+        match root.take_work() {
+            Some(work) if work.is_producer() => {
+                handed.producers += 1;
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(move || work.run())
+                        .join()
+                        .expect("the producer runs")
+                });
+            }
+            Some(work) => {
+                handed.dispatch_steps += 1;
+                if !work.run() {
+                    std::thread::park();
+                }
+            }
+            None => std::thread::park(),
+        }
+    }
+}
+
+fn compiled_texts(response: crate::types::CompileRequestResponse) -> Vec<String> {
+    response
+        .products
+        .iter()
+        .flat_map(|product| match product {
+            CompiledProduct::Runtime { nodes, .. } => {
+                nodes.iter().map(|node| node.code.to_string()).collect()
+            }
+            CompiledProduct::Ide(ide) => vec![ide.code.to_string()],
+            CompiledProduct::Analysis(_) => Vec::new(),
+        })
+        .collect()
+}
+
+/// The owner through the batch compile root.
+fn compile_owner_batch(host: &VerterHost) -> String {
+    let entries = host.compile_many(
+        vec![CompileBatchInput {
+            canonical_id: OWNER.to_owned(),
+            source: Arc::from(OWNER_SOURCE),
+            requested_mode: None,
+            component_id: None,
+        }],
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
+    match &entries[..] {
+        [entry] => match &entry.outcome {
+            CompileBatchOutcome::Produced { code, .. } => code.to_string(),
+            CompileBatchOutcome::Failed { errors } => {
+                panic!("the owner compiles: {errors:?}")
+            }
+        },
+        other => panic!("one entry per input: {}", other.len()),
+    }
+}
+
+/// Every family a component-meta or compile root can reach, as listed in
+/// `docs/arch/root-continuations.md`.
+const ROOT_INVENTORY: &[WaitFamily] = &[
+    WaitFamily::Root,
+    WaitFamily::SemanticFlight,
+    WaitFamily::SemanticDrive,
+    WaitFamily::CacheFlight,
+    WaitFamily::ResolverFlight,
+    WaitFamily::StoreViewBuild,
+    WaitFamily::CarrierPublication,
+    WaitFamily::SchedulerCompletion,
+    WaitFamily::SchedulerAdmission,
+    WaitFamily::ScopedCacheNode,
+    WaitFamily::WorkspaceResolution,
+    WaitFamily::DeclLowering,
+    WaitFamily::CpuPool,
+];
+
+/// The families only another request's concurrent work makes a root wait
+/// on: a flight someone else produces, or a store view someone else builds.
+/// A single-request run never reaches them.
+const CONTENTION_ONLY: &[WaitFamily] = &[
+    WaitFamily::SemanticFlight,
+    WaitFamily::CacheFlight,
+    WaitFamily::ResolverFlight,
+    WaitFamily::StoreViewBuild,
+];
+
+/// `reached` stays inside the documented inventory, reaches every `pinned`
+/// family, and reaches nothing else outside the contention-only families.
+fn assert_reaches(path: &str, reached: &BTreeSet<WaitFamily>, pinned: &[WaitFamily]) {
+    let inventory: BTreeSet<WaitFamily> = ROOT_INVENTORY.iter().copied().collect();
+    let outside: Vec<_> = reached.difference(&inventory).collect();
+    assert!(
+        outside.is_empty(),
+        "{path} reached waits outside the documented inventory: {outside:?}",
+    );
+    let pinned: BTreeSet<WaitFamily> = pinned.iter().copied().collect();
+    let missing: Vec<_> = pinned.difference(reached).collect();
+    assert!(
+        missing.is_empty(),
+        "{path} no longer reaches {missing:?} (reached {reached:?}): move the pin and the \
+         inventory in docs/arch/root-continuations.md with the conversion",
+    );
+    let allowed: BTreeSet<WaitFamily> = pinned.iter().chain(CONTENTION_ONLY).copied().collect();
+    let unpinned: Vec<_> = reached.difference(&allowed).collect();
+    assert!(
+        unpinned.is_empty(),
+        "{path} reached {unpinned:?} beyond its pinned families {pinned:?}",
+    );
+}
+
+/// The cold component-meta root over cross-file dependencies. Building the
+/// host and registering its sources, the root itself, and dropping the
+/// host are inventoried separately, so a blocking constructor or drop
+/// cannot hide behind the root.
+#[test]
+fn root_continuations_cold_component_meta_inventory() {
+    let (construction, host) = reached(host);
+    let (root, props) = reached(|| owner_props(&host));
+    let (teardown, ()) = reached(|| drop(host));
+    assert_eq!(props, ["label", "tone"]);
+    assert_reaches(
+        "host construction and registration",
+        &construction,
+        &[
+            WaitFamily::SchedulerCompletion,
+            WaitFamily::SchedulerAdmission,
+        ],
+    );
+    assert_reaches(
+        "cold component-meta",
+        &root,
+        &[WaitFamily::SemanticDrive, WaitFamily::DeclLowering],
+    );
+    assert_reaches("host drop", &teardown, &[]);
+}
+
+/// A warm component-meta root re-captures the store view and validates its
+/// cached entry. Uncontended, it waits on nothing; the store-view build it
+/// can park on is contention-only.
+#[test]
+fn root_continuations_warm_component_meta_inventory() {
+    let host = host();
+    let cold = owner_props(&host);
+    let (families, warm) = reached(|| owner_props(&host));
+    assert_eq!(warm, cold);
+    assert_reaches("warm component-meta", &families, &[]);
+}
+
+/// A mixed root: the child component's metadata is warm, and the owner is
+/// cold again because its props module was edited after both resolved.
+#[test]
+fn root_continuations_mixed_component_meta_inventory() {
+    let host = host();
+    let _ = host
+        .get_component_meta_output(CHILD)
+        .expect("the child resolves")
+        .expect("the child is a component");
+    let _ = owner_props(&host);
+    upsert(
+        &host,
+        PROPS,
+        &PROPS_SOURCE.replace("'a' | 'b'", "'a' | 'c'"),
+        crate::FileLanguage::script_ts(),
+    );
+    let (families, props) = reached(|| owner_props(&host));
+    assert_eq!(props, ["label", "tone"]);
+    assert_reaches(
+        "mixed component-meta",
+        &families,
+        &[WaitFamily::SemanticDrive, WaitFamily::DeclLowering],
+    );
+}
+
+/// The single-request compile root, cold then warm, over the same
+/// dependencies, polled under a forbidding probe: its polls enter no wait.
+/// Its macro bundle's scoped cache node elects it producer, and the root
+/// hands that producer to its driver instead of running it, cold or warm;
+/// the producer's own macro traversal runs where the driver runs it. The
+/// answer is the synchronous entry's.
+#[test]
+fn root_continuations_compile_root_hands_its_producer_to_its_driver() {
+    let host = host();
+    let (cold_code, cold) = compile_owner_through_root(&host, WaitProbe::forbid);
+    let (warm_code, warm) = compile_owner_through_root(&host, WaitProbe::forbid);
+    assert_eq!(cold_code, warm_code);
+    assert!(cold_code.iter().any(|code| code.contains("caption")));
+    assert_eq!((cold.producers, warm.producers), (1, 1));
+    assert_eq!(compile_owner(&host), cold_code);
+}
+
+/// A compile root whose macro bundle another root is producing suspends on
+/// it: its poll answers `Pending` without entering a wait while the other
+/// root's handed-out producer is held, and running that producer wakes it
+/// to the same answer.
+#[test]
+fn root_continuations_compile_root_suspends_on_another_roots_producer() {
+    let host = host();
+    let expected = compile_owner(&host);
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
+    let producer = loop {
+        assert!(producing.poll(&waker).is_pending());
+        match producing.take_work() {
+            Some(work) if work.is_producer() => break work,
+            Some(dispatch) => {
+                let _ = dispatch.run();
+            }
+            None => std::thread::park(),
+        }
+    };
+    let following = host.begin_compile_request(OWNER, owner_compile_request());
+    let answer = pending_before_release(
+        POLL_DEADLINE,
+        following,
+        |root, waker| root.poll(waker),
+        || {
+            assert!(producer.run());
+            loop {
+                if let Poll::Ready(answer) = producing.poll(&waker) {
+                    assert_eq!(
+                        compiled_texts(answer.expect("the owner compiles")),
+                        expected
+                    );
+                    break;
+                }
+                if let Some(work) = producing.take_work() {
+                    let _ = work.run();
+                }
+            }
+        },
+    )
+    .expect("the follower suspends until the producer runs");
+    assert_eq!(
+        compiled_texts(answer.expect("the owner compiles")),
+        expected
+    );
+}
+
+/// A follower compile root whose request is cancelled while it waits on
+/// another root's held producer is woken by the cancellation itself and
+/// answers it without entering a wait; the producing root, under its own
+/// request, still completes with the request's answer.
+#[test]
+fn root_continuations_cancelling_a_suspended_follower_spares_its_producer() {
+    let host = host();
+    let expected = compile_owner(&host);
+    let unpark = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producing = {
+        let _request = verter_type_engine::request_context::install_test_request_for(OWNER);
+        host.begin_compile_request(OWNER, owner_compile_request())
+    };
+    let producer = loop {
+        assert!(producing.poll(&unpark).is_pending());
+        match producing.take_work() {
+            Some(work) if work.is_producer() => break work,
+            Some(dispatch) => {
+                let _ = dispatch.run();
+            }
+            None => std::thread::park(),
+        }
+    };
+    let (mut following, cancel) = {
+        let _request = verter_type_engine::request_context::install_test_request_for(OWNER);
+        let cancel = verter_type_engine::request_context::current_request_context()
+            .expect("the follower's request is installed")
+            .cancellation_token();
+        (
+            host.begin_compile_request(OWNER, owner_compile_request()),
+            cancel,
+        )
+    };
+    let (wake_tx, wake_rx) = mpsc::channel::<()>();
+    let follower = Waker::from(Arc::new(ChannelWaker(parking_lot::Mutex::new(wake_tx))));
+    let first = {
+        let _forbid = WaitProbe::forbid();
+        following.poll(&follower)
+    };
+    assert!(
+        first.is_pending(),
+        "the follower waits on the held producer"
+    );
+    drop(following.take_work());
+    while wake_rx.try_recv().is_ok() {}
+    cancel.cancel();
+    wake_rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("cancelling the follower's request wakes it");
+    let answer = {
+        let _forbid = WaitProbe::forbid();
+        following.poll(&follower)
+    };
+    assert!(
+        matches!(
+            answer,
+            Poll::Ready(Err(crate::types::CompileRequestFailure::Host(
+                crate::types::HostError::Cancelled
+            )))
+        ),
+        "the follower answers its cancellation: {answer:?}",
+    );
+    assert!(producer.run());
+    let produced = loop {
+        if let Poll::Ready(answer) = producing.poll(&unpark) {
+            break answer;
+        }
+        if let Some(work) = producing.take_work() {
+            let _ = work.run();
+        }
+    };
+    assert_eq!(
+        compiled_texts(produced.expect("the producer's root compiles")),
+        expected
+    );
+}
+
+/// Resetting the scheduler while a compile root follows another root's
+/// held producer wakes the follower, whose next poll answers the shutdown
+/// without entering a wait; the producer handed out before the reset still
+/// runs, and its own root answers too.
+#[test]
+fn root_continuations_a_reset_answers_a_suspended_follower_root() {
+    let host = host();
+    let unpark = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
+    let producer = loop {
+        assert!(producing.poll(&unpark).is_pending());
+        match producing.take_work() {
+            Some(work) if work.is_producer() => break work,
+            Some(dispatch) => {
+                let _ = dispatch.run();
+            }
+            None => std::thread::park(),
+        }
+    };
+    let mut following = host.begin_compile_request(OWNER, owner_compile_request());
+    let (wake_tx, wake_rx) = mpsc::channel::<()>();
+    let follower = Waker::from(Arc::new(ChannelWaker(parking_lot::Mutex::new(wake_tx))));
+    assert!(following.poll(&follower).is_pending());
+    drop(following.take_work());
+    while wake_rx.try_recv().is_ok() {}
+    host.scheduler().reset();
+    wake_rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("the reset wakes the follower");
+    let answer = {
+        let _forbid = WaitProbe::forbid();
+        following.poll(&follower)
+    };
+    assert!(
+        matches!(
+            answer,
+            Poll::Ready(Err(crate::types::CompileRequestFailure::Host(
+                crate::types::HostError::Shutdown
+            )))
+        ),
+        "the follower answers the shutdown: {answer:?}",
+    );
+    assert!(producer.run());
+    let produced = loop {
+        if let Poll::Ready(answer) = producing.poll(&unpark) {
+            break answer;
+        }
+        if let Some(work) = producing.take_work() {
+            let _ = work.run();
+        }
+    };
+    assert!(
+        matches!(
+            produced,
+            Err(crate::types::CompileRequestFailure::Host(
+                crate::types::HostError::Shutdown
+            ))
+        ),
+        "the producing root answers the shutdown too: {produced:?}",
+    );
+}
+
+/// The synchronous compile entry drives the same root at its boundary: it
+/// enters the root driver's wait and runs the handed-out producer on the
+/// scheduler's CPU pool, cold or warm.
+#[test]
+fn root_continuations_compile_inventory() {
+    let host = host();
+    let (cold, cold_code) = reached(|| compile_owner(&host));
+    let (warm, warm_code) = reached(|| compile_owner(&host));
+    assert_eq!(cold_code, warm_code);
+    assert!(cold_code.iter().any(|code| code.contains("caption")));
+    for (path, families) in [("cold compile", &cold), ("warm compile", &warm)] {
+        assert_reaches(path, families, &[WaitFamily::Root, WaitFamily::CpuPool]);
+    }
+}
+
+/// The batch compile root parks its calling thread on the host CPU pool
+/// for every batch, a single cold input included; what each input then
+/// waits on happens on a pool thread, outside this thread's probe.
+#[test]
+fn root_continuations_batch_compile_inventory() {
+    let host = host();
+    let (cold, cold_code) = reached(|| compile_owner_batch(&host));
+    let (warm, warm_code) = reached(|| compile_owner_batch(&host));
+    assert_eq!(cold_code, warm_code);
+    for (path, families) in [("cold batch compile", &cold), ("warm batch compile", &warm)] {
+        assert_reaches(path, families, &[WaitFamily::CpuPool]);
+    }
+}
+
+// ── Component-metadata root ────────────────────────────────────────────
+
+/// A component-metadata root outlives the call that began it: the entry
+/// returns the unpolled root, another thread polls it to its answer, and
+/// that answer is the one the synchronous entry gives.
+#[test]
+fn root_continuations_component_meta_root_resumes_after_its_entry_returns() {
+    fn begin(host: &VerterHost) -> ComponentMetaOutputRoot<'_> {
+        host.begin_component_meta_output(OWNER)
+    }
+    let host = host();
+    let root = begin(&host);
+    let polled = std::thread::scope(|scope| {
+        scope
+            .spawn(move || poll_to_answer(root))
+            .join()
+            .expect("the root answers on the thread that polls it")
+    });
+    let polled = format!(
+        "{:?}",
+        polled
+            .expect("the owner's metadata resolves")
+            .expect("the owner is a component")
+    );
+    let synchronous = format!(
+        "{:?}",
+        host.get_component_meta_output(OWNER)
+            .expect("the owner's metadata resolves")
+            .expect("the owner is a component")
+    );
+    assert_eq!(polled, synchronous);
+}
+
+/// A cold component-metadata root suspends on its owner's index build: with
+/// the declaration-lowering shards held, its first poll answers `Pending`
+/// without entering a wait. Once the shards are released the same root
+/// resumes to the props a fresh host resolves, and to the answer its own
+/// host then gives synchronously.
+#[test]
+fn root_continuations_cold_component_meta_root_suspends_on_its_owners_index_build() {
+    let expected_props = owner_props(&host());
+    let host = host();
+    let mut held = host.decl_lowering.hold_workers_for_tests();
+    let mut root = host.begin_component_meta_output(OWNER);
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let first = {
+        let _forbid = WaitProbe::forbid();
+        root.poll(&waker)
+    };
+    assert!(
+        first.is_pending(),
+        "the cold root waits on its owner's held index build"
+    );
+    held.release();
+    let answer = poll_to_answer(root);
+    let resumed = format!(
+        "{:?}",
+        answer
+            .as_ref()
+            .expect("the owner's metadata resolves")
+            .as_ref()
+            .expect("the owner is a component")
+    );
+    assert_eq!(props_of(answer), expected_props);
+    let synchronous = format!(
+        "{:?}",
+        host.get_component_meta_output(OWNER)
+            .expect("the owner's metadata resolves")
+            .expect("the owner is a component")
+    );
+    assert_eq!(resumed, synchronous);
+}
+
+/// A thread holding the host's next store-view build at the test gate,
+/// with the build claim taken.
+fn hold_store_view_build<'s>(
+    scope: &'s std::thread::Scope<'s, '_>,
+    host: &'s VerterHost,
+) -> (std::thread::ScopedJoinHandle<'s, ()>, Hold<impl FnOnce()>) {
+    let gate = &crate::resolver_store::TEST_BUILD_GATE;
+    let release = Hold(Some(|| crate::resolver_store::TEST_BUILD_GATE.release()));
+    // The cached view goes stale, so the next read builds.
+    host.bump_store_view_epoch();
+    gate.arm();
+    let builder = scope.spawn(move || {
+        gate.enroll_current_thread();
+        let _ = host.resolver_store_view_read();
+    });
+    assert!(
+        gate.wait_for_builder_parked(POLL_DEADLINE),
+        "the builder holds the store-view build claim",
+    );
+    (builder, release)
+}
+
+#[test]
+fn held_store_view_builder_is_released_when_a_poll_panics() {
+    let host = host();
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        std::thread::scope(|scope| {
+            let (_builder, _release) = hold_store_view_build(scope, &host);
+            let _forbid = WaitProbe::forbid();
+            // The synchronous boundary panics under this probe. Cleanup must
+            // release the held builder before the scope joins it on unwind.
+            let _ = host.resolver_store_view_read();
+        });
+    }));
+    assert!(refused.is_err(), "the blocking poll was refused");
+    let _ = host.resolver_store_view_read();
+}
+
+/// The component-metadata root suspends on a store-view build another
+/// thread holds: its first poll returns `Pending` without entering a wait,
+/// the build's release wakes it, and it resumes from the wait to the same
+/// answer, its remaining (warm) work entering no wait either.
+#[test]
+fn root_continuations_component_meta_root_suspends_behind_a_held_store_view_build() {
+    let host = host();
+    let cold = owner_output_through_root(&host);
+    let answer = std::thread::scope(|scope| {
+        let (builder, _release) = hold_store_view_build(scope, &host);
+        pending_before_release(
+            POLL_DEADLINE,
+            host.begin_component_meta_output(OWNER),
+            |root, waker| root.poll(waker),
+            || {
+                crate::resolver_store::TEST_BUILD_GATE.release();
+                builder.join().expect("the held build publishes");
+            },
+        )
+    });
+    let answer = answer.expect("the root suspends until the held build is released");
+    let answer = format!(
+        "{:?}",
+        answer
+            .expect("the owner's metadata resolves")
+            .expect("the owner is a component")
+    );
+    assert_eq!(answer, cold);
+    assert_eq!(host.store_view_manager().build_release_registrations(), 0);
+}
+
+/// Both request adapters must suspend when their per-attempt snapshot joins
+/// another builder. The public output root's fixed snapshot bypasses this
+/// path, so exercising that root alone cannot catch a blocking adapter here.
+#[test]
+fn component_meta_request_snapshot_suspends_behind_a_held_store_view_build() {
+    use crate::resolver_core::{run_component_meta_request_pollable, RequestSource};
+    use crate::session_view::SessionView;
+    use verter_type_engine::semantic_query::ProjectionMode;
+
+    let host = Arc::new(host());
+    let view = crate::session_view::HostViewRef::new(&host);
+    let overlaid = crate::session_view::OverlaidView::new(
+        Arc::clone(&host),
+        rustc_hash::FxHashMap::from_iter([(
+            PROPS.to_owned(),
+            Arc::from("export interface Props { overlayOnly: boolean }"),
+        )]),
+    );
+    let mode = ProjectionMode::Expanded;
+    for session_view in [None, Some(&view as &dyn SessionView), Some(&overlaid)] {
+        let expected = match session_view {
+            Some(view) => host.resolve_component_meta_with_view(OWNER, mode, view),
+            None => host.resolve_component_meta(OWNER, mode),
+        }
+        .expect("warm resolution");
+        let answer = std::thread::scope(|scope| {
+            // Release even if an assertion or poll panics, before scope joins.
+            let (builder, _release) = hold_store_view_build(scope, &host);
+            let request = async {
+                let flights = host.resolver_runtime().component_meta.singleflight();
+                if let Some(view) = session_view {
+                    let adapter =
+                        crate::host_manage::component_meta_request_impl::ViewBoundRequestHost {
+                            host: &host,
+                            view,
+                            overlay: Arc::new(
+                                crate::resolver_core::CanonicalCompletionOverlay::new(),
+                            ),
+                        };
+                    run_component_meta_request_pollable(&adapter, flights, OWNER, mode, None, 3)
+                        .await
+                } else {
+                    run_component_meta_request_pollable(
+                        host.as_ref(),
+                        flights,
+                        OWNER,
+                        mode,
+                        None,
+                        3,
+                    )
+                    .await
+                }
+            };
+            pending_before_release(
+                POLL_DEADLINE,
+                crate::root_continuation::RootTask::new(&host.task_registry, request),
+                |root, waker| root.poll(waker),
+                || {
+                    crate::resolver_store::TEST_BUILD_GATE.release();
+                    builder.join().expect("the held build publishes");
+                },
+            )
+        });
+        let answer = answer.expect("the per-attempt snapshot suspends until build release");
+        // Base and passthrough warm reads retain their cache path. An
+        // overlay may serve a complete return-only value instead.
+        if session_view.is_none_or(|view| view.fingerprint() == 0) {
+            assert!(matches!(answer.request.source, RequestSource::Cache));
+        }
+        assert_eq!(
+            answer.request.attempts, 1,
+            "resumption keeps the current attempt"
+        );
+        let actual = answer
+            .request
+            .value
+            .expect("the warmed resolution remains available");
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        assert_eq!(host.store_view_manager().build_release_registrations(), 0);
+    }
+    assert_eq!(owner_props(&host), ["label", "tone"]);
+}
+
+/// An overlay's own index build yields on the retained parse's owner,
+/// keeping the finished index work rather than starting it again on resume.
+#[test]
+fn overlay_input_capture_suspends_without_repeating_index_work() {
+    use crate::session_view::SessionView;
+
+    let host = Arc::new(host());
+    let source: Arc<str> = Arc::from("export interface Props { overlayOnly: boolean }");
+    let view = crate::session_view::OverlaidView::new(
+        Arc::clone(&host),
+        rustc_hash::FxHashMap::from_iter([(PROPS.to_owned(), Arc::clone(&source))]),
+    );
+    #[cfg(feature = "semantic-observe")]
+    let before = {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            host.provenance
+                .decl_lowering
+                .eval_program_parses
+                .load(Relaxed),
+            host.provenance
+                .decl_lowering
+                .decl_bodies_lowered
+                .load(Relaxed),
+            host.provenance.shallow_state_builds.load(Relaxed),
+        )
+    };
+    let mut held = host.decl_lowering.hold_workers_for_tests();
+    let root = crate::root_continuation::RootTask::new(
+        &host.task_registry,
+        host.capture_component_meta_inputs_with_view(PROPS, &view),
+    );
+    let captured = pending_before_release(
+        POLL_DEADLINE,
+        root,
+        |root, waker| root.poll(waker),
+        || held.release(),
+    )
+    .expect("overlay capture suspends until its index owner is released")
+    .expect("the overlay's input is captured");
+    assert_eq!(Some(captured.whole_hash), view.content_hash_for(PROPS));
+    assert_eq!(captured.owner_eval_source.as_deref(), Some(source.as_ref()));
+    #[cfg(feature = "semantic-observe")]
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        assert_eq!(
+            host.provenance
+                .decl_lowering
+                .eval_program_parses
+                .load(Relaxed)
+                - before.0,
+            1
+        );
+        assert_eq!(
+            host.provenance
+                .decl_lowering
+                .decl_bodies_lowered
+                .load(Relaxed)
+                - before.1,
+            0
+        );
+        assert_eq!(
+            host.provenance.shallow_state_builds.load(Relaxed) - before.2,
+            1
+        );
+    }
+}
+
+#[test]
+fn dropping_a_component_meta_request_withdraws_its_pending_snapshot() {
+    let host = host();
+    let view = crate::session_view::HostViewRef::new(&host);
+    std::thread::scope(|scope| {
+        let (builder, _release) = hold_store_view_build(scope, &host);
+        let mut root = crate::root_continuation::RootTask::new(
+            &host.task_registry,
+            host.resolve_component_meta_with_view_and_fixed_admission_pollable(
+                OWNER,
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                &view,
+                None,
+            ),
+        );
+        let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+        let pending = {
+            let _forbid = WaitProbe::forbid();
+            root.poll(&waker)
+        };
+        let registered = host.store_view_manager().build_release_registrations();
+        drop(root);
+        let after_drop = host.store_view_manager().build_release_registrations();
+        crate::resolver_store::TEST_BUILD_GATE.release();
+        builder.join().expect("the held build publishes");
+        assert!(pending.is_pending());
+        assert_eq!((registered, after_drop), (1, 0));
+    });
+}
+
+/// The synchronous store-view capture behind the same held build enters
+/// the store-view wait, which the harness refuses: the planted blocking
+/// form of the boundary the root suspends on fails the same check.
+#[test]
+fn root_continuations_synchronous_capture_behind_a_held_build_is_refused() {
+    let host = host();
+    let _ = host.resolver_store_view_read();
+    let verdict = std::thread::scope(|scope| {
+        let (builder, _release) = hold_store_view_build(scope, &host);
+        pending_before_release(
+            POLL_DEADLINE,
+            (),
+            |(), _waker| {
+                let view = crate::session_view::HostViewRef::new(&host);
+                Poll::Ready(host.capture_batch_fixed_view(&view).is_current())
+            },
+            || {
+                crate::resolver_store::TEST_BUILD_GATE.release();
+                builder.join().expect("the held build publishes");
+            },
+        )
+    });
+    match verdict {
+        Err(NotSuspended::EnteredWait(message)) => {
+            assert!(message.contains("StoreViewBuild"), "{message}");
+        }
+        other => panic!("the synchronous capture must be refused, got {other:?}"),
+    }
+    assert_eq!(host.store_view_manager().build_release_registrations(), 0);
+}
+
+/// Dropping a root suspended behind a held store-view build withdraws its
+/// wait: the build's release finds nobody registered, and the dropped root
+/// leaves no wait behind.
+#[test]
+fn root_continuations_dropping_a_suspended_component_meta_root_withdraws_its_wait() {
+    let host = host();
+    let _ = owner_output_through_root(&host);
+    std::thread::scope(|scope| {
+        let (builder, _release) = hold_store_view_build(scope, &host);
+        let mut root = host.begin_component_meta_output(OWNER);
+        let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+        let first = {
+            let _forbid = WaitProbe::forbid();
+            root.poll(&waker)
+        };
+        let registered = host.store_view_manager().build_release_registrations();
+        drop(root);
+        let after_drop = host.store_view_manager().build_release_registrations();
+        crate::resolver_store::TEST_BUILD_GATE.release();
+        builder.join().expect("the held build publishes");
+        assert!(first.is_pending(), "the root waits behind the held build");
+        assert_eq!((registered, after_drop), (1, 0));
+    });
+}
+
+// ── Single-thread external driver ──────────────────────────────────────
+
+/// Wakes a root by queueing its index for a later poll of the driver.
+struct QueueWaker {
+    index: usize,
+    queue: Arc<parking_lot::Mutex<std::collections::VecDeque<usize>>>,
+    /// Set while the driver polls a root or runs its work.
+    driving: Arc<std::sync::atomic::AtomicBool>,
+    /// Wakes that arrived while the driver was polling or running work:
+    /// where a waker that drove its root would have re-entered the driver.
+    woken_while_driving: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Wake for QueueWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if self.driving.load(std::sync::atomic::Ordering::SeqCst) {
+            self.woken_while_driving
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.queue.lock().push_back(self.index);
+    }
+}
+
+/// What a single-thread driver run produced.
+struct DriverRun {
+    answers: Vec<Vec<String>>,
+    producers: usize,
+    polls: usize,
+    woken_while_driving: usize,
+}
+
+/// Poll every root on this one thread until all answer, under a forbidding
+/// probe for each poll. A wake only queues its root; handed-out work runs
+/// here, between polls, and its root is polled again after it. No root is
+/// begun once driving starts.
+fn drive_on_one_thread(mut roots: Vec<crate::CompileRequestRoot<'_>>) -> DriverRun {
+    let queue = Arc::new(parking_lot::Mutex::new(
+        (0..roots.len()).collect::<std::collections::VecDeque<_>>(),
+    ));
+    let driving = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let woken_while_driving = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wakers: Vec<Waker> = (0..roots.len())
+        .map(|index| {
+            Waker::from(Arc::new(QueueWaker {
+                index,
+                queue: Arc::clone(&queue),
+                driving: Arc::clone(&driving),
+                woken_while_driving: Arc::clone(&woken_while_driving),
+            }))
+        })
+        .collect();
+    let mut answers: Vec<Option<Vec<String>>> = roots.iter().map(|_| None).collect();
+    let (mut producers, mut polls) = (0, 0);
+    while answers.iter().any(Option::is_none) {
+        let index = queue
+            .lock()
+            .pop_front()
+            .expect("a pending root is woken or holds work: no wake is lost");
+        if answers[index].is_some() {
+            continue;
+        }
+        polls += 1;
+        driving.store(true, std::sync::atomic::Ordering::SeqCst);
+        let polled = {
+            let _forbid = WaitProbe::forbid();
+            roots[index].poll(&wakers[index])
+        };
+        if let Poll::Ready(answer) = polled {
+            answers[index] = Some(compiled_texts(answer.expect("the root compiles")));
+        } else if let Some(work) = roots[index].take_work() {
+            producers += usize::from(work.is_producer());
+            if work.run() {
+                queue.lock().push_back(index);
+            }
+        }
+        driving.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    DriverRun {
+        answers: answers.into_iter().map(Option::unwrap).collect(),
+        producers,
+        polls,
+        woken_while_driving: woken_while_driving.load(std::sync::atomic::Ordering::SeqCst),
+    }
+}
+
+/// One thread drives three compile roots — two of the same request and one
+/// of the child component — begun before driving starts, with no other
+/// pool: every poll answers or suspends without entering a wait, each
+/// shared macro bundle is produced once, by the work its first root hands
+/// out while the other root of the request waits suspended, and every
+/// answer is the synchronous entry's. A follower's wake arrives while the
+/// driver runs its producer's work — where a waker that drove the root
+/// would re-enter the driver — and only queues a later poll.
+#[test]
+fn root_continuations_one_thread_drives_several_suspended_roots() {
+    let host = host();
+    let (owner, child) = (
+        compile_owner(&host),
+        compiled_texts(
+            host.compile_request(CHILD, owner_compile_request())
+                .expect("the child compiles"),
+        ),
+    );
+    let roots = vec![
+        host.begin_compile_request(OWNER, owner_compile_request()),
+        host.begin_compile_request(OWNER, owner_compile_request()),
+        host.begin_compile_request(CHILD, owner_compile_request()),
+    ];
+    let run = drive_on_one_thread(roots);
+    assert_eq!(run.answers, vec![owner.clone(), owner, child]);
+    assert_eq!(run.producers, 2, "one producer per distinct macro bundle");
+    assert!(run.polls > 3, "a root suspended and was resumed");
+    assert!(
+        run.woken_while_driving > 0,
+        "the follower is woken while the driver runs its producer"
+    );
+}
+
+// ── Pending-before-release harness ─────────────────────────────────────
+
+/// Why a poll did not suspend on its held dependency.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NotSuspended {
+    /// The poll entered a synchronous wait the probe refused.
+    EnteredWait(String),
+    /// The poll was still running at the deadline.
+    Blocked,
+    /// The poll answered before the dependency was released.
+    ReadyBeforeRelease,
+}
+
+/// Wakes the harness thread by sending on a channel.
+struct ChannelWaker(parking_lot::Mutex<mpsc::Sender<()>>);
+
+impl Wake for ChannelWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let _ = self.0.lock().send(());
+    }
+}
+
+/// Releases a held dependency exactly once: explicitly, or on drop when an
+/// assertion unwinds first.
+struct Hold<R: FnOnce()>(Option<R>);
+
+impl<R: FnOnce()> Hold<R> {
+    fn release(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
+}
+
+impl<R: FnOnce()> Drop for Hold<R> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Poll `state` while the dependency `release` frees is held. The first
+/// poll runs on the harness thread under a forbidding probe and must answer
+/// `Pending` within `deadline`. The hold is then released and the
+/// harness re-polls once per wake, each poll again under the probe, until
+/// the answer. Whatever happens, the hold is released and the thread joined
+/// before this returns.
+pub(crate) fn pending_before_release<S, T, P, R>(
+    deadline: Duration,
+    state: S,
+    poll: P,
+    release: R,
+) -> Result<T, NotSuspended>
+where
+    S: Send,
+    T: Send,
+    P: FnMut(&mut S, &Waker) -> Poll<T> + Send,
+    R: FnOnce(),
+{
+    let mut hold = Hold(Some(release));
+    let (first_tx, first_rx) = mpsc::channel::<Poll<()>>();
+    let (released_tx, released_rx) = mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let poller = scope.spawn(move || {
+            let mut state = state;
+            let mut poll = poll;
+            let (wake_tx, wake_rx) = mpsc::channel::<()>();
+            let waker = Waker::from(Arc::new(ChannelWaker(parking_lot::Mutex::new(wake_tx))));
+            let first = {
+                let _forbid = WaitProbe::forbid();
+                poll(&mut state, &waker)
+            };
+            if let Poll::Ready(answer) = first {
+                let _ = first_tx.send(Poll::Ready(()));
+                return Some(answer);
+            }
+            let _ = first_tx.send(Poll::Pending);
+            if released_rx.recv().is_err() {
+                return None;
+            }
+            loop {
+                wake_rx
+                    .recv_timeout(POLL_DEADLINE)
+                    .expect("releasing the dependency wakes the suspended poll");
+                let _forbid = WaitProbe::forbid();
+                if let Poll::Ready(answer) = poll(&mut state, &waker) {
+                    return Some(answer);
+                }
+            }
+        });
+        let verdict = match first_rx.recv_timeout(deadline) {
+            Ok(Poll::Pending) => None,
+            Ok(Poll::Ready(())) => Some(NotSuspended::ReadyBeforeRelease),
+            Err(mpsc::RecvTimeoutError::Timeout) => Some(NotSuspended::Blocked),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Some(NotSuspended::EnteredWait(String::new()))
+            }
+        };
+        hold.release();
+        if verdict.is_none() {
+            released_tx
+                .send(())
+                .expect("the suspended poller awaits the release");
+        }
+        drop(released_tx);
+        let joined = poller.join();
+        match (verdict, joined) {
+            (None, Ok(Some(answer))) => Ok(answer),
+            (None, Ok(None)) => unreachable!("a released poller answers"),
+            (Some(NotSuspended::EnteredWait(_)), Err(panic)) => {
+                let message = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                    .unwrap_or_default();
+                Err(NotSuspended::EnteredWait(message))
+            }
+            (Some(verdict), _) => Err(verdict),
+            (None, Err(panic)) => std::panic::resume_unwind(panic),
+        }
+    })
+}

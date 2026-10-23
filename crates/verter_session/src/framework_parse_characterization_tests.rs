@@ -574,7 +574,7 @@ fn cold_component_meta_reuses_indexed_ready_eval_source_arc() {
     let before = crate::parse::catalog_eval_source_call_count();
     let store = host.resolver_store_view_read().into_owned_view();
     let captured = host
-        .capture_component_meta_inputs("Reuse.vue", &store)
+        .drive_for_tests(host.capture_component_meta_inputs("Reuse.vue", &store))
         .expect("cold component-meta capture");
     assert_eq!(
         crate::parse::catalog_eval_source_call_count(),

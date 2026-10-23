@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
+use verter_execution::wake::{WakeRegistration, WakerSet};
 
 use crate::dag::{DepKey, WorkNodeIdentity};
 use crate::stage::TargetStage;
@@ -257,9 +258,17 @@ pub(crate) enum CompletionTarget {
 
 // ── CompletionHandle / CompletionSender ──
 
+/// A handle's terminal state and the wakers of the subscriptions polling it.
+struct CompletionSlot<T: Clone> {
+    state: Option<CompletionState<T>>,
+    /// Each pending subscription's registration; taken by the completion
+    /// that resolves the slot.
+    wakers: WakerSet,
+}
+
 /// Internal shared state between handle and sender.
 struct CompletionInner<T: Clone> {
-    state: Mutex<Option<CompletionState<T>>>,
+    slot: Mutex<CompletionSlot<T>>,
     condvar: Condvar,
     /// Optional target identity for same-path self-await detection
     /// by the cooperative pump.
@@ -283,7 +292,10 @@ pub struct CompletionSender<T: Clone> {
 /// The handle blocks on `wait()` until the sender signals a terminal state.
 pub fn completion_pair<T: Clone>() -> (CompletionHandle<T>, CompletionSender<T>) {
     let inner = Arc::new(CompletionInner {
-        state: Mutex::new(None),
+        slot: Mutex::new(CompletionSlot {
+            state: None,
+            wakers: WakerSet::default(),
+        }),
         condvar: Condvar::new(),
         target: Mutex::new(None),
     });
@@ -299,14 +311,35 @@ impl<T: Clone> CompletionSender<T> {
     /// Signal completion. First-writer-wins: subsequent calls are no-ops.
     ///
     /// Returns `true` if this was the first write, `false` if already signaled.
+    ///
+    /// Blocking waiters are notified, and every subscription that polled the
+    /// handle while it was pending is woken once, after the slot's lock is
+    /// released.
     pub fn send(&self, state: CompletionState<T>) -> bool {
-        let mut guard = self.inner.state.lock();
-        if guard.is_some() {
-            return false; // already signaled — enforce exactly-once
-        }
-        *guard = Some(state);
-        self.inner.condvar.notify_all();
+        let Some(wakers) = self.send_deferred(state) else {
+            return false;
+        };
+        wakers.wake();
         true
+    }
+
+    /// Publish under an enclosing scheduler lock, retaining callback delivery
+    /// for that lock's owner. State publication and first-writer semantics are
+    /// identical to `send`; only polling wakes are deferred.
+    pub(crate) fn send_deferred(
+        &self,
+        state: CompletionState<T>,
+    ) -> Option<verter_execution::wake::TakenWakers> {
+        let wakers = {
+            let mut slot = self.inner.slot.lock();
+            if slot.state.is_some() {
+                return None;
+            }
+            slot.state = Some(state);
+            slot.wakers.take()
+        };
+        self.inner.condvar.notify_all();
+        Some(wakers)
     }
 
     /// Attach a [`CompletionTarget`] so cooperative-pump callers
@@ -334,11 +367,14 @@ impl<T: Clone> CompletionSender<T> {
 impl<T: Clone> CompletionHandle<T> {
     /// Block until the handle resolves to a terminal state.
     pub fn wait(&self) -> CompletionState<T> {
-        let mut guard = self.inner.state.lock();
-        while guard.is_none() {
-            self.inner.condvar.wait(&mut guard);
+        verter_execution::blocking::enter_wait(
+            verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        );
+        let mut slot = self.inner.slot.lock();
+        while slot.state.is_none() {
+            self.inner.condvar.wait(&mut slot);
         }
-        guard.clone().unwrap()
+        slot.state.clone().unwrap()
     }
 
     /// Block until the handle resolves OR `timeout` elapses. Returns
@@ -350,32 +386,91 @@ impl<T: Clone> CompletionHandle<T> {
     /// and ready queue. The pump is native-only, so this is too.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn wait_timeout(&self, timeout: Duration) -> Option<CompletionState<T>> {
-        let mut guard = self.inner.state.lock();
-        if guard.is_some() {
-            return Some(guard.clone().unwrap());
+        let mut slot = self.inner.slot.lock();
+        if slot.state.is_some() {
+            return slot.state.clone();
         }
-        let result = self.inner.condvar.wait_for(&mut guard, timeout);
-        if result.timed_out() && guard.is_none() {
+        let result = self.inner.condvar.wait_for(&mut slot, timeout);
+        if result.timed_out() && slot.state.is_none() {
             None
         } else {
-            guard.clone()
+            slot.state.clone()
         }
     }
 
     /// Non-blocking check. Returns `Some` if already resolved.
     pub fn try_get(&self) -> Option<CompletionState<T>> {
-        self.inner.state.lock().clone()
+        self.inner.slot.lock().state.clone()
     }
 
     /// Returns `true` if already resolved.
     pub fn is_resolved(&self) -> bool {
-        self.inner.state.lock().is_some()
+        self.inner.slot.lock().state.is_some()
+    }
+
+    /// A nonblocking subscription to this handle's completion, for a
+    /// pollable computation that must not park its thread on it.
+    pub fn subscribe(&self) -> CompletionSubscription<T> {
+        CompletionSubscription {
+            inner: Arc::clone(&self.inner),
+            registration: WakeRegistration::default(),
+        }
+    }
+
+    /// How many pending subscriptions have a waker registered on the handle.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn registered_wakers(&self) -> usize {
+        self.inner.slot.lock().wakers.len()
     }
 
     /// Snapshot the target identity attached by the sender, if any.
     /// Returns `None` if the sender never called `set_target`.
     pub(crate) fn target(&self) -> Option<CompletionTarget> {
         self.inner.target.lock().clone()
+    }
+}
+
+/// A pollable view of one [`CompletionHandle`]'s completion.
+///
+/// [`Self::poll`] checks the handle and, while it is pending, registers the
+/// poll's waker in the same critical section, so a completion that lands
+/// between the check and the registration still wakes it. The subscription
+/// holds at most one registration: a re-poll with a waker that wakes the
+/// same task keeps it, any other waker replaces it, and dropping the
+/// subscription withdraws it without touching any other subscription's,
+/// even one registered with the same executor waker. A wake only signals
+/// that a later poll will answer; it never runs the waiting computation.
+/// The answer is the handle's terminal state, cloned for every poll that
+/// observes it.
+pub struct CompletionSubscription<T: Clone> {
+    inner: Arc<CompletionInner<T>>,
+    /// This subscription's registration while it is pending.
+    registration: WakeRegistration,
+}
+
+impl<T: Clone> CompletionSubscription<T> {
+    /// `Ready` with the handle's terminal state once it resolved, else
+    /// `Pending` with `waker` registered to fire when it does.
+    pub fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<CompletionState<T>> {
+        let mut slot = self.inner.slot.lock();
+        if let Some(state) = &slot.state {
+            // The completion took every registration when it resolved.
+            return std::task::Poll::Ready(state.clone());
+        }
+        slot.wakers.register(&mut self.registration, waker);
+        std::task::Poll::Pending
+    }
+}
+
+impl<T: Clone> Drop for CompletionSubscription<T> {
+    fn drop(&mut self) {
+        if self.registration.is_registered() {
+            self.inner
+                .slot
+                .lock()
+                .wakers
+                .withdraw(&mut self.registration);
+        }
     }
 }
 
@@ -613,6 +708,172 @@ mod tests {
             other => panic!("expected Ready(ok) within budget, got {other:?}"),
         }
         t.join().unwrap();
+    }
+
+    /// A waker that counts how often it was woken.
+    struct CountingWake(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker() -> (Arc<CountingWake>, std::task::Waker) {
+        let counter = Arc::new(CountingWake(std::sync::atomic::AtomicUsize::new(0)));
+        (Arc::clone(&counter), std::task::Waker::from(counter))
+    }
+
+    fn wakes(counter: &CountingWake) -> usize {
+        counter.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn subscription_to_a_resolved_handle_answers_without_registering() {
+        let (handle, sender) = completion_pair::<u32>();
+        sender.send(CompletionState::Ready(5));
+        let (counter, waker) = counting_waker();
+        let mut subscription = handle.subscribe();
+        match subscription.poll(&waker) {
+            std::task::Poll::Ready(CompletionState::Ready(5)) => {}
+            other => panic!("expected Ready(5), got {other:?}"),
+        }
+        assert_eq!(handle.registered_wakers(), 0);
+        assert_eq!(wakes(&counter), 0);
+    }
+
+    #[test]
+    fn pending_subscription_is_woken_once_by_completion_then_ready() {
+        let (handle, sender) = completion_pair::<u32>();
+        let (counter, waker) = counting_waker();
+        let mut subscription = handle.subscribe();
+        assert!(subscription.poll(&waker).is_pending());
+        assert_eq!(handle.registered_wakers(), 1);
+        assert_eq!(wakes(&counter), 0, "registering never wakes");
+
+        sender.send(CompletionState::Superseded);
+        assert_eq!(wakes(&counter), 1, "completion wakes the registered poller");
+        assert_eq!(
+            handle.registered_wakers(),
+            0,
+            "completion takes the registration"
+        );
+        assert!(matches!(
+            subscription.poll(&waker),
+            std::task::Poll::Ready(CompletionState::Superseded)
+        ));
+        // A second send is a no-op: no second wake.
+        sender.send(CompletionState::Shutdown);
+        assert_eq!(wakes(&counter), 1);
+        // Spurious re-polls after the answer keep answering it.
+        assert!(matches!(
+            subscription.poll(&waker),
+            std::task::Poll::Ready(CompletionState::Superseded)
+        ));
+    }
+
+    #[test]
+    fn repolling_keeps_one_registration_and_a_new_waker_replaces_it() {
+        let (handle, sender) = completion_pair::<u32>();
+        let (first_counter, first) = counting_waker();
+        let (second_counter, second) = counting_waker();
+        let mut subscription = handle.subscribe();
+        assert!(subscription.poll(&first).is_pending());
+        assert!(subscription.poll(&first).is_pending());
+        assert_eq!(
+            handle.registered_wakers(),
+            1,
+            "same waker is not re-registered"
+        );
+        assert!(subscription.poll(&second).is_pending());
+        assert_eq!(
+            handle.registered_wakers(),
+            1,
+            "a new waker replaces the old"
+        );
+
+        sender.send(CompletionState::Ready(1));
+        assert_eq!(wakes(&first_counter), 0, "the replaced waker is not woken");
+        assert_eq!(wakes(&second_counter), 1);
+    }
+
+    #[test]
+    fn dropping_a_pending_subscription_withdraws_only_its_own_registration() {
+        let (handle, sender) = completion_pair::<u32>();
+        let (dropped_counter, dropped_waker) = counting_waker();
+        let (kept_counter, kept_waker) = counting_waker();
+        let mut dropped = handle.subscribe();
+        let mut kept = handle.subscribe();
+        assert!(dropped.poll(&dropped_waker).is_pending());
+        assert!(kept.poll(&kept_waker).is_pending());
+        assert_eq!(handle.registered_wakers(), 2);
+
+        drop(dropped);
+        assert_eq!(
+            handle.registered_wakers(),
+            1,
+            "drop withdraws its registration"
+        );
+
+        sender.send(CompletionState::Ready(3));
+        assert_eq!(wakes(&dropped_counter), 0);
+        assert_eq!(
+            wakes(&kept_counter),
+            1,
+            "a sibling subscriber stays registered"
+        );
+        assert!(matches!(
+            kept.poll(&kept_waker),
+            std::task::Poll::Ready(CompletionState::Ready(3))
+        ));
+    }
+
+    #[test]
+    fn one_executor_waker_shared_by_two_subscriptions_is_withdrawn_per_subscription() {
+        let (handle, sender) = completion_pair::<u32>();
+        let (counter, waker) = counting_waker();
+        let mut first = handle.subscribe();
+        let mut second = handle.subscribe();
+        assert!(first.poll(&waker).is_pending());
+        assert!(second.poll(&waker).is_pending());
+        drop(first);
+        assert_eq!(handle.registered_wakers(), 1);
+        sender.send(CompletionState::Ready(4));
+        assert_eq!(wakes(&counter), 1);
+        assert!(second.poll(&waker).is_ready());
+    }
+
+    /// A completion racing a subscription's registration is never lost:
+    /// either the poll that registers sees the answer, or the registered
+    /// waker fires.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn completion_racing_registration_never_loses_the_wake() {
+        for round in 0..256u32 {
+            let (handle, sender) = completion_pair::<u32>();
+            let (counter, waker) = counting_waker();
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let sending = {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    sender.send(CompletionState::Ready(round));
+                })
+            };
+            let mut subscription = handle.subscribe();
+            start.wait();
+            let answered_at_poll = subscription.poll(&waker).is_ready();
+            sending.join().expect("the sender thread completes");
+            assert!(
+                answered_at_poll || wakes(&counter) == 1,
+                "round {round}: a pending poll must be woken by the completion"
+            );
+            assert!(matches!(
+                subscription.poll(&waker),
+                std::task::Poll::Ready(CompletionState::Ready(answer)) if answer == round
+            ));
+            assert_eq!(handle.registered_wakers(), 0);
+        }
     }
 
     #[test]

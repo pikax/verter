@@ -24,6 +24,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
+use verter_execution::sync_cell::{SyncCell, SyncRefCell};
 
 use rustc_hash::FxHashSet;
 
@@ -298,43 +299,43 @@ impl<'a> DemandCancellation<'a> {
 /// only outside a demand) are enforced by the operations, not by convention.
 pub struct ConnectedDemandLedger<'a> {
     cancellation: DemandCancellation<'a>,
-    active: Cell<bool>,
-    work_used: Cell<usize>,
-    work_limit: Cell<usize>,
+    active: SyncCell<bool>,
+    work_used: SyncCell<usize>,
+    work_limit: SyncCell<usize>,
     /// Every construction byte the demand charged: the bytes it reserved
     /// and the advisory footprint (`advisory_bytes_used`).
-    bytes_used: Cell<u64>,
+    bytes_used: SyncCell<u64>,
     /// The part of `bytes_used` charged while the advisory
     /// construction-byte rail is off: accounted, never enforced, so no
     /// later reservation is refused for it.
-    advisory_bytes_used: Cell<u64>,
-    bytes_limit: Cell<u64>,
+    advisory_bytes_used: SyncCell<u64>,
+    bytes_limit: SyncCell<u64>,
     /// Whether a canonical construction's footprint
     /// ([`Self::charge_construction`]) may be refused at `bytes_limit`: the
     /// advisory construction-byte rail, off unless explicitly enabled. Off,
     /// the footprint is still charged to `bytes_used`, as advisory bytes.
-    construction_byte_refusal: Cell<bool>,
-    query_depth: Cell<u16>,
-    query_depth_limit: Cell<u16>,
+    construction_byte_refusal: SyncCell<bool>,
+    query_depth: SyncCell<u16>,
+    query_depth_limit: SyncCell<u16>,
     instantiation_depth_limit: u32,
     tail_steps_limit: u32,
-    tripped: Cell<PartialReasonSet>,
+    tripped: SyncCell<PartialReasonSet>,
     /// The cold computations recording their exclusive cost, innermost
     /// last; `scope_open` mirrors "the stack is not empty" so a charge
     /// taken outside any recording pays one flag read.
-    scopes: RefCell<Vec<CostScope>>,
-    scope_open: Cell<bool>,
+    scopes: SyncRefCell<Vec<CostScope>>,
+    scope_open: SyncCell<bool>,
     /// The computations whose receipt, and its whole prerequisite closure,
     /// this connected demand has paid.
-    paid: RefCell<CostIdentitySet>,
+    paid: SyncRefCell<CostIdentitySet>,
     /// What this connected demand itself did to its request: the request
     /// operations it spent and the computations it was first to pay.
-    request_effects: Cell<RequestEffects>,
+    request_effects: SyncCell<RequestEffects>,
     /// Whether one of this demand's reads was answered with a recursion
     /// carrier another task's schedule decided — a cross-task wait cycle,
     /// or a joined producer's own re-entry: the demand went on without work
     /// it alone would have done, so where it stopped is not its own.
-    schedule_cut: Cell<bool>,
+    schedule_cut: SyncCell<bool>,
 }
 
 /// What one connected demand did to its request
@@ -366,30 +367,38 @@ thread_local! {
     static COMPONENT_META_SPAN_OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Opens one component-meta span on this thread. Nested computes each keep
-/// their own frame, and a charge is recorded on every frame still open.
-pub(crate) struct ComponentMetaSpanGuard {
-    armed: bool,
+/// The component-meta span of one compute, which the compute owns across
+/// its suspensions. Each step of the compute opens it on the running
+/// thread ([`Self::install`]); nested computes each keep their own frame,
+/// and a charge is recorded on every frame open.
+#[derive(Default)]
+pub(crate) struct ComputeSpan {
+    span: ComponentMetaSpan,
 }
 
-impl ComponentMetaSpanGuard {
-    pub(crate) fn enter() -> Self {
-        COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().push(ComponentMetaSpan::default()));
+impl ComputeSpan {
+    /// Open the span on this thread until the returned installation drops,
+    /// unwinding included.
+    pub(crate) fn install(&mut self) -> ComputeSpanInstall<'_> {
+        COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().push(self.span));
         COMPONENT_META_SPAN_OPEN.with(|open| open.set(true));
-        Self { armed: true }
+        ComputeSpanInstall { owner: self }
     }
 
-    pub(crate) fn finish(mut self) -> ComponentMetaSpan {
-        self.armed = false;
-        pop_component_meta_span()
+    pub(crate) fn finish(self) -> ComponentMetaSpan {
+        self.span
     }
 }
 
-impl Drop for ComponentMetaSpanGuard {
+/// One step's installation of a [`ComputeSpan`]; dropping it closes the
+/// frame on the thread and keeps its charges in the compute.
+pub(crate) struct ComputeSpanInstall<'c> {
+    owner: &'c mut ComputeSpan,
+}
+
+impl Drop for ComputeSpanInstall<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = pop_component_meta_span();
-        }
+        self.owner.span = pop_component_meta_span();
     }
 }
 
@@ -398,9 +407,12 @@ impl Drop for ComponentMetaSpanGuard {
 /// capture uses its existing scoped telemetry and panic cleanup.
 #[cfg(any(test, feature = "test-support"))]
 pub fn with_connected_work_capture_for_tests<R>(body: impl FnOnce() -> R) -> (R, DemandUsage) {
-    let guard = ComponentMetaSpanGuard::enter();
-    let result = body();
-    let span = guard.finish();
+    let mut span = ComputeSpan::default();
+    let result = {
+        let _installed = span.install();
+        body()
+    };
+    let span = span.finish();
     (
         result,
         DemandUsage {
@@ -636,22 +648,22 @@ impl<'a> ConnectedDemandLedger<'a> {
     pub(super) fn new(cancellation: DemandCancellation<'a>) -> Self {
         Self {
             cancellation,
-            active: Cell::new(false),
-            work_used: Cell::new(0),
+            active: SyncCell::new(false),
+            work_used: SyncCell::new(0),
             #[cfg(not(any(test, feature = "test-support")))]
-            work_limit: Cell::new(MAX_CONNECTED_PROJECTION_WORK),
+            work_limit: SyncCell::new(MAX_CONNECTED_PROJECTION_WORK),
             #[cfg(any(test, feature = "test-support"))]
-            work_limit: Cell::new(
+            work_limit: SyncCell::new(
                 WORK_FOR_TESTS
                     .with(Cell::get)
                     .unwrap_or(MAX_CONNECTED_PROJECTION_WORK),
             ),
-            bytes_used: Cell::new(0),
-            advisory_bytes_used: Cell::new(0),
-            bytes_limit: Cell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
-            construction_byte_refusal: Cell::new(false),
-            query_depth: Cell::new(0),
-            query_depth_limit: Cell::new(MAX_CONNECTED_QUERY_DEPTH),
+            bytes_used: SyncCell::new(0),
+            advisory_bytes_used: SyncCell::new(0),
+            bytes_limit: SyncCell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
+            construction_byte_refusal: SyncCell::new(false),
+            query_depth: SyncCell::new(0),
+            query_depth_limit: SyncCell::new(MAX_CONNECTED_QUERY_DEPTH),
             #[cfg(not(any(test, feature = "test-support")))]
             instantiation_depth_limit: MAX_CONNECTED_INSTANTIATION_DEPTH,
             #[cfg(any(test, feature = "test-support"))]
@@ -664,12 +676,12 @@ impl<'a> ConnectedDemandLedger<'a> {
             tail_steps_limit: TAIL_STEPS_FOR_TESTS
                 .with(Cell::get)
                 .unwrap_or(MAX_CONNECTED_TAIL_STEPS),
-            tripped: Cell::new(PartialReasonSet::empty()),
-            scopes: RefCell::new(Vec::new()),
-            scope_open: Cell::new(false),
-            paid: RefCell::new(CostIdentitySet::default()),
-            request_effects: Cell::new(RequestEffects::default()),
-            schedule_cut: Cell::new(false),
+            tripped: SyncCell::new(PartialReasonSet::empty()),
+            scopes: SyncRefCell::new(Vec::new()),
+            scope_open: SyncCell::new(false),
+            paid: SyncRefCell::new(CostIdentitySet::default()),
+            request_effects: SyncCell::new(RequestEffects::default()),
+            schedule_cut: SyncCell::new(false),
         }
     }
 

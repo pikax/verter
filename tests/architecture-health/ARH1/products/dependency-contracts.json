@@ -357,12 +357,16 @@
           "crates/verter_session/src/materialized_structure_equivalence_tests.rs",
           "crates/verter_session/src/meta_batch_fixed_view_tests.rs",
           "crates/verter_session/src/prepared_surface_intersection_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs",
           "crates/verter_session/src/public_api_batch_fixed_view_tests.rs",
+          "crates/verter_session/src/root_continuation.rs",
           "crates/verter_session/src/test_worker_pools.rs",
           "crates/verter_session/src/tests/meta/mod.rs",
           "crates/verter_session/src/typeinfo/vue_macro_codegen.rs",
           "crates/verter_session/src/u6_flow_expect_tests.rs",
           "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
+          "crates/verter_session/tests/cases/compile-fail/root_poll_no_blocking_driver.rs",
+          "crates/verter_session/tests/cases/compile-fail/scoped_handoff_no_blocking_scheduler.rs",
           "crates/verter_session/tests/cases/component_meta_audit_corpus/chunk_harness.rs",
           "crates/verter_session/tests/cases/corpus_audit_layout.rs",
           "crates/verter_session/tests/cases/exposed_binding_regression.rs",
@@ -381,7 +385,7 @@
           "crates/verter_session/tests/cases/relation_nominal_authority.rs",
           "crates/verter_session/tests/cases/runtime_constructor_matrix.rs"
         ],
-        "ownerCratePopulation": "the importers array is the complete cross-crate population (48 files: 26 verter_session src files, 17 verter_session integration tests, three verter_lsp audit test cases, verter_dx_baseline materialize and verter_napi lib), enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_execution::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
+        "ownerCratePopulation": "the importers array is the complete cross-crate population, enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_execution::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
         "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and BOTH use statements and inline crate paths in code position (verter_audit::attribute! macros, crossbeam_channel::Sender parameter types, the feature-gated hotpath::wrap alias, and crate::module::Item paths like crate::cache_id::SchedulerCacheId fields, crate::execution::pool::SchedulerCpuPool constructor parameters, crate::request_context::RequestContext, crate::audit_publish, crate::dedupe_hook, crate::execution::owner_command and crate::source_root references) are measured, so the declared sets equal the production direction both ways; verter_audit is measured through the module root's production re-export and its inline attribute! paths; cache_id and request_context are production crate-internal roots measured through inline paths (their use-statement imports are test configuration), and execution is the declared crate-internal root for the moved execution adapters (pool, owner_command, executor, host_cpu_pool, cpu_concurrency), measured through both its production use statements and its inline crate::execution:: paths"
       },
       "constructorCapabilities": [
@@ -408,7 +412,23 @@
           ],
           "rules": [
             "the stage executor is injected: DefaultExecutor is chosen by the caller, never constructed here to reach semantic crates",
-            "same pool-injection and single-driver-thread capability as new"
+            "same pool-injection and single-driver-thread capability as new",
+            "creates a standalone task registry; hosts sharing semantic producers use with_executor_and_task_registry"
+          ]
+        },
+        {
+          "constructor": "with_executor_and_task_registry",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool",
+            "SchedulerIoPool",
+            "TaskRegistry"
+          ],
+          "rules": [
+            "source loader, executor and pools remain host-injected with one native driver thread",
+            "the host injects the same task registry it supplies to semantic producers; construction creates no second cycle authority",
+            "scoped handoffs retain execution tasks and follower wait edges from this shared registry"
           ]
         },
         {
@@ -429,11 +449,32 @@
             "SchedulerCpuPool"
           ],
           "rules": [
-            "synchronous-driver variant of with_executor with the same injected-executor capability"
+            "synchronous-driver variant of with_executor with the same injected-executor capability and standalone task registry"
+          ]
+        },
+        {
+          "constructor": "new_sync_with_executor_and_task_registry",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool",
+            "SchedulerIoPool",
+            "TaskRegistry"
+          ],
+          "rules": [
+            "inline-driver variant with the same injected executor and shared task registry as with_executor_and_task_registry",
+            "no driver thread is created; native pools are injected and wasm32 carries no pool parameter"
           ]
         }
       ],
       "stateLifetimes": [
+        {
+          "state": "Scheduler.task_registry",
+          "owner": "host composition root; Scheduler retains a shared registry handle",
+          "lifetime": "session",
+          "evidence": "one wait-cycle authority shared with semantic producers; scoped handoffs retain their tasks and own their follower wait edges",
+          "soleOwner": "crates/verter_scheduler/src/scheduler.rs"
+        },
         {
           "state": "Scheduler.nodes",
           "owner": "Scheduler (Arc<FileNode> per canonical file)",
@@ -520,11 +561,18 @@
           "into_handles",
           "new",
           "with_executor",
+          "with_executor_and_task_registry",
           "new_sync",
           "new_sync_with_executor",
+          "new_sync_with_executor_and_task_registry",
           "execute_scoped_cache_node",
+          "begin_scoped_cache_node",
+          "run_transferred_producer",
+          "dispatch_for_pending_dependency",
           "submit_request",
+          "begin_submit_request",
           "submit_batch_atomic",
+          "begin_submit_batch_atomic",
           "wait_batch",
           "account_batch_submission",
           "counters",
@@ -1069,6 +1117,7 @@
       "allowedImportDirection": {
         "verter": [
           "verter_audit",
+          "verter_execution",
           "verter_retention",
           "verter_session_query",
           "verter_span",
@@ -1491,6 +1540,7 @@
           "crates/verter_session/src/resolver_core/shallow_file_state.rs",
           "crates/verter_session/src/resolver_core/surface_projector_tests.rs",
           "crates/verter_session/src/resolver_core_tests/bare_name_resolve_namespace_tests.rs",
+          "crates/verter_session/src/root_continuations_tests.rs",
           "crates/verter_session/src/semantic_graph_self_root_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/allocation_ownership_tests.rs",
