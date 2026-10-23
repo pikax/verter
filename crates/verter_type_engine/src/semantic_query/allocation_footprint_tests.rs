@@ -140,6 +140,7 @@ impl crate::semantic_query::CheckerDiagnosticPrinter for NoTypes {
         _: SemanticNodeId,
         _: crate::semantic_query::CheckerDiagnostic,
         _: &verter_type_expr::IndexedReportSite,
+        _: Option<(u32, u32)>,
     ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
         unreachable!("the message reports no relation")
     }

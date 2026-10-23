@@ -128,6 +128,106 @@ impl DisplaySubstitution {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ImplicitInferConstraint {
+    String,
+    UnknownArray,
+    PropertyKey,
+    MappedValue {
+        value: SemanticNodeId,
+        parameter: SemanticNodeId,
+        key_space: SemanticNodeId,
+    },
+}
+
+/// A display-only request for the consumer's canonical identity authority.
+/// Ordered substitutions distinguish the same binder at different use sites.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct InferConstraintRequest {
+    pub actual: SemanticNodeId,
+    pub inferred: Vec<ImplicitInferConstraint>,
+    pub substitutions: Vec<SubstitutionPair>,
+}
+
+pub(crate) type InferConstraintDecisions = rustc_hash::FxHashMap<InferConstraintRequest, bool>;
+
+/// The positions that infer a constraint without consulting a referenced
+/// declaration (the checker's omitTypeReferences path). A nested conditional
+/// declares its own inference scope.
+fn inferred_constraints(
+    store: &SemanticGraphStore,
+    check: SemanticNodeId,
+    pattern: SemanticNodeId,
+) -> rustc_hash::FxHashMap<super::InferBinderId, Vec<ImplicitInferConstraint>> {
+    let mut inferred = rustc_hash::FxHashMap::<_, Vec<_>>::default();
+    let (check, _) = follow_alias_chain(store, check, &DisplaySubstitution::default());
+    let (pattern, _) = follow_alias_chain(store, pattern, &DisplaySubstitution::default());
+    if let (
+        Some(SemanticNodeData::Mapped { mapper: check, .. }),
+        Some(SemanticNodeData::Mapped {
+            mapper: pattern, ..
+        }),
+    ) = (
+        store.node_data(check).as_deref(),
+        store.node_data(pattern).as_deref(),
+    ) {
+        if let Some(SemanticNodeData::Infer { binder, .. }) =
+            store.node_data(pattern.value_expr).as_deref()
+        {
+            inferred.entry(binder.clone()).or_default().push(
+                ImplicitInferConstraint::MappedValue {
+                    value: check.value_expr,
+                    parameter: check.parameter_node,
+                    key_space: check.key_space,
+                },
+            );
+        }
+    }
+    let mut stack = vec![pattern];
+    let mut seen = rustc_hash::FxHashSet::default();
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let Some(data) = store.node_data(node) else {
+            continue;
+        };
+        if matches!(data.as_ref(), SemanticNodeData::Conditional { .. }) {
+            continue;
+        }
+        let mut note = |child: SemanticNodeId, constraint| {
+            let (child, _) = follow_alias_chain(store, child, &DisplaySubstitution::default());
+            if let Some(SemanticNodeData::Infer { binder, .. }) = store.node_data(child).as_deref()
+            {
+                inferred.entry(binder.clone()).or_default().push(constraint);
+            }
+        };
+        match data.as_ref() {
+            SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                for expression in expressions.iter() {
+                    note(*expression, ImplicitInferConstraint::String);
+                }
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                for element in elements.iter().filter(|element| element.rest) {
+                    note(element.value, ImplicitInferConstraint::UnknownArray);
+                }
+            }
+            SemanticNodeData::Signature { params, .. } => {
+                for parameter in params.iter().filter(|parameter| parameter.rest) {
+                    note(parameter.ty, ImplicitInferConstraint::UnknownArray);
+                }
+            }
+            SemanticNodeData::Mapped { mapper, .. } => {
+                note(mapper.key_space, ImplicitInferConstraint::PropertyKey)
+            }
+            _ => {}
+        }
+        data.for_each_retained_child(|child| stack.push(child));
+    }
+    inferred
+}
+
 /// The same lexical boundary as semantic substitution: only a declaration in
 /// this extends pattern shadows; a reference or a nested conditional does not.
 fn pattern_declares_infer(
@@ -242,13 +342,18 @@ pub(crate) struct DisplayContext {
     /// for a message ([`Self::for_checker`]) so its abbreviation is the
     /// checker's.
     length: Option<NodeBuilderLength>,
-    /// What each mapped type a message prints settled to, materialized by
-    /// the consumer ([`Self::with_settled_mapped`]): the checker prints a
-    /// mapped type that is not generic as the object type it resolves to.
-    settled_mapped: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
-    /// The mapped types a message print met with no settled form, for the
-    /// consumer to materialize ([`Self::unsettled_mapped`]).
-    unsettled_mapped: Vec<SemanticNodeId>,
+    /// Evaluated forms prepared by the consumer ([`Self::with_settled_types`]):
+    /// closed mapped types and spread programs print as their resolved object
+    /// surfaces, and anonymous merged declarations as their peer-merged form.
+    settled_types: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    /// The types a message print met with no evaluated form, for the
+    /// consumer to materialize ([`Self::unsettled_types`]).
+    unsettled_types: Vec<SemanticNodeId>,
+    /// Constraints inferred from the immediate syntactic positions of this
+    /// conditional's infer declarations, excluding reference constraints.
+    inferred_constraints: rustc_hash::FxHashMap<super::InferBinderId, Vec<ImplicitInferConstraint>>,
+    infer_constraint_decisions: InferConstraintDecisions,
+    unsettled_infer_constraints: Vec<InferConstraintRequest>,
 }
 
 /// `typeToString`'s clip of a message's type text: a text of at least twice
@@ -329,28 +434,36 @@ impl DisplayContext {
         self
     }
 
-    /// This context printing each mapped type `settled` names as the object
-    /// type it settled to, as the checker prints a mapped type that is not
-    /// generic (`createTypeNodeFromObjectType`).
-    pub(crate) fn with_settled_mapped(
+    /// Print the forms the consumer evaluated before display. Display itself
+    /// remains a read-only projection and never dispatches a semantic query.
+    pub(crate) fn with_settled_types(
         mut self,
         settled: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+        decisions: InferConstraintDecisions,
     ) -> Self {
-        self.settled_mapped = settled;
+        self.settled_types = settled;
+        self.infer_constraint_decisions = decisions;
         self
     }
 
-    /// The mapped types a checker print met that its settled forms did not
+    /// The types a checker print met that its evaluated forms did not
     /// name, in the order it met them.
-    pub(crate) fn unsettled_mapped(&self) -> &[SemanticNodeId] {
-        &self.unsettled_mapped
+    pub(crate) fn unsettled_types(&self) -> &[SemanticNodeId] {
+        &self.unsettled_types
     }
 
-    /// The settled forms this context prints mapped types by.
-    pub(crate) fn into_settled_mapped(
+    pub(crate) fn unsettled_infer_constraints(&self) -> &[InferConstraintRequest] {
+        &self.unsettled_infer_constraints
+    }
+
+    /// The evaluated forms and identity decisions this context prints by.
+    pub(crate) fn into_settled_types(
         self,
-    ) -> rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> {
-        self.settled_mapped
+    ) -> (
+        rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+        InferConstraintDecisions,
+    ) {
+        (self.settled_types, self.infer_constraint_decisions)
     }
 
     fn measuring(&self) -> bool {
@@ -372,10 +485,18 @@ impl DisplayContext {
             return false;
         };
         if !length.truncating {
-            length.truncating =
-                length.approximate > super::checker_policy::MAXIMUM_TRUNCATION_LENGTH;
+            let limit = super::checker_policy::MAXIMUM_TRUNCATION_LENGTH;
+            length.truncating = length.approximate > limit;
         }
         length.truncating
+    }
+
+    /// Symbol-keyed properties count the stable leaf spelling plus five
+    /// fixed bytes. The native checker's decimal symbol id depends on
+    /// process history; it cannot control provider-free abbreviation or
+    /// suppress an otherwise printable diagnostic.
+    fn symbol_property_length(&mut self, name: &str) {
+        self.add_length(name.len() + 5);
     }
 
     /// Record `printed`, the text of a node whose node-builder count is not
@@ -424,7 +545,7 @@ impl DisplayContext {
         let mut rendered = Vec::with_capacity(entries.len());
         for (index, &entry) in entries.iter().enumerate() {
             let shown = index + 1;
-            if self.check_truncation() && shown + 2 < entries.len() - 1 {
+            if shown + 2 < entries.len() - 1 && self.check_truncation() {
                 rendered.push(format!("... {} more ...", entries.len() - shown));
                 rendered.push(render(self, last));
                 break;
@@ -699,6 +820,20 @@ fn display_resolved_type_node(
     }
     visited.push(id);
     let child_depth = depth - 1;
+    if let Some(settled) = visited.settled_types.get(&id).copied() {
+        let out = display_type_node(store, settled, needs, child_depth, visited);
+        visited.pop();
+        return out;
+    }
+    if visited.measuring()
+        && matches!(
+            data.as_ref(),
+            SemanticNodeData::ObjectSpreadProgram(_) | SemanticNodeData::MergedDecl { .. }
+        )
+        && !visited.unsettled_types.contains(&id)
+    {
+        visited.unsettled_types.push(id);
+    }
     // A node kind whose node-builder count is not modelled bounds it by its
     // printed text instead.
     let mut unmodeled = false;
@@ -842,10 +977,10 @@ fn display_resolved_type_node(
             literal.printed_name()
         }
         // Error carrier riding through display — a concise token, NOT a panic.
-        SemanticNodeData::Opaque(_) => {
-            unmodeled = true;
-            "<error>".to_string()
-        }
+        // A checker message has no type for it: the part is cut, so a message
+        // that would show it is not reported.
+        SemanticNodeData::Opaque(_) if visited.measuring() => visited.cut(),
+        SemanticNodeData::Opaque(_) => "<error>".to_string(),
         SemanticNodeData::Array { element, readonly } => {
             // The leading-`readonly` postfix-base parenthesisation is handled
             // uniformly inside `render_operand` for `Prec::Postfix` operands.
@@ -968,8 +1103,12 @@ fn display_resolved_type_node(
                     n
                 }
                 IndexKey::UniqueSymbol(identity) => {
-                    unmodeled = true;
-                    format!("unique symbol {}", identity.symbol)
+                    if needs.contains(DisplayFacet::CheckerSpelling) {
+                        visited.add_length(13);
+                        "unique symbol".to_owned()
+                    } else {
+                        format!("unique symbol {}", identity.symbol)
+                    }
                 }
                 IndexKey::Computed(node) => {
                     display_type_node(store, *node, needs, child_depth, visited).0
@@ -978,30 +1117,50 @@ fn display_resolved_type_node(
             visited.add_length(2);
             format!("{obj}[{key}]")
         }
-        // A mapped type that is not generic prints as the object type it
-        // resolves to, which the consumer settled.
-        SemanticNodeData::Mapped { .. } if visited.settled_mapped.contains_key(&id) => {
-            let settled = visited.settled_mapped[&id];
-            display_type_node(store, settled, needs, child_depth, visited).0
-        }
         SemanticNodeData::Mapped { source: _, mapper } => {
-            if visited.measuring() && !visited.unsettled_mapped.contains(&id) {
-                visited.unsettled_mapped.push(id);
+            if visited.measuring() && !visited.unsettled_types.contains(&id) {
+                visited.unsettled_types.push(id);
             }
-            unmodeled = true;
-            let param = visited.scoped(DisplaySubstitution::default(), |visited| {
-                display_type_node(store, mapper.parameter_node, needs, child_depth, visited).0
-            });
-            let key_space =
-                display_type_node(store, mapper.key_space, needs, child_depth, visited).0;
+            let param = match store.node_data(mapper.parameter_node).as_deref() {
+                Some(SemanticNodeData::TypeParam { display_name, .. }) => display_name.to_string(),
+                _ => {
+                    display_type_node(
+                        store,
+                        mapper.parameter_node,
+                        needs,
+                        child_depth,
+                        &mut DisplayContext::default(),
+                    )
+                    .0
+                }
+            };
+            // The builder makes the key constraint before the parameter name.
+            // A keyof-declared mapping constructs the keyof node directly;
+            // only its operand contributes to approximateLength.
+            let key_space = match store.node_data(mapper.key_space).as_deref() {
+                Some(SemanticNodeData::KeyOf { base }) => format!(
+                    "keyof {}",
+                    render_operand(store, *base, needs, child_depth, visited, Prec::Prefix)
+                ),
+                _ => display_type_node(store, mapper.key_space, needs, child_depth, visited).0,
+            };
+            visited.add_length(param.len() + 1);
             let scoped = visited
                 .substitution
                 .without_parameter(mapper.parameter_node);
-            let value = visited.scoped(scoped.clone(), |visited| {
+            let remap = match mapper.name_remap {
+                Some(node) => visited.scoped(scoped.clone(), |visited| {
+                    format!(
+                        " as {}",
+                        display_type_node(store, node, needs, child_depth, visited).0
+                    )
+                }),
+                None => String::new(),
+            };
+            let value = visited.scoped(scoped, |visited| {
                 display_type_node(store, mapper.value_expr, needs, child_depth, visited).0
             });
-            // Readonly / optionality / `as` name-remap are LIVE graph fields,
-            // each rendered structurally (TS mapped-modifier spelling).
+            visited.add_length(10);
             let readonly = match mapper.readonly {
                 ReadonlyMod::Add => "readonly ",
                 ReadonlyMod::Remove => "-readonly ",
@@ -1012,21 +1171,23 @@ fn display_resolved_type_node(
                 OptionalityMod::Remove => "-?",
                 OptionalityMod::Keep => "",
             };
-            let remap = match mapper.name_remap {
-                Some(node) => visited.scoped(scoped, |visited| {
-                    format!(
-                        " as {}",
-                        display_type_node(store, node, needs, child_depth, visited).0
-                    )
-                }),
-                None => String::new(),
-            };
-            format!("{{ {readonly}[{param} in {key_space}{remap}]{optionality}: {value} }}")
+            if needs.contains(DisplayFacet::CheckerSpelling) {
+                format!("{{ {readonly}[{param} in {key_space}{remap}]{optionality}: {value}; }}")
+            } else {
+                format!("{{ {readonly}[{param} in {key_space}{remap}]{optionality}: {value} }}")
+            }
         }
+        // A query is a type query node over the queried name's symbol chain
+        // (`symbolToTypeNode` with a value meaning), its instantiation
+        // arguments built before the name is counted.
         SemanticNodeData::TypeOf(_) => {
-            unmodeled = true;
             let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
             let type_args = data.carrier_type_args();
+            let rendered = type_argument_list(store, type_args, needs, child_depth, visited);
+            visited.add_length(entity_name_length(
+                std::iter::once(value_root.name.as_ref())
+                    .chain(path.iter().map(|seg| seg.as_ref())),
+            ));
             let mut s = format!("typeof {}", value_root.name);
             for seg in path.iter() {
                 s.push('.');
@@ -1035,10 +1196,6 @@ fn display_resolved_type_node(
             // Instantiation args render in a `<...>` segment, matching the
             // `ImportType` / `InstantiationRef` convention; empty stays bare.
             if !type_args.is_empty() {
-                let rendered: Vec<String> = type_args
-                    .iter()
-                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
-                    .collect();
                 s.push('<');
                 s.push_str(&rendered.join(", "));
                 s.push('>');
@@ -1052,13 +1209,16 @@ fn display_resolved_type_node(
             "unique symbol".to_owned()
         }
         SemanticNodeData::TypeOfNominal(_) => {
-            unmodeled = true;
             // Renders the AUTHORED head (`typeof TOKEN` / `typeof Ns.TOKEN`)
             // — the local spelling every display consumer reads; the
             // declaring identity rides the payload and is never spliced into
             // rendered type text. No instantiation segment: the terminal is
             // never an instantiation site.
             let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+            visited.add_length(entity_name_length(
+                std::iter::once(value_root.name.as_ref())
+                    .chain(path.iter().map(|seg| seg.as_ref())),
+            ));
             let mut s = format!("typeof {}", value_root.name);
             for seg in path.iter() {
                 s.push('.');
@@ -1071,12 +1231,41 @@ fn display_resolved_type_node(
             display_name.to_string()
         }
         SemanticNodeData::Infer {
-            name, constraint, ..
+            name,
+            constraint,
+            binder,
         } => {
-            // A printed constraint's count is not modelled.
-            unmodeled = constraint.is_some();
             visited.add_length(name.len() + 6);
-            format!("infer {name}")
+            let constraint = constraint
+                .filter(|_| needs.contains(DisplayFacet::CheckerSpelling))
+                .filter(|constraint| {
+                    let Some(inferred) = visited
+                        .inferred_constraints
+                        .get(binder)
+                        .filter(|inferred| !inferred.is_empty())
+                    else {
+                        return true;
+                    };
+                    let request = InferConstraintRequest {
+                        actual: *constraint,
+                        inferred: inferred.clone(),
+                        substitutions: visited.substitution.remaining().to_vec(),
+                    };
+                    if let Some(omit) = visited.infer_constraint_decisions.get(&request) {
+                        return !omit;
+                    }
+                    visited.unsettled_infer_constraints.push(request);
+                    true
+                })
+                .map(|constraint| {
+                    visited.add_length(9);
+                    display_type_node(store, constraint, needs, child_depth, visited).0
+                });
+            visited.add_length(name.len() + 1);
+            match constraint {
+                Some(constraint) => format!("infer {name} extends {constraint}"),
+                None => format!("infer {name}"),
+            }
         }
         SemanticNodeData::InferRef { name, .. } => {
             visited.add_length(reference_length(name));
@@ -1115,11 +1304,14 @@ fn display_resolved_type_node(
                     .as_ref()
                     .map_or(&[], |frame| frame.false_branch().pairs()),
             );
+            let inferred = inferred_constraints(store, *check, *extends);
             let check = render_operand(store, *check, needs, child_depth, visited, Prec::Prefix);
             visited.add_length(15);
+            let outer_infers = std::mem::replace(&mut visited.inferred_constraints, inferred);
             let extends = visited.scoped(scoped, |visited| {
                 render_operand(store, *extends, needs, child_depth, visited, Prec::Prefix)
             });
+            visited.inferred_constraints = outer_infers;
             let t = visited.scoped(true_substitution, |visited| {
                 render_operand(
                     store,
@@ -1186,20 +1378,16 @@ fn display_resolved_type_node(
             type_arguments,
             ..
         } => {
-            unmodeled = true;
-            let name = qualified_name(
-                needs,
-                &identity.canonical_id,
-                &identity.printed_name_in(store, type_arguments),
-            );
+            // A reference to the class: its own type arguments, then the
+            // symbol chain of its printed name.
+            let printed = identity.printed_name_in(store, type_arguments);
             let own = identity.own_type_arguments(type_arguments);
+            let rendered = type_argument_list(store, own, needs, child_depth, visited);
+            visited.add_length(entity_name_length(printed.split('.')));
+            let name = qualified_name(needs, &identity.canonical_id, &printed);
             if own.is_empty() {
                 name
             } else {
-                let rendered: Vec<String> = own
-                    .iter()
-                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
-                    .collect();
                 format!("{name}<{}>", rendered.join(", "))
             }
         }
@@ -1252,11 +1440,23 @@ fn display_resolved_type_node(
         }
         // Dynamic-import carrier renders the import expression + qualifier
         // path + any type arguments.
+        //
+        // The node builder counts an import type's specifier and its
+        // `import("")`, and each qualifier name and its separator, after its
+        // type arguments.
         SemanticNodeData::ImportType(_) => {
-            unmodeled = true;
             let (specifier, qualifier, typeof_query) =
                 data.import_type_head().expect("ImportType carrier head");
             let type_args = data.carrier_type_args();
+            let rendered = type_argument_list(store, type_args, needs, child_depth, visited);
+            visited.add_length(
+                specifier.len()
+                    + 10
+                    + qualifier
+                        .iter()
+                        .map(|segment| segment.len() + 1)
+                        .sum::<usize>(),
+            );
             let mut out = if typeof_query {
                 format!("typeof import(\"{specifier}\")")
             } else {
@@ -1267,10 +1467,6 @@ fn display_resolved_type_node(
                 out.push_str(segment);
             }
             if !type_args.is_empty() {
-                let rendered: Vec<String> = type_args
-                    .iter()
-                    .map(|a| display_type_node(store, *a, needs, child_depth, visited).0)
-                    .collect();
                 out.push('<');
                 out.push_str(&rendered.join(", "));
                 out.push('>');
@@ -1337,6 +1533,14 @@ fn render_object_surface(
         visited.add_length(2);
         return "{}".to_string();
     }
+    if checker {
+        if let Some((signature, prefix)) = sole_signature(store, surface) {
+            return format!(
+                "{prefix}{}",
+                display_type_node(store, signature, needs, depth, visited).0
+            );
+        }
+    }
     if visited.check_truncation() {
         visited.add_length(2);
         return "{ ...; }".to_string();
@@ -1400,17 +1604,77 @@ fn render_object_surface(
                 number
             }
             crate::semantic_query::AuthoredPropertyKey::UniqueSymbol(identity) => {
-                let name = format!("[unique symbol {}]", identity.symbol);
-                visited.unmodeled(&name);
-                name
+                if checker {
+                    let leaf = identity
+                        .member_path
+                        .last()
+                        .map_or(identity.symbol.as_ref(), |name| name.as_str());
+                    visited.symbol_property_length(leaf);
+                    let mut name = identity.symbol.to_string();
+                    for segment in identity.member_path.iter() {
+                        name.push('.');
+                        name.push_str(segment);
+                    }
+                    format!("[{name}]")
+                } else {
+                    format!("[unique symbol {}]", identity.symbol)
+                }
             }
             crate::semantic_query::AuthoredPropertyKey::Computed(node) => {
-                let name = format!(
-                    "[{}]",
-                    display_type_node(store, *node, needs, depth, visited).0
-                );
-                visited.unmodeled(&name);
-                name
+                let (mut key, _) = follow_alias_chain(store, *node, &visited.substitution);
+                if checker {
+                    if let Some(settled) = visited.settled_types.get(&key) {
+                        key = follow_alias_chain(store, *settled, &visited.substitution).0;
+                    } else if matches!(
+                        store.node_data(key).as_deref(),
+                        Some(SemanticNodeData::TypeOf(_))
+                    ) && !visited.unsettled_types.contains(&key)
+                    {
+                        visited.unsettled_types.push(key);
+                    }
+                    // Only a key uses the enum member's literal base. The
+                    // same node in a value position keeps its nominal name.
+                    if let Some(SemanticNodeData::EnumLiteral(member)) =
+                        store.node_data(key).as_deref()
+                    {
+                        key = member.base;
+                    }
+                }
+                match store.node_data(key).as_deref() {
+                    Some(SemanticNodeData::Literal(LiteralValue::String(name))) if checker => {
+                        visited.add_length(name.len() + 1);
+                        if is_bare_member_name(name) {
+                            name.to_string()
+                        } else {
+                            double_quoted(name)
+                        }
+                    }
+                    Some(SemanticNodeData::Literal(LiteralValue::Number(number))) if checker => {
+                        let name = number.to_string();
+                        visited.add_length(name.len() + 1);
+                        name
+                    }
+                    Some(data @ SemanticNodeData::TypeOfNominal(_)) if checker => {
+                        let (root, path) = data.typeof_head().expect("nominal query head");
+                        visited.symbol_property_length(
+                            path.last().map_or(root.name.as_ref(), |name| name.as_ref()),
+                        );
+                        let mut name = root.name.to_string();
+                        for segment in path.iter() {
+                            name.push('.');
+                            name.push_str(segment);
+                        }
+                        format!("[{name}]")
+                    }
+                    _ => {
+                        let name = format!(
+                            "[{}]",
+                            display_type_node(store, *node, needs, depth, visited).0
+                        );
+                        visited.unmodeled(&name);
+                        name
+                    }
+                }
             }
         };
         s.push_str(&name);
@@ -1454,7 +1718,7 @@ fn render_object_surface(
     let count = members.len();
     for (index, member) in members.iter().enumerate() {
         let shown = index + 1;
-        if visited.check_truncation() && shown + 2 < count - 1 {
+        if shown + 2 < count - 1 && visited.check_truncation() {
             parts.push(format!("... {} more ...", count - shown));
             parts.push(render_member(visited, members[count - 1]));
             break;
@@ -1471,6 +1735,47 @@ fn render_object_surface(
         parts.extend(signatures);
         format!("{{ {} }}", parts.join("; "))
     }
+}
+
+/// The one signature of an object type the checker prints as a function or
+/// constructor type (`createTypeNodeFromObjectType`) — no property and no
+/// index signature, and one call signature and no construct signature, or
+/// one construct signature and no call signature — with the `new ` its
+/// print adds where the signature does not carry its own.
+fn sole_signature(
+    store: &SemanticGraphStore,
+    surface: &crate::semantic_query::SurfaceView,
+) -> Option<(SemanticNodeId, &'static str)> {
+    if !surface.members.is_empty() || !surface.index_signatures.is_empty() {
+        return None;
+    }
+    match (
+        &surface.call_signatures[..],
+        &surface.construct_signatures[..],
+    ) {
+        ([call], []) => Some((*call, "")),
+        ([], [construct]) => {
+            let (resolved, _) =
+                follow_alias_chain(store, *construct, &DisplaySubstitution::default());
+            let carries_new = matches!(
+                store.node_data(resolved).as_deref(),
+                Some(SemanticNodeData::Signature {
+                    kind: crate::semantic_query::SignatureKind::Construct,
+                    ..
+                })
+            );
+            Some((*construct, if carries_new { "" } else { "new " }))
+        }
+        _ => None,
+    }
+}
+
+/// What the node builder counts for an entity name it builds from a symbol
+/// chain (`createAccessFromSymbolChain`): each name and its separator, the
+/// first counted twice.
+fn entity_name_length<'s>(mut segments: impl Iterator<Item = &'s str>) -> usize {
+    segments.next().map_or(0, reference_length)
+        + segments.map(|segment| segment.len() + 1).sum::<usize>()
 }
 
 /// `value` with `undefined` added, as the checker prints an optional
@@ -2051,12 +2356,12 @@ fn render_return(
         rendered.push_str("asserts ");
     }
     rendered.push_str(subject);
+    // The node builder counts a predicate's type alone
+    // (`typePredicateToTypePredicateNode`).
     if let Some(target) = predicate.ty {
         rendered.push_str(" is ");
         rendered.push_str(&display_type_node(store, target, needs, depth, visited).0);
     }
-    // A type predicate's count is not modelled.
-    visited.unmodeled(&rendered);
     rendered
 }
 
@@ -2181,14 +2486,31 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
 }
 
 /// Precedence of a node id, following the transparent `Alias` chain (bounded by
-/// the display depth cap) to the node that actually renders.
+/// the display depth cap) to the node that actually renders. Under
+/// [`DisplayFacet::CheckerSpelling`] an object type the checker prints as its
+/// sole signature binds as loosely as a function type.
 fn node_precedence(
     store: &SemanticGraphStore,
     id: SemanticNodeId,
+    needs: DisplayNeeds,
     visited: &DisplayContext,
 ) -> Prec {
-    let (node, _) = follow_alias_chain(store, id, &visited.substitution);
-    store.node_data(node).as_deref().map_or(Prec::Atom, prec_of)
+    let (mut node, _) = follow_alias_chain(store, id, &visited.substitution);
+    for _ in 0..MAX_DISPLAY_DEPTH {
+        let Some(settled) = visited.settled_types.get(&node) else {
+            break;
+        };
+        node = follow_alias_chain(store, *settled, &visited.substitution).0;
+    }
+    match store.node_data(node).as_deref() {
+        Some(SemanticNodeData::Object(surface))
+            if needs.contains(DisplayFacet::CheckerSpelling)
+                && sole_signature(store, surface).is_some() =>
+        {
+            Prec::Loose
+        }
+        data => data.map_or(Prec::Atom, prec_of),
+    }
 }
 /// Follow the transparent `Alias` chain (bounded by the display depth cap) and
 /// report whether the node ultimately renders as a [`SemanticNodeData::Signature`]
@@ -2309,7 +2631,7 @@ fn render_operand(
     if min_prec == Prec::Postfix && element_renders_leading_readonly(store, id, visited, needs) {
         return format!("({rendered})");
     }
-    if node_precedence(store, id, visited) < min_prec {
+    if node_precedence(store, id, needs, visited) < min_prec {
         format!("({rendered})")
     } else {
         rendered

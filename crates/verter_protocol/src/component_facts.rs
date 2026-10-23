@@ -174,6 +174,7 @@ impl FfiComponentMeta {
                                 FfiSurfacePartialReason::UndecidedConditional => 18,
                                 FfiSurfacePartialReason::ConnectedMemoryLimit => 19,
                                 FfiSurfacePartialReason::OperationBudget => 20,
+                                FfiSurfacePartialReason::FanoutLimit => 21,
                                 _ => {
                                     crate::component_meta::surface_partial_reason_to_proto(*reason)
                                         as u32
@@ -514,6 +515,7 @@ impl FfiComponentMeta {
                 18 => FfiSurfacePartialReason::UndecidedConditional,
                 19 => FfiSurfacePartialReason::ConnectedMemoryLimit,
                 20 => FfiSurfacePartialReason::OperationBudget,
+                21 => FfiSurfacePartialReason::FanoutLimit,
                 _ => FfiSurfacePartialReason::Propagated,
             };
             if !reasons.contains(&reason) {

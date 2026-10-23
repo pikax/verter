@@ -2768,6 +2768,7 @@ pub(crate) fn surface_partial_reason_to_proto(
         FfiSurfacePartialReason::FlowReturnNoSurface => {
             proto::SurfacePartialReason::FlowReturnNoSurface
         }
+        FfiSurfacePartialReason::FanoutLimit => proto::SurfacePartialReason::FanoutLimit,
         FfiSurfacePartialReason::UndecidedConditional => proto::SurfacePartialReason::Propagated,
     }
 }
@@ -3232,9 +3233,8 @@ mod tests {
     /// The expected name is DERIVED from `as_str_name()`, never hand-listed,
     /// so this is a generated-enum-driven check rather than a second copy of
     /// the taxonomy.
-    /// And the encoder speaks schema 12: a newer cause publishes as the
-    /// legacy reason it refines, so a released reader, which rejects an
-    /// unknown reason, reads every payload.
+    /// The encoder preserves the schema-12 refinements where they describe
+    /// the same stop. Fanout has no such legacy reason and retains its own tag.
     #[test]
     fn surface_partial_reason_serde_and_proto_names_agree() {
         use crate::types::FfiSurfacePartialReason as R;
@@ -3263,6 +3263,7 @@ mod tests {
             R::UndecidedConditional,
             R::ConnectedMemoryLimit,
             R::OperationBudget,
+            R::FanoutLimit,
         ];
 
         // `SURFACE_PARTIAL_REASON_UNSPECIFIED` -> the shared prefix, derived
@@ -3305,10 +3306,14 @@ mod tests {
                          — the FFI JSON lane and the proto lane must not diverge"
                     )
                 });
-            // The encoder publishes a legacy reason as its own value and a
-            // newer one as the legacy reason it refines, never above the
-            // schema-12 vocabulary.
+            // Fanout is distinct from propagation and every operation refusal.
+            // Other refinements retain their schema-12 compatibility mapping.
             let wire = super::surface_partial_reason_to_proto(*reason) as i32;
+            if *reason == R::FanoutLimit {
+                assert_eq!(wire, own.0, "fanout keeps its distinct protocol cause");
+                named.push(name);
+                continue;
+            }
             assert!(
                 (1..=SCHEMA_12_SURFACE_PARTIAL_REASONS).contains(&wire),
                 "{reason:?} encodes as {wire}, outside schema 12's reasons"
@@ -3339,6 +3344,21 @@ mod tests {
     /// reasons and its resolution diagnostic kinds all name values a
     /// released reader knows, each newer cause as the legacy one it refines,
     /// and a cause that publishes as one already present appears once.
+    #[test]
+    fn fanout_cause_is_distinct_in_every_wire_projection() {
+        let mut meta = super::build_test_meta();
+        meta.result_completeness = crate::types::FfiResultCompleteness::Partial {
+            reasons: vec![crate::types::FfiSurfacePartialReason::FanoutLimit],
+        };
+        let body = super::component_meta_payload(&meta).body.unwrap();
+        let fanout = proto::SurfacePartialReason::FanoutLimit as i32;
+        assert_eq!(body.result_completeness.unwrap().partial_reasons, [fanout]);
+        assert_eq!(
+            body.facts.unwrap().delivery.unwrap().causes,
+            [fanout as u32]
+        );
+    }
+
     #[test]
     fn newer_causes_encode_in_the_schema_12_vocabulary() {
         use crate::types::{

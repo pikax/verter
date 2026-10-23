@@ -3956,6 +3956,65 @@ fn reasonless_partial_publishes_the_inherited_partiality_reason() {
     );
 }
 
+/// A real public fan-out refusal stays distinct through native and fact-wire
+/// publication; a below-cap component remains complete.
+#[test]
+fn fanout_reason_survives_native_and_wire_publication() {
+    let session = host::VerterHost::new_standalone(host::HostConfig::default());
+    let mut source = String::from("<script setup lang=\"ts\">\n");
+    for i in 0..301 {
+        source.push_str(&format!("interface H{i} {{ p{i}?: string }}\n"));
+    }
+    let members = (0..301)
+        .map(|i| format!("m{i}?: H{i}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    source.push_str(&format!(
+        "interface Props {{ {members} }}\ndefineProps<Props>()\n</script>"
+    ));
+    for (canonical, source) in [
+        ("/Fanout.vue", source),
+        (
+            "/Control.vue",
+            "<script setup lang=\"ts\">defineProps<{ a: string }>()</script>".into(),
+        ),
+    ] {
+        let _ = session
+            .upsert(host::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from(source),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("registered component");
+    }
+    let control = wire_payload(&session, "/Control.vue");
+    assert_eq!(control.result_completeness, FfiResultCompleteness::Complete);
+    for _ in 0..2 {
+        let ffi = wire_payload(&session, "/Fanout.vue");
+        assert_eq!(
+            ffi.result_completeness,
+            FfiResultCompleteness::Partial {
+                reasons: vec![FfiSurfacePartialReason::FanoutLimit],
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&ffi.result_completeness).unwrap()["reasons"],
+            serde_json::json!(["fanoutLimit"])
+        );
+        let body = verter_protocol::component_meta::component_meta_payload(&ffi)
+            .body
+            .unwrap();
+        assert_eq!(body.facts.unwrap().delivery.unwrap().causes, [21]);
+        assert_eq!(
+            body.result_completeness.unwrap().partial_reasons,
+            [7, 21],
+            "fanout stays distinct beside the independent lower-bound fact summary"
+        );
+    }
+}
+
 // ── Unresolved-import prop surfaces vs a genuinely empty one ─────────
 
 /// The props type is imported from a module that does not exist at all.

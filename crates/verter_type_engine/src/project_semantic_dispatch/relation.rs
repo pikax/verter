@@ -8229,6 +8229,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return Some(RelationResult::Unknown),
         };
+        // The runtime construction is an object, but a spread of `any` makes
+        // its checker type dynamic. Apply the ordinary wildcard relation before
+        // rejecting primitive targets or asking for object-only branches.
+        if source_is_program {
+            match self.object_spread_any_operand(source) {
+                Ok(Some(any)) => {
+                    return Some(self.relate_member(
+                        any,
+                        target,
+                        bindings,
+                        InferPosition::Covariant,
+                    ))
+                }
+                Ok(None) => {}
+                Err(_) => return Some(RelationResult::Unknown),
+            }
+        }
         let target = match self.unwrap_identity_carrier_for_relation(target) {
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return Some(RelationResult::Unknown),
@@ -8305,11 +8322,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 return Some(assignable(bindings));
             }
-            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Never))) => {
-                return Some(RelationResult::NotAssignable);
-            }
             (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Object))) => {
                 return Some(assignable(bindings));
+            }
+            // Generic construction types can reduce to bottom even though
+            // their runtime value is an object. Decide through the same
+            // evaluated authority diagnostic preparation reads.
+            (
+                _,
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::Never
+                    | PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol
+                    | PrimitiveKind::Null
+                    | PrimitiveKind::Undefined
+                    | PrimitiveKind::Void,
+                )),
+            ) if source_is_program => {
+                return Some(match self.evaluated_object_spread_type(source) {
+                    Some(evaluated) => {
+                        self.relate_member(evaluated, target, bindings, InferPosition::Covariant)
+                    }
+                    None => RelationResult::Unknown,
+                });
+            }
+            (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Never))) => {
+                return Some(RelationResult::NotAssignable);
             }
             _ => {}
         }

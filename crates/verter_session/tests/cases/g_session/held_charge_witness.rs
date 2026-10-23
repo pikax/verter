@@ -455,81 +455,159 @@ fn copies_keep_exactly_the_measured_charge_through_retirement_in_either_order() 
     }
 }
 
-/// What a delivery's readers leave charged once they have gone. `readers`
-/// answers of one cached delivery are held while the cache retires; every
-/// reader but the last then drops in turn, and the last either drops or is
-/// kept. Returns the process account's pinned bytes at the end, what each
-/// earlier drop released beside the bookkeeping its witness named, and the
-/// last reader's witness.
-struct Drained {
+/// What one reader's drop moved on the process account, with the store
+/// backing that drained beside it read from the host's own storage figures.
+#[derive(Debug)]
+struct DropDelta {
     pinned: usize,
-    earlier_drops: Vec<(usize, usize)>,
-    last: HeldChargeWitness,
+    retained: usize,
+    backing: Backing,
 }
 
-fn drained(readers: usize, keep_last: bool) -> Drained {
-    let host = ClosingHost::settled();
-    let mut answers: Vec<_> = (0..readers).map(|_| flow_return(&host, 1)).collect();
-    host.retire();
-    let mut earlier_drops = Vec::new();
-    while answers.len() > 1 {
-        let answer = answers.remove(0);
-        let bookkeeping = HeldChargeWitness::of_flow_return(&answer)
-            .root_metadata()
-            .charged_bytes();
-        let before = host.accounts().2;
-        drop(answer);
-        host.retire();
-        earlier_drops.push((before - host.accounts().2, bookkeeping));
+/// The bytes the host's stores charge for their own storage, which no
+/// witness section names: the semantic store's pinned graph storage and
+/// memo bookkeeping, and the identity pool's retained entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Backing {
+    pinned: usize,
+    retained: usize,
+}
+
+fn backing(host: &ClosingHost) -> Backing {
+    let snapshot = host.retention_snapshot();
+    Backing {
+        pinned: host
+            .project_type_store()
+            .semantic_graph()
+            .store_storage_pins_for_tests(),
+        retained: snapshot.identity_pool_bytes,
     }
+}
+
+/// Drop `answer` and apply the releases it queued, measuring what the
+/// account and the store backing gave back.
+fn drop_reader(host: &ClosingHost, answer: Arc<FlowReturnResult>) -> DropDelta {
+    let (_, retained_before, pinned_before) = host.accounts();
+    let backing_before = backing(host);
+    drop(answer);
+    host.retire();
+    let (_, retained_after, pinned_after) = host.accounts();
+    let backing_after = backing(host);
+    DropDelta {
+        pinned: pinned_before - pinned_after,
+        retained: retained_before - retained_after,
+        backing: Backing {
+            pinned: backing_before.pinned - backing_after.pinned,
+            retained: backing_before.retained - backing_after.retained,
+        },
+    }
+}
+
+/// The pinned bytes a drop released beyond the store backing that drained
+/// beside it, once its retained release is shown to be backing alone.
+fn released_beyond_backing(delta: &DropDelta) -> usize {
+    assert_eq!(
+        delta.retained, delta.backing.retained,
+        "a reader's drop releases no retained charge beyond the store backing: {delta:?}"
+    );
+    delta.pinned - delta.backing.pinned
+}
+
+/// The final-release oracle: the reader's drop gave back exactly the charges
+/// its witness named — the payload and the bookkeeping, every one pinned
+/// once the cache retired — beside the store backing that drained with it.
+/// The expectation is the witness's own figures and the stores' own backing
+/// figures, never another release run.
+fn exact_final_release(witness: &HeldChargeWitness, delta: &DropDelta) -> Result<(), String> {
+    let payload = witness.payload().charged_bytes();
+    let metadata = witness.root_metadata().charged_bytes();
+    assert_eq!(
+        witness.charged_bytes_in(ChargeClass::Pinned),
+        payload + metadata,
+        "the held charges are all pinned once the cache retired: {witness:#?}"
+    );
+    let released = released_beyond_backing(delta);
+    if released == payload + metadata {
+        Ok(())
+    } else {
+        Err(format!(
+            "{released} pinned bytes released beyond the store backing ({delta:?}), for \
+             {payload} of payload and {metadata} of bookkeeping"
+        ))
+    }
+}
+
+/// Three readers of one cached delivery outlive the cache's retirement.
+/// Each earlier reader's drop releases exactly its own bookkeeping, the
+/// shared payload staying charged for the readers left; the last reader's
+/// drop is measured on its own. `withhold_payload` keeps one earlier
+/// reader — a public answer sharing the payload — alive through the final
+/// drop, so the payload's final release never happens there.
+fn final_release(withhold_payload: bool) -> (HeldChargeWitness, DropDelta) {
+    let host = ClosingHost::settled();
+    let mut answers: Vec<_> = (0..3).map(|_| flow_return(&host, 1)).collect();
+    host.retire();
     let last = answers.pop().expect("a last reader");
     let witness = HeldChargeWitness::of_flow_return(&last);
-    let _kept = keep_last.then_some(last);
-    host.retire();
-    Drained {
-        pinned: host.accounts().2,
-        earlier_drops,
-        last: witness,
+    let withheld = withhold_payload.then(|| answers.pop().expect("a withholding reader"));
+    for answer in answers {
+        let earlier = HeldChargeWitness::of_flow_return(&answer);
+        assert_eq!(
+            earlier.payload(),
+            witness.payload(),
+            "the readers share the payload"
+        );
+        let delta = drop_reader(&host, answer);
+        assert_eq!(
+            released_beyond_backing(&delta),
+            earlier.root_metadata().charged_bytes(),
+            "an earlier reader releases exactly its bookkeeping: {delta:?}"
+        );
     }
+    let delta = drop_reader(&host, last);
+    if let Some(withheld) = withheld {
+        assert_eq!(
+            HeldChargeWitness::of_flow_return(&withheld).payload(),
+            witness.payload(),
+            "the control applied: the withheld payload is still charged after the final drop"
+        );
+    }
+    (witness, delta)
 }
 
-/// The last reader's drop releases every charge its witness named, and
-/// nothing else is left behind: with every reader gone the account holds
-/// exactly what a host that served one answer and released it holds. An
-/// earlier reader's drop releases exactly its own bookkeeping, the shared
-/// payload staying charged for the readers left. A leaked payload or
-/// bookkeeping charge — the control keeps the last reader alive while the
-/// rest of its delivery drains — is left in the residual, which is exact, so
-/// the unobserved store backing released beside the observed charges
-/// cannot hide it.
+/// The last reader's drop releases every charge its witness named, measured
+/// against the witnessed payload and bookkeeping themselves with the store
+/// backing accounted on its own from the stores' storage figures. The
+/// control withholds the payload's final release through a public answer
+/// that shares it; the oracle rejects that drop, which released the
+/// bookkeeping alone.
 #[test]
 fn the_last_reader_releases_every_observed_charge_exactly() {
     let _serial = serial();
-    let reference = drained(1, false).pinned;
-    let released = drained(3, false);
-    assert_eq!(
-        released.pinned, reference,
-        "with every reader gone no observed charge is left behind"
-    );
-    for (dropped, bookkeeping) in &released.earlier_drops {
-        assert_eq!(
-            dropped, bookkeeping,
-            "an earlier reader releases exactly its bookkeeping"
-        );
-    }
-    assert_eq!(released.earlier_drops.len(), 2);
-
-    let leaked = drained(3, true);
-    let witnessed =
-        leaked.last.payload().charged_bytes() + leaked.last.root_metadata().charged_bytes();
+    let (witness, delta) = final_release(false);
     assert!(
-        witnessed > 0 && leaked.pinned >= reference + witnessed,
-        "the control leaves the last reader's charges in place: {} against {reference}",
-        leaked.pinned
+        witness.payload().charged_bytes() > 0 && witness.root_metadata().charged_bytes() > 0,
+        "the last reader holds a payload and bookkeeping: {witness:#?}"
     );
-    assert_ne!(
-        leaked.pinned, reference,
-        "the exact residual rejects the leaked charges"
+    assert!(
+        delta.backing.pinned > 0,
+        "the final drop drains store backing the oracle must separate: {delta:?}"
+    );
+    exact_final_release(&witness, &delta).unwrap_or_else(|error| panic!("{error}"));
+
+    let (witness, delta) = final_release(true);
+    assert!(
+        witness.payload().charged_bytes() > 0,
+        "the control withholds a charged payload: {witness:#?}"
+    );
+    assert!(
+        exact_final_release(&witness, &delta).is_err(),
+        "the oracle rejects a final drop that left the payload charged"
+    );
+    assert_eq!(
+        released_beyond_backing(&delta),
+        witness.root_metadata().charged_bytes(),
+        "the withheld drop released its bookkeeping and nothing of the payload"
     );
 }
 

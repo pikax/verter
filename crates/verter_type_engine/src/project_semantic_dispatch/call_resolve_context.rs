@@ -1927,21 +1927,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         context.checker_text(printed)
     }
 
-    /// `node` printed under a fresh context from `context`, every mapped
-    /// type the print meets settled first where it settles: the checker
-    /// prints a mapped type that is not generic as the object type it
-    /// resolves to (`createTypeNodeFromObjectType`), which display reads
-    /// but never materializes. A settled object can hold further mapped
-    /// types, so the print repeats until none it meets is new.
+    /// Prepare evaluated forms for a read-only print: closed mapped types,
+    /// spread alternatives and merged declarations. A prepared surface may
+    /// contain further unevaluated types, so repeat until none is new.
     fn print_diagnostic_type_text(
         &self,
         node: SemanticNodeId,
         context: impl Fn() -> crate::semantic_query::display::DisplayContext,
     ) -> (String, crate::semantic_query::display::DisplayContext) {
         let mut settled = FxHashMap::default();
+        let mut decisions = FxHashMap::default();
         let mut tried = FxHashSet::default();
         loop {
-            let mut printing = context().with_settled_mapped(settled);
+            let mut printing = context().with_settled_types(settled, decisions);
             let printed = crate::semantic_query::display::display_type_node(
                 self.graph().store(),
                 node,
@@ -1956,25 +1954,79 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             )
             .0;
             let newly_settled: Vec<(SemanticNodeId, SemanticNodeId)> = printing
-                .unsettled_mapped()
+                .unsettled_types()
                 .iter()
                 .copied()
                 .filter(|mapped| tried.insert(*mapped))
-                .filter_map(|mapped| Some((mapped, self.settled_mapped_object(mapped)?)))
+                .filter_map(|mapped| Some((mapped, self.settled_diagnostic_type(mapped)?)))
                 .collect();
-            if newly_settled.is_empty() {
+            let newly_decided: Vec<_> = printing
+                .unsettled_infer_constraints()
+                .iter()
+                .map(|request| {
+                    (
+                        request.clone(),
+                        self.omit_diagnostic_infer_constraint(request),
+                    )
+                })
+                .collect();
+            if newly_settled.is_empty() && newly_decided.is_empty() {
                 return (printed, printing);
             }
-            settled = printing.into_settled_mapped();
+            (settled, decisions) = printing.into_settled_types();
             settled.extend(newly_settled);
+            decisions.extend(newly_decided);
         }
     }
 
-    /// The object type a mapped type that is not generic resolves to: the
-    /// object the relation decides it by. `None` while it stays a mapped
-    /// type.
-    fn settled_mapped_object(&self, mapped: SemanticNodeId) -> Option<SemanticNodeId> {
+    /// Infer constraints print only when they differ from the constraint
+    /// inferred from their declaration positions. Use the shared canonical
+    /// algebra and identity relation, including aliases and use-site frames.
+    fn omit_diagnostic_infer_constraint(
+        &self,
+        request: &crate::semantic_query::display::InferConstraintRequest,
+    ) -> bool {
+        use crate::semantic_query::display::ImplicitInferConstraint;
+        use crate::semantic_query::{PendingSubstitutionFrame, PrimitiveKind};
+        let primitive = |kind| self.graph().intern_node(SemanticNodeData::Primitive(kind));
+        let inferred: Vec<_> = request.inferred.iter().map(|constraint| match *constraint {
+            ImplicitInferConstraint::String => primitive(PrimitiveKind::String),
+            ImplicitInferConstraint::UnknownArray => self.graph().intern_node(SemanticNodeData::Array {
+                element: primitive(PrimitiveKind::Unknown), readonly: false,
+            }),
+            ImplicitInferConstraint::PropertyKey => {
+                let members = [primitive(PrimitiveKind::String), primitive(PrimitiveKind::Number), primitive(PrimitiveKind::Symbol)];
+                crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_charged(self.graph(), &members,
+                    verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                    self.construction_meter()).node
+            }
+            ImplicitInferConstraint::MappedValue { value, parameter, key_space } =>
+                self.substitute_semantic_type_param(value, parameter, key_space),
+        }).collect();
+        let inferred = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection_charged(
+            self.graph(), &inferred, self.construction_meter()).node;
+        let mut frame = PendingSubstitutionFrame::empty();
+        for &(parameter, argument) in &request.substitutions {
+            frame = frame.append(parameter, argument);
+        }
+        let actual = self.apply_pending_substitution_frame(request.actual, &frame);
+        let inferred = self.apply_pending_substitution_frame(inferred, &frame);
+        self.relate_type_identity(actual, inferred) == Some(true)
+    }
+
+    /// The evaluated form the checker prints. Use the shared mapped, spread
+    /// and peer-merge authorities; retain generic mapped types as such.
+    fn settled_diagnostic_type(&self, mapped: SemanticNodeId) -> Option<SemanticNodeId> {
         let data = self.graph().node_data(mapped)?;
+        if matches!(data.as_ref(), SemanticNodeData::TypeOf(_)) {
+            return Some(self.evaluate_deferred_semantic_node(mapped));
+        }
+        if let SemanticNodeData::MergedDecl { contributors } = data.as_ref() {
+            return Some(self.reduce_merged_decl(contributors));
+        }
+        if matches!(data.as_ref(), SemanticNodeData::ObjectSpreadProgram(_)) {
+            return self.evaluated_object_spread_type(mapped);
+        }
         let SemanticNodeData::Mapped { source, mapper } = data.as_ref() else {
             return None;
         };

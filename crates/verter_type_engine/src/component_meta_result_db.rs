@@ -337,7 +337,7 @@ pub fn classify_final_component_retention(
             | PartialReason::ProjectionWorkLimit
             | PartialReason::DeferredEvaluationLimit
             | PartialReason::StructuralFactDemandLimit => operation = true,
-            PartialReason::ConnectedMemoryLimit => other = true,
+            PartialReason::ConnectedMemoryLimit | PartialReason::FanoutLimit => other = true,
             PartialReason::SamePathRecursion => recursion = true,
             PartialReason::ConnectedQueryDepthLimit => depth = true,
             // Spread marker only. See the function doc.

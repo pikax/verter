@@ -669,6 +669,7 @@
           "crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
           "crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve_depth_tests.rs",
           "crates/verter_session/src/resolver_core/component_meta_query_engine/surface.rs",
+          "crates/verter_session/src/resolver_core/component_meta_query_engine/tests.rs",
           "crates/verter_session/src/resolver_core/component_meta_registry.rs",
           "crates/verter_session/src/resolver_core/prepared_decl_tests.rs",
           "crates/verter_session/src/resolver_core/shallow_file_state.rs",

@@ -2,13 +2,15 @@
 //! back as a flow-return answer and, where the form is a returned test, as
 //! the type predicate the checker infers from it.
 //!
-//! Every expected answer is measured on the pinned TypeScript 7.0.2: the
+//! Checker-parity answers are measured on the pinned TypeScript 7.0.2: the
 //! strict column is the function's `.d.ts` line (`tsc --declaration
 //! --emitDeclarationOnly --strict`), the loose column the same under
 //! `--strictNullChecks false`, read from a TS2322 message quoting the type
 //! where the loose `.d.ts` reprints an authored annotation instead. A
 //! branch that does not return `throw`s, so each answer is the narrowed
 //! read alone, never a join.
+//! Symbol-abbreviation controls instead pin the documented stable-spelling
+//! policy where the native checker's messages depend on process history.
 
 use super::signature_predicate_inference_tests::{
     assert_predicate, assert_prints, host_with, LOOSE_ROOT, STRICT_ROOT,
@@ -1782,6 +1784,102 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// A wide argument whose members are function queries, class-expression
+/// instances or methods with type predicates prints as the checker
+/// abbreviates it, never withheld: a `typeof` of a declared function prints
+/// its signature, a class expression's instance `(Anonymous class)`, each
+/// counted as the checker's node builder counts it, so the members past
+/// the truncation length elide exactly where tsc elides them and a text of
+/// twice that length is clipped. Every expected line is TypeScript 7.0.2's
+/// on this fixture, identical with `strictNullChecks` off, cold and warm.
+#[test]
+fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abbreviates_them() {
+    const WIDE: usize = 30;
+    let mut source = String::from("\ndeclare function one(x: string): number;\n");
+    for ordinal in 0..WIDE {
+        source.push_str(&format!("declare function f{ordinal}(): void;\n"));
+    }
+    let members = |count: usize, member: &dyn Fn(usize) -> String| {
+        (0..count).map(member).collect::<Vec<_>>().join("; ")
+    };
+    source.push_str(&format!(
+        "declare namespace ns {{ function g(): void; }}\n\
+         declare const typeofs: {{ {} }};\n\
+         export function typeof_wide() {{ return one(typeofs); }}\n\
+         declare const qualified: {{ {} }};\n\
+         export function qualified_wide() {{ return one(qualified); }}\n\
+         function mk() {{ return class {{ v = 1 }}; }}\n\
+         const Made = mk();\n\
+         declare const made: InstanceType<typeof Made>;\n\
+         declare const anons: {{ {} }};\n\
+         export function class_wide() {{ return one(anons); }}\n\
+         export function class_short() {{ return one(made); }}\n\
+         declare const preds: {{ {} }};\n\
+         export function predicate_wide() {{ return one(preds); }}\n",
+        members(WIDE, &|i| format!("p{i}: typeof f{i}")),
+        members(WIDE, &|i| format!("q{i}: typeof ns.g")),
+        members(WIDE, &|i| format!("a{i}: typeof made")),
+        members(12, &|i| format!("r{i}(x: unknown): x is string")),
+    ));
+    let at = |position: &str, printed: &str| {
+        format!(
+            "{position}: error TS2345: Argument of type '{printed}' is not assignable to \
+             parameter of type 'string'."
+        )
+    };
+    let elided = |count: usize, member: &dyn Fn(usize) -> String| {
+        format!(
+            "{{ {}; ... {} more ...; {}; }}",
+            members(count, member),
+            WIDE - count - 1,
+            member(WIDE - 1)
+        )
+    };
+    let predicates = format!(
+        "{{ {}; }}",
+        members(12, &|i| format!("r{i}(x: unknown): x is string"))
+    );
+    let rows: Vec<(&str, Vec<String>)> = vec![
+        (
+            "typeof_wide",
+            vec![at("(35,44)", &elided(16, &|i| format!("p{i}: () => void")))],
+        ),
+        (
+            "qualified_wide",
+            vec![at("(37,47)", &elided(16, &|i| format!("q{i}: () => void")))],
+        ),
+        (
+            "class_wide",
+            vec![at(
+                "(42,43)",
+                &elided(5, &|i| format!("a{i}: (Anonymous class)")),
+            )],
+        ),
+        ("class_short", vec![at("(43,44)", "(Anonymous class)")]),
+        (
+            "predicate_wide",
+            vec![at("(45,47)", &format!("{}...", &predicates[..317]))],
+        ),
+    ];
+    let host = host_with(&source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in &rows {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, &source,
+                );
+                if reported != *expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
 /// A message prints a tuple and an object's members as the checker does:
 /// under `strictNullChecks` an optional element's type with `undefined`
 /// added, which also counts toward where the node builder abbreviates; an
@@ -1916,12 +2014,13 @@ fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
 }
 
 /// A failure through a long property path is reported while the checker's
-/// relation stack holds it, and withheld where the checker reports TS2321
-/// instead: the failing pair itself takes a frame when it is two object
-/// types or an intersection target's member, not when it is two primitives
-/// or an object type against a primitive. Every reported line is
-/// TypeScript 7.0.2's on this fixture, identical with `strictNullChecks`
-/// off; each withheld row is one tsc reports as TS2321.
+/// relation stack holds it, and as TS2321 where the stack overflows: the
+/// failing pair itself takes a frame when it is two object types or an
+/// intersection target's member, not when it is two primitives or an
+/// object type against a primitive. An overflow is reported twice, at the
+/// call the checker compares the types in while it chooses the candidate,
+/// then at the argument, in place of TS2345. Every line is TypeScript
+/// 7.0.2's on this fixture, identical with `strictNullChecks` off.
 #[test]
 fn deep_chains_report_until_the_checker_relation_stack_overflows() {
     let nest = |inner: &str, depth: usize| {
@@ -1959,6 +2058,16 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             vec!["a"; depth].join("."),
         )]
     };
+    let overflowed = |call: &str, argument: &str| {
+        [call, argument]
+            .map(|position| {
+                format!(
+                    "{position}: error TS2321: Excessive stack depth comparing types \
+                     '{clipped}' and '{clipped}'."
+                )
+            })
+            .to_vec()
+    };
     let expected: [(&str, Vec<String>); 8] = [
         (
             "object_leaf_99",
@@ -1968,7 +2077,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                 "Property 'y' is missing in type '{ x: number; }' but required in type '{ y: number; }'.",
             ),
         ),
-        ("object_leaf_100", Vec::new()),
+        ("object_leaf_100", overflowed("(7,44)", "(7,62)")),
         (
             "object_to_primitive_99",
             reported("(10,76)", 99, "Type '{ x: 1; }' is not assignable to type 'string'."),
@@ -1981,7 +2090,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             "primitive_leaf_100",
             reported("(16,68)", 100, "Type 'string' is not assignable to type 'number'."),
         ),
-        ("primitive_leaf_101", Vec::new()),
+        ("primitive_leaf_101", overflowed("(19,47)", "(19,68)")),
         (
             "intersection_98",
             reported(
@@ -1991,7 +2100,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                  Type 'string' is not assignable to type '{ p: 1; }'.",
             ),
         ),
-        ("intersection_99", Vec::new()),
+        ("intersection_99", overflowed("(25,44)", "(25,62)")),
     ];
     let host = host_with(&source);
     let mut mismatches = Vec::new();
@@ -2993,4 +3102,302 @@ fn an_assertion_every_conditional_arm_applies_narrows_past_it() {
         rows.push((name, "string | number", "string | number"));
     }
     check_rows(CONDITIONAL_ASSERTIONS, &rows);
+}
+
+/// Symbol abbreviation depends on spelling, not unrelated interning or query history.
+#[test]
+fn symbol_abbreviation_keeps_diagnostics_across_query_histories() {
+    use super::signature_predicate_inference_tests::checker_report;
+
+    let padding = "x".repeat(91);
+    let mut source = String::from("declare function one(x: string): number;\n");
+    for i in 0..12 {
+        source.push_str(&format!("declare const s{i}: unique symbol;\n"));
+    }
+    source.push_str(&format!(
+        "export function target(x: {{ padding: \"{padding}\"; "
+    ));
+    for i in 0..12 {
+        source.push_str(&format!("[s{i}]: number; "));
+    }
+    source.push_str("last: string }) { return [one(x), one(x)]; }\n");
+    for i in 0..128 {
+        source.push_str(&format!("declare const u{i}: unique symbol;\n"));
+    }
+    source.push_str("export function unrelated(x: { ");
+    for i in 0..128 {
+        source.push_str(&format!("[u{i}]: {i}; "));
+    }
+    source.push_str("}) { return x; }\n");
+    let message = format!("error TS2345: Argument of type '{{ padding: \"{padding}\"; [s0]: number; [s1]: number; [s2]: number; [s3]: number; [s4]: number; ... 7 more ...; last: string; }}' is not assignable to parameter of type 'string'.");
+    let expected: Vec<_> = source
+        .match_indices("one(x)")
+        .map(|(start, _)| {
+            let before = &source[..start + "one(".len()];
+            let line = before.matches('\n').count() + 1;
+            let column = before.len() - before.rfind('\n').unwrap();
+            format!("({line},{column}): {message}")
+        })
+        .collect();
+    assert_eq!(expected.len(), 2, "the fixture has two authored call sites");
+    for prewarm in [false, true] {
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            for root in [STRICT_ROOT, LOOSE_ROOT] {
+                if prewarm {
+                    assert!(checker_report(&host, root, "unrelated", &source).is_empty());
+                }
+                assert_eq!(
+                    checker_report(&host, root, "target", &source),
+                    expected,
+                    "{pass} {root}, unrelated prewarm: {prewarm}"
+                );
+                assert_prints(&host, root, "target", "number[]");
+            }
+        }
+    }
+}
+
+/// Printable residual kinds retain the call's diagnostic through cold and warm reads.
+#[test]
+fn printable_residual_types_keep_call_diagnostics() {
+    let source = r#"declare function one(x: string): number;
+interface Merged { a: number }
+interface Merged { b: string }
+export function merged(x: Merged) { return one(x); }
+export function spread(x: { a: number; b: string }) { const y = { ...x }; return one(y); }
+export function constrained<T>(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; value: T extends { v: infer U extends string } ? U : number; tail: boolean }) { return one(x); }
+declare const key: unique symbol;
+export function symbol_short(x: { [key]: number }) { return one(x); }
+export function symbol_wide(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; [key]: number; tail: boolean; last: string }) { return one(x); }
+export function mapped<T>(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; value: { [K in keyof T]: string }; tail: boolean }) { return one(x); }
+export function constrained_short<T>(x: { value: T extends { v: infer U extends string } ? U : number }) { return one(x); }
+export function template_infer<T>(x: { value: T extends `${infer U extends string}` ? U : number }) { return one(x); }
+export function rest_infer<T>(x: { value: T extends [...infer U extends unknown[]] ? U : number }) { return one(x); }
+export function indexed<T extends { [key]: number }>(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; value: T[typeof key]; tail: boolean }) { return one(x); }
+export function mapped_template<T>(x: { padding: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; value: { [K in keyof T]: { p0: 0; p1: 1; p2: 2; p3: 3; p4: 4; p5: 5; p6: 6; p7: 7; p8: 8; p9: 9 } }; tail: boolean }) { return one(x); }
+declare namespace ns { const key: unique symbol; }
+export function qualified_symbol(x: { [ns.key]: number }) { return one(x); }
+export function computed_literal(x: { ["a-b"]: number }) { return one(x); }
+export function generic_spread<T extends object>(x: T) { const y = { ...x, extra: 1 }; return one(y); }
+export function generic_between<T extends object>(x: T) { const y = { before: "a", ...x, after: true }; return one(y); }
+export function nested_generic<T extends object>(x: T) { const y = { ...{ ...x, inner: 1 }, outer: true }; return one(y); }
+type StringAlias = string;
+export function infer_alias<T>(x: { value: T extends `${infer U extends StringAlias}` ? U : number }) { return one(x); }
+export function infer_repeated<T>(x: { value: T extends [`${infer U extends string}`, { [K in infer U extends string]: number }] ? U : number }) { return one(x); }
+export function mapped_infer<T>(x: { value: { [K in keyof T]: string } extends { [K in keyof T]: infer U extends string } ? U : number }) { return one(x); }
+"#;
+    let rows = [
+        ("merged", "(4,48): error TS2345: Argument of type 'Merged' is not assignable to parameter of type 'string'."),
+        ("spread", "(5,86): error TS2345: Argument of type '{ a: number; b: string; }' is not assignable to parameter of type 'string'."),
+        ("constrained", "(6,271): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T extends { ...; } ? U : number; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("symbol_short", "(8,65): error TS2345: Argument of type '{ [key]: number; }' is not assignable to parameter of type 'string'."),
+        ("symbol_wide", "(9,236): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; [key]: number; tail: boolean; last: string; }' is not assignable to parameter of type 'string'."),
+        ("mapped", "(10,240): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: { [K in keyof T]: string; }; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("constrained_short", "(11,119): error TS2345: Argument of type '{ value: T extends { v: infer U extends string; } ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("template_infer", "(12,114): error TS2345: Argument of type '{ value: T extends `${infer U}` ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("rest_infer", "(13,113): error TS2345: Argument of type '{ value: T extends [...infer U] ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("indexed", "(14,254): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T[unique symbol]; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("mapped_template", "(15,315): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: { [K in keyof T]: { p0: 0; p1: 1; p2: 2; ... 6 more ...; p9: 9; }; }; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("qualified_symbol", "(17,72): error TS2345: Argument of type '{ [ns.key]: number; }' is not assignable to parameter of type 'string'."),
+        ("computed_literal", "(18,71): error TS2345: Argument of type '{ \"a-b\": number; }' is not assignable to parameter of type 'string'."),
+        ("generic_spread", "(19,99): error TS2345: Argument of type 'T & { extra: number; }' is not assignable to parameter of type 'string'."),
+        ("generic_between", "(20,116): error TS2345: Argument of type '{ before: string; } & T & { after: boolean; }' is not assignable to parameter of type 'string'."),
+        ("nested_generic", "(21,119): error TS2345: Argument of type 'T & { inner: number; outer: boolean; }' is not assignable to parameter of type 'string'."),
+        ("infer_alias", "(23,116): error TS2345: Argument of type '{ value: T extends `${infer U}` ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("infer_repeated", "(24,159): error TS2345: Argument of type '{ value: T extends [`${infer U}`, { [K in infer U]: number; }] ? U : number; }' is not assignable to parameter of type 'string'."),
+        ("mapped_infer", "(25,152): error TS2345: Argument of type '{ value: { [K in keyof T]: string; } extends { [K in keyof T]: infer U; } ? U : number; }' is not assignable to parameter of type 'string'."),
+    ];
+    let host = host_with(source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in rows {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, function, source,
+                );
+                if reported != [expected] {
+                    mismatches.push(format!(
+                        "{pass} {root} {function}: expected {expected:?}, got {reported:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn spread_and_computed_key_diagnostics_preserve_evaluated_types() {
+    let padding = "x".repeat(130);
+    let source = format!(
+        r#"declare function one(x: string): number;
+declare const k: "a";
+enum E {{ A = "a", N = 1 }}
+export function repeated<T extends object>(x: T) {{ const y = {{ ...x, a: 1, ...x, b: true }}; return one(y); }}
+export function overwritten<T extends object>(x: T) {{ const a = {{ p: 1 }}; const b = {{ p: true }}; const y = {{ ...x, ...a, ...x, ...b }}; return one(y); }}
+export function nested_repeated<T extends object,U extends object>(x:T,z:U) {{ const a={{q:1,...x,a:1,...z}}; const y={{...z,b:1,...a,c:true}}; return one(y); }}
+export function nested_disjoint<T extends object>(x:T) {{ const y={{...{{...x,p:1}},...{{...x,q:true}}}}; return one(y); }}
+export function nested_conflict<T extends object>(x:T) {{ const a={{...x,p:1}}; const b={{...x,p:true}}; const y={{...a,...b}}; return one(y); }}
+export function nested_bounded<T extends object>(x:T) {{ const y={{...x,...{{p:1}},...{{...x,p:true}}}}; return one(y); }}
+export function nested_nondiscriminant<T extends object>(x:T) {{ const a={{...x,p:1}}; const b={{...x,p:"s"}}; const y={{...a,...b}}; return one(y); }}
+export function nested_overwrite<T extends object>(x:T) {{ const a={{...x,p:1}}; const y={{...a,p:true}}; return one(y); }}
+export function literal(x: {{ [k]: number }}) {{ return one(x); }}
+export function enumeration(x: {{ [E.A]: number; [E.N]: string }}) {{ return one(x); }}
+export function wide(x: {{ padding: "{padding}"; [k]: number; tail: boolean; last: string }}) {{ return one(x); }}
+export function dynamic(x: any) {{ const y = {{ ...x }}; return one(y); }}
+export function dynamic_before(x: any) {{ const y = {{ p: 1, ...x }}; return one(y); }}
+export function dynamic_after(x: any) {{ const y = {{ ...x, p: 1 }}; return one(y); }}
+export function closed(x: {{ a: number }}) {{ const y = {{ ...x }}; return one(y); }}
+export function enum_value(x: {{ [E.A]: E.A }}) {{ return one(x); }}
+export function dynamic_nested(x: any) {{ const y = {{ ...{{ ...x, inner: 1 }}, outer: true }}; return one(y); }}
+export function property_dynamic(x: {{ a: any }}) {{ const y = {{ ...x }}; return one(y); }}
+export function enum_wide(x: {{ padding: "{padding}"; [E.A]: number; tail: boolean; last: string }}) {{ return one(x); }}
+"#
+    );
+    let expected = [
+        (
+            "repeated",
+            Some("T & { a: number; b: boolean; }".to_owned()),
+        ),
+        ("overwritten", Some("T & { p: boolean; }".to_owned())),
+        (
+            "nested_repeated",
+            Some("U & { b: number; } & { q: number; } & T & { a: number; c: boolean; }".to_owned()),
+        ),
+        (
+            "nested_disjoint",
+            Some("T & { p: number; } & { q: boolean; }".to_owned()),
+        ),
+        ("nested_conflict", None),
+        ("nested_bounded", None),
+        (
+            "nested_nondiscriminant",
+            Some("T & { p: number; } & { p: string; }".to_owned()),
+        ),
+        ("nested_overwrite", Some("T & { p: boolean; }".to_owned())),
+        ("literal", Some("{ a: number; }".to_owned())),
+        ("enumeration", Some("{ a: number; 1: string; }".to_owned())),
+        (
+            "wide",
+            Some(format!(
+                "{{ padding: \"{padding}\"; a: number; tail: boolean; last: string; }}"
+            )),
+        ),
+        ("dynamic", None),
+        ("dynamic_before", None),
+        ("dynamic_after", None),
+        ("closed", Some("{ a: number; }".to_owned())),
+        ("enum_value", Some("{ a: E.A; }".to_owned())),
+        ("dynamic_nested", None),
+        ("property_dynamic", Some("{ a: any; }".to_owned())),
+        (
+            "enum_wide",
+            Some(format!(
+                "{{ padding: \"{padding}\"; a: number; tail: boolean; last: string; }}"
+            )),
+        ),
+    ];
+    let host = host_with(&source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (name, ty) in &expected {
+                let reports = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, name, &source,
+                );
+                let expected: Vec<_> = ty.iter().map(|ty| {
+                    let line = source.lines().position(|line| line.starts_with(&format!("export function {name}<")) || line.starts_with(&format!("export function {name}("))).unwrap();
+                    let text = source.lines().nth(line).unwrap();
+                    let column = text.rfind("one(").unwrap() + 5;
+                    format!("({},{}): error TS2345: Argument of type '{ty}' is not assignable to parameter of type 'string'.", line + 1, column)
+                }).collect();
+                if reports != expected {
+                    mismatches.push(format!(
+                        "{pass} {root} {name}: got {reports:?}, expected {expected:?}"
+                    ));
+                }
+                assert_prints(&host, root, name, "number");
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
+    let nest =
+        |leaf: &str, count: usize| format!("{}{leaf}{}", "{ e: ".repeat(count), " }".repeat(count));
+    let clipped = format!("{}{{ ...", "{ e: ".repeat(63));
+    for (name, overload, elaborated, count) in [
+        ("elaborated", false, true, 100),
+        ("overloaded", true, false, 100),
+        ("part_overflow", false, true, 101),
+        ("overload_elaborated", true, true, 100),
+    ] {
+        // A context-sensitive sibling exercises the supported overload
+        // diagnostic producer while the first argument owns the overflow.
+        let callback = if overload {
+            ", cb: (v: number) => number"
+        } else {
+            ""
+        };
+        let callback_argument = if overload { ", v => v" } else { "" };
+        let source = format!("declare const x: {};\ndeclare function f(arg: {}{callback}): number;\n{}export function {name}() {{ return f({}{callback_argument}); }}\n",
+            nest("{ x: number }", count), nest("{ y: number }", count),
+            if overload { format!("declare function f(arg: {}{callback}, extra?: number): number;\n", nest("{ y: number }", count)) } else { String::new() },
+            if elaborated { "{ e: x.e }" } else { "x" });
+        let line = source.lines().count();
+        let body = source.lines().last().unwrap();
+        let call = body.find("f(").unwrap() + 1;
+        let argument = call + 2;
+        let overflow =
+            format!("Excessive stack depth comparing types '{clipped}' and '{clipped}'.");
+        let mut expected = vec![format!("({line},{}): error TS2321: {overflow}", call)];
+        if overload && !elaborated {
+            expected.push(format!("({line},{argument}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {overflow}"));
+        } else if count == 101 {
+            expected.push(format!(
+                "({line},{}): error TS2321: {overflow}",
+                argument + 2
+            ));
+        } else {
+            let message = format!("Type '{clipped}' is not assignable to type '{clipped}'. Two different types with this name exist, but they are unrelated.\n  The types of '{}' are incompatible between these types.\n    Property 'y' is missing in type '{{ x: number; }}' but required in type '{{ y: number; }}'.", vec!["e"; 99].join("."));
+            if overload {
+                expected.push(format!("({line},{}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {}", argument + 2, message.replace('\n', "\n    ")));
+            } else {
+                expected.push(format!(
+                    "({line},{}): error TS2719: {message}",
+                    argument + 2
+                ));
+            }
+        }
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            for root in [STRICT_ROOT, LOOSE_ROOT] {
+                assert_eq!(
+                    super::signature_predicate_inference_tests::checker_report(
+                        &host, root, name, &source
+                    ),
+                    expected,
+                    "{pass} {root} {name}"
+                );
+                if overload {
+                    super::signature_predicate_inference_tests::observe(
+                        &host,
+                        root,
+                        name,
+                        |_, degradation, _| {
+                            assert!(
+                                degradation.is_some(),
+                                "overload recovery retains its existing typed gap"
+                            )
+                        },
+                    );
+                } else {
+                    assert_prints(&host, root, name, "number");
+                }
+            }
+        }
+    }
 }

@@ -25,3 +25,12 @@
 - The never-consulted member-surface recursion-depth and union-member-explosion fuses are deleted.
 
 No replacement request-wide cutoff exists. The remaining `FuseBudgets` rails — wildcard-route fan-out, imported-root fan-out and registry-deepening fan-out — bound route and registry work that no semantic query counts, so the operation account does not cover them; they stay until that work is charged to it. Query depth, checker instantiation depth, `Maybe` rules, cancellation and deterministic refusal sealing are unchanged.
+
+Fan-out trips record `PartialReasonSet::FANOUT_LIMIT` (`fanoutLimit` on the
+native boundary), distinct from operation-account exhaustion. The cause vetoes
+final-result refusal retention even beside an eligible operation-budget reason.
+These fixed caps do not define an operation profile, and wildcard accounting
+counts cold imported-registry computations only: successfully warmed dependency
+entries let an identical follow-up recompute and heal. Intermediate fuse-tripped
+misses likewise remain request-only, never warm negatives. Wire fact causes and
+the completeness field both keep the distinct `fanoutLimit` reason.

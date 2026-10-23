@@ -116,7 +116,7 @@ impl EvalState {
     }
 }
 
-enum EvalFailure {
+pub(super) enum EvalFailure {
     /// An operand or nested query failed with its own typed reason. The
     /// reason is propagated unchanged so operational partials stay
     /// distinguishable from a genuine miss.
@@ -137,10 +137,10 @@ impl From<NarrowFailure> for EvalFailure {
     }
 }
 
-struct PropertySpreadChain {
-    base: SemanticNodeId,
+pub(super) struct PropertySpreadChain {
+    pub(super) base: SemanticNodeId,
     /// The chain's programs, outermost first.
-    programs: Vec<SemanticNodeId>,
+    pub(super) programs: Vec<SemanticNodeId>,
     /// How many tail writes the programs hold together.
     writes: usize,
 }
@@ -1042,7 +1042,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// surface, so a named interface or alias spreads its real closed
     /// surface instead of staying an open residual. Unresolvable carriers
     /// stay as-is and classify as open residuals downstream.
-    fn normalize_spread_operand_node(&self, operand: SemanticNodeId) -> SemanticNodeId {
+    pub(super) fn normalize_spread_operand_node(&self, operand: SemanticNodeId) -> SemanticNodeId {
         let mut current = operand;
         let mut seen = rustc_hash::FxHashSet::default();
         while seen.insert(current) {
@@ -1077,6 +1077,239 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         current
+    }
+
+    /// The checker's evaluated spread type, shared by relation decisions and
+    /// diagnostic preparation. Compose nested types rather than flattening
+    /// their effects: only a non-generic right operand merges with the final
+    /// non-generic group of a generic left intersection.
+    pub(super) fn evaluated_object_spread_type(
+        &self,
+        origin: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        if let Some(any) = self.object_spread_any_operand(origin).ok()? {
+            return Some(any);
+        }
+        let mut evaluated = FxHashMap::default();
+        let mut active = FxHashSet::default();
+        let mut pending = vec![(origin, false)];
+        while let Some((node, finish)) = pending.pop() {
+            if evaluated.contains_key(&node) {
+                continue;
+            }
+            let data = self.graph().node_data(node)?;
+            let SemanticNodeData::ObjectSpreadProgram(program) = data.as_ref() else {
+                return None;
+            };
+            if !finish {
+                if let Some(closed) = self.closed_object_spread_type(node)? {
+                    evaluated.insert(node, closed);
+                    continue;
+                }
+                if !active.insert(node) {
+                    return None;
+                }
+                self.charge_spread_construction(
+                    program.effects.len(),
+                    program.effects.len().saturating_mul(
+                        std::mem::size_of::<ObjectConstructionEffect>()
+                            + std::mem::size_of::<(SemanticNodeId, bool)>(),
+                    ),
+                )
+                .ok()?;
+                pending.push((node, true));
+                for effect in program.effects.iter().rev() {
+                    if let ObjectConstructionEffect::Spread(operand) = effect {
+                        let operand = self.normalize_spread_operand_node(*operand);
+                        if matches!(
+                            self.graph().node_data(operand).as_deref(),
+                            Some(SemanticNodeData::ObjectSpreadProgram(_))
+                        ) {
+                            pending.push((operand, false));
+                        }
+                    }
+                }
+                continue;
+            }
+            let mut result = self.empty_object();
+            let mut direct = Vec::new();
+            for effect in program.effects.iter() {
+                let ObjectConstructionEffect::Spread(operand) = effect else {
+                    direct.push(effect.copy());
+                    continue;
+                };
+                if !direct.is_empty() {
+                    let group = self.closed_spread_effects_type(
+                        node,
+                        program.is_literal,
+                        std::mem::take(&mut direct),
+                    )?;
+                    result = self.compose_object_spread_types(node, result, group)?;
+                }
+                let operand = self.normalize_spread_operand_node(*operand);
+                let operand = evaluated.get(&operand).copied().unwrap_or(operand);
+                result = self.compose_object_spread_types(node, result, operand)?;
+            }
+            if !direct.is_empty() {
+                let group = self.closed_spread_effects_type(node, program.is_literal, direct)?;
+                result = self.compose_object_spread_types(node, result, group)?;
+            }
+            active.remove(&node);
+            evaluated.insert(node, result);
+        }
+        evaluated.get(&origin).copied()
+    }
+
+    /// `Some(None)` is an open projection, never permission to turn its
+    /// positive facts into a closed surface. Query failures return `None`.
+    fn closed_object_spread_type(&self, origin: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
+        let formula = match self.project_object_spread_for_consumer(
+            origin,
+            ObjectProjectionSelector::Surface,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        ) {
+            QueryResult::Value(formula) => formula,
+            _ => return None,
+        };
+        let alternatives = self.object_spread_alternatives(&formula).ok()?;
+        let arms: Option<Vec<_>> = alternatives
+            .iter()
+            .map(|alternative| {
+                let surface = alternative.closed()?.to_closed_surface_view()?;
+                Some(
+                    self.graph()
+                        .intern_preserving_scope(origin, SemanticNodeData::Object(surface)),
+                )
+            })
+            .collect();
+        Some(arms.map(|arms| {
+            super::canonical_algebra::intern_ordered_union_charged(
+                self.graph(),
+                &arms,
+                verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                    self.relation_strict_config().strict_null_checks,
+                ),
+                self.construction_meter(),
+            )
+            .node
+        }))
+    }
+
+    fn closed_spread_effects_type(
+        &self,
+        origin: SemanticNodeId,
+        is_literal: bool,
+        effects: Vec<ObjectConstructionEffect>,
+    ) -> Option<SemanticNodeId> {
+        let fragment = self.graph().intern_preserving_scope(
+            origin,
+            SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+                is_literal,
+                effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
+            }),
+        );
+        self.closed_object_spread_type(fragment)?
+    }
+
+    fn compose_object_spread_types(
+        &self,
+        origin: SemanticNodeId,
+        left: SemanticNodeId,
+        right: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let left_data = self.graph().node_data(left)?;
+        let right_data = self.graph().node_data(right)?;
+        match (left_data.as_ref(), right_data.as_ref()) {
+            (SemanticNodeData::Primitive(PrimitiveKind::Any), _) => return Some(left),
+            (_, SemanticNodeData::Primitive(PrimitiveKind::Any)) => return Some(right),
+            (SemanticNodeData::Primitive(PrimitiveKind::Unknown), _) => return Some(left),
+            (_, SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => return Some(right),
+            (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => return Some(right),
+            (
+                _,
+                SemanticNodeData::Primitive(
+                    PrimitiveKind::Never | PrimitiveKind::Null | PrimitiveKind::Undefined,
+                ),
+            ) => return Some(left),
+            (_, data) if right_spreads_to_nothing(data) => return Some(left),
+            _ => {}
+        }
+        let closed_merge = |left, right| {
+            self.closed_spread_effects_type(
+                origin,
+                false,
+                vec![
+                    ObjectConstructionEffect::Spread(left),
+                    ObjectConstructionEffect::Spread(right),
+                ],
+            )
+        };
+        if !self.type_is_generic(left) && !self.type_is_generic(right) {
+            return closed_merge(left, right);
+        }
+        if matches!(left_data.as_ref(), SemanticNodeData::Object(surface) if surface.closed().is_empty())
+        {
+            return Some(right);
+        }
+        let mut groups = vec![left, right];
+        if let SemanticNodeData::Intersection(members) = left_data.as_ref() {
+            if let Some(last) = members.last().copied() {
+                if matches!(
+                    self.graph().node_data(last).as_deref(),
+                    Some(SemanticNodeData::Object(_))
+                ) && matches!(right_data.as_ref(), SemanticNodeData::Object(_))
+                {
+                    groups = members.iter().copied().collect();
+                    *groups.last_mut()? = closed_merge(last, right)?;
+                }
+            }
+        }
+        Some(
+            super::canonical_algebra::intern_ordered_intersection_charged(
+                self.graph(),
+                &groups,
+                self.construction_meter(),
+            )
+            .node,
+        )
+    }
+
+    /// A dynamic spread makes the construction's checker type `any`, even
+    /// beside known writes. Inspect only spread operands, through the shared
+    /// operand normalizer; an `any`-valued property does not make its object dynamic.
+    pub(super) fn object_spread_any_operand(
+        &self,
+        program: SemanticNodeId,
+    ) -> Result<Option<SemanticNodeId>, EvalFailure> {
+        let mut pending = vec![program];
+        let mut seen = FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            let node = self.normalize_spread_operand_node(node);
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(node) else {
+                return Err(EvalFailure::Operational(QueryError::Miss));
+            };
+            match data.as_ref() {
+                SemanticNodeData::Primitive(PrimitiveKind::Any) => return Ok(Some(node)),
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    self.charge_spread_construction(
+                        program.effects.len(),
+                        program
+                            .effects
+                            .len()
+                            .saturating_mul(std::mem::size_of::<SemanticNodeId>()),
+                    )?;
+                    pending.extend(program.effects.iter().filter_map(|effect| match effect {
+                        ObjectConstructionEffect::Spread(operand) => Some(*operand),
+                        _ => None,
+                    }));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 
     /// The product layer one spread operand contributes. `top` marks the
@@ -1193,7 +1426,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the existing correlated evaluator. No prefix is projected or rebuilt.
     /// Optional writes, computed keys and non-public members need the complete
     /// inner-object fold before copying and cannot use this composition rule.
-    fn property_spread_chain(
+    pub(super) fn property_spread_chain(
         &self,
         mut operand: SemanticNodeId,
     ) -> Result<Option<PropertySpreadChain>, EvalFailure> {

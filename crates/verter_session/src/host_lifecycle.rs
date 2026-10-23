@@ -1072,6 +1072,8 @@ impl VerterHost {
                 .entry_count(),
             component_meta_states: self.resolver.runtime.component_meta_state_count(),
             identity_pool_entries: self.project_type_store.identity_interner().len(),
+            #[cfg(any(test, feature = "test-support"))]
+            identity_pool_bytes: self.project_type_store.identity_interner().retained_bytes(),
             registered_sources: self.carrier_publication.source_authority.len(),
             signature_records: self
                 .project_type_store
