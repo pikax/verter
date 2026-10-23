@@ -51,6 +51,40 @@ with a 2 ms slice so a stop stays observable.
 
 ## Delivered boundaries
 
+### Task-owned cancellation
+
+`verter_execution::dependency::OwnedDependency<H>` binds a poll-only
+`DependencyPoll` to its actual producer and waiter tasks. Both must belong
+to the same registry. Pending registers one wait edge; a cycle, an already
+waiting task or an authority mismatch returns `DependencyStop::Cycle`.
+An immediately ready answer needs no edge. `DependencyStop::Cancelled`
+contains no partial answer. Terminal answers and drop withdraw the readiness
+and cancellation registrations, edge and task pins. No method exposes the
+underlying handoff or its synchronous driver.
+
+`CancellationToken::subscribe` observes explicit stop without timer-based
+re-polling. Registration and stop publication share the token's wake lock.
+Aggregate tokens forward the final owner's cancellation or withdrawal;
+surviving owners keep the shared computation live. Liveness probes remain
+callback-free. Owners that publish cancellation under an outer lock use
+`cancel_deferred`, `register_owner_deferred` or
+`CancellationOwner::detach_deferred` and deliver the
+returned wakes after unlocking. The scheduler uses its existing DAG/lifecycle
+delivery rail for these wakes as well as completion wakes.
+
+The host constructs one registry and injects it into its scheduler and
+semantic store. A scoped cache flight owns a producer task in that registry;
+its producer installs that task while executing, including when moved to
+another thread. A scoped subscriber captures the current task or owns a new
+task for an external caller. It retains its wait edge while the transferred
+producer runs under its own task, so a demand back into the waiting parent
+is refused. Terminalization withdraws that edge. Cancellation
+wakes the subscriber directly, and `Reentrant` also represents refused
+cross-family cycles.
+
+Terminal scoped handoffs also release their scheduler, identity and request
+context; keeping a completed handoff alive does not retain its scheduler tree.
+
 ### Scheduler completions
 
 | Boundary | Owner |
@@ -82,6 +116,11 @@ with a 2 ms slice so a stop stays observable.
   thread identity; another scheduler's driver still waits for the reset
   barrier.
 - **Backpressure:** none at completion; admission has its own handoff below.
+
+`CompletionSubscription::owned(waiter, producer, cancellation)` returns an
+`OwnedDependency` with the same terminal states. The supplied producer must
+be the execution that actually produces the completion. It stops only that
+subscriber, preserving the handle's first-writer-wins result and siblings.
 
 ### Scheduler request admission
 
@@ -142,9 +181,9 @@ producer on the existing CPU pool.
   its owner; a surviving sibling keeps shared work live.
 - **Errors:** cancellation, shutdown/reset, panic, mismatched result type and
   same-path re-entry retain the existing typed outcomes. Cancellation is
-  checked at each poll; cancellation-only wake delivery and shared-registry
-  wait edges remain unfinished. Executors must re-poll or drop on request
-  cancellation. Polling after a terminal result is a contract violation.
+  checked and registered at each poll. A stop wakes only its subscriber;
+  shared-registry wait edges refuse cycles before suspension. Polling after
+  a terminal result is a contract violation.
 - **Wake ordering:** dispatch and settlement take registrations under the
   flight lock. Delivery uses the scheduler's deferral rail, after flight,
   scoped-incarnation and DAG locks release, including reset's outer hold.
@@ -170,6 +209,16 @@ carries owned inputs to the shard and brings back owned results.
 | `DeclLoweringService::begin_run_leased_batch -> LeasedBatchHandoff<R>` | `run_leased_batch` | `Vec<Option<R>>` in input order |
 
 All of these are in `crates/verter_semantic_source/src/decl_lowering.rs`.
+
+Each handoff additionally offers `owned(waiter, cancellation)` before its
+first poll. This returns `OwnedDependency` with typed `LoweringFailure`
+(`WorkerStopped` or `Panicked`) inside its answer. The existing worker job
+installs its producer task from the waiter's registry; no parser arena or
+borrowed AST crosses a shard boundary. A batch's pure shard operations
+jointly produce one ordered answer under its batch task identity. Cancellation
+drops unsubmitted jobs or abandons admitted replies; an arriving lease is
+released on its owner shard. Existing synchronous entries retain their panic
+compatibility and drive the same queue/reply state.
 
 - **Backpressure yields.** A poll first offers the job to its worker's
   bounded queue with a non-blocking send. If the queue is full, the poll
@@ -197,23 +246,70 @@ All of these are in `crates/verter_semantic_source/src/decl_lowering.rs`.
   shard's share is offered on the first poll and the shards lower in
   parallel. The batch answers once every share has answered, and the first
   job panic re-panics then.
-- **wasm32:** the shard is the calling thread's own, so a handoff answers at
-  submission and its first poll is `Ready`.
+- **wasm32:** the shard is the calling thread's own. Construction retains
+  owned inputs; its first poll runs the pure shard operation and is `Ready`.
+  Attaching ownership before that poll installs the task around the work and
+  allows an already cancelled demand to stop without executing it. Panic
+  containment requires an unwinding target; the default wasm panic-abort
+  target is checked for compilation rather than panic recovery.
+
+### Cache admission and publication
+
+Both artifact and query-candidate admission use one owned protocol. Artifact
+callers enter `singleflight::owned_admit_with_post_publish` or
+`owned_admit_with_post_publish_by_flight_key`; query-candidate callers enter
+`lookup_publish::owned_admit_with_lookup_publish` in the type engine.
+
+- **Work transfer:** `OwnedAdmission::poll` answers a validated warm value,
+  subscribes to a flight, or transfers the sole `OwnedAdmissionProducer`.
+  Running that producer is the external owner's job. Polling neither computes
+  cold work nor submits to a queue. The producer installs its actual task from
+  the waiter's shared registry, and the parent edge remains live until the
+  answer is observed or abandoned.
+- **Result and failure:** `Value(Some(value))` is complete. `Value(None)` keeps
+  the adapter's failure policy. `Cancelled`, `Cycle`, `ProducerUnowned`,
+  `ProducerDropped` and `ProducerPanicked` are typed refusals without partial values. The artifact
+  follower surfaces failed production; a query follower forks after producer
+  panic or rejected admission. Return-only production is never shared across
+  views. A cacheable follower revalidates and bubbles facts in its own view.
+- **Lifetime:** each subscriber owns one replaceable readiness registration
+  and its stop interest. Dropping or cancelling it leaves the producer and
+  sibling subscriptions intact. Terminalization releases task pins, its table,
+  key and callbacks while a completed handle may remain alive. Dropping an
+  unrun producer fails and retires its exact flight and wakes the followers.
+- **Publication:** the original validation, retention fences, pointer-checked
+  retirement, displaced-entry cleanup and deferred eviction stay in the
+  owning adapter. Wakes occur after publication locks release. The same-key
+  and split-flight artifact entries preserve their different publish locking.
+- **Compatibility:** synchronous admission/get-or-insert entries externally
+  drive this same state machine with borrowed callbacks. Explicit owned APIs
+  require owned transferable views/tracers; they refuse a pending producer
+  whose shared task authority is unavailable with `ProducerUnowned`. A ready
+  answer needs no wait authority. No extra registry or pool is
+  allocated by standalone compatibility calls.
+
+The dispatch layer owns conversion of `cache_runtime::node::{lookup,
+query::lookup}` and their semantic memo consumers. Metadata and compilation
+callers reach those nodes through dispatch and retain responsibility for their
+own resumable traversal state.
 
 ## Boundaries that still block
 
 These are the production waits a component-meta or compile root can reach
 in the current tree. Each one parks the polling thread inside whatever poll
-reaches it, so a root that reaches one is not yet pollable. None of them
-registers a wait-for edge with the shared `TaskRegistry`; only the semantic
-memo's flights do (`verter_type_engine::semantic_query_memo`).
+reaches it, so a root that reaches one is not yet pollable. Semantic memo
+flights and scoped cache-node handoffs register shared-registry wait edges.
+Completion, cache admission and declaration-lowering subscriptions offer
+explicit task-owned adapters; their synchronous callers still require
+conversion. Resolver/store-view, workspace, carrier publication and host
+load/index ownership remain incomplete in this inventory.
 
 | Wait | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- |
 | Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
 | Semantic task drive (`SemanticTask::drive`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
-| Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | private `SlotJoin::poll`; synchronous callers still drive it to completion |
-| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | same `SlotJoin::poll`; callers still synchronous |
+| Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | owned artifact admission with producer transfer; dispatch callers still synchronous |
+| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |
 | Resolver request singleflight follower (`SingleflightGroup::run_retaining`; thread-identity owner) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | private owned `FlightJoin::poll`; callers still synchronous |
 | Store-view build park (`StoreViewManager::park_for_build`) | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | private `BuildRelease::poll`; callers still synchronous |
 | Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |

@@ -2259,7 +2259,12 @@ impl SchedulerDag {
         }
         if let Some(node) = self.nodes.get_mut(&tok) {
             node.cancelled = true;
-            node.cancellation.cancel();
+            let wakes = node.cancellation.cancel_deferred();
+            if let Some(pending) = &mut self.completion_wakes {
+                pending.push(wakes);
+            } else {
+                wakes.wake();
+            }
         }
         // A cancelled node is no longer dispatch-ready — drop its lane
         // entry (if it had one).
@@ -2595,7 +2600,12 @@ impl SchedulerDag {
         // decrements the counters; the explicit zero below catches
         // any stragglers held outside the dag.
         for (_, mut node) in self.nodes.drain() {
-            node.cancellation.cancel();
+            let wakes = node.cancellation.cancel_deferred();
+            if let Some(pending) = &mut self.completion_wakes {
+                pending.push(wakes);
+            } else {
+                wakes.wake();
+            }
             // Reservation::Drop returns permits to both counters.
             let _ = node.reservation.take();
         }

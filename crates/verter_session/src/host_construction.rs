@@ -504,6 +504,7 @@ impl VerterHost {
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
+        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
@@ -555,12 +556,13 @@ impl VerterHost {
                         Arc::clone(&worker_pools.scheduler_io_pool),
                     ),
                 };
-                let scheduler = verter_scheduler::scheduler::Scheduler::with_executor(
+                let scheduler = verter_scheduler::scheduler::Scheduler::with_executor_and_registry(
                     scheduler_config,
                     loader,
                     executor,
                     scheduler_cpu_pool,
                     scheduler_io_pool,
+                    task_registry.clone(),
                 );
                 platform_services
                     .verify_scheduling_route(
@@ -575,11 +577,13 @@ impl VerterHost {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                let scheduler = verter_scheduler::scheduler::Scheduler::new_sync_with_executor(
-                    scheduler_config,
-                    loader,
-                    executor,
-                );
+                let scheduler =
+                    verter_scheduler::scheduler::Scheduler::new_sync_with_executor_and_registry(
+                        scheduler_config,
+                        loader,
+                        executor,
+                        task_registry.clone(),
+                    );
                 platform_services
                     .verify_scheduling_route(
                         crate::platform_services::ServiceRoute::InlineDriveScheduler,
@@ -594,7 +598,6 @@ impl VerterHost {
         // another shares — and composes the project store over it. The
         // engine grants stay here: the root lends them to the request
         // attachment alone.
-        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let (project_type_store, engine_grants) =
             crate::project_type_store::ProjectTypeStore::compose(
                 Arc::clone(&provenance),

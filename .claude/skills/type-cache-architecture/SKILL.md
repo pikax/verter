@@ -118,6 +118,38 @@ the cache-runtime overhaul and any feature admitting cache entries.
     returns its COMPLETE value uncached under
     `NonAdmissionReason::RetentionPressure`.
 
+## Owned cache admission
+
+`cache_runtime::singleflight::owned_admit_with_post_publish` and its
+`_by_flight_key` counterpart retain owned map, view and callback inputs in an
+`OwnedAdmission`. The query-candidate adapter uses
+`lookup_publish::owned_admit_with_lookup_publish`. Polling only looks up,
+validates or subscribes; a cold winner transfers `OwnedAdmissionProducer`
+through `OwnedAdmissionStep::Produce`. The external owner runs that producer,
+then polls for `Value`. No queue, pool or cold computation runs within poll.
+
+Both synchronous admission adapters drive this same protocol with borrowed
+policies. With an execution scope they inherit its registry; standalone
+compatibility callers allocate no second authority. An explicit owned waiter
+cannot join a producer with absent or foreign registry authority.
+
+The producer installs its actual task scope. Its parent retains a wait edge
+through transferred work; followers register their own shared-registry edges
+and readiness/stop subscriptions. Cancellation or drop detaches only that
+waiter. `Cancelled`, `Cycle`, `ProducerUnowned`, `ProducerDropped` and
+`ProducerPanicked` carry no partial value. A pending legacy producer with no
+task scope is `ProducerUnowned`, rather than a fabricated cycle. A completed
+answer requires no producer authority. Terminalization releases the waiter, key, table and callback
+captures even if the completed handle remains alive.
+
+`Value(None)` preserves each adapter's existing failure policy: artifact
+followers surface a failed compute; query followers fork after panic or rejected
+admission. Return-only values remain winner-only. Every successful follower
+validates and bubbles facts against its own captured view. The same-key and
+split-flight entries retain their distinct publication/cleanup locking; the
+query adapter retains its publish-core/deferred-eviction fence. Captured views
+and tracers belong to the caller, rather than borrowed thread-local state.
+
 ## Aggregate retention account
 
 `crates/verter_retention` owns `SemanticRetentionAccount` and its charge

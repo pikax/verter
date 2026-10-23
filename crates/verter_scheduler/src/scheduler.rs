@@ -237,7 +237,8 @@ pub enum ScopedCacheNodeError {
     Panicked,
     /// The same typed identity was used concurrently for different value types.
     TypeMismatch,
-    /// A producer synchronously requested its own active cache-node identity.
+    /// A producer requested its own active identity, or a dependency wait
+    /// would close a cycle in the host's shared task registry.
     Reentrant,
 }
 
@@ -248,6 +249,7 @@ pub enum ScopedCacheNodeError {
 pub struct ScopedCacheFlight {
     state: Mutex<ScopedCacheFlightState>,
     delivery: Arc<DagMutex>,
+    task: verter_execution::tasks::ExecutionTask,
 }
 
 /// Typed result of a submission attempt.
@@ -320,6 +322,7 @@ impl BatchHandle {
 /// Manages per-file nodes, a priority queue, and a driver thread that
 /// processes submissions and dispatches work to CPU/IO pools.
 pub struct Scheduler {
+    task_registry: verter_execution::tasks::TaskRegistry,
     /// Per-file nodes (concurrent access via DashMap).
     ///
     /// EXECUTION state: each [`FileNode`] holds only its CURRENT
@@ -584,7 +587,28 @@ impl Scheduler {
         cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
         io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
+        Self::with_executor_and_registry(
+            config,
+            source_loader,
+            executor,
+            cpu_pool,
+            io_pool,
+            Default::default(),
+        )
+    }
+
+    /// Compose scheduler dependencies under the host's cycle authority.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_executor_and_registry(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+        cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+        task_registry: verter_execution::tasks::TaskRegistry,
+    ) -> Arc<Self> {
         let scheduler = Arc::new(Self {
+            task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
@@ -682,7 +706,29 @@ impl Scheduler {
         #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
         #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
+        Self::new_sync_with_executor_and_registry(
+            config,
+            source_loader,
+            executor,
+            #[cfg(not(target_arch = "wasm32"))]
+            cpu_pool,
+            #[cfg(not(target_arch = "wasm32"))]
+            io_pool,
+            Default::default(),
+        )
+    }
+
+    /// Compose an externally driven scheduler under the host's cycle authority.
+    pub fn new_sync_with_executor_and_registry(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
+        task_registry: verter_execution::tasks::TaskRegistry,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
@@ -887,7 +933,10 @@ impl Scheduler {
                 let candidate = match self.scoped_cache_flights.entry(identity.clone()) {
                     dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
                     dashmap::mapref::entry::Entry::Vacant(entry) => {
-                        let flight = Arc::new(ScopedCacheFlight::new(Arc::clone(&self.dag)));
+                        let flight = Arc::new(ScopedCacheFlight::new(
+                            Arc::clone(&self.dag),
+                            self.task_registry.register_task(),
+                        ));
                         entry.insert(Arc::clone(&flight));
                         flight
                     }

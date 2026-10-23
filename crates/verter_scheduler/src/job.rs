@@ -446,6 +446,16 @@ pub struct CompletionSubscription<T: Clone> {
 }
 
 impl<T: Clone> CompletionSubscription<T> {
+    /// Attach a completion wait to its execution owners and request stop.
+    /// Neither this capability nor its result exposes the blocking handle.
+    pub fn owned(
+        self,
+        waiter: verter_execution::tasks::ExecutionTask,
+        producer: verter_execution::tasks::ExecutionTask,
+        cancellation: verter_execution::cancellation::CancellationToken,
+    ) -> verter_execution::dependency::OwnedDependency<Self> {
+        verter_execution::dependency::OwnedDependency::new(self, waiter, producer, cancellation)
+    }
     /// `Ready` with the handle's terminal state once it resolved, else
     /// `Pending` with `waker` registered to fire when it does.
     pub fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<CompletionState<T>> {
@@ -456,6 +466,14 @@ impl<T: Clone> CompletionSubscription<T> {
         }
         slot.wakers.register(&mut self.registration, waker);
         std::task::Poll::Pending
+    }
+}
+
+impl<T: Clone> verter_execution::dependency::DependencyPoll for CompletionSubscription<T> {
+    type Output = CompletionState<T>;
+
+    fn poll_dependency(&mut self, waker: &std::task::Waker) -> std::task::Poll<Self::Output> {
+        self.poll(waker)
     }
 }
 
@@ -767,6 +785,45 @@ mod tests {
             subscription.poll(&waker),
             std::task::Poll::Ready(CompletionState::Superseded)
         ));
+    }
+
+    #[test]
+    fn owned_completion_stop_wakes_and_detaches_without_resolving_its_sibling() {
+        use std::task::Poll;
+        use verter_execution::cancellation::CancellationToken;
+        use verter_execution::dependency::DependencyStop;
+        use verter_execution::tasks::TaskRegistry;
+        let registry = TaskRegistry::default();
+        let producer = registry.register_task();
+        let (handle, sender) = completion_pair::<u32>();
+        let token = CancellationToken::new();
+        let mut first =
+            handle
+                .subscribe()
+                .owned(registry.register_task(), producer.clone(), token.clone());
+        let mut sibling =
+            handle
+                .subscribe()
+                .owned(registry.register_task(), producer, CancellationToken::new());
+        let (counter, waker) = counting_waker();
+        assert!(first.poll(&waker).is_pending());
+        assert!(sibling.poll(&waker).is_pending());
+        assert_eq!(handle.registered_wakers(), 2);
+        token.cancel();
+        assert_eq!(wakes(&counter), 1);
+        assert!(matches!(
+            first.poll(&waker),
+            Poll::Ready(Err(DependencyStop::Cancelled))
+        ));
+        assert_eq!(handle.registered_wakers(), 1);
+        assert_eq!(registry.wait_graph_occupancy().edges, 1);
+        assert!(!handle.is_resolved());
+        sender.send(CompletionState::Ready(51));
+        assert!(matches!(
+            sibling.poll(&waker),
+            Poll::Ready(Ok(CompletionState::Ready(51)))
+        ));
+        assert_eq!(registry.wait_graph_occupancy().edges, 0);
     }
 
     #[test]

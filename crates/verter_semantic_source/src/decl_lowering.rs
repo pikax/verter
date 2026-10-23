@@ -704,6 +704,16 @@ pub(crate) struct ShardHandoff<T> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl<T> ShardHandoff<T> {
+    /// Bind the retained job before admission; its arena remains on its
+    /// existing shard and only the task identity crosses the queue.
+    fn install_task(&mut self, task: verter_execution::tasks::ExecutionTask) {
+        let job = self.job.take().expect("ownership binds before admission");
+        self.job = Some(Box::new(move |shard| {
+            let _scope = verter_execution::tasks::ExecutionScope::install(task.registry(), &task);
+            job(shard);
+        }));
+    }
+
     /// A handoff to `worker` of the job `build` makes around its reply.
     fn new(
         worker: &DeclWorker,
@@ -739,7 +749,7 @@ impl<T> ShardHandoff<T> {
                     return std::task::Poll::Pending;
                 }
                 Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                    panic!("decl-lowering worker channel must outlive the service")
+                    std::panic::panic_any(WorkerDisconnected)
                 }
             }
         }
@@ -758,7 +768,7 @@ impl<T> ShardHandoff<T> {
                 ReplyState::Answered(answer) => std::task::Poll::Ready(answer),
                 _ => unreachable!("the reply was just seen answered"),
             },
-            ReplyState::Closed => panic!("decl-lowering worker must answer every job"),
+            ReplyState::Closed => std::panic::panic_any(WorkerDisconnected),
             ReplyState::Taken | ReplyState::Abandoned => {
                 panic!("a decl-lowering handoff is polled after it answered")
             }
@@ -1356,31 +1366,39 @@ impl DeclLoweringService {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let ((parsed_now, refused), result) = WASM_DECL_LOWERING_SHARD.with(|cell| {
-                let acquired = cell
-                    .borrow_mut()
-                    .acquire(&self.account, key, source, source_type);
-                let result = match (job, acquired.1) {
-                    (Some(job), None) => {
-                        let shard = cell.borrow();
-                        shard
-                            .snapshot_leased(key)
-                            .map(|parsed| job(parsed.as_deref()))
-                    }
-                    _ => None,
-                };
-                (acquired, result)
-            });
-            LeaseHandoff {
-                ready: Some((
+            let service = Arc::clone(self);
+            let key = key.clone();
+            let source = Arc::clone(source);
+            let work = Box::new(move || {
+                let ((parsed_now, refused, lease), result) =
+                    WASM_DECL_LOWERING_SHARD.with(|cell| {
+                        let acquired =
+                            cell.borrow_mut()
+                                .acquire(&service.account, &key, &source, source_type);
+                        // Mint the lease before the user job so unwinding releases
+                        // an acquired snapshot just as it does on a native worker.
+                        let lease = service.lease(key.clone());
+                        let result = match (job, acquired.1) {
+                            (Some(job), None) => {
+                                let shard = cell.borrow();
+                                shard
+                                    .snapshot_leased(&key)
+                                    .map(|parsed| job(parsed.as_deref()))
+                            }
+                            _ => None,
+                        };
+                        ((acquired.0, acquired.1, lease), result)
+                    });
+                (
                     LeaseOutcome {
-                        lease: self.lease(key.clone()),
+                        lease,
                         parsed_now,
                         refused,
                     },
                     result,
-                )),
-            }
+                )
+            });
+            LeaseHandoff { work: Some(work) }
         }
     }
 
@@ -1696,13 +1714,18 @@ impl DeclLoweringService {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let ready = WASM_DECL_LOWERING_SHARD.with(|cell| {
-                let shard = cell.borrow();
-                shard
-                    .snapshot_leased(key)
-                    .map(|parsed| job(parsed.as_deref()))
+            let key = key.clone();
+            let service = Arc::clone(self);
+            let work = Box::new(move || {
+                let _service = service;
+                WASM_DECL_LOWERING_SHARD.with(|cell| {
+                    let shard = cell.borrow();
+                    shard
+                        .snapshot_leased(&key)
+                        .map(|parsed| job(parsed.as_deref()))
+                })
             });
-            LeasedRunHandoff { ready: Some(ready) }
+            LeasedRunHandoff { work: Some(work) }
         }
     }
 
@@ -1787,18 +1810,22 @@ impl DeclLoweringService {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let ready = WASM_DECL_LOWERING_SHARD.with(|cell| {
-                let shard = cell.borrow();
-                jobs.into_iter()
-                    .map(|LeasedJob { key, run }| {
-                        shard
-                            .snapshot_leased(&key)
-                            .map(|parsed| run(parsed.as_deref()))
-                    })
-                    .collect()
+            let service = Arc::clone(self);
+            let work = Box::new(move || {
+                let _service = service;
+                WASM_DECL_LOWERING_SHARD.with(|cell| {
+                    let shard = cell.borrow();
+                    jobs.into_iter()
+                        .map(|LeasedJob { key, run }| {
+                            shard
+                                .snapshot_leased(&key)
+                                .map(|parsed| run(parsed.as_deref()))
+                        })
+                        .collect()
+                })
             });
             let _ = count;
-            LeasedBatchHandoff { ready: Some(ready) }
+            LeasedBatchHandoff { work: Some(work) }
         }
     }
 }
@@ -1846,12 +1873,85 @@ pub struct LeaseHandoff<R> {
     /// The profile sink and the submission instant, for a profiled handoff.
     #[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
     profile: Option<(Arc<HandoffStats>, std::time::Instant)>,
-    /// wasm answers at submission: the shard is this thread's.
+    /// wasm defers its pure shard work until first poll.
     #[cfg(target_arch = "wasm32")]
-    ready: Option<(LeaseOutcome, Option<R>)>,
+    work: InlineWork<(LeaseOutcome, Option<R>)>,
+}
+
+/// A terminal owner-shard failure, with no partial lowering answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoweringFailure {
+    /// The worker stopped without answering the retained job.
+    WorkerStopped,
+    /// The submitted operation panicked; its lease was released first.
+    Panicked,
+}
+
+#[cfg(target_arch = "wasm32")]
+type InlineWork<T> = Option<Box<dyn FnOnce() -> T + Send>>;
+
+#[cfg(target_arch = "wasm32")]
+fn install_inline_task<T: 'static>(
+    work: &mut InlineWork<T>,
+    task: verter_execution::tasks::ExecutionTask,
+) {
+    let operation = work.take().expect("ownership binds before execution");
+    *work = Some(Box::new(move || {
+        let _scope = verter_execution::tasks::ExecutionScope::install(task.registry(), &task);
+        operation()
+    }));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct WorkerDisconnected;
+
+fn poll_lowering<T>(
+    poll: impl FnOnce() -> std::task::Poll<T>,
+) -> std::task::Poll<Result<T, LoweringFailure>> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(poll)) {
+        Ok(answer) => answer.map(Ok),
+        Err(payload) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            if payload.is::<WorkerDisconnected>() {
+                return std::task::Poll::Ready(Err(LoweringFailure::WorkerStopped));
+            }
+            #[cfg(target_arch = "wasm32")]
+            let _ = payload;
+            std::task::Poll::Ready(Err(LoweringFailure::Panicked))
+        }
+    }
+}
+
+impl<R> verter_execution::dependency::DependencyPoll for LeaseHandoff<R> {
+    type Output = Result<(LeaseOutcome, Option<R>), LoweringFailure>;
+    fn poll_dependency(&mut self, waker: &std::task::Waker) -> std::task::Poll<Self::Output> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(*self.handoff.reply.state.lock(), ReplyState::Closed) {
+            return std::task::Poll::Ready(Err(LoweringFailure::WorkerStopped));
+        }
+        poll_lowering(|| self.poll(waker))
+    }
 }
 
 impl<R> LeaseHandoff<R> {
+    /// A cancellable, task-owned lease demand. Call before the first poll.
+    /// Cancellation abandons only this answer and releases any arriving lease.
+    pub fn owned(
+        mut self,
+        waiter: verter_execution::tasks::ExecutionTask,
+        cancellation: verter_execution::cancellation::CancellationToken,
+    ) -> verter_execution::dependency::OwnedDependency<Self>
+    where
+        R: 'static,
+    {
+        let producer = waiter.registry().register_task();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.handoff.install_task(producer.clone());
+        #[cfg(target_arch = "wasm32")]
+        install_inline_task(&mut self.work, producer.clone());
+        verter_execution::dependency::OwnedDependency::new(self, waiter, producer, cancellation)
+    }
+
     /// `Ready` with the acquisition's outcome, or `Pending` with `waker`
     /// registered for the queue space or the worker's answer.
     pub fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<(LeaseOutcome, Option<R>)> {
@@ -1887,11 +1987,11 @@ impl<R> LeaseHandoff<R> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = waker;
-            std::task::Poll::Ready(
-                self.ready
-                    .take()
-                    .expect("a decl-lowering handoff is polled after it answered"),
-            )
+            std::task::Poll::Ready(self
+                .work
+                .take()
+                .expect("a decl-lowering handoff is polled after it answered")(
+            ))
         }
     }
 }
@@ -1910,10 +2010,39 @@ pub struct LeasedRunHandoff<R> {
     #[cfg(all(not(target_arch = "wasm32"), feature = "semantic-observe"))]
     profile: Option<(Arc<HandoffStats>, std::time::Instant)>,
     #[cfg(target_arch = "wasm32")]
-    ready: Option<Option<R>>,
+    work: InlineWork<Option<R>>,
+}
+
+impl<R> verter_execution::dependency::DependencyPoll for LeasedRunHandoff<R> {
+    type Output = Result<Option<R>, LoweringFailure>;
+    fn poll_dependency(&mut self, waker: &std::task::Waker) -> std::task::Poll<Self::Output> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(*self.handoff.reply.state.lock(), ReplyState::Closed) {
+            return std::task::Poll::Ready(Err(LoweringFailure::WorkerStopped));
+        }
+        poll_lowering(|| self.poll(waker))
+    }
 }
 
 impl<R> LeasedRunHandoff<R> {
+    /// Bind this run to the request task and stop token before admission.
+    /// The worker installs its producer task without transferring its arena.
+    pub fn owned(
+        mut self,
+        waiter: verter_execution::tasks::ExecutionTask,
+        cancellation: verter_execution::cancellation::CancellationToken,
+    ) -> verter_execution::dependency::OwnedDependency<Self>
+    where
+        R: 'static,
+    {
+        let producer = waiter.registry().register_task();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.handoff.install_task(producer.clone());
+        #[cfg(target_arch = "wasm32")]
+        install_inline_task(&mut self.work, producer.clone());
+        verter_execution::dependency::OwnedDependency::new(self, waiter, producer, cancellation)
+    }
+
     /// `Ready` with the job's result (`None` on a lease miss), or `Pending`
     /// with `waker` registered for the queue space or the worker's answer.
     pub fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<Option<R>> {
@@ -1937,11 +2066,11 @@ impl<R> LeasedRunHandoff<R> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = waker;
-            std::task::Poll::Ready(
-                self.ready
-                    .take()
-                    .expect("a decl-lowering handoff is polled after it answered"),
-            )
+            std::task::Poll::Ready(self
+                .work
+                .take()
+                .expect("a decl-lowering handoff is polled after it answered")(
+            ))
         }
     }
 }
@@ -1964,10 +2093,47 @@ pub struct LeasedBatchHandoff<R> {
     #[cfg(not(target_arch = "wasm32"))]
     panic_payload: Option<Box<dyn std::any::Any + Send>>,
     #[cfg(target_arch = "wasm32")]
-    ready: Option<Vec<Option<R>>>,
+    work: InlineWork<Vec<Option<R>>>,
+}
+
+impl<R> verter_execution::dependency::DependencyPoll for LeasedBatchHandoff<R> {
+    type Output = Result<Vec<Option<R>>, LoweringFailure>;
+    fn poll_dependency(&mut self, waker: &std::task::Waker) -> std::task::Poll<Self::Output> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self
+            .shares
+            .iter()
+            .flatten()
+            .any(|share| matches!(*share.reply.state.lock(), ReplyState::Closed))
+        {
+            return std::task::Poll::Ready(Err(LoweringFailure::WorkerStopped));
+        }
+        poll_lowering(|| self.poll(waker))
+    }
 }
 
 impl<R> LeasedBatchHandoff<R> {
+    /// Bind this batch before submission. Its pure shard operations jointly
+    /// produce one ordered batch answer and install that batch's task identity.
+    /// Stopping the demand abandons every share without stopping its workers.
+    pub fn owned(
+        mut self,
+        waiter: verter_execution::tasks::ExecutionTask,
+        cancellation: verter_execution::cancellation::CancellationToken,
+    ) -> verter_execution::dependency::OwnedDependency<Self>
+    where
+        R: 'static,
+    {
+        let producer = waiter.registry().register_task();
+        #[cfg(not(target_arch = "wasm32"))]
+        for share in self.shares.iter_mut().flatten() {
+            share.install_task(producer.clone());
+        }
+        #[cfg(target_arch = "wasm32")]
+        install_inline_task(&mut self.work, producer.clone());
+        verter_execution::dependency::OwnedDependency::new(self, waiter, producer, cancellation)
+    }
+
     /// `Ready` with every job's result in input order, or `Pending` with
     /// `waker` registered on every share still outstanding.
     pub fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<Vec<Option<R>>> {
@@ -2004,11 +2170,11 @@ impl<R> LeasedBatchHandoff<R> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = waker;
-            std::task::Poll::Ready(
-                self.ready
-                    .take()
-                    .expect("a decl-lowering handoff is polled after it answered"),
-            )
+            std::task::Poll::Ready(self
+                .work
+                .take()
+                .expect("a decl-lowering handoff is polled after it answered")(
+            ))
         }
     }
 }

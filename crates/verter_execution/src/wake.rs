@@ -97,6 +97,11 @@ impl WakerSet {
 }
 
 impl TakenWakers {
+    /// Combine notifications while retaining delivery for the outer owner.
+    pub fn append(&mut self, mut other: Self) {
+        self.0.append(&mut other.0);
+    }
+
     /// Whether there are no registrations to deliver.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

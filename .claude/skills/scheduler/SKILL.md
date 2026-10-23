@@ -29,8 +29,17 @@ resuming the handoff. `execute_scoped_cache_node` is the synchronous driver over
 the same state, using the existing CPU pool. Scoped-flight dispatch/settlement
 wakes use the lifecycle deferral rail through flight and incarnation holds.
 Dropping a producer settles cancellation; dropping a subscriber detaches only
-its own owner. Cancellation-only wake subscriptions and shared wait-graph edges
-are still missing. See the root-continuations reference for the full contract.
+its own owner. Request stops wake the subscriber without timer polling.
+Scoped flights retain a producer task from the host's shared registry and
+install it while running, including after thread migration. Pending subscribers
+register wait edges; cycles return `Reentrant`. The waiter keeps its edge
+while the transferred producer runs under a separate task; terminalizing
+withdraws that edge. The host injects the same registry into
+the scheduler and semantic store through the registry-aware constructors.
+`CompletionSubscription::owned` also binds a poll-only completion to explicit
+producer/waiter tasks and a stop token. DAG cancellation and scoped owner
+withdrawal defer cancellation wakes through the same lifecycle rail as normal
+completion wakes. See the root-continuations reference for the full contract.
 
 Each `FileNode` keeps four shards for its small per-profile artifact map,
 independent of the host CPU count. Source-only scripts still allocate that

@@ -408,6 +408,33 @@
           "rules": [
             "synchronous-driver variant of with_executor with the same injected-executor capability"
           ]
+        },
+        {
+          "constructor": "with_executor_and_registry",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool",
+            "SchedulerIoPool",
+            "TaskRegistry"
+          ],
+          "rules": [
+            "the host injects its shared task registry as the cycle authority for scoped producers and semantic dependencies",
+            "same injected executor, pools and native driver capability as with_executor; no additional pool or semantic computation"
+          ]
+        },
+        {
+          "constructor": "new_sync_with_executor_and_registry",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool",
+            "TaskRegistry"
+          ],
+          "rules": [
+            "the externally driven scheduler shares the host task registry without constructing another cycle authority",
+            "same injected executor and native pool capability as new_sync_with_executor; no driver thread or new pool"
+          ]
         }
       ],
       "stateLifetimes": [
@@ -497,8 +524,10 @@
           "into_handles",
           "new",
           "with_executor",
+          "with_executor_and_registry",
           "new_sync",
           "new_sync_with_executor",
+          "new_sync_with_executor_and_registry",
           "execute_scoped_cache_node",
           "begin_scoped_cache_node",
           "submit_request",

@@ -258,6 +258,119 @@ fn an_abandoned_acquisition_releases_its_lease_on_the_worker() {
     );
 }
 
+#[test]
+fn stopping_an_owned_acquisition_detaches_before_queue_or_reply_release() {
+    use verter_execution::cancellation::CancellationToken;
+    use verter_execution::dependency::DependencyStop;
+    use verter_execution::tasks::TaskRegistry;
+
+    for full in [false, true] {
+        let service = service(2);
+        let k = key("/ws/stopped.ts", 21);
+        let registry = TaskRegistry::default();
+        let release = hold_worker(&service, full);
+        let token = CancellationToken::new();
+        let mut cancelled = service
+            .begin_acquire_lease(&k, &source(), oxc_span::SourceType::ts())
+            .owned(registry.register_task(), token.clone());
+        let mut sibling = service
+            .begin_acquire_lease(&k, &source(), oxc_span::SourceType::ts())
+            .owned(registry.register_task(), CancellationToken::new());
+        let (wake, waker, _) = reporting_waker();
+        assert!(cancelled.poll(&waker).is_pending());
+        assert!(sibling.poll(&waker).is_pending());
+        assert_eq!(registry.wait_graph_occupancy().edges, 2);
+        token.cancel();
+        assert_eq!(wakes(&wake), 1);
+        assert!(matches!(
+            cancelled.poll(&waker),
+            Poll::Ready(Err(DependencyStop::Cancelled))
+        ));
+        assert_eq!(registry.wait_graph_occupancy().edges, 1);
+        if full {
+            assert_eq!(space_waiters(&service), 1);
+        }
+        release.send(()).unwrap();
+        let outcome = finish(|waker| sibling.poll(waker)).unwrap().unwrap().0;
+        assert!(run_leased(&service, &k).is_some());
+        assert_eq!(registry.wait_graph_occupancy().edges, 0);
+        drop(outcome);
+        service.release_completion().wait().unwrap();
+        assert_eq!(service.live_lease_count(), 0);
+        assert!(run_leased(&service, &k).is_none());
+    }
+}
+
+#[test]
+fn an_owned_lowering_contains_job_panic_and_installs_its_producer_task() {
+    use verter_execution::cancellation::CancellationToken;
+    use verter_execution::tasks::{ExecutionScope, TaskRegistry};
+    let service = service(2);
+    let k = key("/ws/task.ts", 22);
+    let registry = TaskRegistry::default();
+    let from_job = registry.clone();
+    let task_present = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_task = Arc::clone(&task_present);
+    let mut handoff = service
+        .begin_acquire_lease_and_run(&k, &source(), oxc_span::SourceType::ts(), move |_| {
+            observed_task.store(
+                ExecutionScope::current(&from_job).is_some(),
+                Ordering::SeqCst,
+            );
+            panic!("lowering failed");
+        })
+        .owned(registry.register_task(), CancellationToken::new());
+    assert!(matches!(
+        finish(|waker| handoff.poll(waker)),
+        Ok(Err(super::LoweringFailure::Panicked))
+    ));
+    assert!(task_present.load(Ordering::SeqCst));
+    service.release_completion().wait().unwrap();
+    assert_eq!(service.live_lease_count(), 0);
+}
+
+#[test]
+fn an_owned_run_reports_a_closed_reply_and_an_owned_batch_preserves_order() {
+    use verter_execution::cancellation::CancellationToken;
+    use verter_execution::tasks::TaskRegistry;
+    let service = service(2);
+    let k = key("/ws/closed-reply.ts", 23);
+    let lease = acquire(&service, &k);
+    let registry = TaskRegistry::default();
+    let mut handoff = service.begin_run_leased(&k, |_| 1_u64);
+    let discarded = handoff.handoff.job.take().unwrap();
+    // The owner drops the retained operation without producing its reply.
+    handoff.handoff.job = Some(Box::new(move |_| drop(discarded)));
+    let mut handoff = handoff.owned(registry.register_task(), CancellationToken::new());
+    assert!(matches!(
+        finish(|waker| handoff.poll(waker)),
+        Ok(Err(super::LoweringFailure::WorkerStopped))
+    ));
+    let jobs = vec![
+        LeasedJob {
+            key: k.clone(),
+            run: Box::new(|_| 11_u64),
+        },
+        LeasedJob {
+            key: key("/ws/missing-batch.ts", 24),
+            run: Box::new(|_| 22_u64),
+        },
+        LeasedJob {
+            key: k,
+            run: Box::new(|_| 33_u64),
+        },
+    ];
+    let mut batch = service
+        .begin_run_leased_batch(jobs)
+        .owned(registry.register_task(), CancellationToken::new());
+    assert_eq!(
+        finish(|waker| batch.poll(waker)),
+        Ok(Ok(vec![Some(11), None, Some(33)]))
+    );
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    drop(lease);
+}
+
 /// A handoff is owned, `Send` state: suspended on one thread, it resumes
 /// and completes on another, and the answer is the one the synchronous
 /// entry gives.

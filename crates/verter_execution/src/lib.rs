@@ -27,6 +27,7 @@ extern crate verter_debug_assert;
 
 pub mod blocking;
 pub mod cancellation;
+pub mod dependency;
 pub mod pool_size;
 pub mod request_context;
 pub mod tasks;

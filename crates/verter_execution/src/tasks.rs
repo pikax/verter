@@ -327,6 +327,21 @@ impl std::fmt::Debug for ExecutionTask {
 }
 
 impl ExecutionTask {
+    /// The cycle authority that minted this task. Dependency adapters use
+    /// this handle instead of creating a private registry.
+    pub fn registry(&self) -> &TaskRegistry {
+        &self.0.registry
+    }
+
+    /// Register a dependency on another task from this same authority.
+    /// Cross-registry identities must never alias by slot and generation.
+    pub fn wait_for(&self, producer: &ExecutionTask) -> Result<WaitEdge, WaitCycle> {
+        if !Arc::ptr_eq(&self.0.registry.state, &producer.0.registry.state) {
+            return Err(WaitCycle);
+        }
+        self.0.registry.register_wait(self.id(), producer.id())
+    }
+
     /// This task's id.
     pub fn id(&self) -> TaskId {
         self.0.id
@@ -429,6 +444,12 @@ pub struct ExecutionScope {
 }
 
 impl ExecutionScope {
+    /// The innermost installed task, for synchronous adapters that inherit
+    /// their caller's execution authority without creating another registry.
+    pub fn current_task() -> Option<ExecutionTask> {
+        INSTALLED_TASKS.with(|installed| installed.borrow().last().map(|(_, task)| task.clone()))
+    }
+
     /// The task installed on this thread for `registry`, if any.
     pub fn current(registry: &TaskRegistry) -> Option<ExecutionTask> {
         let identity = registry.identity();

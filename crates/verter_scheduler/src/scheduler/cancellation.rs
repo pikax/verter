@@ -31,11 +31,24 @@ pub(super) struct ScopedCacheFlightState {
 }
 
 impl ScopedCacheFlight {
-    pub(super) fn new(delivery: Arc<DagMutex>) -> Self {
+    pub(super) fn new(
+        delivery: Arc<DagMutex>,
+        task: verter_execution::tasks::ExecutionTask,
+    ) -> Self {
         Self {
             state: Mutex::new(ScopedCacheFlightState::default()),
             delivery,
+            task,
         }
+    }
+
+    fn clear_owners(&self, state: &mut ScopedCacheFlightState) {
+        for owner in state.owners.values() {
+            if let Some(registration) = &owner.aggregate_registration {
+                self.delivery.deliver(vec![registration.detach_deferred()]);
+            }
+        }
+        state.owners.clear();
     }
 
     /// Attach an owner before its inbox submission. Returns `false` only when
@@ -48,15 +61,19 @@ impl ScopedCacheFlight {
             return false;
         }
         let aggregate_registration = match state.aggregate.as_ref() {
-            Some(aggregate) => match aggregate.register_owner(request.clone()) {
-                Some(registration) => Some(registration),
-                None => {
-                    state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                    state.owners.clear();
-                    self.delivery.deliver(vec![state.wakers.take()]);
-                    return false;
+            Some(aggregate) => {
+                let (owner, wakes) = aggregate.register_owner_deferred(request.clone());
+                self.delivery.deliver(vec![wakes]);
+                match owner {
+                    Some(registration) => Some(registration),
+                    None => {
+                        state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                        self.clear_owners(&mut state);
+                        self.delivery.deliver(vec![state.wakers.take()]);
+                        return false;
+                    }
                 }
-            },
+            }
             None => None,
         };
         let prior = state.owners.insert(
@@ -82,9 +99,11 @@ impl ScopedCacheFlight {
             return true;
         }
         for owner in state.owners.values_mut() {
-            let Some(registration) = aggregate.register_owner(owner.request.clone()) else {
+            let (registration, wakes) = aggregate.register_owner_deferred(owner.request.clone());
+            self.delivery.deliver(vec![wakes]);
+            let Some(registration) = registration else {
                 state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                state.owners.clear();
+                self.clear_owners(&mut state);
                 self.delivery.deliver(vec![state.wakers.take()]);
                 return false;
             };
@@ -99,7 +118,11 @@ impl ScopedCacheFlight {
     pub(super) fn detach_owner(&self, owner_id: u64) -> bool {
         let _wakes = self.delivery.defer_wakes();
         let mut state = self.state.lock();
-        state.owners.remove(&owner_id);
+        if let Some(owner) = state.owners.remove(&owner_id) {
+            if let Some(registration) = &owner.aggregate_registration {
+                self.delivery.deliver(vec![registration.detach_deferred()]);
+            }
+        }
         if state.terminal.is_some() {
             return false;
         }
@@ -112,7 +135,7 @@ impl ScopedCacheFlight {
             return false;
         }
         state.terminal = Some(ScopedCacheTerminal::Cancelled);
-        state.owners.clear();
+        self.clear_owners(&mut state);
         self.delivery.deliver(vec![state.wakers.take()]);
         true
     }
@@ -125,7 +148,7 @@ impl ScopedCacheFlight {
         if state.terminal.is_some() || aggregate.is_cancelled() {
             if state.terminal.is_none() {
                 state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                state.owners.clear();
+                self.clear_owners(&mut state);
                 self.delivery.deliver(vec![state.wakers.take()]);
             }
             return false;
@@ -147,7 +170,7 @@ impl ScopedCacheFlight {
             return false;
         }
         state.terminal = Some(terminal);
-        state.owners.clear();
+        self.clear_owners(&mut state);
         self.delivery.deliver(vec![state.wakers.take()]);
         true
     }

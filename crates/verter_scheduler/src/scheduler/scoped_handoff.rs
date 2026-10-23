@@ -3,6 +3,8 @@
 use super::*;
 use std::marker::PhantomData;
 use std::task::{Poll, Waker};
+use verter_execution::cancellation::CancellationSubscription;
+use verter_execution::tasks::{ExecutionScope, ExecutionTask, WaitEdge};
 use verter_execution::wake::WakeRegistration;
 
 /// One advancement of a scoped cache-node computation.
@@ -28,19 +30,21 @@ pub enum ScopedCacheNodeStep<T: Send + Sync + 'static> {
 ///
 /// Drop withdraws this subscriber and detaches only its request owner. A
 /// transferred producer keeps working for any surviving sibling. Cancellation
-/// is checked on every poll; an executor must also re-poll or drop a handoff
-/// when its request cancels. Reset/shutdown and producer settlement wake all
+/// is checked and registered on every poll. Reset/shutdown and producer settlement wake all
 /// subscribers. Polling after a terminal value or error is a contract violation.
 pub struct ScopedCacheNodeHandoff<T: Send + Sync + 'static> {
-    scheduler: Arc<Scheduler>,
-    identity: WorkNodeIdentity,
-    flight: Arc<ScopedCacheFlight>,
+    scheduler: Option<Arc<Scheduler>>,
+    identity: Option<WorkNodeIdentity>,
+    flight: Option<Arc<ScopedCacheFlight>>,
     owner_id: u64,
     context: Option<verter_execution::request_context::OpaqueRequestContext>,
     request: Option<CancellationToken>,
     admission: Option<PendingSubmission>,
     registration: WakeRegistration,
     finished: bool,
+    waiter: Option<ExecutionTask>,
+    edge: Option<WaitEdge>,
+    stop: Option<CancellationSubscription>,
     value: PhantomData<T>,
 }
 
@@ -55,16 +59,22 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         submission: Submission,
     ) -> Self {
         let admission = Some(PendingSubmission::new(&scheduler.inbox, Some(submission)));
+        let waiter = ExecutionScope::current(&scheduler.task_registry)
+            .unwrap_or_else(|| scheduler.task_registry.register_task());
+        let stop = request.as_ref().map(CancellationToken::subscribe);
         Self {
-            scheduler,
-            identity,
-            flight,
+            scheduler: Some(scheduler),
+            identity: Some(identity),
+            flight: Some(flight),
             owner_id,
             context,
             request,
             admission,
             registration: WakeRegistration::default(),
             finished: false,
+            waiter: Some(waiter),
+            edge: None,
+            stop,
             value: PhantomData,
         }
     }
@@ -77,49 +87,70 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
     ) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
         assert!(!self.finished, "scoped cache handoff already completed");
         if self
-            .request
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
+            .stop
+            .as_mut()
+            .is_some_and(|stop| stop.poll(waker).is_ready())
         {
             return self.finish(Err(ScopedCacheNodeError::Cancelled));
         }
-        if caller_kind::active_path_contains_work(&self.identity) {
+        if caller_kind::active_path_contains_work(self.identity.as_ref().expect("live identity")) {
             return self.finish(Err(ScopedCacheNodeError::Reentrant));
         }
         // A sibling may already have admitted or completed this flight.
         // Its answer must not wait for capacity in a later inbox incarnation.
-        let terminal = self.flight.terminal();
+        let terminal = self.flight.as_ref().expect("live flight").terminal();
         if let Some(terminal) = terminal {
             return self.finish_terminal(terminal);
         }
         if let Some(admission) = &mut self.admission {
-            match admission.poll(&self.scheduler, waker) {
+            match admission.poll(self.scheduler.as_ref().expect("live scheduler"), waker) {
                 Poll::Pending => {
                     // Subscribe to settlement as well as capacity: reset or a
                     // sibling's completion can answer without admitting us.
-                    let mut state = self.flight.state.lock();
+                    let mut state = self.flight.as_ref().expect("live flight").state.lock();
                     if let Some(terminal) = state.terminal.clone() {
                         drop(state);
                         return self.finish_terminal(terminal);
                     }
                     state.wakers.register(&mut self.registration, waker);
-                    return Poll::Pending;
+                    drop(state);
+                    return self.pending();
                 }
-                Poll::Ready(Ok(())) => self.scheduler.record_inbox_submission(),
-                Poll::Ready(Err(submission)) => {
-                    self.scheduler.shutdown_drained_submission(*submission)
-                }
+                Poll::Ready(Ok(())) => self
+                    .scheduler
+                    .as_ref()
+                    .expect("live scheduler")
+                    .record_inbox_submission(),
+                Poll::Ready(Err(submission)) => self
+                    .scheduler
+                    .as_ref()
+                    .expect("live scheduler")
+                    .shutdown_drained_submission(*submission),
             }
             self.admission = None;
         }
         // Neither admission nor this poll dispatches work. Claiming and
         // registering share the same flight hold as dispatch and settlement.
-        let mut state = self.flight.state.lock();
+        let mut state = self.flight.as_ref().expect("live flight").state.lock();
         if let Some(terminal) = state.terminal.clone() {
             drop(state);
             return self.finish_terminal(terminal);
         }
         if state.dispatched && !state.builder_claimed {
+            if self.edge.is_none() {
+                match self
+                    .waiter
+                    .as_ref()
+                    .expect("live waiter")
+                    .wait_for(&self.flight.as_ref().expect("live flight").task)
+                {
+                    Ok(edge) => self.edge = Some(edge),
+                    Err(_) => {
+                        drop(state);
+                        return self.finish(Err(ScopedCacheNodeError::Reentrant));
+                    }
+                }
+            }
             let aggregate = state
                 .aggregate
                 .clone()
@@ -127,9 +158,9 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
             state.builder_claimed = true;
             state.wakers.withdraw(&mut self.registration);
             return Poll::Ready(Ok(ScopedCacheNodeStep::Produce(ScopedCacheNodeProducer {
-                scheduler: Arc::clone(&self.scheduler),
-                identity: self.identity.clone(),
-                flight: Arc::clone(&self.flight),
+                scheduler: Arc::clone(self.scheduler.as_ref().expect("live scheduler")),
+                identity: self.identity.as_ref().expect("live identity").clone(),
+                flight: Arc::clone(self.flight.as_ref().expect("live flight")),
                 context: self.context.clone(),
                 aggregate,
                 settled: false,
@@ -137,6 +168,22 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
             })));
         }
         state.wakers.register(&mut self.registration, waker);
+        drop(state);
+        self.pending()
+    }
+
+    fn pending(&mut self) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
+        if self.edge.is_none() {
+            match self
+                .waiter
+                .as_ref()
+                .expect("live waiter")
+                .wait_for(&self.flight.as_ref().expect("live flight").task)
+            {
+                Ok(edge) => self.edge = Some(edge),
+                Err(_) => return self.finish(Err(ScopedCacheNodeError::Reentrant)),
+            }
+        }
         Poll::Pending
     }
 
@@ -160,16 +207,18 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         answer: Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>,
     ) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
         self.finished = true;
+        self.edge = None;
+        self.stop = None;
+        self.waiter = None;
         self.admission = None;
-        self.flight
-            .state
-            .lock()
-            .wakers
-            .withdraw(&mut self.registration);
-        self.scheduler
-            .detach_scoped_cache_owner(&self.identity, &self.flight, self.owner_id);
-        if self
-            .request
+        let flight = self.flight.take().expect("live flight");
+        flight.state.lock().wakers.withdraw(&mut self.registration);
+        let scheduler = self.scheduler.take().expect("live scheduler");
+        let identity = self.identity.take().expect("live identity");
+        self.context = None;
+        let request = self.request.take();
+        scheduler.detach_scoped_cache_owner(&identity, &flight, self.owner_id);
+        if request
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
         {
@@ -182,14 +231,19 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
 
 impl<T: Send + Sync + 'static> Drop for ScopedCacheNodeHandoff<T> {
     fn drop(&mut self) {
-        self.flight
-            .state
-            .lock()
-            .wakers
-            .withdraw(&mut self.registration);
+        let Some(flight) = self.flight.take() else {
+            return;
+        };
+        flight.state.lock().wakers.withdraw(&mut self.registration);
         if !self.finished {
             self.scheduler
-                .detach_scoped_cache_owner(&self.identity, &self.flight, self.owner_id);
+                .as_ref()
+                .expect("live scheduler")
+                .detach_scoped_cache_owner(
+                    self.identity.as_ref().expect("live identity"),
+                    &flight,
+                    self.owner_id,
+                );
         }
     }
 }
@@ -215,6 +269,7 @@ pub struct ScopedCacheNodeProducer<T: Send + Sync + 'static> {
 impl<T: Send + Sync + 'static> ScopedCacheNodeProducer<T> {
     /// Run the admitted producer outside its waiting root's poll.
     pub fn run(mut self, build: impl FnOnce(&CancellationToken) -> T) {
+        let _execution = ExecutionScope::install(&self.scheduler.task_registry, &self.flight.task);
         let _request = self
             .context
             .as_ref()
