@@ -28,10 +28,11 @@ pub enum ScopedCacheNodeStep<T: Send + Sync + 'static> {
 /// thread; `poll` requires exclusive access. It retains the scheduler while live.
 ///
 /// Drop withdraws this subscriber and detaches only its request owner. A
-/// transferred producer keeps working for any surviving sibling. Cancellation
-/// is checked on every poll; an executor must also re-poll or drop a handoff
-/// when its request cancels. Reset/shutdown and producer settlement wake all
-/// subscribers. Polling after a terminal value or error is a contract violation.
+/// transferred producer keeps working for any surviving sibling. A pending
+/// handoff is also registered on its request's cancellation, so cancelling
+/// the request wakes it and its next poll answers `Cancelled`. Reset/shutdown
+/// and producer settlement wake all subscribers. Polling after a terminal
+/// value or error is a contract violation.
 ///
 /// Construction captures the execution task installed for this scheduler's
 /// registry, or creates one if this is an external root. That task follows the
@@ -48,6 +49,8 @@ pub struct ScopedCacheNodeHandoff<T: Send + Sync + 'static> {
     wait: Option<WaitEdge>,
     context: Option<verter_execution::request_context::OpaqueRequestContext>,
     request: Option<CancellationToken>,
+    /// This handoff's wait on its request's cancellation while pending.
+    stop: Option<verter_execution::cancellation::CancellationSubscription>,
     admission: Option<PendingSubmission>,
     registration: WakeRegistration,
     finished: bool,
@@ -75,6 +78,7 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
             task,
             wait: None,
             context,
+            stop: request.as_ref().map(CancellationToken::subscribe),
             request,
             admission,
             registration: WakeRegistration::default(),
@@ -123,7 +127,8 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
                         drop(state);
                         return self.finish(Err(error));
                     }
-                    return Poll::Pending;
+                    drop(state);
+                    return self.pending_until_cancelled(waker);
                 }
                 Poll::Ready(Ok(())) => self.scheduler.record_inbox_submission(),
                 Poll::Ready(Err(submission)) => {
@@ -164,6 +169,25 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         if let Err(error) = self.subscribe(&mut state, waker) {
             drop(state);
             return self.finish(Err(error));
+        }
+        drop(state);
+        self.pending_until_cancelled(waker)
+    }
+
+    /// Return `Pending` with `waker` also registered on the request's
+    /// cancellation, or answer `Cancelled` when it already landed: a
+    /// cancellation between the poll's first check and this registration
+    /// is still observed.
+    fn pending_until_cancelled(
+        &mut self,
+        waker: &Waker,
+    ) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
+        if self
+            .stop
+            .as_mut()
+            .is_some_and(|stop| stop.poll(waker).is_ready())
+        {
+            return self.finish(Err(ScopedCacheNodeError::Cancelled));
         }
         Poll::Pending
     }
@@ -211,6 +235,7 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
     ) -> Poll<Result<ScopedCacheNodeStep<T>, ScopedCacheNodeError>> {
         self.finished = true;
         self.wait = None;
+        self.stop = None;
         self.admission = None;
         self.flight
             .state

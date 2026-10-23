@@ -8,12 +8,23 @@
 //! A request token is a one-shot atomic latch. A scheduler job may instead
 //! use an aggregate token whose live-owner registrations keep shared work
 //! alive until every attached request has cancelled or detached.
+//!
+//! A pollable computation that waits on something else also waits on its
+//! cancellation: [`CancellationToken::subscribe`] gives it a
+//! [`CancellationSubscription`] whose poll registers the computation's waker
+//! with the token, so the cancellation itself wakes the pending poll instead
+//! of a timer re-polling it. An aggregate token wakes its subscribers when it
+//! becomes cancelled: when its last live owner's request cancels, or when its
+//! last live owner detaches.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
+use std::task::{Poll, Wake, Waker};
 
 use parking_lot::Mutex;
+
+use crate::wake::{WakeRegistration, WakerSet};
 
 /// A cheap, clonable, thread-safe one-shot cancellation flag.
 ///
@@ -28,12 +39,54 @@ pub struct CancellationToken {
 struct CancellationState {
     cancelled: AtomicBool,
     owners: Option<AggregateOwners>,
+    /// The polls waiting for this token to cancel. Taken, and woken after
+    /// the lock is released, by whoever sets `cancelled` first. Never locked
+    /// while an aggregate's `entries` are held.
+    wakers: Mutex<WakerSet>,
+}
+
+impl CancellationState {
+    fn new(owners: Option<AggregateOwners>) -> Arc<Self> {
+        Arc::new(Self {
+            cancelled: AtomicBool::new(false),
+            owners,
+            wakers: Mutex::new(WakerSet::default()),
+        })
+    }
+
+    /// Set the flag. The setter that flips it delivers every waiting poll,
+    /// outside the waker lock.
+    fn trip(&self) {
+        if !self.cancelled.swap(true, Ordering::AcqRel) {
+            let taken = self.wakers.lock().take();
+            taken.wake();
+        }
+    }
 }
 
 #[derive(Debug)]
 struct AggregateOwners {
     ever_registered: AtomicBool,
     entries: Mutex<OwnerEntries>,
+    /// The waker each owner's request token wakes when it cancels: it
+    /// re-evaluates this aggregate for its own subscribers. Built once.
+    request_wake: OnceLock<Waker>,
+}
+
+/// Woken by an owner's request token as it cancels: delivers the
+/// aggregate's own subscribers if no live owner remains.
+struct AggregateWake(Weak<CancellationState>);
+
+impl Wake for AggregateWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if let Some(state) = self.0.upgrade() {
+            CancellationToken { state }.deliver_if_cancelled();
+        }
+    }
 }
 
 /// Registered owners of one aggregate token. An owner that has detached,
@@ -115,6 +168,9 @@ fn owner_is_live(owner: &Weak<CancellationOwnerState>) -> bool {
 struct CancellationOwnerState {
     active: AtomicBool,
     request: Option<CancellationToken>,
+    /// The aggregate's wake registered on `request`, withdrawn when the
+    /// owner detaches.
+    request_wake: Mutex<WakeRegistration>,
 }
 
 /// One live requester attached to an aggregate job token.
@@ -125,6 +181,22 @@ struct CancellationOwnerState {
 #[derive(Debug)]
 pub struct CancellationOwner {
     state: Arc<CancellationOwnerState>,
+    /// The aggregate token this owner keeps live.
+    aggregate: Weak<CancellationState>,
+}
+
+/// A poll's wait for one token's cancellation.
+///
+/// [`Self::poll`] answers `Ready` once the token is cancelled, and
+/// otherwise registers the waker with the token in the same critical
+/// section the cancellation takes to deliver, so a cancellation racing the
+/// poll still wakes it. A wake only schedules a later poll. Re-polling with
+/// a waker that wakes the same task keeps the registration; dropping the
+/// subscription withdraws exactly it and cancels nothing.
+#[derive(Debug)]
+pub struct CancellationSubscription {
+    token: CancellationToken,
+    registration: WakeRegistration,
 }
 
 impl CancellationToken {
@@ -132,10 +204,7 @@ impl CancellationToken {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            state: Arc::new(CancellationState {
-                cancelled: AtomicBool::new(false),
-                owners: None,
-            }),
+            state: CancellationState::new(None),
         }
     }
 
@@ -145,13 +214,11 @@ impl CancellationToken {
     /// the one-shot token.
     pub fn aggregate() -> Self {
         Self {
-            state: Arc::new(CancellationState {
-                cancelled: AtomicBool::new(false),
-                owners: Some(AggregateOwners {
-                    ever_registered: AtomicBool::new(false),
-                    entries: Mutex::new(OwnerEntries::default()),
-                }),
-            }),
+            state: CancellationState::new(Some(AggregateOwners {
+                ever_registered: AtomicBool::new(false),
+                entries: Mutex::new(OwnerEntries::default()),
+                request_wake: OnceLock::new(),
+            })),
         }
     }
 
@@ -169,6 +236,7 @@ impl CancellationToken {
         let state = Arc::new(CancellationOwnerState {
             active: AtomicBool::new(true),
             request,
+            request_wake: Mutex::new(WakeRegistration::default()),
         });
         let mut entries = owners.entries.lock();
         // Linearize registration against `is_cancelled()`: once the aggregate
@@ -180,18 +248,77 @@ impl CancellationToken {
             return None;
         }
         if owners.ever_registered.load(Ordering::Acquire) && !entries.any_live() {
-            self.state.cancelled.store(true, Ordering::Release);
+            drop(entries);
+            self.state.trip();
             return None;
         }
         entries.push(Arc::downgrade(&state));
         owners.ever_registered.store(true, Ordering::Release);
-        Some(CancellationOwner { state })
+        drop(entries);
+        // The owner's request cancelling may leave this aggregate with no
+        // live owner: its token wakes the aggregate's re-evaluation.
+        if let Some(request) = state.request.as_ref() {
+            let wake = owners
+                .request_wake
+                .get_or_init(|| Waker::from(Arc::new(AggregateWake(Arc::downgrade(&self.state)))));
+            request
+                .state
+                .wakers
+                .lock()
+                .register(&mut state.request_wake.lock(), wake);
+            if request.is_cancelled() {
+                self.deliver_if_cancelled();
+            }
+        }
+        Some(CancellationOwner {
+            state,
+            aggregate: Arc::downgrade(&self.state),
+        })
     }
 
     /// Trips the flag. Idempotent — calling more than once leaves the
-    /// token cancelled and never panics or toggles back.
+    /// token cancelled and never panics or toggles back. The first call
+    /// wakes every pending [`CancellationSubscription`], after releasing the
+    /// token's waker lock.
     pub fn cancel(&self) {
-        self.state.cancelled.store(true, Ordering::Release);
+        self.state.trip();
+    }
+
+    /// A wait for this token's cancellation, for a poll that must wake when
+    /// it cancels.
+    #[must_use]
+    pub fn subscribe(&self) -> CancellationSubscription {
+        CancellationSubscription {
+            token: self.clone(),
+            registration: WakeRegistration::default(),
+        }
+    }
+
+    /// Deliver this token's subscribers if it is cancelled now. A token no
+    /// poll waits on is left to its next probe.
+    fn deliver_if_cancelled(&self) {
+        if self.state.wakers.lock().is_empty() {
+            return;
+        }
+        let _ = self.is_cancelled();
+    }
+
+    /// Whether the token is cancelled, setting the flag (without delivering
+    /// its subscribers) when an aggregate has just lost its last live owner.
+    /// Returns `(cancelled, newly)`, where `newly` means this probe set the
+    /// flag and the caller must deliver. Takes the aggregate's `entries`
+    /// only, so it runs under the token's waker lock.
+    fn probe(&self) -> (bool, bool) {
+        if self.state.cancelled.load(Ordering::Acquire) {
+            return (true, false);
+        }
+        let Some(owners) = self.state.owners.as_ref() else {
+            return (false, false);
+        };
+        if !owners.ever_registered.load(Ordering::Acquire) || owners.entries.lock().any_live() {
+            return (false, false);
+        }
+        (true, !self.state.cancelled.swap(true, Ordering::AcqRel))
     }
 
     /// Whether two handles name the same cancellation source: clones of one
@@ -218,7 +345,7 @@ impl CancellationToken {
         if owners.entries.lock().any_live() {
             return false;
         }
-        self.state.cancelled.store(true, Ordering::Release);
+        self.state.trip();
         true
     }
 
@@ -247,15 +374,71 @@ impl CancellationOwnerState {
 }
 
 impl CancellationOwner {
-    /// Detach this requester from the aggregate job. Idempotent.
+    /// Detach this requester from the aggregate job. Idempotent. When it
+    /// was the aggregate's last live owner, the aggregate's subscribers are
+    /// woken.
     pub(crate) fn detach(&self) {
         self.state.active.store(false, Ordering::Release);
+        if let Some(request) = self.state.request.as_ref() {
+            request
+                .state
+                .wakers
+                .lock()
+                .withdraw(&mut self.state.request_wake.lock());
+        }
+        if let Some(state) = self.aggregate.upgrade() {
+            CancellationToken { state }.deliver_if_cancelled();
+        }
     }
 }
 
 impl Drop for CancellationOwner {
     fn drop(&mut self) {
         self.detach();
+    }
+}
+
+impl CancellationSubscription {
+    /// The token this subscription waits on.
+    #[must_use]
+    pub fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+
+    /// `Ready` once the token is cancelled; otherwise `Pending` with
+    /// `waker` registered to be woken when it is.
+    pub fn poll(&mut self, waker: &Waker) -> Poll<()> {
+        let state = &self.token.state;
+        let mut wakers = state.wakers.lock();
+        match self.token.probe() {
+            (true, newly) => {
+                wakers.withdraw(&mut self.registration);
+                // This probe set an aggregate's flag under the lock its
+                // delivery takes: deliver the siblings here, after unlock.
+                let taken = newly.then(|| wakers.take());
+                drop(wakers);
+                if let Some(taken) = taken {
+                    taken.wake();
+                }
+                Poll::Ready(())
+            }
+            (false, _) => {
+                wakers.register(&mut self.registration, waker);
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl Drop for CancellationSubscription {
+    fn drop(&mut self) {
+        if self.registration.is_registered() {
+            self.token
+                .state
+                .wakers
+                .lock()
+                .withdraw(&mut self.registration);
+        }
     }
 }
 
@@ -522,6 +705,160 @@ mod tests {
                 per_handoff.windows(2).all(|pair| pair[0] == pair[1]),
                 "per-handoff work is independent of the handoff count: {per_handoff:?}",
             );
+        }
+    }
+
+    /// Counts its wakes.
+    #[derive(Default)]
+    struct Counting(std::sync::atomic::AtomicUsize);
+
+    impl Wake for Counting {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting() -> (Arc<Counting>, Waker) {
+        let counter = Arc::new(Counting::default());
+        (Arc::clone(&counter), Waker::from(counter))
+    }
+
+    fn wakes(counter: &Counting) -> usize {
+        counter.0.load(Ordering::SeqCst)
+    }
+
+    fn registered(token: &CancellationToken) -> usize {
+        token.state.wakers.lock().len()
+    }
+
+    /// A cancellation that lands before the first poll answers it without
+    /// a registration; one that lands while it is pending wakes it once,
+    /// and the next poll answers.
+    #[test]
+    fn a_subscription_answers_or_is_woken_by_the_cancellation() {
+        let early = CancellationToken::new();
+        early.cancel();
+        let (count, waker) = counting();
+        assert!(early.subscribe().poll(&waker).is_ready());
+        assert_eq!((registered(&early), wakes(&count)), (0, 0));
+
+        let token = CancellationToken::new();
+        let mut subscription = token.subscribe();
+        assert!(subscription.poll(&waker).is_pending());
+        assert!(subscription.poll(&waker).is_pending());
+        assert_eq!(registered(&token), 1, "a re-poll keeps one registration");
+        token.cancel();
+        token.cancel();
+        assert_eq!(wakes(&count), 1, "the cancellation wakes the poll once");
+        assert!(subscription.poll(&waker).is_ready());
+        assert!(subscription.poll(&waker).is_ready());
+    }
+
+    /// Re-polling with another waker replaces the registration; dropping a
+    /// subscription withdraws only its own, so a sibling registered with the
+    /// same waker is still woken, and nothing is cancelled.
+    #[test]
+    fn a_dropped_subscription_withdraws_only_itself() {
+        let token = CancellationToken::new();
+        let (first_count, first) = counting();
+        let (second_count, second) = counting();
+        let mut replaced = token.subscribe();
+        assert!(replaced.poll(&first).is_pending());
+        assert!(replaced.poll(&second).is_pending());
+        let mut sibling = token.subscribe();
+        assert!(sibling.poll(&second).is_pending());
+        let mut dropped = token.subscribe();
+        assert!(dropped.poll(&second).is_pending());
+        drop(dropped);
+        assert_eq!(registered(&token), 2);
+        assert!(!token.is_cancelled(), "a dropped wait cancels nothing");
+        token.cancel();
+        assert_eq!(wakes(&first_count), 0, "the replaced waker is not woken");
+        assert_eq!(wakes(&second_count), 2, "each live subscription is woken");
+        assert!(sibling.poll(&second).is_ready());
+        drop(replaced);
+        assert_eq!(registered(&token), 0);
+    }
+
+    /// An aggregate wakes its subscribers when its last live owner's request
+    /// cancels, not before, and when its last live owner detaches.
+    #[test]
+    fn an_aggregate_wakes_when_its_last_live_owner_goes() {
+        for detach_last in [false, true] {
+            let aggregate = CancellationToken::aggregate();
+            let first = CancellationToken::new();
+            let second = CancellationToken::new();
+            let first_owner = aggregate.register_owner(Some(first.clone())).unwrap();
+            let mut second_owner = Some(aggregate.register_owner(Some(second.clone())).unwrap());
+            let (count, waker) = counting();
+            let mut subscription = aggregate.subscribe();
+            assert!(subscription.poll(&waker).is_pending());
+            first.cancel();
+            assert_eq!(wakes(&count), 0, "a live sibling owner keeps the job");
+            assert!(subscription.poll(&waker).is_pending());
+            if detach_last {
+                drop(second_owner.take());
+            } else {
+                second.cancel();
+            }
+            assert_eq!(wakes(&count), 1, "detach_last={detach_last}");
+            assert!(subscription.poll(&waker).is_ready());
+            drop(first_owner);
+            drop(second_owner);
+            assert_eq!(registered(&first) + registered(&second), 0);
+        }
+    }
+
+    /// An owner whose request was already cancelled when it registered still
+    /// wakes the aggregate's subscribers once no live owner remains.
+    #[test]
+    fn an_owner_registered_cancelled_delivers_its_aggregate() {
+        let aggregate = CancellationToken::aggregate();
+        let builder = aggregate.register_owner(None).unwrap();
+        let (count, waker) = counting();
+        let mut subscription = aggregate.subscribe();
+        assert!(subscription.poll(&waker).is_pending());
+        let request = CancellationToken::new();
+        request.cancel();
+        let late = aggregate.register_owner(Some(request)).unwrap();
+        assert_eq!(wakes(&count), 0, "the builder keeps the job live");
+        drop(builder);
+        assert_eq!(wakes(&count), 1);
+        drop(late);
+        assert!(subscription.poll(&waker).is_ready());
+    }
+
+    /// A cancellation racing the poll's registration is never lost: every
+    /// poll that returned `Pending` is woken.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_cancellation_racing_registration_always_wakes() {
+        for _ in 0..200 {
+            for aggregate in [false, true] {
+                let (token, request, owner) = if aggregate {
+                    let token = CancellationToken::aggregate();
+                    let request = CancellationToken::new();
+                    let owner = token.register_owner(Some(request.clone())).unwrap();
+                    (token, request, Some(owner))
+                } else {
+                    let token = CancellationToken::new();
+                    (token.clone(), token, None)
+                };
+                let (count, waker) = counting();
+                let mut subscription = token.subscribe();
+                let canceller = std::thread::spawn(move || request.cancel());
+                let pending = subscription.poll(&waker).is_pending();
+                canceller.join().unwrap();
+                if pending {
+                    assert_eq!(wakes(&count), 1, "aggregate={aggregate}");
+                }
+                assert!(subscription.poll(&waker).is_ready());
+                drop(owner);
+            }
         }
     }
 

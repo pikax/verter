@@ -45,9 +45,6 @@ thread_local! {
     static LEASES_HELD: Cell<usize> = const { Cell::new(0) };
 }
 
-/// How often a waiting subscriber with a cancellation check observes it.
-const CANCELLATION_SLICE: std::time::Duration = std::time::Duration::from_millis(5);
-
 /// The registry of in-flight cold queries.
 pub(crate) struct ResolutionFlights<K, T> {
     flights: Mutex<FxHashMap<K, Arc<Flight<T>>>>,
@@ -217,17 +214,24 @@ impl<T> FlightSubscription<T> {
         }
     }
 
-    /// Wait for the flight to settle, observing `cancelled` at least every
-    /// few milliseconds; a cancelled subscriber detaches and the flight
-    /// runs on. This is [`Self::poll`] driven by the external blocking
-    /// driver.
-    pub(crate) fn wait(mut self, cancelled: Option<&dyn Fn() -> bool>) -> FlightOutcome<T> {
-        let slice = cancelled.map(|_| CANCELLATION_SLICE);
+    /// Wait for the flight to settle; a subscriber whose `cancelled` token
+    /// cancels first detaches and the flight runs on. The waiter is
+    /// registered on the flight and on the token, so either wakes it. This
+    /// is [`Self::poll`] driven by the external blocking driver.
+    pub(crate) fn wait(
+        mut self,
+        cancelled: Option<&verter_execution::cancellation::CancellationToken>,
+    ) -> FlightOutcome<T> {
+        let mut stop = cancelled.map(verter_execution::cancellation::CancellationToken::subscribe);
         verter_execution::blocking::block_on(
             verter_execution::blocking::WaitFamily::WorkspaceResolution,
-            slice,
+            None,
             |waker| match self.poll(waker) {
-                Poll::Pending if cancelled.is_some_and(|cancelled| cancelled()) => {
+                Poll::Pending
+                    if stop
+                        .as_mut()
+                        .is_some_and(|stop| stop.poll(waker).is_ready()) =>
+                {
                     self.detach();
                     Poll::Ready(FlightOutcome::Detached)
                 }
@@ -387,7 +391,8 @@ mod tests {
         };
         let cancelled = join(&flights, 1);
         let mut sibling = join(&flights, 1);
-        let stop = || true;
+        let stop = verter_execution::cancellation::CancellationToken::new();
+        stop.cancel();
         assert!(matches!(
             cancelled.wait(Some(&stop)),
             FlightOutcome::Detached

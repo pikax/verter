@@ -6,7 +6,6 @@ use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use verter_compiler::framework_common::FrameworkParseArtifact;
@@ -729,9 +728,6 @@ impl PublicationLane {
     }
 }
 
-/// How often a lane waiter observes its request's cancellation.
-const LANE_CANCELLATION_SLICE: Duration = Duration::from_millis(5);
-
 /// The waiters polling one lane for its outcome.
 ///
 /// A waiter registers only while it holds the lane's state lock and finds
@@ -1076,11 +1072,14 @@ impl CarrierPublicationStore {
             );
             drop(state);
             let mut wait = LaneWait::new(&lane.waiters);
+            // The request's cancellation wakes the waiter as the lane's
+            // outcome does; it registers before the lane is checked.
+            let mut stop = request.cancellation.subscribe();
             verter_execution::blocking::block_on(
                 verter_execution::blocking::WaitFamily::CarrierPublication,
-                Some(LANE_CANCELLATION_SLICE),
+                None,
                 |waker| {
-                    if request.cancellation.is_cancelled() {
+                    if stop.poll(waker).is_ready() {
                         self.audit.push(
                             &request,
                             &artifact_id,
@@ -1411,11 +1410,14 @@ impl CarrierPublicationStore {
         artifact_id: &FrameworkArtifactId,
     ) -> StableShared {
         let mut wait = LaneWait::new(&lane.waiters);
+        // The request's cancellation wakes the waiter as the lane's outcome
+        // does; it registers before the lane is checked.
+        let mut stop = request.cancellation.subscribe();
         verter_execution::blocking::block_on(
             verter_execution::blocking::WaitFamily::CarrierPublication,
-            Some(LANE_CANCELLATION_SLICE),
+            None,
             |waker| {
-                if request.cancellation.is_cancelled() {
+                if stop.poll(waker).is_ready() {
                     self.audit.push(
                         request,
                         artifact_id,

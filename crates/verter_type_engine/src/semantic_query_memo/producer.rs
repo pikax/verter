@@ -738,7 +738,10 @@ impl SemanticGraphStore {
 
 impl Subscription<'_> {
     /// Wait for the producer's completion. Blocks the calling thread: only a
-    /// synchronous entry waits this way.
+    /// synchronous entry waits this way. The thread parks with this
+    /// subscription's waker registered on the flight and on the cancellation
+    /// that stops the request, so either one wakes it; nothing re-polls on a
+    /// timer.
     pub fn wait<C: crate::resolver_core::ResolverCapabilities>(
         mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
@@ -761,18 +764,37 @@ impl Subscription<'_> {
             if let Err(WaitCycle) = self.park::<C::Observe>(&state, attempt.prepared.key()) {
                 return Joined::Recursive(Recursion::WaitCycle);
             }
-            // Cooperative wait on the flight's condvar until it completes,
-            // is aborted by a canonical-invalidation sweep, or this request
-            // is cancelled. Subscribers never busy-spin.
-            while !flight_resolved(&state, flags) {
-                // Timed parking is the cancellation observation rail. A
-                // canceled subscriber detaches by returning; it never marks
-                // the shared flight aborted, so it cannot disturb an
-                // uncancelled producer or sibling.
-                inflight
-                    .ready
-                    .wait_for(&mut state, std::time::Duration::from_millis(2));
-            }
+            drop(state);
+            // Park until the flight completes, is aborted by a
+            // canonical-invalidation sweep, or this request is cancelled.
+            // The cancellation registers before the flight is checked, so a
+            // cancellation landing between the two still wakes the thread. A
+            // cancelled subscriber detaches by returning; it never marks the
+            // shared flight aborted, so it cannot disturb an uncancelled
+            // producer or sibling.
+            let mut stop =
+                crate::resolver_core::request_ports::CancellationCheckpoint::selected_token()
+                    .map(|token| token.subscribe());
+            let parked = self
+                .parked
+                .as_mut()
+                .expect("a waiting subscriber is parked");
+            verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::SemanticFlight,
+                None,
+                |waker| {
+                    if let Some(stop) = stop.as_mut() {
+                        let _ = stop.poll(waker);
+                    }
+                    let mut state = inflight.state.lock();
+                    if flight_resolved(&state, flags) {
+                        return std::task::Poll::Ready(());
+                    }
+                    state.wakers.register(&mut parked.waker, waker);
+                    std::task::Poll::Pending
+                },
+            );
+            state = inflight.state.lock();
         }
         self.resolve(state, ctx, flags, attempt, capture, wait_start)
     }

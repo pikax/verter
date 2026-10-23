@@ -31,21 +31,53 @@ follows the same rules:
   borrow of the producer. They are `Send` whenever their result is, so a
   suspended subscriber may resume on another thread. One poller drives a
   subscriber at a time (`poll` takes `&mut self`).
+- **Cancellation wakes too.** A pending poll that a cancellation must stop
+  also registers its waker on that cancellation, so the cancellation itself
+  wakes it and the next poll answers the cancellation. No boundary re-polls
+  on a timer to notice a stop.
+
+## Cancellation subscriptions
+
+`CancellationToken::subscribe() -> CancellationSubscription`
+(`crates/verter_execution/src/cancellation.rs`) is the cancellation's own
+pollable boundary. `poll(&mut self, &Waker)` answers `Ready` once the token
+is cancelled and otherwise registers the waker under the token's waker
+lock; `cancel` sets the flag and then takes and wakes every registration
+outside that lock, so a cancellation racing a registration is never lost.
+Dropping a subscription withdraws exactly its own registration and cancels
+nothing.
+
+An aggregate job token wakes its subscribers when it becomes cancelled:
+when the last live owner's request cancels (each owner's request token
+carries a registration that re-evaluates the aggregate) or when the last
+live owner detaches. A requester cancelling while a sibling keeps the job
+live wakes nothing. The waker lock is never taken while an aggregate's
+owner list is held.
+
+Users: the semantic runtime registers on the token its stop selects
+(`Program::wake_on_stop`, called whenever a poll returns `Pending`; for
+`QueryProgram` the job token when it has owners, else the request's, else
+the ownerless job's), so a pending `SemanticTask` is woken by the
+cancellation that stops it. The scoped cache-node handoff registers on its
+request's token while pending. The synchronous semantic flight wait, the
+carrier publication and stable-parse lanes and the workspace flight wait
+register on their cancellation and park untimed.
 
 ## The external-boundary driver
 
-`verter_execution::blocking::block_on(slice, poll)` is the only place a
-pollable computation is driven to completion by blocking. It polls with a
-waker that unparks the calling thread, and parks while the poll is pending.
-With a `slice`, each park is bounded, so a computation whose stop is
-observed only at its next poll (a cancelled request) is re-polled at least
-that often.
+`verter_execution::blocking::block_on(family, slice, poll)` is the only
+place a pollable computation is driven to completion by blocking. It polls
+with a waker that unparks the calling thread, and parks while the poll is
+pending. Every driver over a cancellable wait passes no `slice`: the poll
+registers on its cancellation, which wakes the thread. The `slice`
+parameter remains for a caller that must bound its park for another
+reason.
 
 Each synchronous entry listed below is the driver applied to the pollable
 boundary beside it, so there is one implementation of each handoff, not a
 blocking copy next to a polling one. The semantic runtime's blocking drive
 (`SemanticExecution::drive`, `SemanticTask::drive`) uses the same driver,
-with a 2 ms slice so a stop stays observable.
+untimed, and is woken by its stop's cancellation.
 
 The target is that only a synchronous public entry outside the computation
 reaches the driver. The current tree does not meet it: the host roots are
@@ -219,9 +251,10 @@ producer on the existing CPU pool.
   its owner; a surviving sibling keeps shared work live.
 - **Errors:** cancellation, shutdown/reset, panic, mismatched result type and
   same-path re-entry retain the existing typed outcomes. Cancellation is
-  checked at each poll; cancellation-only wake delivery remains unfinished.
-  Executors must re-poll or drop on request
-  cancellation. Polling after a terminal result is a contract violation.
+  checked at each poll, and a pending handoff is registered on its request's
+  cancellation, so cancelling the request wakes it and the next poll answers
+  `Cancelled` without disturbing the producer or sibling followers. Polling
+  after a terminal result is a contract violation.
 - **Wake ordering:** dispatch and settlement take registrations under the
   flight lock. Delivery uses the scheduler's deferral rail, after flight,
   scoped-incarnation and DAG locks release, including reset's outer hold.

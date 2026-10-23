@@ -20,14 +20,14 @@ use super::prepared::PreparedKeyHandle;
 
 /// Same-key production cell for one in-flight semantic query.
 ///
-/// The inner mutex guards `state` exclusively; `ready` is signalled when
-/// the winner publishes. Joiners wait on `ready` via `wait_while`, so they
-/// do not busy-retry. Ownership is released when the cell is retired from
-/// the store's flight table after completion, abort, or panic.
+/// The inner mutex guards `state` exclusively. A joiner registers its waker
+/// in `state` while the flight is unresolved, and the winner wakes every
+/// registration once it publishes or aborts, so joiners do not busy-retry.
+/// Ownership is released when the cell is retired from the store's flight
+/// table after completion, abort, or panic.
 pub struct FlightCell {
     pub(super) site: crate::semantic_query::checker_policy::TupleSplicePosition,
     pub(super) state: Mutex<InflightState>,
-    pub(super) ready: Condvar,
     /// The cell's block and its slot in the flight table, pinned for as
     /// long as the cell lives — through every subscriber that still holds
     /// it after the flight retires. A flight is live work, never refused.
@@ -128,13 +128,12 @@ pub(super) struct InflightState {
 
 impl FlightCell {
     /// Wake every subscriber after the flight resolved (completed or
-    /// aborted) under its lock: the blocking ones on the condvar, the
-    /// polling ones through their registered wakers. A poll registers its
-    /// waker only after finding the flight unresolved under the same lock,
-    /// so every waker registered before the resolution is taken here and
-    /// none is registered after it.
+    /// aborted) under its lock, through their registered wakers. A
+    /// subscriber, polling or blocking, registers its waker only after
+    /// finding the flight unresolved under the same lock, so every waker
+    /// registered before the resolution is taken here and none is
+    /// registered after it.
     pub(super) fn wake_subscribers(&self) {
-        self.ready.notify_all();
         let wakers = self.state.lock().wakers.take();
         wakers.wake();
     }
@@ -146,7 +145,6 @@ impl FlightCell {
         Self {
             site: Default::default(),
             state: Mutex::new(InflightState::default()),
-            ready: Condvar::new(),
             _storage: Some(account.pin(flight_storage_bytes())),
         }
     }
@@ -159,7 +157,6 @@ impl FlightCell {
         Self {
             site: Default::default(),
             state: Mutex::new(InflightState::default()),
-            ready: Condvar::new(),
             _storage: None,
         }
     }

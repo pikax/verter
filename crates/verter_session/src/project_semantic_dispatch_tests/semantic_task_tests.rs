@@ -806,6 +806,66 @@ fn a_pending_semantic_task_keeps_its_jobs_cancellation_on_another_thread() {
     drop(other);
 }
 
+/// A task pending on another task's held producer is woken by the
+/// cancellation that stops it — its request's, or its job's once the last
+/// requester cancels — with no timer and the producer still held. Its next
+/// poll stops it, leaving nothing open and no wait behind; a requester
+/// cancelling while a sibling keeps the job live wakes nothing. The held
+/// producer is untouched and still finishes for its own owner.
+#[test]
+fn a_pending_semantic_task_is_woken_by_the_cancellation_that_stops_it() {
+    for under_job in [false, true] {
+        let host = chain_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (other, lease) = hold_producer(&host, graph, typeof_key(&dispatch, "x2"));
+        let first = budgeted_request(1);
+        let second = budgeted_request(2);
+        let job = verter_execution::cancellation::CancellationToken::aggregate();
+        let owners = under_job.then(|| {
+            (
+                job.register_owner(Some(first.cancellation_token()))
+                    .unwrap(),
+                job.register_owner(Some(second.cancellation_token()))
+                    .unwrap(),
+            )
+        });
+        let _job = under_job
+            .then(|| verter_execution::cancellation::JobCancellationGuard::install(job.clone()));
+        let _request =
+            verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&first));
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        dispatch
+            .with_semantic_task_for_tests(typeof_key(&dispatch, "x5"), |slot| {
+                let task = slot.as_mut().expect("the task is lent");
+                assert!(task.poll_for_tests(&waker).is_pending());
+                let before = wakes();
+                first.cancel();
+                if under_job {
+                    assert_eq!(wakes(), before, "the second requester keeps the job live");
+                    assert!(task.poll_for_tests(&waker).is_pending());
+                    second.cancel();
+                }
+                assert!(
+                    wakes() > before,
+                    "the stopping cancellation wakes the pending task (under_job={under_job})"
+                );
+                assert!(matches!(
+                    task.poll_for_tests(&waker),
+                    Poll::Ready(TaskOutcomeForTests::Stopped)
+                ));
+            })
+            .expect("the cold root runs as a task");
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "no wait is left");
+        drop(lease);
+        drop(owners);
+        drop(other);
+    }
+}
+
 /// The work, spend and paid computations a task's frames charge on
 /// another thread land in the component-meta compute that lent it the
 /// request, exactly as when the task finishes on its own thread.

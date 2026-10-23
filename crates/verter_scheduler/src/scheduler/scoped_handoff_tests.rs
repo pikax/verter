@@ -162,9 +162,20 @@ fn scoped_handoff_cancellation_detaches_only_its_follower() {
     let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
         panic!("dispatch transfers the producer");
     };
+    // With the producer held and no timer, the cancellation alone wakes the
+    // pending follower, and its next poll ends it.
+    let counter = Arc::new(CountWake::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    assert!(follower.poll(&waker).is_pending());
+    let before = counter.0.load(Ordering::SeqCst);
     token.cancel();
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        before + 1,
+        "cancelling the request wakes its pending follower once"
+    );
     assert!(matches!(
-        follower.poll(Waker::noop()),
+        follower.poll(&waker),
         Poll::Ready(Err(ScopedCacheNodeError::Cancelled))
     ));
     producer.run(|token| {

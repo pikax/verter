@@ -128,6 +128,9 @@ pub(super) struct QueryProgram<'p, 'a, C: crate::resolver_core::ResolverCapabili
     /// step needed it (the drive runs one chain, so a demand starts right
     /// after the step that needed it, or after its wait restarts it).
     child_depth: u32,
+    /// The pending drive's wait on the cancellation that stops it, so the
+    /// cancellation wakes the drive instead of a timer re-polling it.
+    stop_wake: Option<verter_execution::cancellation::CancellationSubscription>,
     /// Test-only: the demands a call's walk suspends on are claimed by
     /// another task first, and held until released.
     #[cfg(any(test, feature = "test-support"))]
@@ -537,9 +540,8 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
     /// Advance the task as far as it can go: `Ready` with its root's
     /// delivery (`Err` when a stop abandoned it), or `Pending` once it
     /// waits on a producer outside it that will wake `waker`. Cancelling
-    /// the request wakes nothing: the stop is seen at the next poll, so the
-    /// executor re-polls or drops a pending task its request cancelled
-    /// ([`crate::semantic_execution::SemanticExecution::poll`]).
+    /// the work that stops it (its job, else its request) wakes `waker`
+    /// too, and the next poll abandons the task.
     pub(super) fn poll(
         &mut self,
         waker: &std::task::Waker,
@@ -770,6 +772,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             task: graph.execution_task(),
             retries: FxHashMap::default(),
             child_depth: 1,
+            stop_wake: None,
             #[cfg(any(test, feature = "test-support"))]
             held_call_needs: None,
         };
@@ -1196,6 +1199,24 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
 
     fn stop(&self) -> Option<()> {
         self.dispatch.cancellation.is_cancelled().then_some(())
+    }
+
+    fn wake_on_stop(&mut self, waker: &std::task::Waker) {
+        // The token `stop` selects on this poll's thread, with the task's job
+        // and request installed: the same selection decides the stop.
+        let Some(token) =
+            crate::resolver_core::request_ports::CancellationCheckpoint::selected_token()
+        else {
+            self.stop_wake = None;
+            return;
+        };
+        let subscription = match &mut self.stop_wake {
+            Some(held) if held.token().same_source(&token) => held,
+            slot => slot.insert(token.subscribe()),
+        };
+        if subscription.poll(waker).is_ready() {
+            waker.wake_by_ref();
+        }
     }
 
     fn abandon(&mut self, frame: QueryFrame<'p, 'a, C>) {

@@ -868,7 +868,7 @@ impl Scheduler {
         let mut build = Some(build);
         verter_execution::blocking::block_on(
             verter_execution::blocking::WaitFamily::ScopedCacheNode,
-            Some(std::time::Duration::from_millis(2)),
+            None,
             |waker| {
                 loop {
                     match handoff.poll(waker) {
