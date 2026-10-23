@@ -78,5 +78,11 @@ lanes and the workspace flight wait are removed with it.
 | `SyncRefCell`, `SyncCell` (the dispatcher's request state, the connected demand ledger and the guard references to them) | Every dispatcher borrow, with `RefCell`/`Cell` borrow discipline and an atomic flag | REQUIRED | One dispatcher | `verter_execution/src/sync_cell.rs`, `verter_type_engine/src/project_semantic_dispatch` | always |
 | `RefusalsWithin` (the operation's own refusal record) | The compile root's entry records parse-stack refusals across its polls | REQUIRED | One recording operation | `verter_parser/src/oxc_parse/stack.rs` | always |
 | `WaitFamily::Root`, `block_on_when_pending` | The synchronous entries over the roots, and the synchronous store-view read | REQUIRED | Static | `verter_execution/src/blocking.rs` | always |
+| `drive_pending`, `complete_now`, `on_heap` | Synchronous forms of the converted computations drive their one pollable implementation; `on_heap` keeps the cold component-meta computations off the driving stack | REQUIRED | One synchronous call | `verter_execution/src/blocking.rs` | always |
+| The component-meta root's own request context | Created where the root begins when no request is current, and installed on each poll as its ambient request | REQUIRED | One root | `verter_session/src/root_continuation.rs` | always |
+| `ComputeSpendLog`, `ComputeSpan`, `OwnedFactTracer::fanning_out` | `traced_component_meta_compute_pollable` owns its spend log, span and tracer and installs them for each poll | REQUIRED | One component-meta compute | `verter_type_engine/src/request_budget.rs`, `project_semantic_dispatch/connected_demand.rs`, `resolver_core/resolver_context.rs` | always |
+| `SuspendableDispatch` (the dispatcher and its graph's construction arena) | The cold component-meta output path; its lane is entered for each poll | REQUIRED | One cold output computation | `verter_type_engine/src/project_semantic_dispatch/mod.rs` | always |
+| `RequestAudit` (`request_id`, `RequestPhaseAudit`) | The component-meta resolve's phase audit, installed for each poll by `within_request_audit` | OPTIONAL | One audited resolve | `verter_session/src/component_meta_audit/mod.rs` | `semantic-observe` |
+| `AttributedPolls` | `attribute_polls` scopes a work site to each poll of an IndexedReady build | OPTIONAL | One attributed computation | `verter_audit/src/attribution/mod.rs` | `semantic-observe` |
 
-No trace or history is added, and every item above holds with capture off.
+No trace or history is added, and every REQUIRED item above holds with capture off.

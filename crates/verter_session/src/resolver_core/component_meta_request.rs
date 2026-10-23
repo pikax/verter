@@ -496,9 +496,12 @@ where
     let mut executor =
         ComponentMetaRequestExecutor::new(host, canonical.to_string(), mode, max_attempts)
             .with_fixed_view(fixed_store_view);
-    let request = run_stable_request_pollable(singleflight, &mut executor)
-        .await
-        .expect("component-meta request execution is infallible");
+    let driven = &mut executor;
+    let request = verter_execution::blocking::on_heap(move || {
+        run_stable_request_pollable(singleflight, driven)
+    })
+    .await
+    .expect("component-meta request execution is infallible");
     ComponentMetaRequestResult {
         request,
         admission: executor.last_admission,

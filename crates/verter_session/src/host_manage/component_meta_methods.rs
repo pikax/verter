@@ -2560,7 +2560,10 @@ impl VerterHost {
     /// analysis.
     ///
     /// [`Self::get_raw_analysis_snapshot_in`] for a caller outside a captured or uncaptured
-    /// execution unit: adopts the mode the installed request carries.
+    /// execution unit: adopts the mode the installed request carries. The
+    /// production capture awaits [`Self::get_raw_analysis_snapshot_pollable`];
+    /// this synchronous form serves the direct-host test seam.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn get_raw_analysis_snapshot(
         &self,
         canonical: &str,

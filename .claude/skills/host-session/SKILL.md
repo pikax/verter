@@ -89,7 +89,12 @@ back into the host for a service it was not given.
   `Send` roots an external driver polls, which run under their creator's
   request context, job and task, and hand their driver dependency work as
   `RootWork`. `get_component_meta_output` and `compile_request` drive the
-  same roots at the synchronous boundary.
+  same roots at the synchronous boundary. A converted computation has one
+  (pollable) implementation; its synchronous form drives it (`drive_pending`,
+  or `complete_now` where it never waits), and a scope it holds across a
+  suspension — request context, spend log, span, fact tracer, request audit,
+  construction lane (`ProjectSemanticDispatch::suspendable`) — is owned by the
+  computation and installed per poll.
 - `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
   is the only route by which a workspace receives it, both at construction and on
   `set_workspace`. Resident resolution state needs no service: every workspace

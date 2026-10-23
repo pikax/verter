@@ -89,11 +89,23 @@ re-exported from the crate root with `RootWork`.
 
 What each root suspends on today:
 
-- **Component-metadata output.** The store-view capture it starts with
-  suspends behind a build another thread holds (see
-  [Store-view reads](#store-view-reads)). Its resolution, extraction and
-  output materialization still enter their dependency waits synchronously
-  inside the poll; see [Boundaries that still block](#boundaries-that-still-block).
+- **Component-metadata output.** The root runs as a request of its own when
+  it is begun outside one: it creates that request's budgeted context where
+  it begins and carries it as its ambient request, so every poll runs under
+  the same request. The store-view capture it starts with suspends behind a
+  build another thread holds (see [Store-view reads](#store-view-reads)). A
+  cold component's resolve is pollable through the capture of its inputs:
+  the stable-request driver (`run_stable_request_pollable`), the request
+  host's `capture_component_meta_inputs` (an `async` trait method), the
+  raw analysis snapshot with its imports' resolution, and the owner's
+  IndexedReady build, so the root suspends on the owner's declaration-
+  lowering shard instead of parking there. The compute that resolve runs
+  in (`traced_component_meta_compute_pollable`) and its dispatcher
+  (`ProjectSemanticDispatch::suspendable`) cross that suspension with it
+  ([Scopes a suspended compute carries](#scopes-a-suspended-compute-carries)).
+  The resolution's own semantic evaluation, extraction and output
+  materialization still enter their dependency waits synchronously inside
+  the poll; see [Boundaries that still block](#boundaries-that-still-block).
 - **Compile request.** The macro bundle it compiles with is produced on a
   pollable path: the store-view read suspends; the scoped cache node
   suspends while another root produces it and while it waits for dispatch
@@ -112,7 +124,11 @@ entry answers; a root resumed on another thread runs under its own task and
 request and leaves the polling thread's state as it was; a root begun inside
 a task adopts it; the component-metadata root suspends behind a held
 store-view build and resumes warm without entering a wait; dropping it there
-withdraws its wait; the compile root's polls enter no wait under a
+withdraws its wait; a cold component-metadata root with the declaration-
+lowering shards held answers its first poll `Pending` without entering a
+wait, and once they are released resumes to a fresh host's props and to the
+answer its own host then gives synchronously (failed before the capture
+chain was pollable, by a synchronous `DeclLowering` wait); the compile root's polls enter no wait under a
 forbidding probe, cold and warm, handing out its producer once; and a second
 compile root following the first's held producer answers `Pending` and
 completes once that producer runs. One thread drives three compile roots
@@ -167,6 +183,35 @@ a computation can suspend while it holds them:
   `Send`.
 - **Store-view build claims** are taken, built and released within one poll;
   a reader never suspends while it holds a claim.
+
+## Scopes a suspended compute carries
+
+A scope a computation opens on its thread and holds across a suspension is
+owned by the computation instead, and each of its polls installs it on the
+polling thread for that poll alone. Nothing of it stays on a thread between
+polls, so the computation may resume anywhere, and a synchronous caller —
+one poll that runs to the end — sees the scope exactly as it was before.
+
+| Scope | Owned as | Installed per poll by |
+| --- | --- | --- |
+| Request context and budget | the root's ambient request, created where it begins when none is current | `RootTask` |
+| Component-meta spend log | `request_budget::ComputeSpendLog` | `traced_component_meta_compute_pollable` |
+| Component-meta span | `connected_demand::ComputeSpan` | the same |
+| Fact tracer | `OwnedFactTracer::fanning_out` (observations reach the scopes below it on the polling thread, as a synchronous tracer's do) | the same |
+| Request phase audit (`semantic-observe`) | `component_meta_audit::RequestAudit` | `within_request_audit` |
+| Construction lane | `SuspendableDispatch`: a dispatcher bound to no thread, whose lane is entered for each poll (a lane owns nothing, so no operation of it may span a suspension) | `SuspendableDispatch::run` |
+| Work attribution | the site | `attribute_polls` |
+| Parse-stack refusals | the recording | `refusals_within_pollable` |
+
+Each converted computation has one implementation: the pollable form. Its
+synchronous form drives it — `drive_pending` under the caller's execution
+task where it may wait, `complete_now` where every step runs in place and
+the first poll must answer. A driver takes its computation pinned where the
+caller builds it, so the state is not copied into the driver's frame, and
+the cold component-meta path builds its large nested computations with
+`on_heap`, from a frame that ends before they run, so a synchronous caller
+does not hold their state on its stack while the compute recurses below
+them.
 
 ## Interior state a suspended computation shares
 
@@ -542,10 +587,12 @@ wait edges; the remaining families do not yet register their waits there.
 | Declaration-lowering synchronous entries (`acquire_lease*`, `run_leased*`) | `DeclLowering` | `verter_semantic_source/src/decl_lowering.rs` | IndexedReady materialization and the declaration body memo, from inside resolution and semantic evaluation | the `begin_*` handoffs above; callers still synchronous |
 | Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) and the scheduler pool's `install` | `CpuPool` | `verter_session/src/host_batch_coordinator.rs`, `verter_scheduler/src/execution/` | `compile_many`, `get_component_meta_batch`, and the synchronous drivers' handed-out producers | none; the batch topology itself is the executor's to replace |
 
-The declaration-lowering row's handoffs are pollable; what still blocks is
-their synchronous entries, which IndexedReady materialization and the
-declaration body memo call from inside resolution and semantic evaluation.
-What remains is to make the computations that call them suspend instead.
+The declaration-lowering row's handoffs are pollable, and so is the
+IndexedReady build a cold component-meta root's input capture reaches; what
+still blocks is the synchronous entries that resolution and semantic
+evaluation call — the declaration body memo, and IndexedReady builds reached
+from inside the compute. What remains is to make the computations that call
+them suspend instead.
 
 ## What a pollable root still needs
 
@@ -573,13 +620,25 @@ What is already in place for that:
 - a `Sync` dispatcher, so continuation state that borrows it is `Send`;
 - task-owned resolver flights whose leader may suspend inside its compute,
   and workspace leases that cannot cross a suspension;
-- pollable forms of every leaf wait in the table.
+- pollable forms of every leaf wait in the table;
+- the component-meta root's cold path down to its input capture, with the
+  scopes it holds carried per poll
+  ([Scopes a suspended compute carries](#scopes-a-suspended-compute-carries)).
 
-Each scope a converted caller holds across a suspension point — a fact
-tracer, a spend or span log, a refusal recording, a request budget, a
-construction lane — needs the per-poll carry `SemanticTask` and
-`refusals_within_pollable` use: the scope's state is owned by the suspended
-computation and installed for each poll on the polling thread. Where a
+What stays synchronous inside a cold component-meta poll: the request
+host's `compute_component_meta` (macro resolution through
+`ProjectSemanticDispatch`), `extract_component_meta_from_resolved`
+(including fallthrough into imported components), the output
+materialization, and the per-attempt store-view read the non-fixed request
+path takes (`snapshot_store_view_read`). The next callers to convert are
+`compute_component_meta` and the semantic task drive it reaches, under the
+same carries.
+
+Each scope a converted caller holds across a suspension point needs the
+per-poll carry the scopes the component-meta path already holds use
+([Scopes a suspended compute carries](#scopes-a-suspended-compute-carries)):
+the scope's state is owned by the suspended computation and installed for
+each poll on the polling thread. Where a
 scope's guard is thread-bound — the spend log, a workspace lease, a borrow of
 the dispatcher's state — the compiler rejects holding it across a
 suspension; a scope whose guard is `Send` has to be given its carry

@@ -656,11 +656,14 @@ where
         }
 
         let lane_token = store_view.compat_token();
+        let flight_key = cache_key.clone();
         let leader = &mut *executor;
         let leader_view = &store_view;
-        let flight = singleflight
-            .run_retaining_pollable(
-                cache_key.clone(),
+        // The flight, with the compute it leads, is built on the heap: a
+        // cold compute nests deep under its synchronous driver.
+        let flight = verter_execution::blocking::on_heap(move || {
+            singleflight.run_retaining_pollable(
+                flight_key,
                 lane_token,
                 move || async move {
                     let (executor, store_view) = (leader, leader_view);
@@ -668,7 +671,7 @@ where
                     // returned before pinning), so the warm peek here is safe:
                     // a hit it retains as a `stable` rendezvous for followers
                     // was validated against a current view.
-                    if let Some(cached) = executor.try_get_cached(&store_view) {
+                    if let Some(cached) = executor.try_get_cached(store_view) {
                         return Ok(StableExecutionValue {
                             value: cached,
                             stable: true,
@@ -681,8 +684,8 @@ where
                         });
                     }
 
-                    let value = executor.compute(&store_view)?;
-                    let stable = executor.is_stable(&store_view);
+                    let value = executor.compute(store_view)?;
+                    let stable = executor.is_stable(store_view);
                     let completeness = executor.capture_completeness();
                     let cache_refusal = executor.capture_cache_refusal();
                     if stable && !completeness.is_partial() && cache_refusal.is_none() {
@@ -711,7 +714,8 @@ where
                 // recomputing against fresh state.
                 |sev| sev.stable && !sev.completeness.is_partial() && sev.reuse.is_shared(),
             )
-            .await?;
+        })
+        .await?;
 
         if flight.value.stable {
             // A flight LEADER whose closure served a warm hit (did NOT

@@ -707,65 +707,65 @@ impl VerterHost {
                 );
             let dispatch = suspendable.dispatch();
             suspendable.run(async {
-            let Some(ComponentMetaColdResult {
-                resolved,
-                analysis: meta,
-                completeness,
-                admitted,
-            }) = verter_execution::blocking::on_heap(|| {
-                self.component_meta_via_view_cold_pollable(
-                    canonical.as_str(),
-                    view,
-                    fixed,
-                    ctx,
-                    dispatch,
-                    &seed_fence,
-                    validated_at_generation,
-                )
-            })
-            .await?
-            else {
-                return Ok(None);
-            };
-            let seed = with_resolution.then(|| {
-                crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(&resolved)
-            });
-            // SEPARATE tracer scope: output-materialization dependencies never
-            // fold into the analysis entry's fact signature (the cold body's
-            // tracer already sealed + published above). Reuse the SAME live
-            // session context that extraction used.
-            let (output, output_read_set) = named_fact_tracer!(
-                &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-                TracerScope::ComponentMetaOutput,
-                || {
-                    if let Some(final_result) = admitted.as_ref() {
-                        verter_type_engine::fact_signature_helpers::observe_fact_signature(
-                            &final_result.entry.read_set_signature.facts,
-                        );
-                    }
-                    crate::meta_resolve::projectors::build_component_meta_output(
+                let Some(ComponentMetaColdResult {
+                    resolved,
+                    analysis: meta,
+                    completeness,
+                    admitted,
+                }) = verter_execution::blocking::on_heap(|| {
+                    self.component_meta_via_view_cold_pollable(
+                        canonical.as_str(),
+                        view,
+                        fixed,
                         ctx,
                         dispatch,
-                        canonical.as_str(),
-                        meta.0.clone(),
-                        seed,
-                        completeness,
+                        &seed_fence,
+                        validated_at_generation,
                     )
-                }
-            );
-            let output = output?;
-            let publication_evidence = admitted
-                .zip(finalized_output_signature(output_read_set))
-                .map(
-                    |(final_result, output_read_set)| ComponentMetaOutputPublicationEvidence {
-                        final_result,
-                        output_read_set,
-                    },
+                })
+                .await?
+                else {
+                    return Ok(None);
+                };
+                let seed = with_resolution.then(|| {
+                    crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(&resolved)
+                });
+                // SEPARATE tracer scope: output-materialization dependencies never
+                // fold into the analysis entry's fact signature (the cold body's
+                // tracer already sealed + published above). Reuse the SAME live
+                // session context that extraction used.
+                let (output, output_read_set) = named_fact_tracer!(
+                    &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+                    TracerScope::ComponentMetaOutput,
+                    || {
+                        if let Some(final_result) = admitted.as_ref() {
+                            verter_type_engine::fact_signature_helpers::observe_fact_signature(
+                                &final_result.entry.read_set_signature.facts,
+                            );
+                        }
+                        crate::meta_resolve::projectors::build_component_meta_output(
+                            ctx,
+                            dispatch,
+                            canonical.as_str(),
+                            meta.0.clone(),
+                            seed,
+                            completeness,
+                        )
+                    }
                 );
-            Ok(Some(ComponentMetaOutputWithPublicationEvidence {
-                output,
-                publication_evidence,
-            }))
+                let output = output?;
+                let publication_evidence = admitted
+                    .zip(finalized_output_signature(output_read_set))
+                    .map(
+                        |(final_result, output_read_set)| ComponentMetaOutputPublicationEvidence {
+                            final_result,
+                            output_read_set,
+                        },
+                    );
+                Ok(Some(ComponentMetaOutputWithPublicationEvidence {
+                    output,
+                    publication_evidence,
+                }))
             })
             .await
         })
@@ -1056,64 +1056,63 @@ impl VerterHost {
         // nests deep, and a synchronous caller drives it on its own stack.
         let ((resolved_opt, meta_opt), admitted) = verter_execution::blocking::on_heap(move || {
             results.compute_and_admit_with_entry_pollable(
-            canonical,
-            "view-aware path",
-            async move {
-                let (mut resolved, admission) = match verter_execution::blocking::on_heap(move || {
-                    self.resolve_component_meta_with_view_and_fixed_admission_pollable(
+                canonical,
+                "view-aware path",
+                async move {
+                    let resolve = verter_execution::blocking::on_heap(move || {
+                        self.resolve_component_meta_with_view_and_fixed_admission_pollable(
+                            canonical,
+                            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                            view,
+                            executor_fixed,
+                        )
+                    });
+                    let (mut resolved, admission) = match resolve.await {
+                        Some(pair) => pair,
+                        None => return (None, None),
+                    };
+                    let extract = extract_component_meta_from_resolved(
+                        self, canonical, &resolved, true, // include_fallthrough
+                        ctx, dispatch,
+                    );
+                    self.merge_extraction_facts_into_admitted_resolved_meta(
                         canonical,
                         verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                        view,
-                        executor_fixed,
-                    )
-                })
-                .await
-                {
-                    Some(pair) => pair,
-                    None => return (None, None),
-                };
-                let extract = extract_component_meta_from_resolved(
-                    self, canonical, &resolved, true, // include_fallthrough
-                    ctx, dispatch,
-                );
-                self.merge_extraction_facts_into_admitted_resolved_meta(
-                    canonical,
-                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                    view.fingerprint(),
-                    &mut resolved,
-                    extract.fallthrough_fact_versions.as_deref(),
-                    admission.as_ref(),
-                );
-                (
-                    Some(resolved),
-                    Some((
-                        crate::component_meta_cached_result::shared_component_meta_analysis(
-                            extract.analysis,
-                        ),
-                        extract.completeness,
-                    )),
-                )
-            },
-            move |computed, evidence| {
-                let (Some(resolved), Some((meta, extract_completeness))) = computed else {
-                    return crate::component_meta_result_db::ComponentMetaPublishDecision::no_value(
+                        view.fingerprint(),
+                        &mut resolved,
+                        extract.fallthrough_fact_versions.as_deref(),
+                        admission.as_ref(),
                     );
-                };
-                let final_completeness = resolved.completeness.merge(*extract_completeness);
-                let admission = dispatch.component_meta_admission_proof(refusal_query, evidence);
-                self.component_meta_publish_decision_with_view(
-                    canonical,
-                    view,
-                    resolved,
-                    meta.clone(),
-                    validated_at_generation,
-                    seed_fence,
-                    final_completeness,
-                    refusal_query,
-                    admission,
-                )
-            },
-        )
+                    (
+                        Some(resolved),
+                        Some((
+                            crate::component_meta_cached_result::shared_component_meta_analysis(
+                                extract.analysis,
+                            ),
+                            extract.completeness,
+                        )),
+                    )
+                },
+                move |computed, evidence| {
+                    let (Some(resolved), Some((meta, extract_completeness))) = computed else {
+                        return crate::component_meta_result_db::ComponentMetaPublishDecision::no_value(
+                        );
+                    };
+                    let final_completeness = resolved.completeness.merge(*extract_completeness);
+                    let admission = dispatch.component_meta_admission_proof(refusal_query, evidence);
+                    self.component_meta_publish_decision_with_view(
+                        canonical,
+                        view,
+                        resolved,
+                        meta.clone(),
+                        validated_at_generation,
+                        seed_fence,
+                        final_completeness,
+                        refusal_query,
+                        admission,
+                    )
+                },
+            )
         })
         .await;
         let (Some(resolved), Some((meta, extract_completeness))) = (resolved_opt, meta_opt) else {
