@@ -127,7 +127,7 @@ pub(super) struct FunctionArgumentMark {
 
 /// The contextual signature a function value is checked under: the type at
 /// each parameter position and the contextual return type.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct ContextualSignature {
     pub(super) receiver: Option<SemanticNodeId>,
     /// The contextual signature's non-rest parameter types, in order.

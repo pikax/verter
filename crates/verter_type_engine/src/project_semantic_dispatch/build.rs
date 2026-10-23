@@ -22796,6 +22796,34 @@ impl TransactionReadRecording<'_> {
         verter_session_query::facts::reuse::ReuseClass,
         super::dispatch_txn::FlowMemberReuse,
     )> {
+        self.finish_admitting(dispatch, complete, true)
+    }
+
+    /// [`Self::finish`] for a read whose replay must reproduce every rail
+    /// the read reached: one that raised or read an operation refusal is
+    /// not reusable, since the replay re-deposits no refusal.
+    pub(super) fn finish_without_operation_refusals<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        self.finish_admitting(dispatch, complete, false)
+    }
+
+    fn finish_admitting<C: crate::resolver_core::ResolverCapabilities>(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        complete: bool,
+        operation_refusals_reusable: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
         let Self {
             reads,
             refusals,
@@ -22820,7 +22848,10 @@ impl TransactionReadRecording<'_> {
             }
             None => verter_session_query::facts::reuse::ObservedRefusal::None,
         };
-        let complete = !observed.result_is_partial && !folded_partial && complete;
+        let complete = !observed.result_is_partial
+            && !folded_partial
+            && (operation_refusals_reusable || observed.operation_refusals.is_empty())
+            && complete;
         let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
         if !reuse.is_request_reusable() {
             return None;

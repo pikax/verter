@@ -9966,6 +9966,41 @@ impl FlowBinderEnv {
     }
 }
 
+/// The parts of a [`FlowBinderEnv`] that differ between the environments
+/// of one file: the scope its binders declare into, the binders by name,
+/// their declarations, the completed clause operands and the explicit
+/// name-resolution overlay. The scope payload and shadow set derive from
+/// the file.
+#[derive(PartialEq, Eq)]
+pub(super) struct FlowBinderIdentity {
+    scope: crate::semantic_query::NodeScopeId,
+    env: rustc_hash::FxHashMap<String, SemanticNodeId>,
+    type_param_decls: Vec<crate::semantic_query::TypeParamDecl>,
+    exact_binders: rustc_hash::FxHashSet<String>,
+    name_resolution: rustc_hash::FxHashMap<
+        verter_type_expr::OwnedStr,
+        verter_session_query::type_solver::host::ResolvedRootIdentity,
+    >,
+}
+
+impl FlowBinderEnv {
+    /// What a lowering against this environment reads that another
+    /// environment of the same file may bind differently.
+    fn identity(&self) -> FlowBinderIdentity {
+        FlowBinderIdentity {
+            scope: self.scope.clone(),
+            env: self.env.clone(),
+            type_param_decls: self
+                .type_param_decls
+                .iter()
+                .map(crate::semantic_query::TypeParamDecl::copy)
+                .collect(),
+            exact_binders: self.exact_binders.clone(),
+            name_resolution: self.name_resolution.clone(),
+        }
+    }
+}
+
 /// The TYPE-PARAMETER lowering environment a frame's signature positions
 /// are lowered against. It is not evaluator dataflow state: the frame's
 /// semantic state lives entirely in the typed-subject `FlowProductStore`,
@@ -10399,6 +10434,15 @@ enum CalleeStatementEffect {
     Undecided,
 }
 
+/// A nested function value's selected capture inputs, their basis bytes,
+/// and the first degradation preparing them met when it was set aside to
+/// record where the signature evaluation would have recorded it.
+struct NestedCaptureInputs {
+    capture_inputs: Vec<PreparedFlowCaptureInput>,
+    capture_basis: Vec<Vec<u8>>,
+    degradation: Option<FlowReturnDegradation>,
+}
+
 /// Immutable values prepared for one selected child capture. Source annotation
 /// resolution completes before these values define the child input basis.
 struct PreparedFlowCaptureInput {
@@ -10546,6 +10590,8 @@ mod destructure;
 mod disjunction;
 #[cfg(any(test, feature = "test-support"))]
 pub use arm_index::{index_preparation_for_tests, indexed_arm_visits_for_tests};
+#[cfg(any(test, feature = "test-support"))]
+pub use nested::nested_body_evaluations_for_tests;
 #[path = "flow_return_footprint.rs"]
 mod footprint;
 #[cfg(any(test, feature = "semantic-observe"))]
@@ -10588,6 +10634,27 @@ pub(super) trait FlowDemandDriver {
         &self,
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort>;
+    /// Begin recording a read the rest of the evaluation may replay
+    /// ([`ProjectSemanticDispatch::begin_transaction_read`]).
+    fn begin_transaction_read(&self) -> Option<super::build::TransactionReadRecording<'_>>;
+    /// End `recording`: what replaying it reproduces, when it is reusable
+    /// and raised no operation refusal
+    /// ([`super::build::TransactionReadRecording::finish_without_operation_refusals`]).
+    fn finish_transaction_read(
+        &self,
+        recording: super::build::TransactionReadRecording<'_>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )>;
+    /// Replay a recorded read into the scopes live now
+    /// ([`ProjectSemanticDispatch::replay_transaction_read`]).
+    fn replay_transaction_read(
+        &self,
+        reuse: &verter_session_query::facts::reuse::ReuseClass,
+        replay: &super::dispatch_txn::FlowMemberReuse,
+    );
     /// The capability family of the request context this driver serves.
     type Caps: crate::resolver_core::ResolverCapabilities;
     fn flow_slice_skeleton(
@@ -11012,6 +11079,9 @@ pub(super) trait FlowDemandDriver {
     /// Whether the running flow evaluation waits on a demand its frame must
     /// produce first.
     fn contextual_window_waits(&self) -> bool;
+    /// Whether a contextual window is open on the running flow evaluation
+    /// ([`ProjectSemanticDispatch::contextual_window_open`]).
+    fn contextual_window_open(&self) -> bool;
     /// Whether relating a typed callback to its call's held contextual
     /// target waits on a demand the frame must produce first
     /// ([`ProjectSemanticDispatch::contextual_delivery_waits`]).
@@ -11072,6 +11142,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         read.adopt(self)
+    }
+    fn begin_transaction_read(&self) -> Option<super::build::TransactionReadRecording<'_>> {
+        ProjectSemanticDispatch::begin_transaction_read(self)
+    }
+    fn finish_transaction_read(
+        &self,
+        recording: super::build::TransactionReadRecording<'_>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        recording.finish_without_operation_refusals(self, complete)
+    }
+    fn replay_transaction_read(
+        &self,
+        reuse: &verter_session_query::facts::reuse::ReuseClass,
+        replay: &super::dispatch_txn::FlowMemberReuse,
+    ) {
+        ProjectSemanticDispatch::replay_transaction_read(self, reuse, replay);
     }
     type Caps = C;
     fn flow_slice_skeleton(
@@ -11750,6 +11840,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn contextual_window_waits(&self) -> bool {
         ProjectSemanticDispatch::contextual_window_waits(self)
     }
+    fn contextual_window_open(&self) -> bool {
+        ProjectSemanticDispatch::contextual_window_open(self)
+    }
     fn contextual_delivery_waits(
         &self,
         state: &super::call_resolve::ContextualCallState,
@@ -11920,6 +12013,26 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         self.driver.adopt_read(read)
+    }
+    fn begin_transaction_read(&self) -> Option<super::build::TransactionReadRecording<'_>> {
+        self.driver.begin_transaction_read()
+    }
+    fn finish_transaction_read(
+        &self,
+        recording: super::build::TransactionReadRecording<'_>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        self.driver.finish_transaction_read(recording, complete)
+    }
+    fn replay_transaction_read(
+        &self,
+        reuse: &verter_session_query::facts::reuse::ReuseClass,
+        replay: &super::dispatch_txn::FlowMemberReuse,
+    ) {
+        self.driver.replay_transaction_read(reuse, replay);
     }
     fn flow_slice_skeleton(
         &self,
@@ -12573,6 +12686,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn contextual_window_waits(&self) -> bool {
         self.driver.contextual_window_waits()
     }
+    fn contextual_window_open(&self) -> bool {
+        self.driver.contextual_window_open()
+    }
     fn contextual_delivery_waits(
         &self,
         state: &super::call_resolve::ContextualCallState,
@@ -12648,12 +12764,11 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// and holding the enclosing frame's key would name the wrong
     /// function. The `Option` is what makes that mistake unexpressible.
     self_slot: Option<&'b FlowReturnKey>,
-    /// The nested function values whose returns are being evaluated, the
-    /// outermost first, each flagged once a return it depends on is found
-    /// to read it again: the checker's return-type resolution stack
-    /// (`pushTypeResolution`), shared by every nested evaluator of one
-    /// root evaluation.
-    resolving_functions: std::rc::Rc<std::cell::RefCell<nested::ResolvingFunctions>>,
+    /// The checker's return-type resolution stack (`pushTypeResolution`)
+    /// and the nested signatures this evaluation composed, shared by every
+    /// nested evaluator of one root evaluation and dropped with it
+    /// ([`nested::NestedResolution`]).
+    resolving_functions: std::rc::Rc<std::cell::RefCell<nested::NestedResolution>>,
     /// The values an object literal's recursion check has walked and found
     /// to hold no polymorphic `this` binder at all
     /// ([`FlowEvaluator::value_mentions_receiver`]), shared by every nested
@@ -14162,14 +14277,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         } else {
             self.lower_body_type(declared.ty())
         };
-        self.receiver = Some(std::rc::Rc::new(class_expression::ClassReceiver {
+        self.receiver = Some(std::rc::Rc::new(class_expression::ClassReceiver::of_type(
             binder,
-            base: Some(binder),
-            infer_literal_members: false,
-            members: std::cell::RefCell::new(Vec::new()),
-            declared: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
-            forward_read: std::cell::Cell::new(false),
-        }));
+            Some(binder),
+        )));
     }
 
     /// The canonical union of `members` under this frame's null algebra —
@@ -14547,6 +14658,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     base: contextual_this,
                     infer_literal_members,
                     forward_read: std::cell::Cell::new(false),
+                    reads: class_expression::ReceiverReadLog::default(),
                 })
             })
         });
@@ -27218,6 +27330,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     fn nested_signature_prefix(
         &mut self,
+        precomputed_captures: Option<NestedCaptureInputs>,
         nested_params: &[verter_session_query::flow::slice::SliceParam],
         type_parameters: &[verter_session_query::flow::slice::SliceTypeParam],
         capture_context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
@@ -27436,6 +27549,135 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return NestedSignatureStep::Done(self.unmodeled_position());
         };
         let inputs = FlowProductInputs::for_bound_graph(&bound);
+        let captures = match precomputed_captures {
+            // Prepared before the body's slice content was read: the first
+            // degradation that preparation met is recorded here, where its
+            // own run would have recorded it.
+            Some(captures) => {
+                if let Some(degradation) = captures.degradation {
+                    self.record_degradation(degradation);
+                }
+                captures
+            }
+            None => self.prepare_nested_capture_inputs(
+                &inputs,
+                planned,
+                capture_context,
+                declared_evolving_captures,
+                extended_captures,
+            ),
+        };
+        let NestedCaptureInputs {
+            capture_inputs,
+            capture_basis,
+            degradation: _,
+        } = captures;
+        let input_basis =
+            verter_identity::identity::InputBasisId::from_canonical(&NestedFlowInputBasis {
+                parent: self.execution_selection.basis().input_basis.digest(),
+                parameters: &params,
+                captures: &capture_basis,
+            });
+        let request = super::flow_solve::FlowDemandRequest {
+            query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+            input_basis,
+            ancestry: self
+                .execution_selection
+                .basis()
+                .ancestry
+                .with(self.execution_selection.basis().input_basis.clone()),
+            resources: self.execution_selection.resources(),
+            additional_requirements: Arc::from([]),
+        };
+        let Ok(execution_selection) =
+            super::flow_solve::prepare_flow_execution(&request, &bound, planned)
+        else {
+            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
+            return NestedSignatureStep::Done(self.unmodeled_position());
+        };
+        let plan = match super::flow_solve::build_flow_demand_plan_from_execution(
+            Arc::clone(&execution_selection),
+            &bound,
+            request.additional_requirements,
+        ) {
+            Ok(plan) => Some(Arc::new(plan)),
+            Err(_) => {
+                self.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                );
+                None
+            }
+        };
+        let Ok(execution) = FlowProductExecution::new_for_selection(
+            &inputs,
+            Arc::clone(&execution_selection),
+            FlowProductBudget::for_execution_selection(&execution_selection),
+        ) else {
+            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
+            return NestedSignatureStep::Done(self.unmodeled_position());
+        };
+        let Ok(mut captured_products) = FlowProductStore::new(execution, &bound) else {
+            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
+            return NestedSignatureStep::Done(self.unmodeled_position());
+        };
+        let mut declared_capture_types = rustc_hash::FxHashMap::default();
+        let extended_capture_identities: rustc_hash::FxHashSet<_> = capture_inputs
+            .iter()
+            .filter(|input| input.value_demanded && input.extended)
+            .filter_map(|input| match &input.subject {
+                FlowProductSubject::Captured(identity) => Some(identity.clone()),
+                _ => None,
+            })
+            .collect();
+        for input in capture_inputs {
+            if !input.value_demanded {
+                continue;
+            }
+            if let (Some(node), FlowProductSubject::Captured(identity)) =
+                (input.inferred_declared, &input.subject)
+            {
+                declared_capture_types.insert(identity.clone(), node);
+            }
+            captured_products.import_capture_input(
+                &input.subject,
+                input.assignment,
+                input.reaching,
+                input.declared,
+            );
+        }
+        seed_selected_parameters(
+            &mut captured_products,
+            nested_params,
+            &params,
+            bindings,
+            &bound,
+            &execution_selection,
+        );
+        NestedSignatureStep::Child(Box::new(NestedChildParts {
+            params,
+            signature_params,
+            type_param_decls,
+            binder_env,
+            captured_products,
+            declared_capture_types,
+            extended_capture_identities,
+            execution_selection,
+            plan,
+            bound,
+            skeleton,
+        }))
+    }
+
+    /// The selected capture inputs of a nested function value's body, read
+    /// where the function is created, and their basis bytes.
+    fn prepare_nested_capture_inputs(
+        &mut self,
+        inputs: &FlowProductInputs,
+        planned: &crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        capture_context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
+        declared_evolving_captures: &[verter_session_query::function_program::FlowBindingIdentity],
+        extended_captures: &[verter_session_query::flow::skeleton::SkeletonBindingId],
+    ) -> NestedCaptureInputs {
         // Prepare exactly the selected input values before sealing their basis.
         // Only this transient evaluator owns execution handles; descriptors keep
         // structural source locators and never retain semantic state.
@@ -27690,100 +27932,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 )
             })
             .collect();
-        let request = super::flow_solve::FlowDemandRequest {
-            query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
-            input_basis: verter_identity::identity::InputBasisId::from_canonical(
-                &NestedFlowInputBasis {
-                    parent: self.execution_selection.basis().input_basis.digest(),
-                    parameters: &params,
-                    captures: &capture_basis,
-                },
-            ),
-            ancestry: self
-                .execution_selection
-                .basis()
-                .ancestry
-                .with(self.execution_selection.basis().input_basis.clone()),
-            resources: self.execution_selection.resources(),
-            additional_requirements: Arc::from([]),
-        };
-        let Ok(execution_selection) =
-            super::flow_solve::prepare_flow_execution(&request, &bound, planned)
-        else {
-            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
-            return NestedSignatureStep::Done(self.unmodeled_position());
-        };
-        let plan = match super::flow_solve::build_flow_demand_plan_from_execution(
-            Arc::clone(&execution_selection),
-            &bound,
-            request.additional_requirements,
-        ) {
-            Ok(plan) => Some(Arc::new(plan)),
-            Err(_) => {
-                self.record_degradation(
-                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                );
-                None
-            }
-        };
-        let Ok(execution) = FlowProductExecution::new_for_selection(
-            &inputs,
-            Arc::clone(&execution_selection),
-            FlowProductBudget::for_execution_selection(&execution_selection),
-        ) else {
-            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
-            return NestedSignatureStep::Done(self.unmodeled_position());
-        };
-        let Ok(mut captured_products) = FlowProductStore::new(execution, &bound) else {
-            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
-            return NestedSignatureStep::Done(self.unmodeled_position());
-        };
-        let mut declared_capture_types = rustc_hash::FxHashMap::default();
-        let extended_capture_identities: rustc_hash::FxHashSet<_> = capture_inputs
-            .iter()
-            .filter(|input| input.value_demanded && input.extended)
-            .filter_map(|input| match &input.subject {
-                FlowProductSubject::Captured(identity) => Some(identity.clone()),
-                _ => None,
-            })
-            .collect();
-        for input in capture_inputs {
-            if !input.value_demanded {
-                continue;
-            }
-            if let (Some(node), FlowProductSubject::Captured(identity)) =
-                (input.inferred_declared, &input.subject)
-            {
-                declared_capture_types.insert(identity.clone(), node);
-            }
-            captured_products.import_capture_input(
-                &input.subject,
-                input.assignment,
-                input.reaching,
-                input.declared,
-            );
+        NestedCaptureInputs {
+            capture_inputs,
+            capture_basis,
+            degradation: None,
         }
-        seed_selected_parameters(
-            &mut captured_products,
-            nested_params,
-            &params,
-            bindings,
-            &bound,
-            &execution_selection,
-        );
-        NestedSignatureStep::Child(Box::new(NestedChildParts {
-            params,
-            signature_params,
-            type_param_decls,
-            binder_env,
-            captured_products,
-            declared_capture_types,
-            extended_capture_identities,
-            execution_selection,
-            plan,
-            bound,
-            skeleton,
-        }))
     }
 
     /// The CALLEE's own type-parameter clause at a direct-call site.
