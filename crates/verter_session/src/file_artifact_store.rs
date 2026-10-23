@@ -1493,6 +1493,12 @@ impl FileArtifactStore {
         reclaimed
     }
 
+    /// Callback-free readiness hint for transferring reclamation outside a poll.
+    pub(crate) fn root_release_reclamation_pending(&self) -> bool {
+        self.unreclaimed_retirements.load(Ordering::Relaxed) != 0
+            && self.live_roots.released.load(Ordering::Acquire)
+    }
+
     /// Reclaim what a released root kept reachable.
     ///
     /// The amortised sweep runs while edits retire versions, and a store

@@ -1,0 +1,5 @@
+error[E0616]: field `core` of struct `StoreViewHandoff` is private
+ --> tests/cases/compile-fail/owned_store_view_no_raw_core.rs:4:21
+  |
+4 |     let _ = handoff.core;
+  |                     ^^^^ private field

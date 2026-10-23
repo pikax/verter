@@ -372,6 +372,9 @@ mod resolver_core_tests;
 mod resolver_store;
 pub use host_views::CommittedSourceContent;
 pub use resolver_store::{HostAuthority, HostAuthorityView};
+pub use resolver_store::{
+    StoreViewError, StoreViewHandoff, StoreViewProducer, StoreViewStep, StoreViewValue,
+};
 #[cfg(test)]
 mod resolver_store_tests;
 pub mod route_analysis_inputs;
