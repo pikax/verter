@@ -602,7 +602,7 @@ impl VerterHost {
         let (project_type_store, engine_grants) =
             crate::project_type_store::ProjectTypeStore::compose(
                 Arc::clone(&provenance),
-                task_registry,
+                task_registry.clone(),
                 memo_family_bound,
             );
         let project_type_store = Arc::new(project_type_store);
@@ -700,6 +700,7 @@ impl VerterHost {
                 envelope_ingest: registered_envelope_ingest,
             },
             block_content: crate::block_content::BlockContentHostLane::default(),
+            task_registry,
             language_classifier,
             workspace: workspace_lock,
             workspace_services,

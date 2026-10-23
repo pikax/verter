@@ -522,6 +522,10 @@ pub struct VerterHost {
 
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
+    /// The host's one execution-task registry: the cycle authority the
+    /// scheduler and the semantic store share, and under which each host
+    /// root runs as its own task.
+    pub(crate) task_registry: verter_execution::tasks::TaskRegistry,
     pub(crate) carrier_publication: carrier_publication_store::CarrierPublicationHostHandles,
     pub(crate) block_content: crate::block_content::BlockContentHostLane,
     /// The single host-level language classification authority:
