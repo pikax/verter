@@ -154,9 +154,12 @@ would force a live artifact to re-parse or revoke a live handle. Both
 still consume aggregate headroom, so discretionary retention is refused
 while they are held, and crossing `pin_threshold_bytes` is REPORTED
 (`under_pin_pressure()`) rather than enforced. The hard invariant is
-therefore over the discretionary class: `retained` never exceeds
-`aggregate_ceiling_bytes − pinned − active`, under any concurrent
-interleaving (the admission is a CAS, never a check-then-reserve);
+therefore over discretionary admission: a retained reservation must fit
+`aggregate_ceiling_bytes − pinned − active` at the admission decision.
+All occupancy and peak updates share the admission lock, including
+unconditional ACTIVE reservations and refusable ACTIVE-to-retained adoption.
+Later in-flight work or pins may exceed the ceiling without revoking
+existing owners;
 production in-flight owners charge through
 `SemanticRetentionAccount::reserve_in_flight`, which attributes the
 charge to a measurement owner when an ACTIVE-occupancy window is open on
@@ -193,7 +196,7 @@ the held bytes move between ACTIVE balances with the total unchanged, and no
 window observes the adoption half-applied. `absorb` merges settled
 (non-ACTIVE) charges only. The account keeps each identified owner's ACTIVE
 bytes AND the UNKNOWN balance exactly (they sum to the account's ACTIVE bytes). Every ACTIVE transition — ACTIVE reserve and
-release, `commit_retained`, an ACTIVE `transfer_to_pinned`, a holds slice
+release, `try_adopt_retained`, an ACTIVE `transfer_to_pinned`, a holds slice
 joining an ACTIVE charge through `holding` — is noted under that same lock:
 the account keeps each owner's ACTIVE bytes exactly, so opening or finishing
 races lose nothing and overlapping windows never reset each other.
