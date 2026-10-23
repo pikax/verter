@@ -5,8 +5,12 @@
 // environment fingerprint, the run configuration and each test's hermetic flag
 // so the JUnit report is more than an anonymous observation.
 //
+//   node scripts/ci-junit-metadata.mjs snapshot-env --out <env.json>
+//        run by the step that executes nextest, in that step's shell, so the
+//        recorded variables are the ones the tests ran under
 //   node scripts/ci-junit-metadata.mjs write --junit <junit.xml> --out <metadata.json>
-//        --command <cmd> --profile <name> [--features <list>] [--filter <expr>]
+//        --env-snapshot <env.json> --profile <name>
+//        (--argv-json <cargo argv json> | --command <cmd> [--features <list>] [--filter <expr>])
 //        [--partition <spec>] [--matrix-json <json>] [--tools rustc,cargo,...]
 //   node scripts/ci-junit-metadata.mjs check --junit <junit.xml> --metadata <metadata.json>
 //
@@ -29,9 +33,13 @@ const HERMETIC_LIST = join(REPO_ROOT, "scripts", "manifests", "ci-hermetic-tests
 export const ENV_ALLOWLIST = [
   "CI",
   "CARGO_INCREMENTAL",
+  "CARGO_LLVM_COV",
   "CARGO_TARGET_DIR",
   "CARGO_TERM_COLOR",
   "NEXTEST_PROFILE",
+  "LLVM_PROFILE_FILE",
+  "LLVM_PROFILE_FILE_NAME",
+  "RUSTDOCFLAGS",
   "RUSTFLAGS",
   "RUSTUP_TOOLCHAIN",
   "RUST_BACKTRACE",
@@ -41,6 +49,9 @@ export const ENV_ALLOWLIST = [
   "ImageVersion",
 ];
 
+/** Tools every nextest job runs, so every document must carry their versions. */
+export const REQUIRED_TOOLS = ["rustc", "cargo", "cargo-nextest", "node", "pnpm"];
+
 const TOOL_COMMANDS = {
   rustc: ["rustc", ["--version", "--verbose"]],
   cargo: ["cargo", ["--version"]],
@@ -49,8 +60,40 @@ const TOOL_COMMANDS = {
   pnpm: ["pnpm", ["--version"]],
 };
 
-function run(file, args) {
-  return execFileSync(file, args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+function run(file, args, cwd = REPO_ROOT) {
+  return execFileSync(file, args, { cwd, encoding: "utf8" }).trim();
+}
+
+/** The allow-listed variables of `env`: every name, its value when set, else null. */
+export function allowListedVariables(env) {
+  return Object.fromEntries(ENV_ALLOWLIST.map((name) => [name, env[name] ?? null]));
+}
+
+function readEnvSnapshot(path) {
+  const doc = JSON.parse(readFileSync(path, "utf8"));
+  const variables = doc?.variables;
+  const names = variables && typeof variables === "object" ? Object.keys(variables) : [];
+  if (names.length !== ENV_ALLOWLIST.length || !ENV_ALLOWLIST.every((n) => names.includes(n))) {
+    throw new Error(`${path}: expected {variables: {${ENV_ALLOWLIST.join(", ")}}}`);
+  }
+  return variables;
+}
+
+/** Command, cargo features and filter as the run passed them, read from its cargo argument vector. */
+export function describeArgv(argv) {
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every((a) => typeof a === "string")) {
+    throw new Error("--argv-json must be a non-empty JSON array of strings");
+  }
+  const valueOf = (flag) => {
+    const at = argv.indexOf(flag);
+    return at >= 0 && at + 1 < argv.length ? argv[at + 1] : undefined;
+  };
+  return {
+    command: ["cargo", ...argv].join(" "),
+    features: valueOf("--features"),
+    filter: valueOf("-E"),
+    partition: valueOf("--partition"),
+  };
 }
 
 function parseArgs(argv) {
@@ -99,15 +142,15 @@ function readHermeticList() {
 }
 
 /** The checked-out commit's tree and parents, read from the raw commit object so a shallow clone still reports them. */
-function readCheckout() {
-  const commit = run("git", ["rev-parse", "HEAD"]);
-  const raw = run("git", ["cat-file", "-p", "HEAD"]);
+export function readCheckout(cwd = REPO_ROOT) {
+  const commit = run("git", ["rev-parse", "HEAD"], cwd);
+  const raw = run("git", ["cat-file", "-p", "HEAD"], cwd);
   const parents = raw
     .split("\n\n", 1)[0]
     .split("\n")
     .filter((line) => line.startsWith("parent "))
     .map((line) => line.slice("parent ".length));
-  return { commit, tree: run("git", ["rev-parse", "HEAD^{tree}"]), parents };
+  return { commit, tree: run("git", ["rev-parse", "HEAD^{tree}"], cwd), parents };
 }
 
 function readToolVersions(names) {
@@ -134,7 +177,11 @@ export function buildMetadata(options, env = process.env) {
   const junit = readFileSync(options.junit, "utf8");
   const hermetic = readHermeticList();
   const workflowRef = env.GITHUB_WORKFLOW_REF ?? "";
-  const toolNames = (options.tools ?? "rustc,cargo,cargo-nextest").split(",").filter(Boolean);
+  const toolNames = (options.tools ?? REQUIRED_TOOLS.join(",")).split(",").filter(Boolean);
+  const argv = options["argv-json"] ? describeArgv(JSON.parse(options["argv-json"])) : null;
+  const command = argv?.command ?? options.command ?? "";
+  const filter = argv ? argv.filter : options.filter;
+  const features = argv ? argv.features : options.features;
   return {
     schemaVersion: SCHEMA_VERSION,
     checkout: { ...readCheckout(), event: env.GITHUB_EVENT_NAME ?? "none" },
@@ -145,18 +192,18 @@ export function buildMetadata(options, env = process.env) {
       architecture: arch(),
       runnerImageDigest: env.RUNNER_IMAGE_DIGEST || "none",
       toolchainPins: readToolchainPins(),
-      variables: Object.fromEntries(ENV_ALLOWLIST.map((name) => [name, env[name] ?? null])),
+      variables: readEnvSnapshot(options["env-snapshot"]),
     },
     runConfiguration: {
       workflowPath: workflowRef.split("@", 1)[0].split("/").slice(2).join("/") || "none",
       workflow: env.GITHUB_WORKFLOW ?? "none",
       job: env.GITHUB_JOB ?? "none",
       matrix: options["matrix-json"] ? JSON.parse(options["matrix-json"]) : {},
-      command: options.command ?? "",
-      cargoFeatures: options.features ?? "none",
+      command,
+      cargoFeatures: features ?? "none",
       nextestProfile: options.profile ?? "",
-      testFilter: options.filter ?? "none",
-      partition: options.partition ?? "none",
+      testFilter: filter ?? "none",
+      partition: options.partition ?? argv?.partition ?? "none",
     },
     tests: junitTestIds(junit).map((id) => ({ id, hermetic: hermetic.has(id) })),
   };
@@ -183,8 +230,7 @@ export function checkMetadata(meta, junitXml) {
     need("checkout.parents (a pull_request merge commit has exactly two)", c.parents?.length === 2);
   }
   const tools = meta?.tools ?? {};
-  for (const name of ["rustc", "cargo", "cargo-nextest"])
-    need(`tools.${name}`, nonEmpty(tools[name]));
+  for (const name of REQUIRED_TOOLS) need(`tools.${name}`, nonEmpty(tools[name]));
   const e = meta?.environment ?? {};
   for (const key of ["os", "runnerOs", "architecture", "runnerImageDigest"]) {
     need(`environment.${key}`, nonEmpty(e[key]));
@@ -209,6 +255,14 @@ export function checkMetadata(meta, junitXml) {
   }
   need("runConfiguration.matrix", r.matrix !== null && typeof r.matrix === "object");
   need("runConfiguration.nextestProfile is 'ci'", r.nextestProfile === "ci");
+  need(
+    "environment.variables.NEXTEST_PROFILE equals runConfiguration.nextestProfile",
+    e.variables?.NEXTEST_PROFILE === r.nextestProfile,
+  );
+  need(
+    "runConfiguration.testFilter (the command passes -E, so a filter is required)",
+    !/(^|\s)-E(\s|$)/.test(r.command ?? "") || (nonEmpty(r.testFilter) && r.testFilter !== "none"),
+  );
   const tests = meta?.tests;
   if (
     !Array.isArray(tests) ||
@@ -231,9 +285,20 @@ export function checkMetadata(meta, junitXml) {
 
 function main() {
   const { command, options } = parseArgs(process.argv.slice(2));
+  if (command === "snapshot-env") {
+    if (!options.out) throw new Error("snapshot-env requires --out");
+    writeFileSync(
+      options.out,
+      `${JSON.stringify({ variables: allowListedVariables(process.env) }, null, 2)}\n`,
+    );
+    return 0;
+  }
   if (command === "write") {
-    for (const key of ["junit", "out", "command", "profile"]) {
+    for (const key of ["junit", "out", "profile", "env-snapshot"]) {
       if (!options[key]) throw new Error(`write requires --${key}`);
+    }
+    if (!options["argv-json"] && !options.command) {
+      throw new Error("write requires --argv-json or --command");
     }
     writeFileSync(options.out, `${JSON.stringify(buildMetadata(options), null, 2)}\n`);
     return 0;
@@ -246,7 +311,7 @@ function main() {
     for (const problem of problems) process.stderr.write(`::error::JUnit metadata: ${problem}\n`);
     return problems.length === 0 ? 0 : 1;
   }
-  throw new Error("usage: ci-junit-metadata.mjs write|check ...");
+  throw new Error("usage: ci-junit-metadata.mjs snapshot-env|write|check ...");
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

@@ -436,9 +436,12 @@ jobs:
           NEXTEST_PROFILE: ci
         run: |
           mkdir -p target/rust-nextest-archive
-          export VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter core)"
-          echo "filter=$VERTER_NEXTEST_FILTER" >> "$GITHUB_OUTPUT"
-          cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER"
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter core)"
+          export VERTER_NEXTEST_FILTER
+          nextest_argv=(nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER")
+          echo "argv=$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${nextest_argv[@]}")" >> "$GITHUB_OUTPUT"
+          cargo "${nextest_argv[@]}"
       # The JUnit report plus its metadata document, under a stable name per shard.
       - name: Nextest JUnit evidence
         id: junit
@@ -446,11 +449,9 @@ jobs:
         uses: ./.github/actions/nextest-evidence
         with:
           name: nextest-evidence-rust-test-core-${{ matrix.shard }}-of-4
-          command: cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition hash:${{ matrix.shard }}/4 -E <filter>
-          filter: ${{ steps.nextest.outputs.filter || 'none' }}
-          partition: hash:${{ matrix.shard }}/4
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
           matrix-json: ${{ toJSON(matrix) }}
-          tools: rustc,cargo,cargo-nextest,node,pnpm
       - name: Test report
         if: always() && steps.junit.outputs.junit-path != ''
         uses: dorny/test-reporter@v3
@@ -491,23 +492,22 @@ jobs:
         run: cargo fetch --locked
       - name: Run the instrumentation lane
         timeout-minutes: 80
+        id: nextest
         env:
           NEXTEST_PROFILE: ci
-        run: node scripts/observe-lane.mjs run
-      - name: Core nextest filter
-        id: core-filter
-        if: always()
-        run: echo "expr=$(node scripts/provider-ci.mjs filter core)" >> "$GITHUB_OUTPUT"
+        run: |
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          argv="$(node scripts/observe-lane.mjs args)"
+          echo "argv=$argv" >> "$GITHUB_OUTPUT"
+          node scripts/observe-lane.mjs run
       - name: Nextest JUnit evidence
         id: junit
         if: always()
         uses: ./.github/actions/nextest-evidence
         with:
           name: nextest-evidence-rust-observe
-          command: node scripts/observe-lane.mjs run
-          features: semantic-observe
-          filter: ${{ steps.core-filter.outputs.expr || 'none' }}
-          tools: rustc,cargo,cargo-nextest,node,pnpm
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
       - name: Test report
         if: always() && steps.junit.outputs.junit-path != ''
         uses: dorny/test-reporter@v3
@@ -679,23 +679,21 @@ jobs:
       - name: Verify BF2 CI lane contract
         run: node --test scripts/bf2-ci-lane-selftest.mjs
       - name: Run exact BF2 authoritative inventory
+        id: nextest
         env:
           NEXTEST_PROFILE: ci
-        run: node scripts/bf2-authoritative.mjs
-      - name: BF2 nextest filter
-        id: bf2-filter
-        if: always()
         run: |
-          echo "expr=$(node -e 'import("./scripts/gate-internals.mjs").then((m) => console.log(m.BF2_AUTHORITATIVE_FILTER_EXPR))')" >> "$GITHUB_OUTPUT"
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
+          argv="$(node -e 'import("./scripts/gate-internals.mjs").then((m) => console.log(JSON.stringify(m.buildBf2NextestArgs("run"))))')"
+          echo "argv=$argv" >> "$GITHUB_OUTPUT"
+          node scripts/bf2-authoritative.mjs
       - name: Nextest JUnit evidence
         if: always()
         uses: ./.github/actions/nextest-evidence
         with:
           name: nextest-evidence-bf2-authoritative
-          command: node scripts/bf2-authoritative.mjs
-          features: bf2-authoritative
-          filter: ${{ steps.bf2-filter.outputs.expr || 'none' }}
-          tools: rustc,cargo,cargo-nextest,node,pnpm
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
 
   js-build-test:
     name: JS Build & Test
