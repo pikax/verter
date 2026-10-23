@@ -2023,11 +2023,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         ..
                     } => ScopeId {
                         canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
-                        owner: *owner,
+                        owner: owner.lexical(),
                         local_scope: None,
-                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(*owner),
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            owner.lexical(),
+                        ),
                     },
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
+                };
+                // The root heads in the LEXICAL owner the body is written
+                // in: a module's `declare global` contribution addressed
+                // by its global-augmentation scope reads the module's own
+                // values, its imports and its `declare global` values. A
+                // value the module's `declare global` blocks declare, which
+                // the body's name environment binds to the global ahead of
+                // the module's namesake, heads in those blocks' scope.
+                let root_scope = if self.names_global_block_value(
+                    ctx.name_resolution,
+                    &root_scope,
+                    root.as_str(),
+                ) {
+                    ScopeId {
+                        binder_scope_id:
+                            crate::semantic_query::BinderScopeId::augmentation_global_scope(
+                                root_scope.owner,
+                            ),
+                        ..root_scope
+                    }
+                } else {
+                    root_scope
                 };
                 // A path written inside a `declare module` namespace block
                 // heads at the innermost enclosing ambient namespace member

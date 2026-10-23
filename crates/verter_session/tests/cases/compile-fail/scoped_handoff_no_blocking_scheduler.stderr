@@ -1,0 +1,5 @@
+error[E0616]: field `scheduler` of struct `ScopedCacheNodeHandoff` is private
+ --> tests/cases/compile-fail/scoped_handoff_no_blocking_scheduler.rs:4:22
+  |
+4 |     let _ = &handoff.scheduler;
+  |                      ^^^^^^^^^ private field

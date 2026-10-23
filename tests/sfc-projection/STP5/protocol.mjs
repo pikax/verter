@@ -4,6 +4,12 @@
  * Qualifies the TypeScript content-mapper ABI (initialize / openProject /
  * transform / closeProject, encoding, span kinds, diagnostic directives,
  * observation roles). Does not implement a production Vue mapper.
+ *
+ * The wire model follows the final protocol: microsoft/typescript-go#4712
+ * ("Content mappers") as amended by microsoft/TypeScript#63936 ("Content
+ * mappers round 2"), which removed `protocolVersion` from `initialize`, made
+ * diagnostic `code` required, and lifted the restriction on overlapping
+ * original-text spans.
  */
 
 import fs from "node:fs";
@@ -12,7 +18,35 @@ import { fileURLToPath } from "node:url";
 
 const STP5_DIR = path.dirname(fileURLToPath(import.meta.url));
 
+/** Version of this harness module. Not a wire field: the protocol has none. */
 export const PROTOCOL_VERSION = 1;
+
+/**
+ * The operations the executed proof (`mapper-host/e2e.mjs`) records per
+ * build, in report order. Each maps to a field, method or rule of the final
+ * protocol.
+ */
+export const MAPPER_HOST_OPERATIONS = Object.freeze([
+  "initialize",
+  "encoding-negotiation",
+  "locale",
+  "diagnostic-source",
+  "openProject",
+  "option-diagnostics",
+  "dynamic-config-identity",
+  "watched-files",
+  "transform",
+  "virtual-extension",
+  "span-mappings",
+  "alias-display",
+  "synthesized-diagnostics",
+  "mapper-diagnostics",
+  "diagnostic-directive-ignore",
+  "diagnostic-directive-expect",
+  "unused-expect-diagnostic",
+  "unused-expect-index",
+  "closeProject",
+]);
 
 export const REQUIRED_HOST_OPERATIONS = Object.freeze([
   "initialize",
@@ -20,6 +54,47 @@ export const REQUIRED_HOST_OPERATIONS = Object.freeze([
   "transform",
   "closeProject",
 ]);
+
+/** JSON-RPC methods; TypeScript sends every request, the mapper none. */
+export const MAPPER_METHODS = REQUIRED_HOST_OPERATIONS;
+
+/** `MappedOutput.extension`: how TypeScript parses the virtual text. */
+export const VIRTUAL_EXTENSIONS = Object.freeze([
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".json",
+]);
+
+/**
+ * `InitializeResult.diagnosticSource` may not name TypeScript or any file
+ * extension TypeScript understands (compared case-insensitively, without the
+ * leading dot).
+ */
+export const RESERVED_DIAGNOSTIC_SOURCES = Object.freeze([
+  "typescript",
+  "tsc",
+  "ts",
+  "tsx",
+  "d.ts",
+  "cts",
+  "d.cts",
+  "mts",
+  "d.mts",
+  "js",
+  "jsx",
+  "cjs",
+  "mjs",
+  "json",
+]);
+
+/** `package.json` `typescript.contentMapper` fields. */
+export const MANIFEST_FIELDS = Object.freeze(["exec", "compilerOptions", "dynamicConfig"]);
 
 export const REQUIRED_OBSERVATION_OPERATIONS = Object.freeze([
   "diagnostics",
@@ -59,6 +134,8 @@ export const SpanMapFeature = Object.freeze({
   AutoInsert: 1 << 17,
   DocumentSymbols: 1 << 18,
   CodeLens: 1 << 19,
+  /** Every feature; the default when a mapping omits `features`. */
+  All: (1 << 20) - 1,
 });
 
 export const DiagnosticDirectivePolicy = Object.freeze({
@@ -205,7 +282,7 @@ export function virtualToOriginal(mappings, virtualOffset) {
     if (virtualOffset >= vStart && virtualOffset < vStart + vLen) {
       hits.push({
         kind,
-        features: features ?? (SpanMapFeature.CodeLens << 1) - 1,
+        features: features ?? SpanMapFeature.All,
         originalStart: oStart,
         originalLength: oLen,
       });
@@ -222,7 +299,7 @@ export function originalToVirtual(mappings, originalOffset) {
     if (originalOffset >= oStart && originalOffset < oStart + oLen) {
       hits.push({
         kind,
-        features: features ?? (SpanMapFeature.CodeLens << 1) - 1,
+        features: features ?? SpanMapFeature.All,
         virtualStart: vStart,
         virtualLength: vLen,
       });
@@ -234,6 +311,7 @@ export function originalToVirtual(mappings, originalOffset) {
 export const CLEAN_TRANSFORM = Object.freeze({
   original: "<script>const n = 1;</script>\n<template>{{ n }}</template>",
   text: "const n = 1;\n__synth();\n_n.value;\n__aliasN;",
+  extension: ".ts",
   mappings: [
     [0, 12, 8, 12, SpanMapKind.Verbatim],
     [13, 9, 0, 0, SpanMapKind.Atom, SpanMapFeature.None],
@@ -275,35 +353,154 @@ export function assertCleanGeometry(transform = CLEAN_TRANSFORM) {
   return errors;
 }
 
-export function validateDiagnosticDirectives(directives, originalText) {
+function isNonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * The host's acceptance rules for `MappedOutput.diagnosticDirectives`
+ * (`{ unusedExpectDirectiveDiagnostics, directives }`), as the selected build
+ * enforces them:
+ *
+ * - each directive is a 5- or 6-tuple
+ *   `[originalStart, originalLength, virtualStart, virtualEnd, policy, unusedExpectDirectiveIndex?]`;
+ * - `policy` is `Ignore` (0) or `Expect` (1);
+ * - `virtualEnd >= virtualStart` and both lie in the virtual text;
+ * - an `Expect` directive needs a valid original range, and names its
+ *   unused-Expect diagnostic by index, which may be omitted only when exactly
+ *   one `unusedExpectDirectiveDiagnostics` entry exists;
+ * - directive virtual ranges do not overlap.
+ *
+ * Lengths are in the negotiated encoding; `virtualLength` / `originalLength`
+ * bound the ranges when supplied.
+ */
+export function validateWireDiagnosticDirectives(
+  value,
+  { virtualLength = Infinity, originalLength: originalTextLength = Infinity } = {},
+) {
   const errors = [];
-  const seen = new Map();
-  for (const directive of directives || []) {
+  const fail = (code, message) => errors.push(err("STP5-guard-duplicate", code, message));
+  if (value === undefined || value === null) return errors;
+  if (Array.isArray(value) || typeof value !== "object") {
+    fail(
+      "directive-shape",
+      "diagnosticDirectives is an object { unusedExpectDirectiveDiagnostics, directives }, not a bare tuple array",
+    );
+    return errors;
+  }
+  const unused = value.unusedExpectDirectiveDiagnostics;
+  if (!Array.isArray(unused)) {
+    fail(
+      "directive-shape",
+      "diagnosticDirectives.unusedExpectDirectiveDiagnostics must be an array",
+    );
+    return errors;
+  }
+  for (const [index, row] of unused.entries()) {
+    if (!Number.isInteger(row?.code) || typeof row?.messageText !== "string") {
+      fail(
+        "directive-shape",
+        `unusedExpectDirectiveDiagnostics[${index}] needs an integer code and messageText`,
+      );
+    }
+  }
+  if (!Array.isArray(value.directives)) {
+    fail("directive-shape", "diagnosticDirectives.directives must be an array");
+    return errors;
+  }
+  const ranges = [];
+  for (const [index, directive] of value.directives.entries()) {
+    if (!Array.isArray(directive) || (directive.length !== 5 && directive.length !== 6)) {
+      fail("directive-shape", `directive ${index} must be a 5- or 6-element tuple`);
+      continue;
+    }
+    const [originalStart, originalLength, virtualStart, virtualEnd, policy, unusedIndex] =
+      directive;
+    if (
+      policy !== DiagnosticDirectivePolicy.Ignore &&
+      policy !== DiagnosticDirectivePolicy.Expect
+    ) {
+      fail("hidden-blame", `directive ${index} has unknown policy ${policy}`);
+      continue;
+    }
+    if (
+      !isNonNegativeInteger(virtualStart) ||
+      !Number.isInteger(virtualEnd) ||
+      virtualEnd < virtualStart ||
+      virtualEnd > virtualLength
+    ) {
+      fail(
+        "hidden-blame",
+        `directive ${index} virtual range [${virtualStart}, ${virtualEnd}) is invalid`,
+      );
+      continue;
+    }
+    if (policy === DiagnosticDirectivePolicy.Expect) {
+      if (
+        !isNonNegativeInteger(originalStart) ||
+        !isNonNegativeInteger(originalLength) ||
+        originalStart + originalLength > originalTextLength
+      ) {
+        fail("fabricated-blame", `Expect directive ${index} original range is not in the source`);
+      }
+      if (unusedIndex === undefined) {
+        if (unused.length !== 1) {
+          fail(
+            "unused-expect-index",
+            `Expect directive ${index} must name unusedExpectDirectiveIndex when there is not exactly one unused diagnostic`,
+          );
+        }
+      } else if (!isNonNegativeInteger(unusedIndex) || unusedIndex >= unused.length) {
+        fail(
+          "unused-expect-index",
+          `Expect directive ${index} unusedExpectDirectiveIndex ${unusedIndex} is out of range`,
+        );
+      }
+    }
+    ranges.push({ index, start: virtualStart, end: virtualEnd });
+  }
+  ranges.sort((a, b) => a.start - b.start);
+  for (let i = 1; i < ranges.length; i += 1) {
+    if (ranges[i].start < ranges[i - 1].end) {
+      fail(
+        "duplicate-guard",
+        `directive ${ranges[i].index} virtual range overlaps directive ${ranges[i - 1].index}`,
+      );
+    }
+  }
+  return errors;
+}
+
+/**
+ * Verter's emission policy for the directives it sends: the host's wire
+ * rules, plus no directive without an authored directive behind it (empty
+ * original span) and no directive that can cover nothing (empty virtual
+ * range). The host accepts both of those; Verter does not emit them, because
+ * an empty Expect is always reported unused and an empty-origin directive
+ * suppresses with no blame the author can see.
+ */
+export function validateDiagnosticDirectives(value, originalText) {
+  const errors = validateWireDiagnosticDirectives(value, { originalLength: originalText.length });
+  if (errors.some((error) => error.code === "directive-shape")) return errors;
+  const directives = value?.directives || [];
+  const seen = new Set();
+  for (const directive of directives) {
     const [originalStart, originalLength, virtualStart, virtualEnd, policy] = directive;
     if (
-      originalLength <= 0 ||
-      originalStart < 0 ||
+      !(originalLength > 0) ||
+      !(originalStart >= 0) ||
       originalStart + originalLength > originalText.length
     ) {
       errors.push(
         err(
           "STP5-guard-duplicate",
           "fabricated-blame",
-          `directive original span [${originalStart}, ${originalLength}) is not in the source`,
+          `directive original span [${originalStart}, ${originalLength}) is not an authored directive in the source`,
         ),
       );
-      continue;
     }
     if (virtualEnd <= virtualStart) {
       errors.push(err("STP5-guard-duplicate", "hidden-blame", "directive virtual range is empty"));
-    }
-    if (
-      policy !== DiagnosticDirectivePolicy.Ignore &&
-      policy !== DiagnosticDirectivePolicy.Expect
-    ) {
-      errors.push(
-        err("STP5-guard-duplicate", "hidden-blame", `unknown directive policy ${policy}`),
-      );
     }
     const key = `${originalStart}:${originalLength}:${virtualStart}:${virtualEnd}:${policy}`;
     if (seen.has(key)) {
@@ -315,42 +512,55 @@ export function validateDiagnosticDirectives(directives, originalText) {
         ),
       );
     }
-    seen.set(key, true);
-  }
-  const ranges = (directives || []).map((row) => ({
-    start: row[2],
-    end: row[3],
-    originalStart: row[0],
-    originalLength: row[1],
-  }));
-  for (let i = 0; i < ranges.length; i += 1) {
-    for (let j = i + 1; j < ranges.length; j += 1) {
-      const a = ranges[i];
-      const b = ranges[j];
-      const overlap = a.start < b.end && b.start < a.end;
-      if (overlap) {
-        errors.push(
-          err(
-            "STP5-guard-duplicate",
-            "duplicate-guard",
-            "overlapping replayed guards hide or fabricate diagnostic blame",
-          ),
-        );
-      }
-    }
+    seen.add(key);
   }
   return errors;
 }
 
+/**
+ * An unused `Expect` directive is reported in the ORIGINAL file, over the
+ * directive's original span, with the code and text of the
+ * `unusedExpectDirectiveDiagnostics` entry it names (index 0 when omitted)
+ * and the mapper's `diagnosticSource`.
+ */
 export function validateUnusedExpectReportedInOriginal({
   directives,
   virtualDiagnostics,
   originalReports,
+  diagnosticSource,
 } = {}) {
   const errors = [];
-  for (const directive of directives || []) {
-    const [originalStart, originalLength, virtualStart, virtualEnd, policy] = directive;
+  if (
+    !directives ||
+    typeof directives !== "object" ||
+    Array.isArray(directives) ||
+    !Array.isArray(directives.directives) ||
+    !Array.isArray(directives.unusedExpectDirectiveDiagnostics)
+  ) {
+    return [
+      err(
+        "STP5-guard-duplicate",
+        "directive-shape",
+        "unused-Expect reporting needs diagnosticDirectives { unusedExpectDirectiveDiagnostics, directives }, not a bare tuple array",
+      ),
+    ];
+  }
+  const unusedTable = directives.unusedExpectDirectiveDiagnostics;
+  for (const directive of directives.directives) {
+    const [originalStart, originalLength, virtualStart, virtualEnd, policy, unusedIndex] =
+      directive;
     if (policy !== DiagnosticDirectivePolicy.Expect) continue;
+    const expected = unusedTable[unusedIndex ?? 0];
+    if (!expected) {
+      errors.push(
+        err(
+          "STP5-guard-duplicate",
+          "unused-expect-index",
+          `Expect directive names unused diagnostic ${unusedIndex ?? 0}, which the table does not hold`,
+        ),
+      );
+      continue;
+    }
     const used = (virtualDiagnostics || []).some((diag) => {
       const diagStart = diag.start;
       const diagEnd = diag.end ?? diagStart + (diag.length || 0);
@@ -359,6 +569,8 @@ export function validateUnusedExpectReportedInOriginal({
     if (used) continue;
     const reported = (originalReports || []).some((report) => {
       if (report.file && report.file !== "original") return false;
+      if (report.code !== expected.code) return false;
+      if (diagnosticSource && report.source !== diagnosticSource) return false;
       const reportEnd = report.start + (report.length || 0);
       const originalEnd = originalStart + originalLength;
       return report.start < originalEnd && originalStart < reportEnd;
@@ -368,7 +580,7 @@ export function validateUnusedExpectReportedInOriginal({
         err(
           "STP5-guard-duplicate",
           "unused-expect-not-in-original",
-          "unused Expect directive must be reported in the original file",
+          "unused Expect directive must be reported in the original file with its unusedExpectDirectiveDiagnostics code",
         ),
       );
     }
@@ -530,7 +742,197 @@ export function validateCapabilityClaim(row) {
   return errors;
 }
 
-export function createMapperSession() {
+/**
+ * `InitializeResult`: `{ positionEncoding, diagnosticSource }` and nothing
+ * else the host reads. The encoding must be one TypeScript offered; the
+ * source must be non-empty and not reserved.
+ */
+export function validateInitializeResult(result, offered = POSITION_ENCODINGS) {
+  const errors = [];
+  if (!result || typeof result !== "object") {
+    return [err("STP5-capability", "initialize-shape", "initialize returned no result object")];
+  }
+  if (!offered.includes(result.positionEncoding)) {
+    errors.push(
+      err(
+        "STP5-encoding",
+        "encoding-mismatch",
+        `positionEncoding ${result.positionEncoding} was not offered`,
+      ),
+    );
+  }
+  const source = typeof result.diagnosticSource === "string" ? result.diagnosticSource.trim() : "";
+  if (source.length === 0) {
+    errors.push(
+      err("STP5-raw-cli", "missing-diagnostic-source", "initialize must return a diagnosticSource"),
+    );
+  } else if (RESERVED_DIAGNOSTIC_SOURCES.includes(source.toLowerCase())) {
+    errors.push(
+      err(
+        "STP5-raw-cli",
+        "reserved-diagnostic-source",
+        `diagnosticSource ${JSON.stringify(result.diagnosticSource)} names TypeScript or a TypeScript extension`,
+      ),
+    );
+  }
+  if ("protocolVersion" in result) {
+    errors.push(
+      err(
+        "STP5-capability",
+        "protocol-version",
+        "protocolVersion was removed from initialize (TypeScript#63936)",
+      ),
+    );
+  }
+  return errors;
+}
+
+/**
+ * `OpenProjectResult` against the mapper manifest's `dynamicConfig`:
+ * `configIdentity` is required with it and forbidden without it,
+ * `watchedFiles` (absolute paths) are allowed only with it, and each
+ * `optionDiagnostics` row is
+ * `{ path: (string | nonnegative integer)[], messageText, code }`.
+ */
+export function validateOpenProjectResult(result, { dynamicConfig = false } = {}) {
+  const errors = [];
+  const fail = (code, message) => errors.push(err("STP5-capability", code, message));
+  if (!result || typeof result !== "object") {
+    fail("open-project-shape", "openProject returned no result object");
+    return errors;
+  }
+  const hasIdentity = typeof result.configIdentity === "string" && result.configIdentity.length > 0;
+  if (dynamicConfig && !hasIdentity) {
+    fail("missing-config-identity", "dynamicConfig mapper must return configIdentity");
+  }
+  if (!dynamicConfig && result.configIdentity) {
+    fail(
+      "unexpected-config-identity",
+      "configIdentity is only allowed when the manifest declares dynamicConfig",
+    );
+  }
+  if (result.watchedFiles !== undefined) {
+    if (!dynamicConfig && result.watchedFiles.length > 0) {
+      fail(
+        "unexpected-watched-files",
+        "watchedFiles are only allowed when the manifest declares dynamicConfig",
+      );
+    }
+    for (const file of result.watchedFiles) {
+      if (typeof file !== "string" || !path.isAbsolute(file)) {
+        fail("relative-watched-file", `watched file ${JSON.stringify(file)} is not absolute`);
+      }
+    }
+  }
+  for (const [index, row] of (result.optionDiagnostics || []).entries()) {
+    const pathOk =
+      Array.isArray(row?.path) &&
+      row.path.every((segment) => typeof segment === "string" || isNonNegativeInteger(segment));
+    if (!pathOk || typeof row.messageText !== "string" || !Number.isInteger(row.code)) {
+      fail(
+        "option-diagnostic-shape",
+        `optionDiagnostics[${index}] needs path, messageText and an integer code`,
+      );
+    }
+  }
+  return errors;
+}
+
+function validateMappedOutput(output, { originalLength, encoding, label }) {
+  const errors = [];
+  const fail = (code, message) => errors.push(err("STP5-capability", code, `${label}: ${message}`));
+  if (typeof output?.text !== "string") {
+    fail("mapped-output-shape", "text must be a string");
+    return errors;
+  }
+  const virtualLength = encoding === "utf-8" ? utf8Length(output.text) : output.text.length;
+  if (!VIRTUAL_EXTENSIONS.includes(output.extension)) {
+    fail(
+      "virtual-extension",
+      `extension ${JSON.stringify(output.extension)} is not a supported virtual extension`,
+    );
+  }
+  const mappings = output.mappings || [];
+  const kinds = [SpanMapKind.Verbatim, SpanMapKind.Atom, SpanMapKind.Alias];
+  for (const [index, mapping] of mappings.entries()) {
+    const [vStart, vLen, oStart, oLen, kind, features] = Array.isArray(mapping) ? mapping : [];
+    if (
+      !Array.isArray(mapping) ||
+      (mapping.length !== 5 && mapping.length !== 6) ||
+      ![vStart, vLen, oStart, oLen].every(isNonNegativeInteger) ||
+      !kinds.includes(kind) ||
+      (features !== undefined &&
+        !(isNonNegativeInteger(features) && features <= SpanMapFeature.All))
+    ) {
+      fail(
+        "mapping-shape",
+        `mapping ${index} is not [virtualStart, virtualLength, originalStart, originalLength, kind, features?]`,
+      );
+      continue;
+    }
+    if (oStart + oLen > originalLength) {
+      fail("mapping-range", `mapping ${index} original span exceeds the source`);
+    }
+    if (vStart + vLen > virtualLength) {
+      fail("mapping-range", `mapping ${index} virtual span exceeds the virtual text`);
+    }
+  }
+  errors.push(...assertNonOverlappingVirtualSpans(mappings.filter(Array.isArray)));
+  errors.push(
+    ...validateWireDiagnosticDirectives(output.diagnosticDirectives, {
+      originalLength,
+      virtualLength,
+    }),
+  );
+  return errors;
+}
+
+/**
+ * A `transform` result (`TransformResult extends MappedOutput`): canonical
+ * output, optional `supplemental` outputs, and `diagnostics` whose `code` is
+ * required (TypeScript#63936). Absent `mappings` mean fully synthesized
+ * output. Original and virtual lengths are measured in the negotiated
+ * `encoding`, and every mapping and directive range must lie inside them.
+ */
+export function validateTransformResult(result, originalText, encoding = "utf-16") {
+  const originalLength = encoding === "utf-8" ? utf8Length(originalText) : originalText.length;
+  const errors = validateMappedOutput(result, { originalLength, encoding, label: "transform" });
+  for (const [index, supplemental] of (result?.supplemental || []).entries()) {
+    errors.push(
+      ...validateMappedOutput(supplemental, {
+        originalLength,
+        encoding,
+        label: `supplemental[${index}]`,
+      }),
+    );
+  }
+  for (const [index, diagnostic] of (result?.diagnostics || []).entries()) {
+    if (
+      typeof diagnostic?.messageText !== "string" ||
+      !isNonNegativeInteger(diagnostic.start) ||
+      !isNonNegativeInteger(diagnostic.length) ||
+      !Number.isInteger(diagnostic.code) ||
+      diagnostic.start + diagnostic.length > originalLength
+    ) {
+      errors.push(
+        err(
+          "STP5-capability",
+          "mapper-diagnostic-shape",
+          `diagnostics[${index}] needs messageText, start, length and code`,
+        ),
+      );
+    }
+  }
+  return errors;
+}
+
+/**
+ * A harness mapper session over the final wire shapes. `manifest` stands in
+ * for the package's `typescript.contentMapper`; only `dynamicConfig` matters
+ * to the session. `dynamicConfig` is a manifest field, never an openProject
+ * parameter, and `configIdentity` / `watchedFiles` are openProject RESULTS.
+ */
+export function createMapperSession({ manifest = { dynamicConfig: false } } = {}) {
   const projects = new Map();
   let initialized = false;
   let encoding = null;
@@ -542,11 +944,8 @@ export function createMapperSession() {
       encoding = negotiated.encoding;
       return {
         ok: true,
-        result: {
-          protocolVersion: PROTOCOL_VERSION,
-          positionEncoding: encoding,
-          diagnosticSource: "vue-mapper-proof",
-        },
+        result: { positionEncoding: encoding, diagnosticSource: "vue-mapper-proof" },
+        locale: params.locale,
       };
     },
     openProject(params) {
@@ -566,16 +965,19 @@ export function createMapperSession() {
           ),
         };
       }
+      // `options` and `compilerOptions` arrive only here; transform state is
+      // keyed by the handle and released on closeProject.
       projects.set(params.projectHandle, {
         configFileName: params.configFileName,
-        options: params.options || {},
+        options: params.options,
         compilerOptions: params.compilerOptions || {},
-        watchedFiles: params.dynamicConfig ? params.watchedFiles || [] : [],
       });
-      return {
-        ok: true,
-        result: { configIdentity: params.dynamicConfig ? params.configIdentity : undefined },
-      };
+      const result = { optionDiagnostics: [] };
+      if (manifest.dynamicConfig) {
+        result.configIdentity = `identity:${params.configFileName}`;
+        result.watchedFiles = [];
+      }
+      return { ok: true, result };
     },
     transform(params) {
       const project = projects.get(params.projectHandle);
@@ -599,7 +1001,8 @@ export function createMapperSession() {
           ),
         };
       }
-      return { ok: true, result: { ...CLEAN_TRANSFORM, projectHandle: params.projectHandle } };
+      const { original: _original, targetFile: _targetFile, ...output } = CLEAN_TRANSFORM;
+      return { ok: true, result: output };
     },
     closeProject(params) {
       if (!projects.has(params.projectHandle)) {
@@ -617,17 +1020,45 @@ export function createMapperSession() {
   };
 }
 
+const UNUSED_EXPECT_TABLE = Object.freeze([
+  Object.freeze({ code: 9002, messageText: "Unused '@vue-expect-error' directive." }),
+]);
+
 export const CLEAN_GUARD = Object.freeze({
   original: '<!-- @vue-expect-error -->\n<div :id="first"></div>',
-  directives: [[0, 24, 0, 40, DiagnosticDirectivePolicy.Expect]],
+  directives: {
+    unusedExpectDirectiveDiagnostics: UNUSED_EXPECT_TABLE,
+    directives: [[0, 24, 0, 40, DiagnosticDirectivePolicy.Expect]],
+  },
 });
 
 export const DIRTY_GUARD_DUPLICATE = Object.freeze({
   original: CLEAN_GUARD.original,
-  directives: [
-    [0, 24, 0, 40, DiagnosticDirectivePolicy.Expect],
-    [0, 24, 0, 40, DiagnosticDirectivePolicy.Expect],
-  ],
+  directives: {
+    unusedExpectDirectiveDiagnostics: UNUSED_EXPECT_TABLE,
+    directives: [
+      [0, 24, 0, 40, DiagnosticDirectivePolicy.Expect],
+      [0, 24, 0, 40, DiagnosticDirectivePolicy.Expect],
+    ],
+  },
+});
+
+/** The bare tuple array Verter modelled before: the host refuses it. */
+export const DIRTY_GUARD_BARE_ARRAY = Object.freeze({
+  original: CLEAN_GUARD.original,
+  directives: [[0, 24, 0, 40, DiagnosticDirectivePolicy.Expect]],
+});
+
+/** Two unused diagnostics and an Expect that names neither. */
+export const DIRTY_GUARD_AMBIGUOUS_INDEX = Object.freeze({
+  original: CLEAN_GUARD.original,
+  directives: {
+    unusedExpectDirectiveDiagnostics: [
+      ...UNUSED_EXPECT_TABLE,
+      { code: 9003, messageText: "Unused '@vue-skip' directive." },
+    ],
+    directives: [[0, 24, 0, 40, DiagnosticDirectivePolicy.Expect]],
+  },
 });
 
 export const CLEAN_ALIAS = Object.freeze({
@@ -693,9 +1124,12 @@ export const DIRTY_BLOCKED_EMPTY_EVIDENCE = Object.freeze({
 
 export const CLEAN_UNUSED_EXPECT = Object.freeze({
   original: '<!-- @vue-expect-error -->\n<div :id="ok"></div>',
-  directives: [[0, 24, 0, 40, DiagnosticDirectivePolicy.Expect]],
+  directives: CLEAN_GUARD.directives,
   virtualDiagnostics: [],
-  originalReports: [{ file: "original", start: 0, length: 24 }],
+  diagnosticSource: "vue-mapper-proof",
+  originalReports: [
+    { file: "original", start: 0, length: 24, code: 9002, source: "vue-mapper-proof" },
+  ],
 });
 
 export const DIRTY_UNUSED_EXPECT = Object.freeze({
@@ -703,6 +1137,14 @@ export const DIRTY_UNUSED_EXPECT = Object.freeze({
   directives: CLEAN_UNUSED_EXPECT.directives,
   virtualDiagnostics: [],
   originalReports: [],
+});
+
+/** Reported at the directive, but not with the code the mapper declared. */
+export const DIRTY_UNUSED_EXPECT_WRONG_CODE = Object.freeze({
+  ...CLEAN_UNUSED_EXPECT,
+  originalReports: [
+    { file: "original", start: 0, length: 24, code: 2578, source: "vue-mapper-proof" },
+  ],
 });
 
 export const USED_EXPECT_NO_UNUSED_REPORT = Object.freeze({
@@ -825,8 +1267,155 @@ export function evaluateRejectTwins() {
     diagnosticsDroppedBecause: null,
   });
   if (cleanMask.length) errors.push(...cleanMask);
+  for (const twin of WIRE_REJECT_TWINS) {
+    const found = twin.validate();
+    if (!found.some((error) => error.code === twin.code)) {
+      errors.push(
+        err(twin.caseId, "missed-wire-twin", `${twin.name} was not rejected with ${twin.code}`),
+      );
+    }
+  }
   return errors;
 }
+
+/**
+ * Non-conforming wire replies, each paired with the code the validators must
+ * refuse it with. These are the shapes the selected build refuses (see the
+ * executed end-to-end reject twins), modelled without a host.
+ */
+export const WIRE_REJECT_TWINS = Object.freeze([
+  {
+    name: "bare directive tuple array",
+    caseId: "STP5-guard-duplicate",
+    code: "directive-shape",
+    validate: () => validateWireDiagnosticDirectives(DIRTY_GUARD_BARE_ARRAY.directives),
+  },
+  {
+    name: "Expect without unusedExpectDirectiveIndex among two unused diagnostics",
+    caseId: "STP5-guard-duplicate",
+    code: "unused-expect-index",
+    validate: () => validateWireDiagnosticDirectives(DIRTY_GUARD_AMBIGUOUS_INDEX.directives),
+  },
+  {
+    name: "unused Expect reported with a code the mapper did not declare",
+    caseId: "STP5-guard-duplicate",
+    code: "unused-expect-not-in-original",
+    validate: () => validateUnusedExpectReportedInOriginal(DIRTY_UNUSED_EXPECT_WRONG_CODE),
+  },
+  {
+    name: "initialize returning protocolVersion",
+    caseId: "STP5-capability",
+    code: "protocol-version",
+    validate: () =>
+      validateInitializeResult({
+        protocolVersion: 1,
+        positionEncoding: "utf-16",
+        diagnosticSource: "vue",
+      }),
+  },
+  {
+    name: "diagnosticSource naming TypeScript",
+    caseId: "STP5-raw-cli",
+    code: "reserved-diagnostic-source",
+    validate: () =>
+      validateInitializeResult({ positionEncoding: "utf-8", diagnosticSource: "TSC" }),
+  },
+  {
+    name: "dynamicConfig openProject without configIdentity",
+    caseId: "STP5-capability",
+    code: "missing-config-identity",
+    validate: () => validateOpenProjectResult({ watchedFiles: [] }, { dynamicConfig: true }),
+  },
+  {
+    name: "static openProject returning watchedFiles",
+    caseId: "STP5-capability",
+    code: "unexpected-watched-files",
+    validate: () =>
+      validateOpenProjectResult(
+        { watchedFiles: [path.resolve("/tmp/vue.config.json")] },
+        { dynamicConfig: false },
+      ),
+  },
+  {
+    name: "transform result without extension",
+    caseId: "STP5-capability",
+    code: "virtual-extension",
+    validate: () => {
+      const {
+        original,
+        targetFile: _targetFile,
+        extension: _extension,
+        ...output
+      } = CLEAN_TRANSFORM;
+      return validateTransformResult(output, original);
+    },
+  },
+  {
+    name: "mapping whose virtual span runs past the virtual text",
+    caseId: "STP5-capability",
+    code: "mapping-range",
+    validate: () => {
+      const { original, targetFile: _targetFile, ...output } = CLEAN_TRANSFORM;
+      return validateTransformResult(
+        { ...output, mappings: [[output.text.length - 2, 5, 0, 1, SpanMapKind.Atom]] },
+        original,
+      );
+    },
+  },
+  {
+    name: "directive whose virtual range runs past the virtual text",
+    caseId: "STP5-guard-duplicate",
+    code: "hidden-blame",
+    validate: () => {
+      const { original, targetFile: _targetFile, ...output } = CLEAN_TRANSFORM;
+      return validateTransformResult(
+        {
+          ...output,
+          diagnosticDirectives: {
+            unusedExpectDirectiveDiagnostics: [],
+            directives: [[0, 1, 0, output.text.length + 1, DiagnosticDirectivePolicy.Ignore]],
+          },
+        },
+        original,
+      );
+    },
+  },
+  {
+    name: "unused-Expect check handed the bare tuple array",
+    caseId: "STP5-guard-duplicate",
+    code: "directive-shape",
+    validate: () =>
+      validateUnusedExpectReportedInOriginal({
+        ...CLEAN_UNUSED_EXPECT,
+        directives: DIRTY_GUARD_BARE_ARRAY.directives,
+      }),
+  },
+  {
+    name: "unused-Expect check with an out-of-range unusedExpectDirectiveIndex",
+    caseId: "STP5-guard-duplicate",
+    code: "unused-expect-index",
+    validate: () =>
+      validateUnusedExpectReportedInOriginal({
+        ...CLEAN_UNUSED_EXPECT,
+        directives: {
+          ...CLEAN_GUARD.directives,
+          directives: [[0, 24, 0, 40, DiagnosticDirectivePolicy.Expect, 3]],
+        },
+      }),
+  },
+  {
+    name: "mapper diagnostic without code",
+    caseId: "STP5-capability",
+    code: "mapper-diagnostic-shape",
+    validate: () => {
+      const { original, targetFile: _targetFile, ...output } = CLEAN_TRANSFORM;
+      return validateTransformResult(
+        { ...output, diagnostics: [{ messageText: "bad", start: 0, length: 1 }] },
+        original,
+      );
+    },
+  },
+]);
 
 export function helpTextHasMapperHost(helpText) {
   const text = String(helpText || "");
@@ -835,26 +1424,70 @@ export function helpTextHasMapperHost(helpText) {
   );
 }
 
+/**
+ * Every host-side operation a selected build is asked to prove: the four
+ * methods plus each wire rule the executed end-to-end run exercises.
+ */
+export const HOST_CAPABILITY_OPERATIONS = Object.freeze([
+  ...new Set([...REQUIRED_HOST_OPERATIONS, ...MAPPER_HOST_OPERATIONS]),
+]);
+
+/** The phrase a build without a content-mapper host is recorded with. */
+export function noMapperHostEvidence(engineId, engineVersion, detail) {
+  const base = `no mapper host on ${engineId}@${engineVersion}`;
+  return detail ? `${base}: ${detail}` : base;
+}
+
+/**
+ * Selected-build capability rows for one engine.
+ *
+ * Host operations are `supported` only from the executed end-to-end run
+ * (`hostRun`, from `mapper-host/e2e.mjs`) on that build. A build without a
+ * host, or a host whose run was not executed, records every host operation as
+ * a blocking upstream defect naming the gap; it never passes silently.
+ * `encoding-negotiation` additionally requires the harness encoding identity.
+ */
 export function capabilityRowsFromProbe({
   mapperHostPresent,
   mapperHostEvidence,
+  hostRun,
   observation,
   engineId,
   engineVersion,
   encodingIdentityOk,
 }) {
-  const hostEvidence = mapperHostPresent
-    ? { status: "supported", evidence: "executable-selected-build" }
-    : {
-        status: "blocking-upstream-defect",
-        evidence:
-          mapperHostEvidence || `${engineId}@${engineVersion} mapper-host probe not performed`,
-      };
-  const rows = REQUIRED_HOST_OPERATIONS.map((operation) => ({
-    operation,
-    engineId,
-    ...hostEvidence,
-  }));
+  const rows = [];
+  const executed = new Map((hostRun?.operations || []).map((row) => [row.operation, row]));
+  for (const operation of HOST_CAPABILITY_OPERATIONS) {
+    let blocked = null;
+    if (!mapperHostPresent) {
+      blocked =
+        mapperHostEvidence && /no mapper host on/.test(mapperHostEvidence)
+          ? mapperHostEvidence
+          : noMapperHostEvidence(
+              engineId,
+              engineVersion,
+              mapperHostEvidence || "mapper-host probe not performed",
+            );
+    } else if (!hostRun?.performed) {
+      blocked = `${engineId}@${engineVersion} has a mapper host but the end-to-end mapper run was not executed`;
+    } else if (!executed.get(operation)?.ok) {
+      blocked = `${engineId}@${engineVersion} ${operation}: ${executed.get(operation)?.detail ?? "not exercised"}`;
+    } else if (operation === "encoding-negotiation" && !encodingIdentityOk) {
+      blocked = `${engineId} encoding identity (emoji/CRLF UTF-8/UTF-16) failed`;
+    }
+    rows.push(
+      blocked
+        ? { operation, engineId, status: "blocking-upstream-defect", evidence: blocked }
+        : {
+            operation,
+            engineId,
+            status: "supported",
+            evidence: "executable-selected-build",
+            detail: executed.get(operation).detail,
+          },
+    );
+  }
   for (const operation of REQUIRED_OBSERVATION_OPERATIONS) {
     const ok = Boolean(observation?.[operation]);
     rows.push(
@@ -868,21 +1501,6 @@ export function capabilityRowsFromProbe({
           },
     );
   }
-  rows.push(
-    encodingIdentityOk
-      ? {
-          operation: "encoding-negotiation",
-          engineId,
-          status: "supported",
-          evidence: "executable-selected-build",
-        }
-      : {
-          operation: "encoding-negotiation",
-          engineId,
-          status: "blocking-upstream-defect",
-          evidence: `${engineId} encoding identity (emoji/CRLF UTF-8/UTF-16) failed`,
-        },
-  );
   return rows;
 }
 
@@ -893,11 +1511,7 @@ export function evaluateCapabilityRows(rows) {
     seen.add(row.operation);
     errors.push(...validateCapabilityClaim(row));
   }
-  for (const operation of [
-    ...REQUIRED_HOST_OPERATIONS,
-    ...REQUIRED_OBSERVATION_OPERATIONS,
-    "encoding-negotiation",
-  ]) {
+  for (const operation of [...HOST_CAPABILITY_OPERATIONS, ...REQUIRED_OBSERVATION_OPERATIONS]) {
     if (!seen.has(operation)) {
       errors.push(
         err(
@@ -911,6 +1525,46 @@ export function evaluateCapabilityRows(rows) {
   return errors;
 }
 
+/**
+ * The committed MapperCapabilityEvidence must describe the protocol this
+ * module validates: same methods, same required operations, the final
+ * field set, and a host probe that executes rather than reads a label.
+ */
+export function validateMapperCapabilityEvidence(evidence) {
+  const errors = [];
+  const fail = (message) => errors.push(err("STP5-capability", "evidence-protocol-drift", message));
+  const protocol = evidence?.selectedMapperProtocol || {};
+  if (JSON.stringify(protocol.methods) !== JSON.stringify(MAPPER_METHODS)) {
+    fail(
+      `selectedMapperProtocol.methods ${JSON.stringify(protocol.methods)} != ${JSON.stringify(MAPPER_METHODS)}`,
+    );
+  }
+  if (
+    protocol.protocolVersion !== undefined ||
+    protocol.initialize?.result?.includes?.("protocolVersion")
+  ) {
+    fail("selectedMapperProtocol still models protocolVersion");
+  }
+  const required = new Set(evidence?.requiredOperations || []);
+  for (const operation of [...HOST_CAPABILITY_OPERATIONS, ...REQUIRED_OBSERVATION_OPERATIONS]) {
+    if (!required.has(operation)) fail(`requiredOperations is missing ${operation}`);
+  }
+  if (JSON.stringify(protocol.virtualExtensions) !== JSON.stringify(VIRTUAL_EXTENSIONS)) {
+    fail("selectedMapperProtocol.virtualExtensions differs from VIRTUAL_EXTENSIONS");
+  }
+  if (JSON.stringify(protocol.manifestFields) !== JSON.stringify(MANIFEST_FIELDS)) {
+    fail("selectedMapperProtocol.manifestFields differs from MANIFEST_FIELDS");
+  }
+  if (protocol.diagnosticDirectives?.shape !== "object") {
+    fail("selectedMapperProtocol.diagnosticDirectives.shape must be object");
+  }
+  const probe = evidence?.hostProbe || {};
+  if (!/--help --all/.test(probe.method || "") || !/end-to-end/.test(probe.execution || "")) {
+    fail("hostProbe must run tsc --help --all and execute the end-to-end mapper run");
+  }
+  return errors;
+}
+
 export function loadStp5Product(name) {
   return JSON.parse(fs.readFileSync(path.join(STP5_DIR, "products", name), "utf8"));
 }
@@ -918,9 +1572,10 @@ export function loadStp5Product(name) {
 export function validateStp5Products({
   originPolicy = loadStp5Product("diagnostic-origin-policy.json"),
   rolePolicy = loadStp5Product("observation-role-policy.json"),
+  capabilityEvidence = loadStp5Product("mapper-capability-evidence.json"),
   evidenceText = fs.readFileSync(path.join(STP5_DIR, "../evidence/STP5/cases.md"), "utf8"),
 } = {}) {
-  const errors = [];
+  const errors = [...validateMapperCapabilityEvidence(capabilityEvidence)];
   if (originPolicy?.diagnosticDirectives?.unusedExpectReportedInOriginal !== true) {
     errors.push(
       err(
@@ -969,6 +1624,7 @@ function engineInputsFrom(input = {}) {
     {
       mapperHostPresent: input.mapperHostPresent,
       mapperHostEvidence: input.mapperHostEvidence,
+      hostRun: input.hostRun,
       observation: input.observation,
       engineId: input.engineId,
       engineVersion: input.engineVersion,
@@ -983,21 +1639,24 @@ export async function evaluateStp5(input = {}) {
   errors.push(...encodingErrors);
   errors.push(...assertCleanGeometry());
   errors.push(...evaluateRejectTwins());
-  const session = createMapperSession();
+  const session = createMapperSession({ manifest: { dynamicConfig: true } });
   const init = session.initialize({ positionEncodings: [...POSITION_ENCODINGS], chosen: "utf-16" });
   if (!init.ok) errors.push(init.error);
+  else errors.push(...validateInitializeResult(init.result));
   const opened = session.openProject({
-    configFileName: "/tmp/tsconfig.json",
+    configFileName: path.resolve("/tmp/tsconfig.json"),
     projectHandle: "p1",
     compilerOptions: { strict: true },
   });
   if (!opened.ok) errors.push(opened.error);
+  else errors.push(...validateOpenProjectResult(opened.result, { dynamicConfig: true }));
   const transformed = session.transform({
     projectHandle: "p1",
     fileName: "App.vue",
     content: CLEAN_TRANSFORM.original,
   });
   if (!transformed.ok) errors.push(transformed.error);
+  else errors.push(...validateTransformResult(transformed.result, CLEAN_TRANSFORM.original));
   const closed = session.closeProject({ projectHandle: "p1" });
   if (!closed.ok) errors.push(closed.error);
   const stale = session.transform({

@@ -273,7 +273,7 @@ struct Parked {
     #[cfg(feature = "semantic-observe")]
     since: Option<Instant>,
     /// The subscription's own waker registration on the flight.
-    waker: Option<super::inflight::WakeRegistration>,
+    waker: verter_execution::wake::WakeRegistration,
     /// The subscriber registration an armed rendezvous of this flight took,
     /// retired when the wait resolves or the subscription drops.
     #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
@@ -284,8 +284,14 @@ impl Drop for Subscription<'_> {
     fn drop(&mut self) {
         // A subscriber abandoned while parked (its execution stopped or was
         // dropped) takes its waker off the flight; the edge drops with it.
-        if let Some(registration) = self.parked.take().and_then(|parked| parked.waker) {
-            self.inflight.state.lock().withdraw_waker(registration);
+        if let Some(mut parked) = self.parked.take() {
+            if parked.waker.is_registered() {
+                self.inflight
+                    .state
+                    .lock()
+                    .wakers
+                    .withdraw(&mut parked.waker);
+            }
         }
     }
 }
@@ -812,15 +818,7 @@ impl Subscription<'_> {
             .parked
             .as_mut()
             .expect("a pending subscriber is parked");
-        let registered = parked
-            .waker
-            .is_some_and(|registration| state.holds_waker(registration, waker));
-        if !registered {
-            if let Some(previous) = parked.waker.take() {
-                state.withdraw_waker(previous);
-            }
-            parked.waker = Some(state.register_waker(waker.clone()));
-        }
+        state.wakers.register(&mut parked.waker, waker);
         std::task::Poll::Pending
     }
 
@@ -863,7 +861,7 @@ impl Subscription<'_> {
             _edge: edge,
             #[cfg(feature = "semantic-observe")]
             since: super::records_telemetry::<M>().then(Instant::now),
-            waker: None,
+            waker: verter_execution::wake::WakeRegistration::default(),
             #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
             rendezvous,
         });
@@ -889,14 +887,12 @@ impl Subscription<'_> {
         // and wait-for edge are spent.
         if let Some(parked) = self.parked.take() {
             let Parked {
-                waker,
+                mut waker,
                 #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
                 mut rendezvous,
                 ..
             } = parked;
-            if let Some(registration) = waker {
-                state.withdraw_waker(registration);
-            }
+            state.wakers.withdraw(&mut waker);
             // Retire a rendezvous's subscriber registration before any
             // further engine work on this request, with the flight unlocked
             // — retirement only removes the token, so it needs no ordering

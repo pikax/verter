@@ -69,8 +69,93 @@ with a 2 ms slice so a stop stays observable.
   completion outlives the request that issued it. `CompletionSender::send`
   stays first-writer-wins. It wakes every registered subscription once,
   after releasing the slot's lock.
-- **Backpressure:** none. Submission backpressure belongs to the scheduler's
-  request inbox (see the inventory below).
+- **Scheduler lifecycle locks:** admission, stage completion, failure and
+  retirement publish their terminal state while holding the DAG lock, and
+  retain the taken wakers on that guard. The guard releases the DAG lock
+  before delivering them. Reset additionally defers delivery until its
+  serialization hold and driver join finish. State publication order and
+  first-writer semantics therefore stay intact without invoking a completion
+  callback inside those critical sections. Exclusively owned standalone DAGs
+  deliver immediately. If this scheduler's own driver re-enters an already
+  active reset, that reset retains the quiesce obligation and the driver
+  returns without waiting on its joiner. The exemption uses the exact driver
+  thread identity; another scheduler's driver still waits for the reset
+  barrier.
+- **Backpressure:** none at completion; admission has its own handoff below.
+
+### Scheduler request admission
+
+`Scheduler::begin_submit_request` returns an owned
+`SchedulerSubmission<CompletionSubscription<RequestResult>>`.
+`begin_submit_batch_atomic` returns the same handoff over a vector of
+subscriptions in input order. Neither the handoff nor its output exposes a
+blocking completion driver. Its only advancing operation is `poll(&mut self,
+&Waker)`.
+
+- **Backpressure:** a full inbox retains the whole submission (one item for
+  an atomic batch) and returns `Pending`, without draining the inbox or
+  executing a stage. The offer and registration share the capacity lock;
+  consumers take the registrations after dequeue and wake after unlock.
+- **Result and errors:** `Ready` transfers the completion subscription(s).
+  Inbox admission is distinct from stage completion; poll the subscriptions
+  separately. If shutdown rejects admission, those subscriptions are already
+  terminal with `Shutdown`. An empty batch returns an empty vector without
+  queue or submission accounting. Re-polling a completed admission panics.
+- **Lifetime and cancellation:** construction captures each request's file
+  lifetime using the same preparation as synchronous submission. The handoff
+  retains the scheduler and all unsubmitted inputs. Dropping it withdraws
+  only its own capacity registration and discards unsubmitted work. Once
+  admitted, dropping a completion subscription leaves sibling consumers and
+  the producer intact; request-context cancellation keeps its existing
+  scheduler semantics. Reset invalidates the captured file lifetime, so a
+  retained request cannot republish a retired incarnation after reset.
+- **External drivers:** `submit_request`, `submit_batch_atomic` and the
+  scheduler's internal synchronous sends drive the same admission state.
+  Only these compatibility drivers may drain an older inbox item to avoid
+  parking the sole consumer behind its own full queue. Stage execution stays
+  with the existing scheduler driver or an explicitly driven `drive_one`.
+  This handoff introduces no executor or pool.
+
+### Scoped cache-node admission and producer transfer
+
+`Scheduler::begin_scoped_cache_node<T>` returns `ScopedCacheNodeHandoff<T>`.
+Its `poll` yields while the bounded inbox is full, until DAG dispatch, or
+while another caller produces the shared value. It never executes a stage,
+waits, enters a pool or runs a producer. The synchronous
+`execute_scoped_cache_node` drives this same handoff and runs its transferred
+producer on the existing CPU pool.
+
+- **Producer ownership:** the first eligible poll after dispatch receives
+  `ScopedCacheNodeStep::Produce`. That intermediate result transfers one
+  `ScopedCacheNodeProducer<T>` to the external driver. Its `run` installs the
+  request context, aggregate cancellation and active-path identity, executes
+  the supplied closure, contains panic and publishes once. Dropping it
+  without running settles the flight as cancelled. A later poll of the
+  handoff receives the terminal `Value(Arc<T>)`; every surviving follower
+  receives that same value. Producers can borrow the external caller's data.
+- **Backpressure and lifetime:** admission retains the unsubmitted item and
+  separate capacity and flight registrations. A sibling's settlement
+  can bypass that item's capacity wait; a retired flight resolves
+  even if the successor inbox is full. The handoff and producer retain the
+  scheduler independently and can move between threads with exclusive
+  polling. Dropping a handoff withdraws its registrations and detaches only
+  its owner; a surviving sibling keeps shared work live.
+- **Errors:** cancellation, shutdown/reset, panic, mismatched result type and
+  same-path re-entry retain the existing typed outcomes. Cancellation is
+  checked at each poll; cancellation-only wake delivery and shared-registry
+  wait edges remain unfinished. Executors must re-poll or drop on request
+  cancellation. Polling after a terminal result is a contract violation.
+- **Wake ordering:** dispatch and settlement take registrations under the
+  flight lock. Delivery uses the scheduler's deferral rail, after flight,
+  scoped-incarnation and DAG locks release, including reset's outer hold.
+  Wakes request a later poll and do not execute the producer.
+- **Evidence:** `scheduler::scoped_handoff_tests` exercises yielding before
+  queue/result release, cross-thread producer transfer, follower isolation,
+  panic/drop, re-entry, reset with a full successor inbox, and unlocked wake
+  delivery. The session compile contract
+  `scoped_handoff_no_blocking_scheduler` denies recovering the blocking
+  scheduler from the handoff. These are boundary tests; complete production
+  component-meta/compile roots are still synchronous.
 
 ### Declaration-lowering owner-shard handoffs
 
@@ -127,16 +212,16 @@ memo's flights do (`verter_type_engine::semantic_query_memo`).
 | --- | --- | --- | --- |
 | Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
 | Semantic task drive (`SemanticTask::drive`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
-| Artifact cache singleflight joiner (`cooperative_admit_impl`, untimed `wait_while`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | none |
-| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | none |
-| Resolver request singleflight follower (`SingleflightGroup::run_retaining`; thread-identity owner) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | none |
-| Store-view build park (`StoreViewManager::park_for_build`) | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | none |
-| Carrier publication lanes (`publish_or_get`, `await_stable_parse`; 5 ms timed condvar) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | none |
+| Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | private `SlotJoin::poll`; synchronous callers still drive it to completion |
+| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | same `SlotJoin::poll`; callers still synchronous |
+| Resolver request singleflight follower (`SingleflightGroup::run_retaining`; thread-identity owner) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | private owned `FlightJoin::poll`; callers still synchronous |
+| Store-view build park (`StoreViewManager::park_for_build`) | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | private `BuildRelease::poll`; callers still synchronous |
+| Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
 | Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `CompletionSubscription::poll` on the handle; the adapter still parks |
 | Batch upsert completion (`Scheduler::wait_batch`) | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
-| Scoped cache-node flight (`wait_for_scoped_cache_node`; 2 ms timed condvar plus a rayon `install`) | `verter_scheduler/src/scheduler/{identity,cancellation}.rs` | Vue macro codegen in compile and the Vue API projector | none |
-| Scheduler inbox submission (`send_submission`, bounded send when the inbox is full) | `verter_scheduler/src/scheduler/driver.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | none (the driver drains the inbox) |
-| Workspace import-resolution flight (`FlightSubscription::wait`; 5 ms timed condvar) | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` exists without a waker |
+| Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
+| Scheduler inbox submission (`send_submission`) | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
+| Workspace import-resolution flight (`FlightSubscription::wait`) | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` registers a waker; callers still synchronous |
 | Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) | `verter_session/src/host_batch_coordinator.rs` | `compile_many`, `get_component_meta_batch` | none; the batch topology itself is the executor's to replace |
 
 The declaration-lowering waits that used to be on this list are now the

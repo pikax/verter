@@ -210,9 +210,18 @@ impl DeclBodyMemo {
                         // surfaces the DISTINCT `LeaseMiss` (a transient
                         // no-warm ReturnOnly), never collapsed into the
                         // cacheable `UnknownSymbol`.
+                        // An owner's global-augmentation scope names its own
+                        // `declare global` member, whatever the file surface
+                        // declares of the name.
                         let symbol = slot.anchor.symbol.as_ref();
-                        let owner = slot.anchor.owner;
-                        let (lowered, aug_scope) = match self.type_decl_outcome_in(owner, symbol) {
+                        let global_scoped = slot.anchor.owner.is_global_augmentation();
+                        let owner = slot.anchor.owner.lexical();
+                        let file_scope = if global_scoped {
+                            DemandOutcome::Ready(None)
+                        } else {
+                            self.type_decl_outcome_in(owner, symbol)
+                        };
+                        let (lowered, aug_scope) = match file_scope {
                             DemandOutcome::LeaseMiss => {
                                 return Err(LocatorBodyDerefError::LeaseMiss);
                             }
@@ -221,13 +230,14 @@ impl DeclBodyMemo {
                                 // Then the one `declare module` block
                                 // declaring the name — the prepared
                                 // declaration's own fallback order.
-                                let scope = if self
-                                    .header_index()
-                                    .augmentation_type_header(
-                                        &AugmentationScopeKind::Global,
-                                        symbol,
-                                    )
-                                    .is_some()
+                                let scope = if global_scoped
+                                    || self
+                                        .header_index()
+                                        .augmentation_type_header(
+                                            &AugmentationScopeKind::Global,
+                                            symbol,
+                                        )
+                                        .is_some()
                                 {
                                     AugmentationScopeKind::Global
                                 } else {

@@ -10,6 +10,7 @@ import {
   createGraphTypeExprRef,
   LITERAL_NUMBER,
   LITERAL_STRING,
+  MEMBER_METHOD,
   MEMBER_PROPERTY,
   NODE_ARRAY,
   NODE_CONDITIONAL,
@@ -450,12 +451,26 @@ describe("typeExprToDescriptor", () => {
       ],
     });
 
-    // `keyof` keeps a number key a number literal, as TypeScript does.
+    // A method key indexes to the method's signature.
+    expect(
+      typeExprToDescriptor(
+        {
+          kind: "indexedAccess",
+          object: { kind: "ref", name: "Keyed", typeArguments: [] },
+          index: { kind: "literal", literalKind: "string", value: "go" },
+        },
+        new Map([["Keyed", keyed]]),
+      ),
+    ).toMatchObject({ kind: "function", returnType: { kind: "primitive", name: "void" } });
+
+    // `keyof` names method keys too, and keeps a number key a number
+    // literal, as TypeScript does.
     expect(typeExprToDescriptor({ kind: "keyOf", operand: keyed })).toEqual({
       kind: "union",
       types: [
         { kind: "literal", value: "color" },
         { kind: "literal", value: 7 },
+        { kind: "literal", value: "go" },
       ],
     });
 
@@ -471,6 +486,7 @@ describe("typeExprToDescriptor", () => {
       properties: [
         { name: "color", type: { kind: "literal", value: "color" }, optional: false },
         { name: "7", type: { kind: "literal", value: 7 }, optional: true },
+        { name: "go", type: { kind: "literal", value: "go" }, optional: false },
       ],
     });
 
@@ -509,7 +525,7 @@ describe("typeExprToDescriptor", () => {
 
   it("indexes and enumerates a graph member by its number key", () => {
     const graph = new DecodedTypeGraph(
-      ["K"],
+      ["K", "go"],
       [
         { kind: NODE_PRIMITIVE, primitive: 1 }, // 1: string
         {
@@ -528,11 +544,32 @@ describe("typeExprToDescriptor", () => {
               methodKind: 0,
               hasImplementationBody: false,
             },
+            {
+              kind: MEMBER_METHOD,
+              key: { kind: "string", nameId: 2 },
+              typeNodeId: 0,
+              optional: false,
+              readonly: false,
+              keyNameId: 0,
+              keyTypeNodeId: 0,
+              valueTypeNodeId: 0,
+              functionNodeId: 6,
+              methodKind: 0,
+              hasImplementationBody: false,
+            },
           ],
-        }, // 2: { 7: string }
+        }, // 2: { 7: string; go(): string }
         { kind: NODE_LITERAL, literalKind: LITERAL_NUMBER, numberValue: 7 }, // 3: 7
-        { kind: NODE_INDEXED_ACCESS, objectNodeId: 2, indexNodeId: 3 }, // 4: { 7: string }[7]
-        { kind: NODE_KEY_OF, operandNodeId: 2 }, // 5: keyof { 7: string }
+        { kind: NODE_INDEXED_ACCESS, objectNodeId: 2, indexNodeId: 3 }, // 4: { 7: string; go(): string }[7]
+        { kind: NODE_KEY_OF, operandNodeId: 2 }, // 5: keyof { 7: string; go(): string }
+        {
+          kind: NODE_FUNCTION,
+          parameters: [],
+          returnTypeNodeId: 1,
+          typeParameterNodeIds: [],
+        }, // 6: () => string
+        { kind: NODE_LITERAL, literalKind: LITERAL_STRING, stringId: 2 }, // 7: "go"
+        { kind: NODE_INDEXED_ACCESS, objectNodeId: 2, indexNodeId: 7 }, // 8: { 7: string; go(): string }["go"]
       ],
     );
     expect(typeExprToDescriptor(createGraphTypeExprRef(graph, 4), new Map())).toEqual({
@@ -540,8 +577,15 @@ describe("typeExprToDescriptor", () => {
       name: "string",
     });
     expect(typeExprToDescriptor(createGraphTypeExprRef(graph, 5))).toEqual({
-      kind: "literal",
-      value: 7,
+      kind: "union",
+      types: [
+        { kind: "literal", value: 7 },
+        { kind: "literal", value: "go" },
+      ],
+    });
+    expect(typeExprToDescriptor(createGraphTypeExprRef(graph, 8), new Map())).toMatchObject({
+      kind: "function",
+      returnType: { kind: "primitive", name: "string" },
     });
   });
 

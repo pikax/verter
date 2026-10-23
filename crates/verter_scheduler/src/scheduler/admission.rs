@@ -390,12 +390,14 @@ impl Scheduler {
         } = request;
 
         // Preparation cannot recreate a node for a retired inbox item.
-        let prepared_lifetime = match self.nodes.get(&file_id) {
-            Some(live) if live.submission_lifetime() == submitted_lifetime => {
-                live.submission_lifetime()
-            }
+        let live_lifetime = self
+            .nodes
+            .get(&file_id)
+            .map(|live| live.submission_lifetime());
+        let prepared_lifetime = match live_lifetime {
+            Some(live) if live == submitted_lifetime => live,
             _ => {
-                sender.send(CompletionState::Shutdown);
+                self.dag.send_completion(&sender, CompletionState::Shutdown);
                 return None;
             }
         };
@@ -422,10 +424,10 @@ impl Scheduler {
     /// and batch admission share identical semantics.
     ///
     /// Side effects that are independent of the DAG mutex (the
-    /// `overlay`/`pending_source` writes, the completion-sender signals,
+    /// `overlay`/`pending_source` writes, completion-state publication,
     /// the `set_target` stamp) run inline; they take their own
     /// independent locks (the overlay DashMap shard, the handle's inner
-    /// mutex), so they are safe under the DAG lock.
+    /// mutex). Completion callbacks are retained by the DAG guard until unlock.
     ///
     /// `nodes`-shard lock ordering under the DAG lock. The admission
     /// core DOES read the `nodes` shard while the caller holds
@@ -504,7 +506,7 @@ impl Scheduler {
                 // drops a place expression — so the guard would be held across
                 // the send.
                 drop(live);
-                sender.send(CompletionState::Superseded);
+                dag.send_completion(&sender, CompletionState::Superseded);
                 return;
             }
             None => {
@@ -512,7 +514,7 @@ impl Scheduler {
                 // `remove()` signals Shutdown to the waiters it can see;
                 // this one had not registered yet, so it is signalled
                 // here instead of being left parked.
-                sender.send(CompletionState::Shutdown);
+                dag.send_completion(&sender, CompletionState::Shutdown);
                 return;
             }
         }
@@ -605,7 +607,7 @@ impl Scheduler {
                     RequestResult::Artifact(node.current_artifact(*profile_hash).unwrap())
                 }
             };
-            sender.send(CompletionState::Ready(result));
+            dag.send_completion(&sender, CompletionState::Ready(result));
             return;
         }
 

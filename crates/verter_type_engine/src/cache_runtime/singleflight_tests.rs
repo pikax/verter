@@ -1554,3 +1554,163 @@ fn unified_budgeted_post_publish_eviction_does_not_self_deadlock() {
         "K1 was evicted; K2 survives"
     );
 }
+
+/// A waker that counts its wakes and, at each wake, records whether the
+/// publish fence was free, so a wake under the fence is observable.
+struct FenceProbe {
+    wakes: AtomicUsize,
+    fence: Arc<parking_lot::RwLock<()>>,
+    fenced_wakes: AtomicUsize,
+}
+
+impl std::task::Wake for FenceProbe {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+        if self.fence.try_write().is_none() {
+            self.fenced_wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+fn fence_probe(fence: &Arc<parking_lot::RwLock<()>>) -> (Arc<FenceProbe>, std::task::Waker) {
+    let probe = Arc::new(FenceProbe {
+        wakes: AtomicUsize::new(0),
+        fence: Arc::clone(fence),
+        fenced_wakes: AtomicUsize::new(0),
+    });
+    (Arc::clone(&probe), std::task::Waker::from(probe))
+}
+
+#[test]
+fn slot_join_is_pending_until_completion_wakes_it_once() {
+    let fence = Arc::new(parking_lot::RwLock::new(()));
+    let (probe, waker) = fence_probe(&fence);
+    let slot = Arc::new(InflightSlot::new());
+    let mut join = SlotJoin::new(&slot);
+    assert!(join.poll(&waker).is_pending());
+    assert!(join.poll(&waker).is_pending());
+    assert_eq!(
+        slot.state.lock().wakers.len(),
+        1,
+        "a re-poll keeps one registration"
+    );
+    slot.complete(|state| state.non_cacheable_winner = true)
+        .wake();
+    assert_eq!(probe.wakes.load(Ordering::SeqCst), 1);
+    assert!(join.poll(&waker).is_ready());
+    // A second completion keeps the first outcome and wakes nobody.
+    slot.complete(|state| state.failure = Some(InflightFailureKind::ComputeFailed))
+        .wake();
+    assert_eq!(probe.wakes.load(Ordering::SeqCst), 1);
+    let state = slot.state.lock();
+    assert!(state.non_cacheable_winner && state.failure.is_none());
+}
+
+#[test]
+fn dropping_a_slot_join_withdraws_only_its_own_registration() {
+    let fence = Arc::new(parking_lot::RwLock::new(()));
+    let (probe, waker) = fence_probe(&fence);
+    let slot = Arc::new(InflightSlot::new());
+    let mut dropped = SlotJoin::new(&slot);
+    let mut kept = SlotJoin::new(&slot);
+    assert!(dropped.poll(&waker).is_pending());
+    assert!(kept.poll(&waker).is_pending());
+    drop(dropped);
+    assert_eq!(
+        slot.state.lock().wakers.len(),
+        1,
+        "drop withdraws its registration"
+    );
+    slot.complete(|_| {}).wake();
+    assert_eq!(probe.wakes.load(Ordering::SeqCst), 1);
+    assert!(kept.poll(&waker).is_ready());
+}
+
+/// A completion racing a join's registration is never lost: either the
+/// registering poll sees the completion, or its waker fires.
+#[test]
+fn slot_completion_racing_registration_never_loses_the_wake() {
+    let fence = Arc::new(parking_lot::RwLock::new(()));
+    for round in 0..256u32 {
+        let (probe, waker) = fence_probe(&fence);
+        let slot = Arc::new(InflightSlot::new());
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let winner = {
+            let (slot, start) = (Arc::clone(&slot), Arc::clone(&start));
+            thread::spawn(move || {
+                start.wait();
+                slot.complete(|_| {}).wake();
+            })
+        };
+        let mut join = SlotJoin::new(&slot);
+        start.wait();
+        let answered_at_poll = join.poll(&waker).is_ready();
+        winner.join().expect("the winner completes");
+        assert!(
+            answered_at_poll || probe.wakes.load(Ordering::SeqCst) == 1,
+            "round {round}: a pending join must be woken by the completion"
+        );
+        assert!(join.poll(&waker).is_ready());
+        assert!(slot.state.lock().wakers.is_empty());
+    }
+}
+
+/// The winner wakes its polling joiners only after it released the cache's
+/// publish fence: a wake is a callback, and none runs under a publication
+/// lock.
+#[test]
+fn the_winner_wakes_polling_joiners_after_releasing_the_publish_fence() {
+    use std::sync::mpsc;
+
+    for admitted in [true, false] {
+        let fence = Arc::new(parking_lot::RwLock::new(()));
+        let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
+        let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
+        let (in_compute, computing) = mpsc::channel::<()>();
+        let (release, released) = mpsc::channel::<()>();
+        let winner = {
+            let (map, inflight, fence) =
+                (Arc::clone(&map), Arc::clone(&inflight), Arc::clone(&fence));
+            thread::spawn(move || {
+                cooperative_admit_with_post_publish(
+                    &*map,
+                    &*inflight,
+                    3u32,
+                    |entry: &String| Some(entry.clone()),
+                    || -> ComputeAdmission<String, String> {
+                        in_compute.send(()).expect("signal in-compute");
+                        released.recv().expect("released");
+                        ComputeAdmission::Cacheable("value".to_string())
+                    },
+                    |entry: &String| entry.clone(),
+                    move |_entry: &String| admitted,
+                    |_k: &u32, _e: &Arc<String>| {},
+                    |_entry_arc: &Arc<String>, _k: &u32| {},
+                    Some(&*fence),
+                )
+            })
+        };
+        computing.recv().expect("the winner claims the slot");
+        let slot = Arc::clone(inflight.table.lock().get(&3).expect("the claimed slot"));
+        let (probe, waker) = fence_probe(&fence);
+        let mut join = SlotJoin::new(&slot);
+        assert!(
+            join.poll(&waker).is_pending(),
+            "the winner is still computing"
+        );
+        release.send(()).expect("release the winner");
+        let answer = winner.join().expect("the winner finishes");
+        assert_eq!(answer.is_some(), admitted);
+        assert_eq!(probe.wakes.load(Ordering::SeqCst), 1, "admitted={admitted}");
+        assert_eq!(
+            probe.fenced_wakes.load(Ordering::SeqCst),
+            0,
+            "admitted={admitted}: the joiner was woken under the publish fence"
+        );
+        assert!(join.poll(&waker).is_ready());
+    }
+}

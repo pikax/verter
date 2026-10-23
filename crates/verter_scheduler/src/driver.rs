@@ -101,12 +101,24 @@ pub const SUBMISSION_INBOX_CAPACITY: usize = 1024;
 pub struct SubmissionInbox {
     pub sender: Sender<Submission>,
     pub receiver: Receiver<Submission>,
+    /// Capacity waiters. An offer and its registration share this lock;
+    /// consumers take the registrations after dequeue and wake after unlock.
+    pub(crate) space: std::sync::Arc<parking_lot::Mutex<verter_execution::wake::WakerSet>>,
 }
 
 impl SubmissionInbox {
     pub fn new() -> Self {
         let (sender, receiver) = crossbeam_channel::bounded(SUBMISSION_INBOX_CAPACITY);
-        Self { sender, receiver }
+        Self {
+            sender,
+            receiver,
+            space: Default::default(),
+        }
+    }
+
+    pub(crate) fn notify_space(&self) {
+        let wakers = self.space.lock().take();
+        wakers.wake();
     }
 }
 

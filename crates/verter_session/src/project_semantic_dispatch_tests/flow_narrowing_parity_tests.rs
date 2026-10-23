@@ -2,13 +2,15 @@
 //! back as a flow-return answer and, where the form is a returned test, as
 //! the type predicate the checker infers from it.
 //!
-//! Every expected answer is measured on the pinned TypeScript 7.0.2: the
+//! Checker-parity answers are measured on the pinned TypeScript 7.0.2: the
 //! strict column is the function's `.d.ts` line (`tsc --declaration
 //! --emitDeclarationOnly --strict`), the loose column the same under
 //! `--strictNullChecks false`, read from a TS2322 message quoting the type
 //! where the loose `.d.ts` reprints an authored annotation instead. A
 //! branch that does not return `throw`s, so each answer is the narrowed
 //! read alone, never a join.
+//! Symbol-abbreviation controls instead pin the documented stable-spelling
+//! policy where the native checker's messages depend on process history.
 
 use super::signature_predicate_inference_tests::{
     assert_predicate, assert_prints, host_with, LOOSE_ROOT, STRICT_ROOT,
@@ -3102,6 +3104,60 @@ fn an_assertion_every_conditional_arm_applies_narrows_past_it() {
     check_rows(CONDITIONAL_ASSERTIONS, &rows);
 }
 
+/// Symbol abbreviation depends on spelling, not unrelated interning or query history.
+#[test]
+fn symbol_abbreviation_keeps_diagnostics_across_query_histories() {
+    use super::signature_predicate_inference_tests::checker_report;
+
+    let padding = "x".repeat(91);
+    let mut source = String::from("declare function one(x: string): number;\n");
+    for i in 0..12 {
+        source.push_str(&format!("declare const s{i}: unique symbol;\n"));
+    }
+    source.push_str(&format!(
+        "export function target(x: {{ padding: \"{padding}\"; "
+    ));
+    for i in 0..12 {
+        source.push_str(&format!("[s{i}]: number; "));
+    }
+    source.push_str("last: string }) { return [one(x), one(x)]; }\n");
+    for i in 0..128 {
+        source.push_str(&format!("declare const u{i}: unique symbol;\n"));
+    }
+    source.push_str("export function unrelated(x: { ");
+    for i in 0..128 {
+        source.push_str(&format!("[u{i}]: {i}; "));
+    }
+    source.push_str("}) { return x; }\n");
+    let message = format!("error TS2345: Argument of type '{{ padding: \"{padding}\"; [s0]: number; [s1]: number; [s2]: number; [s3]: number; [s4]: number; ... 7 more ...; last: string; }}' is not assignable to parameter of type 'string'.");
+    let expected: Vec<_> = source
+        .match_indices("one(x)")
+        .map(|(start, _)| {
+            let before = &source[..start + "one(".len()];
+            let line = before.matches('\n').count() + 1;
+            let column = before.len() - before.rfind('\n').unwrap();
+            format!("({line},{column}): {message}")
+        })
+        .collect();
+    assert_eq!(expected.len(), 2, "the fixture has two authored call sites");
+    for prewarm in [false, true] {
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            for root in [STRICT_ROOT, LOOSE_ROOT] {
+                if prewarm {
+                    assert!(checker_report(&host, root, "unrelated", &source).is_empty());
+                }
+                assert_eq!(
+                    checker_report(&host, root, "target", &source),
+                    expected,
+                    "{pass} {root}, unrelated prewarm: {prewarm}"
+                );
+                assert_prints(&host, root, "target", "number[]");
+            }
+        }
+    }
+}
+
 /// Printable residual kinds retain the call's diagnostic through cold and warm reads.
 #[test]
 fn printable_residual_types_keep_call_diagnostics() {
@@ -3169,4 +3225,158 @@ export function mapped_infer<T>(x: { value: { [K in keyof T]: string } extends {
         }
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn spread_and_computed_key_diagnostics_preserve_evaluated_types() {
+    let padding = "x".repeat(130);
+    let source = format!(
+        r#"declare function one(x: string): number;
+declare const k: "a";
+enum E {{ A = "a", N = 1 }}
+export function repeated<T extends object>(x: T) {{ const y = {{ ...x, a: 1, ...x, b: true }}; return one(y); }}
+export function overwritten<T extends object>(x: T) {{ const a = {{ p: 1 }}; const b = {{ p: true }}; const y = {{ ...x, ...a, ...x, ...b }}; return one(y); }}
+export function literal(x: {{ [k]: number }}) {{ return one(x); }}
+export function enumeration(x: {{ [E.A]: number; [E.N]: string }}) {{ return one(x); }}
+export function wide(x: {{ padding: "{padding}"; [k]: number; tail: boolean; last: string }}) {{ return one(x); }}
+export function dynamic(x: any) {{ const y = {{ ...x }}; return one(y); }}
+export function dynamic_before(x: any) {{ const y = {{ p: 1, ...x }}; return one(y); }}
+export function dynamic_after(x: any) {{ const y = {{ ...x, p: 1 }}; return one(y); }}
+export function closed(x: {{ a: number }}) {{ const y = {{ ...x }}; return one(y); }}
+export function enum_value(x: {{ [E.A]: E.A }}) {{ return one(x); }}
+export function dynamic_nested(x: any) {{ const y = {{ ...{{ ...x, inner: 1 }}, outer: true }}; return one(y); }}
+export function property_dynamic(x: {{ a: any }}) {{ const y = {{ ...x }}; return one(y); }}
+export function enum_wide(x: {{ padding: "{padding}"; [E.A]: number; tail: boolean; last: string }}) {{ return one(x); }}
+"#
+    );
+    let expected = [
+        (
+            "repeated",
+            Some("T & { a: number; b: boolean; }".to_owned()),
+        ),
+        ("overwritten", Some("T & { p: boolean; }".to_owned())),
+        ("literal", Some("{ a: number; }".to_owned())),
+        ("enumeration", Some("{ a: number; 1: string; }".to_owned())),
+        (
+            "wide",
+            Some(format!(
+                "{{ padding: \"{padding}\"; a: number; tail: boolean; last: string; }}"
+            )),
+        ),
+        ("dynamic", None),
+        ("dynamic_before", None),
+        ("dynamic_after", None),
+        ("closed", Some("{ a: number; }".to_owned())),
+        ("enum_value", Some("{ a: E.A; }".to_owned())),
+        ("dynamic_nested", None),
+        ("property_dynamic", Some("{ a: any; }".to_owned())),
+        (
+            "enum_wide",
+            Some(format!(
+                "{{ padding: \"{padding}\"; a: number; tail: boolean; last: string; }}"
+            )),
+        ),
+    ];
+    let host = host_with(&source);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (name, ty) in &expected {
+                let reports = super::signature_predicate_inference_tests::checker_report(
+                    &host, root, name, &source,
+                );
+                let expected: Vec<_> = ty.iter().map(|ty| {
+                    let line = source.lines().position(|line| line.starts_with(&format!("export function {name}<")) || line.starts_with(&format!("export function {name}("))).unwrap();
+                    let text = source.lines().nth(line).unwrap();
+                    let column = text.rfind("one(").unwrap() + 5;
+                    format!("({},{}): error TS2345: Argument of type '{ty}' is not assignable to parameter of type 'string'.", line + 1, column)
+                }).collect();
+                if reports != expected {
+                    mismatches.push(format!(
+                        "{pass} {root} {name}: got {reports:?}, expected {expected:?}"
+                    ));
+                }
+                assert_prints(&host, root, name, "number");
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
+    let nest =
+        |leaf: &str, count: usize| format!("{}{leaf}{}", "{ e: ".repeat(count), " }".repeat(count));
+    let clipped = format!("{}{{ ...", "{ e: ".repeat(63));
+    for (name, overload, elaborated, count) in [
+        ("elaborated", false, true, 100),
+        ("overloaded", true, false, 100),
+        ("part_overflow", false, true, 101),
+        ("overload_elaborated", true, true, 100),
+    ] {
+        // A context-sensitive sibling exercises the supported overload
+        // diagnostic producer while the first argument owns the overflow.
+        let callback = if overload {
+            ", cb: (v: number) => number"
+        } else {
+            ""
+        };
+        let callback_argument = if overload { ", v => v" } else { "" };
+        let source = format!("declare const x: {};\ndeclare function f(arg: {}{callback}): number;\n{}export function {name}() {{ return f({}{callback_argument}); }}\n",
+            nest("{ x: number }", count), nest("{ y: number }", count),
+            if overload { format!("declare function f(arg: {}{callback}, extra?: number): number;\n", nest("{ y: number }", count)) } else { String::new() },
+            if elaborated { "{ e: x.e }" } else { "x" });
+        let line = source.lines().count();
+        let body = source.lines().last().unwrap();
+        let call = body.find("f(").unwrap() + 1;
+        let argument = call + 2;
+        let overflow =
+            format!("Excessive stack depth comparing types '{clipped}' and '{clipped}'.");
+        let mut expected = vec![format!("({line},{}): error TS2321: {overflow}", call)];
+        if overload && !elaborated {
+            expected.push(format!("({line},{argument}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {overflow}"));
+        } else if count == 101 {
+            expected.push(format!(
+                "({line},{}): error TS2321: {overflow}",
+                argument + 2
+            ));
+        } else {
+            let message = format!("Type '{clipped}' is not assignable to type '{clipped}'. Two different types with this name exist, but they are unrelated.\n  The types of '{}' are incompatible between these types.\n    Property 'y' is missing in type '{{ x: number; }}' but required in type '{{ y: number; }}'.", vec!["e"; 99].join("."));
+            if overload {
+                expected.push(format!("({line},{}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {}", argument + 2, message.replace('\n', "\n    ")));
+            } else {
+                expected.push(format!(
+                    "({line},{}): error TS2719: {message}",
+                    argument + 2
+                ));
+            }
+        }
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            for root in [STRICT_ROOT, LOOSE_ROOT] {
+                assert_eq!(
+                    super::signature_predicate_inference_tests::checker_report(
+                        &host, root, name, &source
+                    ),
+                    expected,
+                    "{pass} {root} {name}"
+                );
+                if overload {
+                    super::signature_predicate_inference_tests::observe(
+                        &host,
+                        root,
+                        name,
+                        |_, degradation, _| {
+                            assert!(
+                                degradation.is_some(),
+                                "overload recovery retains its existing typed gap"
+                            )
+                        },
+                    );
+                } else {
+                    assert_prints(&host, root, name, "number");
+                }
+            }
+        }
+    }
 }

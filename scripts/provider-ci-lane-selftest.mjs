@@ -357,20 +357,55 @@ test("native-only TypeScript plugin specs run after a native build in the tsserv
   assert.match(pkg.scripts["test:scripts"], /provider-ci-lane-selftest\.mjs/);
 });
 
-test("nightly coverage builds real-tsserver prerequisites before workspace tests", () => {
+test("nightly coverage instruments every CI lane after its prerequisites", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "nightly.yml"), "utf8");
-  const coverage = yamlJob(workflow, "rust-coverage");
-  const install = coverage.indexOf("pnpm install --frozen-lockfile");
-  const build = coverage.indexOf(
-    "pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build",
+  const coverage = yamlJob(workflow, "rust-coverage-lane");
+  for (const [lane, require] of [
+    ["core", null],
+    ["tsgo", "VERTER_REQUIRE_TSGO"],
+    ["tsserver", "VERTER_REQUIRE_TSSERVER"],
+  ]) {
+    const entry = require
+      ? `- lane: ${lane}\\r?\\n\\s+require: ${require}\\r?\\n`
+      : `- lane: ${lane}\\r?\\n(?!\\s+require:)`;
+    assert.match(coverage, new RegExp(entry), `the ${lane} lane and its provider switch`);
+  }
+  assert.match(
+    coverage,
+    /^\s+NEXTEST_PROFILE: ci$/m,
+    "the core lane must keep CI's nextest profile",
   );
-  const testRun = coverage.indexOf("cargo llvm-cov --workspace");
 
-  assert.notEqual(install, -1, "coverage must install the pinned TypeScript toolchain");
-  assert.notEqual(build, -1, "coverage must build the tsserver plugin and its runtime dependency");
-  assert.notEqual(testRun, -1, "coverage must execute the workspace test universe");
-  assert.ok(
-    install < build && build < testRun,
-    "coverage prerequisites must be built before tests",
+  const order = [
+    ["install the pinned TypeScript toolchain", "pnpm install --frozen-lockfile"],
+    [
+      "build the tsserver plugin and its runtime dependency",
+      "pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build",
+    ],
+    ["instrument the cargo commands", "source <(cargo llvm-cov show-env --sh)"],
+    [
+      "prepare the compile-fixture metadata",
+      "node scripts/compile-fixture-artifacts.mjs prepare --workspace",
+    ],
+    [
+      "run the core partition under nextest",
+      'cargo nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)"',
+    ],
+    ["run the provider lane", 'env "$REQUIRE=1" node scripts/provider-ci.mjs run "$LANE"'],
+    ["report the lane", 'cargo llvm-cov report --lcov --output-path "lcov-$LANE.info" || status=1'],
+  ].map(([what, text]) => {
+    const at = coverage.indexOf(text);
+    assert.notEqual(at, -1, `coverage must ${what}`);
+    return at;
+  });
+  assert.deepEqual(
+    order,
+    [...order].sort((a, b) => a - b),
+    "coverage steps must run in order",
   );
+
+  const result = yamlJob(workflow, "rust-coverage");
+  assert.match(result, /^\s+name: Rust Coverage$/m);
+  assert.match(result, /^\s+needs: rust-coverage-lane$/m);
+  assert.match(result, /if: needs\.rust-coverage-lane\.result != 'success'/);
 });

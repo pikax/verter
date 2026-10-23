@@ -4,7 +4,8 @@ pub mod persistence;
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -715,14 +716,68 @@ impl TerminalOutcome {
 
 struct PublicationLane {
     state: Mutex<LaneState>,
-    wake: Condvar,
+    /// The waiters polling for the lane's terminal; see [`LaneWait`].
+    waiters: LaneWaiters,
 }
 
 impl PublicationLane {
     fn vacant() -> Self {
         Self {
             state: Mutex::new(LaneState::Vacant),
-            wake: Condvar::new(),
+            waiters: LaneWaiters::default(),
+        }
+    }
+}
+
+/// How often a lane waiter observes its request's cancellation.
+const LANE_CANCELLATION_SLICE: Duration = Duration::from_millis(5);
+
+/// The waiters polling one lane for its outcome.
+///
+/// A waiter registers only while it holds the lane's state lock and finds
+/// no outcome; the producer publishes the outcome and takes the
+/// registrations under that same lock (lock order: lane state, then
+/// waiters), and wakes them once it holds neither. A publication racing a
+/// registration therefore still wakes the waiter.
+#[derive(Default)]
+struct LaneWaiters(parking_lot::Mutex<verter_execution::wake::WakerSet>);
+
+impl LaneWaiters {
+    /// Take every registration. The caller holds the lane's state lock
+    /// with the outcome just published, and wakes them after releasing it.
+    fn take(&self) -> verter_execution::wake::TakenWakers {
+        self.0.lock().take()
+    }
+}
+
+/// One waiter's registration on a lane, withdrawn when the wait ends.
+struct LaneWait<'l> {
+    waiters: &'l LaneWaiters,
+    registration: verter_execution::wake::WakeRegistration,
+}
+
+impl<'l> LaneWait<'l> {
+    fn new(waiters: &'l LaneWaiters) -> Self {
+        Self {
+            waiters,
+            registration: verter_execution::wake::WakeRegistration::default(),
+        }
+    }
+
+    /// Register `waker` for the lane's outcome. Called with the lane's
+    /// state lock held, after finding no outcome.
+    fn register(&mut self, waker: &std::task::Waker) {
+        self.waiters
+            .0
+            .lock()
+            .register(&mut self.registration, waker);
+    }
+}
+
+impl Drop for LaneWait<'_> {
+    fn drop(&mut self) {
+        if self.registration.is_registered() {
+            self.waiters.0.lock().withdraw(&mut self.registration);
         }
     }
 }
@@ -751,15 +806,29 @@ enum StableParseState {
 
 struct StableParseLane {
     state: Mutex<StableParseState>,
-    wake: Condvar,
+    /// The joiners polling for the shared parse; see [`LaneWait`].
+    waiters: LaneWaiters,
 }
 
 impl StableParseLane {
     fn producing() -> Self {
         Self {
             state: Mutex::new(StableParseState::Producing),
-            wake: Condvar::new(),
+            waiters: LaneWaiters::default(),
         }
+    }
+
+    /// Publish `outcome` and wake the joiners after releasing the lock.
+    fn publish(&self, outcome: StableParseOutcome) {
+        let joiners = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("stable-parse lane lock poisoned by a worker panic");
+            *state = StableParseState::Ready(outcome);
+            self.waiters.take()
+        };
+        joiners.wake();
     }
 }
 
@@ -969,15 +1038,18 @@ impl CarrierPublicationStore {
                     PublicationAuditKind::TerminalFailure,
                 );
             }
-            let mut state = lane
-                .state
-                .lock()
-                .expect("publication lane lock poisoned by a worker panic");
-            *state = LaneState::Terminal(TerminalOutcome::from_outcome(&outcome));
-            lane.wake.notify_all();
+            let waiters = {
+                let mut state = lane
+                    .state
+                    .lock()
+                    .expect("publication lane lock poisoned by a worker panic");
+                *state = LaneState::Terminal(TerminalOutcome::from_outcome(&outcome));
+                lane.waiters.take()
+            };
+            waiters.wake();
             outcome
         } else {
-            let mut state = lane
+            let state = lane
                 .state
                 .lock()
                 .expect("publication lane lock poisoned by a worker panic");
@@ -1002,15 +1074,21 @@ impl CarrierPublicationStore {
                 &artifact_id,
                 PublicationAuditKind::CoordinationLaneEntered(PublicationLaneRole::Waiter),
             );
-            loop {
+            drop(state);
+            let mut wait = LaneWait::new(&lane.waiters);
+            verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
                 if request.cancellation.is_cancelled() {
                     self.audit.push(
                         &request,
                         &artifact_id,
                         PublicationAuditKind::WaiterDetachedCancelled,
                     );
-                    return PublicationOutcome::Cancelled;
+                    return Poll::Ready(PublicationOutcome::Cancelled);
                 }
+                let state = lane
+                    .state
+                    .lock()
+                    .expect("publication lane lock poisoned by a worker panic");
                 match &*state {
                     LaneState::Terminal(outcome) => {
                         if self
@@ -1018,22 +1096,24 @@ impl CarrierPublicationStore {
                             .validate_accepted_current(&self.source_authority, accepted)
                             .is_err()
                         {
-                            return PublicationOutcome::Superseded(CurrentSourceEvidence {
-                                current_source: None,
-                            });
+                            return Poll::Ready(PublicationOutcome::Superseded(
+                                CurrentSourceEvidence {
+                                    current_source: None,
+                                },
+                            ));
                         }
-                        return outcome
-                            .outcome()
-                            .unwrap_or(PublicationOutcome::RetryExhausted);
+                        Poll::Ready(
+                            outcome
+                                .outcome()
+                                .unwrap_or(PublicationOutcome::RetryExhausted),
+                        )
                     }
-                    LaneState::Vacant | LaneState::Producing => {}
+                    LaneState::Vacant | LaneState::Producing => {
+                        wait.register(waker);
+                        Poll::Pending
+                    }
                 }
-                let waited = lane.wake.wait_timeout(state, Duration::from_millis(5));
-                state = match waited {
-                    Ok((state, _)) => state,
-                    Err(_) => panic!("publication lane lock poisoned by a worker panic"),
-                };
-            }
+            })
         }
     }
 
@@ -1287,12 +1367,7 @@ impl CarrierPublicationStore {
                 // a newcomer in between either joins this lane or lands on
                 // the double-checked retained read — never on a second
                 // parse of the same unit.
-                *lane
-                    .state
-                    .lock()
-                    .expect("stable-parse lane lock poisoned by a worker panic") =
-                    StableParseState::Ready(StableParseOutcome::Parsed(Arc::clone(&artifact)));
-                lane.wake.notify_all();
+                lane.publish(StableParseOutcome::Parsed(Arc::clone(&artifact)));
                 let outcome = match catch_unwind(AssertUnwindSafe(|| {
                     self.publish_shared(&artifact, accepted, request, artifact_id)
                 })) {
@@ -1331,39 +1406,36 @@ impl CarrierPublicationStore {
         request: &PublicationRequestContext,
         artifact_id: &FrameworkArtifactId,
     ) -> StableShared {
-        let mut state = lane
-            .state
-            .lock()
-            .expect("stable-parse lane lock poisoned by a worker panic");
-        loop {
+        let mut wait = LaneWait::new(&lane.waiters);
+        verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
             if request.cancellation.is_cancelled() {
                 self.audit.push(
                     request,
                     artifact_id,
                     PublicationAuditKind::WaiterDetachedCancelled,
                 );
-                return StableShared::Done(PublicationOutcome::Cancelled);
+                return Poll::Ready(StableShared::Done(PublicationOutcome::Cancelled));
             }
+            let state = lane
+                .state
+                .lock()
+                .expect("stable-parse lane lock poisoned by a worker panic");
             match &*state {
-                StableParseState::Ready(outcome) => {
-                    return match outcome.clone() {
-                        StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
-                        StableParseOutcome::Rejected(reject) => StableShared::Done(
-                            PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
-                        ),
-                        StableParseOutcome::Panicked => {
-                            StableShared::Done(PublicationOutcome::WinnerPanicked)
-                        }
-                    };
+                StableParseState::Ready(outcome) => Poll::Ready(match outcome.clone() {
+                    StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
+                    StableParseOutcome::Rejected(reject) => StableShared::Done(
+                        PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
+                    ),
+                    StableParseOutcome::Panicked => {
+                        StableShared::Done(PublicationOutcome::WinnerPanicked)
+                    }
+                }),
+                StableParseState::Producing => {
+                    wait.register(waker);
+                    Poll::Pending
                 }
-                StableParseState::Producing => {}
             }
-            let waited = lane.wake.wait_timeout(state, Duration::from_millis(5));
-            state = match waited {
-                Ok((state, _)) => state,
-                Err(_) => panic!("stable-parse lane lock poisoned by a worker panic"),
-            };
-        }
+        })
     }
 
     fn finish_stable_parse(
@@ -1375,12 +1447,7 @@ impl CarrierPublicationStore {
         // Publish before unlisting: a newcomer that misses the entry must
         // land on the double-checked retained read (or a fresh in-flight
         // lane), never on a removed-but-unpublished parse.
-        *lane
-            .state
-            .lock()
-            .expect("stable-parse lane lock poisoned by a worker panic") =
-            StableParseState::Ready(outcome);
-        lane.wake.notify_all();
+        lane.publish(outcome);
         self.stable_parses
             .lock()
             .expect("stable-parse table lock poisoned by a worker panic")
@@ -1599,3 +1666,121 @@ fn parse_key_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseKe
 pub struct GrammarMismatch;
 
 fn _acceptance_error_is_closed(_: CarrierAcceptanceError) {}
+
+#[cfg(test)]
+mod lane_wait_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts its wakes and, at each wake, whether the lane state lock was
+    /// free, so a wake under the lane lock is observable.
+    struct LaneProbe {
+        lane: Arc<StableParseLane>,
+        wakes: AtomicUsize,
+        locked_wakes: AtomicUsize,
+    }
+
+    impl std::task::Wake for LaneProbe {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            if self.lane.state.try_lock().is_err() {
+                self.locked_wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn probe(lane: &Arc<StableParseLane>) -> (Arc<LaneProbe>, std::task::Waker) {
+        let probe = Arc::new(LaneProbe {
+            lane: Arc::clone(lane),
+            wakes: AtomicUsize::new(0),
+            locked_wakes: AtomicUsize::new(0),
+        });
+        (Arc::clone(&probe), std::task::Waker::from(probe))
+    }
+
+    /// One poll of a joiner: `Ready` once the lane has an outcome, else
+    /// registered and `Pending`.
+    fn poll(lane: &StableParseLane, wait: &mut LaneWait<'_>, waker: &std::task::Waker) -> Poll<()> {
+        let state = lane.state.lock().unwrap();
+        match &*state {
+            StableParseState::Ready(_) => Poll::Ready(()),
+            StableParseState::Producing => {
+                wait.register(waker);
+                Poll::Pending
+            }
+        }
+    }
+
+    #[test]
+    fn a_lane_joiner_is_woken_once_after_the_lane_lock_is_released() {
+        let lane = Arc::new(StableParseLane::producing());
+        let (counter, waker) = probe(&lane);
+        let mut wait = LaneWait::new(&lane.waiters);
+        assert!(poll(&lane, &mut wait, &waker).is_pending());
+        assert!(poll(&lane, &mut wait, &waker).is_pending());
+        assert_eq!(
+            lane.waiters.0.lock().len(),
+            1,
+            "a re-poll keeps one registration"
+        );
+        lane.publish(StableParseOutcome::Panicked);
+        assert_eq!(counter.wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            counter.locked_wakes.load(Ordering::SeqCst),
+            0,
+            "the joiner was woken under the lane lock"
+        );
+        assert!(poll(&lane, &mut wait, &waker).is_ready());
+    }
+
+    #[test]
+    fn dropping_a_lane_wait_withdraws_only_its_own_registration() {
+        let lane = Arc::new(StableParseLane::producing());
+        let (counter, waker) = probe(&lane);
+        let mut dropped = LaneWait::new(&lane.waiters);
+        let mut kept = LaneWait::new(&lane.waiters);
+        assert!(poll(&lane, &mut dropped, &waker).is_pending());
+        assert!(poll(&lane, &mut kept, &waker).is_pending());
+        drop(dropped);
+        assert_eq!(
+            lane.waiters.0.lock().len(),
+            1,
+            "drop withdraws its registration"
+        );
+        lane.publish(StableParseOutcome::Panicked);
+        assert_eq!(counter.wakes.load(Ordering::SeqCst), 1);
+        assert!(poll(&lane, &mut kept, &waker).is_ready());
+    }
+
+    /// A publication racing a joiner's registration is never lost: either
+    /// the registering poll sees the outcome, or its waker fires.
+    #[test]
+    fn a_lane_publication_racing_registration_never_loses_the_wake() {
+        for round in 0..256u32 {
+            let lane = Arc::new(StableParseLane::producing());
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let producer = {
+                let (lane, start) = (Arc::clone(&lane), Arc::clone(&start));
+                std::thread::spawn(move || {
+                    start.wait();
+                    lane.publish(StableParseOutcome::Panicked);
+                })
+            };
+            let (counter, waker) = probe(&lane);
+            let mut wait = LaneWait::new(&lane.waiters);
+            start.wait();
+            let answered_at_poll = poll(&lane, &mut wait, &waker).is_ready();
+            producer.join().expect("the producer publishes");
+            assert!(
+                answered_at_poll || counter.wakes.load(Ordering::SeqCst) == 1,
+                "round {round}: a pending joiner must be woken by the publication"
+            );
+            assert!(poll(&lane, &mut wait, &waker).is_ready());
+            assert!(lane.waiters.0.lock().is_empty());
+        }
+    }
+}

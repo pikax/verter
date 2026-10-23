@@ -6,10 +6,14 @@
 //! `cooperative_get_or_insert` provides:
 //!   - **Exactly-one-computer guarantee.** When N threads call concurrently
 //!     for the same key on a cold miss, exactly ONE thread runs `compute()`.
-//!     Other threads block on a per-key condvar until the winner publishes
-//!     (success) or fails (panic / `compute()` returned `None`).
-//!   - **Cooperative wait.** Joiners do NOT busy-spin; they wait on a
-//!     `parking_lot::Condvar` and wake on publish or fail.
+//!     Other threads join the per-key flight and wait until the winner
+//!     publishes (success) or fails (panic / `compute()` returned `None`).
+//!   - **Cooperative wait.** Joiners do NOT busy-spin. A join is a
+//!     pollable [`SlotJoin`]: its poll checks the slot and registers its
+//!     waker under the slot's lock, and the winner takes those
+//!     registrations as it completes the slot and wakes them once it holds
+//!     no lock or publish fence. The synchronous entries drive that poll
+//!     with the external blocking driver.
 //!   - **Panic safety.** If `compute()` panics, the winner's RAII guard
 //!     marks the slot failed (`InflightFailureKind::WinnerPanicked`) and
 //!     notifies waiters; subsequent callers retry the cold path.
@@ -124,7 +128,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
+use verter_execution::wake::{TakenWakers, WakeRegistration, WakerSet};
 
 use super::singleflight_publish::{
     publish_entry_insert_then_post_publish, publish_entry_linearized_per_map_key,
@@ -178,14 +183,13 @@ pub enum ComputeAdmission<V, Entry> {
 }
 
 /// Per-key in-flight slot. The winner publishes via `state.completed`;
-/// joiners wait on `ready` until publish or fail.
+/// joiners poll it through a [`SlotJoin`] until publish or fail.
 ///
 /// `pub(super)` so the sibling `lookup_publish` adapter (the
 /// query-identity multi-candidate state machine) drives the same
 /// winner/joiner protocol over this slot without re-implementing it.
 pub(super) struct InflightSlot {
     pub(super) state: Mutex<InflightSlotState>,
-    pub(super) ready: Condvar,
 }
 
 /// Failure-kind discriminant for a completed in-flight slot that
@@ -214,7 +218,7 @@ pub(super) enum InflightFailureKind {
 #[derive(Default)]
 pub(super) struct InflightSlotState {
     /// `true` once a thread has claimed ownership of the cold build.
-    /// Subsequent threads see `claimed == true` and wait on `ready`.
+    /// Subsequent threads see `claimed == true` and join the flight.
     pub(super) claimed: bool,
     /// `true` once the winner has finished — successfully or otherwise.
     pub(super) completed: bool,
@@ -230,13 +234,77 @@ pub(super) struct InflightSlotState {
     /// validate against its own view, so it forks and cold-recomputes.
     /// `false` for cacheable outcomes and for failures.
     pub(super) non_cacheable_winner: bool,
+    /// The joiners polling the slot while it is incomplete; taken when the
+    /// winner completes it.
+    pub(super) wakers: WakerSet,
 }
 
 impl InflightSlot {
     pub(super) fn new() -> Self {
         Self {
             state: Mutex::new(InflightSlotState::default()),
-            ready: Condvar::new(),
+        }
+    }
+
+    /// Complete the slot with `outcome` applied to its state, unless it
+    /// already completed, and take its joiners' registrations. The caller
+    /// wakes them once it holds no lock or publish fence.
+    pub(super) fn complete(&self, outcome: impl FnOnce(&mut InflightSlotState)) -> TakenWakers {
+        let mut state = self.state.lock();
+        if !state.completed {
+            state.completed = true;
+            outcome(&mut state);
+        }
+        state.wakers.take()
+    }
+}
+
+/// One joiner's wait for an in-flight slot to complete.
+///
+/// [`Self::poll`] checks the slot and, while the winner is still building,
+/// registers the poll's waker under the slot's lock, the same lock
+/// [`InflightSlot::complete`] takes, so a completion racing the
+/// registration still wakes the joiner. Dropping the join withdraws its
+/// registration and leaves the winner and every other joiner alone.
+pub(super) struct SlotJoin {
+    slot: Arc<InflightSlot>,
+    registration: WakeRegistration,
+}
+
+impl SlotJoin {
+    pub(super) fn new(slot: &Arc<InflightSlot>) -> Self {
+        Self {
+            slot: Arc::clone(slot),
+            registration: WakeRegistration::default(),
+        }
+    }
+
+    /// `Ready` once the slot completed, else `Pending` with `waker`
+    /// registered to fire when it does.
+    pub(super) fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<()> {
+        let mut state = self.slot.state.lock();
+        if state.completed {
+            return std::task::Poll::Ready(());
+        }
+        state.wakers.register(&mut self.registration, waker);
+        std::task::Poll::Pending
+    }
+
+    /// Wait for the slot to complete: [`Self::poll`] driven by the
+    /// external blocking driver, for the synchronous admission entries.
+    pub(super) fn wait(mut self) {
+        verter_execution::blocking::block_on(None, |waker| self.poll(waker));
+    }
+}
+
+impl Drop for SlotJoin {
+    fn drop(&mut self) {
+        if self.registration.is_registered() {
+            self.slot
+                .state
+                .lock()
+                .wakers
+                .withdraw(&mut self.registration);
         }
     }
 }
@@ -248,12 +316,11 @@ where
     K: Hash + Eq + Clone,
 {
     pub(super) table: Mutex<HashMap<K, Arc<InflightSlot>>>,
-    /// TEST-ONLY: each joiner sends once immediately before
-    /// `Condvar::wait_while`, so a test can wait for an exact parked
-    /// waiter instead of polling `slot_strong_count`. UNBOUNDED: the
-    /// send happens with the slot state mutex held, and the wait loop
-    /// can re-park, so a bounded channel could block a joiner under
-    /// that lock.
+    /// TEST-ONLY: each joiner sends once immediately before it waits for
+    /// the slot, so a test can wait for an exact joining waiter instead
+    /// of polling `slot_strong_count`. UNBOUNDED: the send happens with
+    /// the slot state mutex held, so a bounded channel could block a
+    /// joiner under that lock.
     #[cfg(any(test, feature = "test-support"))]
     joiner_park_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
@@ -289,7 +356,7 @@ where
     }
 
     /// Arm a oneshot-style joiner-park witness. Each joiner sends
-    /// once immediately before parking on the slot condvar.
+    /// once immediately before it waits for the slot.
     #[cfg(any(test, feature = "test-support"))]
     pub fn subscribe_joiner_park(&self) -> std::sync::mpsc::Receiver<()> {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -308,8 +375,8 @@ where
 
 /// RAII guard that fails the in-flight slot if the cold build panics or
 /// returns early. Without this, a panic inside `compute()` would leave
-/// `claimed = true, completed = false` forever — joiners would block on
-/// the condvar with no possible publish to wake them.
+/// `claimed = true, completed = false` forever — joiners would wait on a
+/// slot no publish can ever complete.
 pub(super) struct InflightPanicGuard<'a, K>
 where
     K: Hash + Eq + Clone,
@@ -351,16 +418,11 @@ where
             return;
         }
         // Panic / early-return path — mark the slot failed so joiners
-        // wake and retry rather than waiting forever on a condvar that
-        // will never be signalled.
-        {
-            let mut state = self.slot.state.lock();
-            if !state.completed {
-                state.completed = true;
-                state.failure = Some(InflightFailureKind::WinnerPanicked);
-            }
-        }
-        self.slot.ready.notify_all();
+        // wake and retry rather than waiting forever on a slot that will
+        // never complete.
+        self.slot
+            .complete(|state| state.failure = Some(InflightFailureKind::WinnerPanicked))
+            .wake();
         // Retire the in-flight slot from the per-cache table so the next
         // caller starts a fresh build. `ptr_eq`-guarded: a cross-view
         // joiner that forked may already have installed a fresh
@@ -715,7 +777,9 @@ where
             // Joiner — wait for the winner to publish or fail.
             #[cfg(any(test, feature = "test-support"))]
             inflight.notify_joiner_park();
-            slot.ready.wait_while(&mut state, |s| !s.completed);
+            drop(state);
+            SlotJoin::new(&slot).wait();
+            let state = slot.state.lock();
             if state.failure.is_some() {
                 // Artifact-path joiner policy: every failure kind surfaces
                 // `None` (the caller's fallback owns retry policy). The
@@ -767,7 +831,7 @@ where
             .take()
             .expect("compute is taken exactly once by the cold winner")();
 
-        let value = match computed {
+        let (value, joiners) = match computed {
             Some(entry) => {
                 // Hold the cache's retention gate (shared read) across the
                 // WHOLE publish sequence — `revalidate_after_compute`, the
@@ -789,15 +853,15 @@ where
                 // entry's dep-signature during the cold window, skip publish
                 // and signal failure to waiters.
                 if !revalidate_after_compute(&entry) {
-                    {
-                        let mut state = slot.state.lock();
-                        state.completed = true;
+                    let joiners = slot.complete(|state| {
                         state.failure = Some(InflightFailureKind::AdmissionRejected);
-                    }
-                    slot.ready.notify_all();
+                    });
                     panic_guard.mark_finished();
                     drop(panic_guard);
                     retire_slot_if_current(&inflight.table, &key, &slot);
+                    // Wake the joiners only once the publish fence is released.
+                    drop(_retention);
+                    joiners.wake();
                     return None;
                 }
 
@@ -821,26 +885,19 @@ where
                     post_publish(&entry_arc, &key);
                 }
 
-                // Mark slot completed; wake joiners.
-                {
-                    let mut state = slot.state.lock();
-                    state.completed = true;
-                }
-                slot.ready.notify_all();
-
-                Some(value)
+                // Mark slot completed; its joiners wake below, once the
+                // publish fence is released.
+                (Some(value), slot.complete(|_| {}))
             }
             None => {
                 // Compute returned None — failure.
-                {
-                    let mut state = slot.state.lock();
-                    state.completed = true;
+                let joiners = slot.complete(|state| {
                     state.failure = Some(InflightFailureKind::ComputeFailed);
-                }
-                slot.ready.notify_all();
-                None
+                });
+                (None, joiners)
             }
         };
+        joiners.wake();
 
         panic_guard.mark_finished();
         drop(panic_guard);
@@ -873,7 +930,7 @@ where
 ///   telemetry. The cache stays empty so the next cold-miss recomputes.
 /// - `Failed` — mark the slot failed; joiners surface `None`.
 ///
-/// **Joiner contract.** Joiners wake on the slot's condvar. If
+/// **Joiner contract.** Joiners wait for the slot to complete. If
 /// `state.failure` set, they return `None`. If `state.non_cacheable_winner`,
 /// the winner emitted a carrier-less `ReturnOnly` outcome that cannot
 /// be view-validated — the joiner forks and cold-recomputes. Otherwise
@@ -1147,7 +1204,9 @@ where
             // Joiner — wait for the winner to publish or fail.
             #[cfg(any(test, feature = "test-support"))]
             inflight.notify_joiner_park();
-            slot.ready.wait_while(&mut state, |s| !s.completed);
+            drop(state);
+            SlotJoin::new(&slot).wait();
+            let state = slot.state.lock();
             if state.failure.is_some() {
                 // Artifact-path joiner policy: every failure kind surfaces
                 // `None` (the caller's fallback owns retry policy). The
@@ -1206,7 +1265,7 @@ where
             .take()
             .expect("compute is taken exactly once by the cold winner")();
 
-        let value = match admission {
+        let (value, joiners) = match admission {
             ComputeAdmission::Cacheable(entry) => {
                 // Hold the cache's retention gate (shared read) across
                 // the WHOLE publish sequence — `revalidate_after_compute`,
@@ -1231,15 +1290,15 @@ where
                 // `None` — the publish then runs unfenced, as before.
                 let _retention = publish_fence.map(parking_lot::RwLock::read);
                 if !revalidate_after_compute(&entry) {
-                    {
-                        let mut state = slot.state.lock();
-                        state.completed = true;
+                    let joiners = slot.complete(|state| {
                         state.failure = Some(InflightFailureKind::AdmissionRejected);
-                    }
-                    slot.ready.notify_all();
+                    });
                     panic_guard.mark_finished();
                     drop(panic_guard);
                     retire_slot_if_current(&inflight.table, &flight_key, &slot);
+                    // Wake the joiners only once the publish fence is released.
+                    drop(_retention);
+                    joiners.wake();
                     return None;
                 }
                 let entry_arc = Arc::new(entry);
@@ -1281,9 +1340,7 @@ where
                         );
                     }
                 }
-                {
-                    let mut state = slot.state.lock();
-                    state.completed = true;
+                let joiners = slot.complete(|_| {
                     // Cacheable winner: joiners fall through to the
                     // `map.get(&map_key) + validate(&entry_arc)` path so
                     // each joiner thread runs `validate` against its own
@@ -1298,9 +1355,10 @@ where
                     // (`map.insert` above happens before the slot is
                     // removed from the inflight table), so a slow-waking
                     // joiner still observes the entry through `map.get`.
-                }
-                slot.ready.notify_all();
-                Some(value)
+                    // Its joiners wake below, once the publish fence is
+                    // released.
+                });
+                (Some(value), joiners)
             }
             ComputeAdmission::ReturnOnly { value, reason } => {
                 // Valid result but not cacheable. The map stays empty and
@@ -1310,24 +1368,17 @@ where
                 // cold-recomputes for its own view; the winner alone
                 // receives `value`.
                 crate::cache_runtime::admission::propagate_non_admission(reason);
-                {
-                    let mut state = slot.state.lock();
-                    state.completed = true;
-                    state.non_cacheable_winner = true;
-                }
-                slot.ready.notify_all();
-                Some(value)
+                let joiners = slot.complete(|state| state.non_cacheable_winner = true);
+                (Some(value), joiners)
             }
             ComputeAdmission::Failed => {
-                {
-                    let mut state = slot.state.lock();
-                    state.completed = true;
+                let joiners = slot.complete(|state| {
                     state.failure = Some(InflightFailureKind::ComputeFailed);
-                }
-                slot.ready.notify_all();
-                None
+                });
+                (None, joiners)
             }
         };
+        joiners.wake();
 
         panic_guard.mark_finished();
         drop(panic_guard);

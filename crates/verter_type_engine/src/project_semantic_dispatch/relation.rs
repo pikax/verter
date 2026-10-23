@@ -8239,6 +8239,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return Some(RelationResult::Unknown),
         };
+        // The runtime construction is an object, but a spread of `any` makes
+        // its checker type dynamic. Apply the ordinary wildcard relation before
+        // rejecting primitive targets or asking for object-only branches.
+        if source_is_program {
+            match self.object_spread_any_operand(source) {
+                Ok(Some(any)) => {
+                    return Some(self.relate_member(
+                        any,
+                        target,
+                        bindings,
+                        InferPosition::Covariant,
+                    ))
+                }
+                Ok(None) => {}
+                Err(_) => return Some(RelationResult::Unknown),
+            }
+        }
         let target = match self.unwrap_identity_carrier_for_relation(target) {
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return Some(RelationResult::Unknown),
@@ -8321,9 +8338,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (_, Some(SemanticNodeData::Primitive(PrimitiveKind::Object))) => {
                 return Some(assignable(bindings));
             }
-            // Every construction program produces an object, independently of
-            // which spread alternatives it contains. A primitive target fails
-            // before object projection, just as for an ordinary object type.
+            // After dynamic operands are handled, an object construction cannot
+            // satisfy a primitive target.
             (
                 _,
                 Some(SemanticNodeData::Primitive(

@@ -2018,6 +2018,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// and peer-merge authorities; retain generic mapped types as such.
     fn settled_diagnostic_type(&self, mapped: SemanticNodeId) -> Option<SemanticNodeId> {
         let data = self.graph().node_data(mapped)?;
+        if matches!(data.as_ref(), SemanticNodeData::TypeOf(_)) {
+            return Some(self.evaluate_deferred_semantic_node(mapped));
+        }
         if let SemanticNodeData::MergedDecl { contributors } = data.as_ref() {
             return Some(self.reduce_merged_decl(contributors));
         }
@@ -2081,6 +2084,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<SemanticNodeId> {
         use crate::semantic_query::{ObjectConstructionEffect, ObjectSpreadProgram, PayloadArray};
         let mut groups = Vec::new();
+        let mut generic_operands = FxHashSet::default();
         let mut effects = Vec::new();
         let mut generic = false;
         let flush = |effects: &mut Vec<ObjectConstructionEffect>,
@@ -2167,6 +2171,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 };
                 if generic_operand {
                     generic = true;
+                    // Intersection construction removes repeated operands at
+                    // each spread, before a later closed operand merges with
+                    // the trailing closed group. Keep its writes together.
+                    if !generic_operands.insert(operand) {
+                        continue;
+                    }
                     flush(&mut effects, &mut groups)?;
                     groups.push(operand);
                     continue;

@@ -64,7 +64,11 @@ primitives, nor an object type against a primitive. Past it the checker reports 
 (`Excessive stack depth comparing types`, both types printed) in place of the relation's message,
 twice: at the call expression (`CheckerDiagnosticSite::expression_start`), where it compares the types
 while choosing the candidate with no error node of its own, then at the argument. An elaborated argument
-whose whole relation overflows, and an overflow under TS2769, are not modelled and record nothing.
+whose whole relation overflows keeps TS2321 at the call beside its
+elaborated parts. An overflowing part keeps TS2321 at that part. Under TS2769,
+candidate selection's TS2321 remains at the call and the argument's own failure
+appears in the last-overload chain. When the two printed operands of an elaborated
+assignment coincide, its head is TS2719, retaining the complete failure chain.
 
 Types print as the checker's `typeToString` prints them (`print_diagnostic_type`,
 `DisplayContext::for_checker`): the display walk keeps the node builder's running `approximateLength`
@@ -88,7 +92,10 @@ in builder order, then ten bytes for the mapping. Closed mappings, spread
 alternatives and anonymous peer-merged declarations are prepared by the consumer
 before display; display itself never evaluates. Generic spreads separate closed
 property groups, each evaluated by the shared spread producer, and print their
-ordered intersection with the type parameters; open positive evidence is never
+ordered intersection with the type parameters. Repeated generic operands are
+deduplicated before splitting closed groups, preserving subsequent overwrite
+semantics. A spread of `any` retains the ordinary dynamic relation rather than
+being rejected as an object against a primitive. Open positive evidence is never
 interned as a closed object. An authored `infer` constraint
 prints with `extends` unless its position already infers that constraint (a
 template span, rest element/parameter, mapped key or a mapped value matched
@@ -99,16 +106,48 @@ substitution; display only reads the resulting decision. Its name is counted aga
 as a parameter declaration, once rather than as a reference. Unique-symbol
 indexed-access types print `unique symbol`.
 
-A symbol-keyed property's internal name includes the native checker's decimal,
-process-global symbol id. Its count is bounded by that id's possible digit count;
-a message is withheld only when an actual abbreviation decision depends on it.
-This remains a compatibility limitation, not an allowed conformance exception:
-the same source and options can produce different abbreviation text after an
-unrelated project is checked in the native compiler process. Non-abbreviating
-symbol-keyed objects print their ordinary `[symbol]` names and are reported.
+Computed property names use the same consumer preparation worklist: non-nominal
+`typeof` keys evaluate through the shared owner and enum-member keys use their
+literal base. Display reads these settled forms without dispatching queries;
+unique-symbol keys retain their nominal spelling and deterministic symbol count.
+
+A symbol-keyed property's abbreviation contribution is the UTF-8 byte length
+of its leaf symbol spelling plus five fixed bytes. Both unique-symbol keys and
+computed keys resolved to a nominal symbol use this rule; qualification remains
+in the visible `[namespace.symbol]` spelling. No allocation id, external checker
+session or query history contributes to the count. Printable symbol-keyed types
+always retain their diagnostic, including at abbreviation boundaries.
+
+### Deterministic symbol abbreviation (2026-10-22)
+
+**Context.** TypeScript 7.0.2 counts an internal symbol name containing a decimal,
+process-global symbol id. Checking an unrelated project can change the number of
+digits and therefore the abbreviation of the same type in the same diagnostic.
+`node scripts/checker-symbol-history.mjs` reproduces this with fresh and prewarmed
+native sessions and verifies unchanged codes, locations, order and unaffected
+messages under both nullability settings.
+
+**Intent contract.** The shared printer preserves deterministic full messages
+from provider-free inputs. Only abbreviation boundaries, omitted-member counts
+and consequent clipping may differ from the checker where its length accounting
+depends on symbol ids. Visible names and type spelling, member and diagnostic
+order, codes, authored locations, recovery and all unaffected text remain exact.
+The exception never permits withholding a printable diagnostic.
+
+**Changes and legacy deletions.** The stable leaf-spelling contribution above
+replaces the symbol-id digit bound and its ambiguous-abbreviation withholding
+state in `DisplayContext`. There is no alternate printer or checker-history input.
+
+**Verification.** `symbol_abbreviation_keeps_diagnostics_across_query_histories`
+checks full consumer messages and recovery cold/warm, with unrelated symbol work
+first and at two authored call sites. The existing residual-kind, wide-argument
+and deep-chain consumer controls retain exact-checker coverage. The native
+experiment is optional oracle evidence; the Rust regressions are provider-free.
+
+### Unprintable carriers
+
 Unresolved computed keys and non-type error carriers likewise remain outside a
 faithful print. A depth-cap cut inside the kept text still withholds the message.
-
 
 Decided by the recipe's producer: arity errors from `ArityEvidence` (`getArgumentArityError`) — TS2575
 for a count in a gap between the candidates' arities, else TS2554/TS2555 with `min`, `min-max` or the

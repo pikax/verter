@@ -1079,6 +1079,44 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         current
     }
 
+    /// A dynamic spread makes the construction's checker type `any`, even
+    /// beside known writes. Inspect only spread operands, through the shared
+    /// operand normalizer; an `any`-valued property does not make its object dynamic.
+    pub(super) fn object_spread_any_operand(
+        &self,
+        program: SemanticNodeId,
+    ) -> Result<Option<SemanticNodeId>, EvalFailure> {
+        let mut pending = vec![program];
+        let mut seen = FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            let node = self.normalize_spread_operand_node(node);
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(node) else {
+                return Err(EvalFailure::Operational(QueryError::Miss));
+            };
+            match data.as_ref() {
+                SemanticNodeData::Primitive(PrimitiveKind::Any) => return Ok(Some(node)),
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    self.charge_spread_construction(
+                        program.effects.len(),
+                        program
+                            .effects
+                            .len()
+                            .saturating_mul(std::mem::size_of::<SemanticNodeId>()),
+                    )?;
+                    pending.extend(program.effects.iter().filter_map(|effect| match effect {
+                        ObjectConstructionEffect::Spread(operand) => Some(*operand),
+                        _ => None,
+                    }));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
     /// The product layer one spread operand contributes. `top` marks the
     /// object literal's own operand, which first merges a union of one
     /// object type and arms that spread into an empty object (the

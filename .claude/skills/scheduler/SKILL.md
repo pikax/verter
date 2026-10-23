@@ -5,6 +5,33 @@ description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_
 
 # Scheduler
 
+## Pollable request admission and completion
+
+`Scheduler::begin_submit_request` and `begin_submit_batch_atomic` return
+owned `SchedulerSubmission` handoffs. Polling yields on a full inbox and
+transfers only pollable `CompletionSubscription` values, in input order for
+a batch. It never pumps a stage. Synchronous submissions drive the same
+admission state from outside the computation. See
+[`root-continuations.md`](../../../docs/arch/root-continuations.md) for the
+ownership, drop, backpressure and error contract.
+
+Completion state still publishes under the scheduler DAG lifecycle hold.
+`scheduler/dag_lock.rs` retains polling wakes and delivers them after unlock;
+reset additionally defers them through its serialization hold and driver join.
+Directly owned standalone DAGs deliver immediately. A reset already joining
+its own driver permits that driver's callback to return instead of waiting
+for its joiner; another scheduler's driver retains the normal reset barrier.
+
+`Scheduler::begin_scoped_cache_node<T>` similarly exposes a poll-only
+`ScopedCacheNodeHandoff<T>`. Admission/result waits yield; dispatch transfers
+exactly one `ScopedCacheNodeProducer<T>` for the external driver to run before
+resuming the handoff. `execute_scoped_cache_node` is the synchronous driver over
+the same state, using the existing CPU pool. Scoped-flight dispatch/settlement
+wakes use the lifecycle deferral rail through flight and incarnation holds.
+Dropping a producer settles cancellation; dropping a subscriber detaches only
+its own owner. Cancellation-only wake subscriptions and shared wait-graph edges
+are still missing. See the root-continuations reference for the full contract.
+
 Each `FileNode` keeps four shards for its small per-profile artifact map,
 independent of the host CPU count. Source-only scripts still allocate that
 map, so machine-wide sharding multiplies empty storage across an opened

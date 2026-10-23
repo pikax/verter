@@ -67,14 +67,7 @@ struct FixtureSlot {
 
 impl FixtureSlot {
     fn new(session: &RealProviderTestSession) -> Self {
-        let relative = format!(
-            "src/Corpus{}.vue",
-            if session.is_tsgo() {
-                "Tsgo"
-            } else {
-                "Tsserver"
-            }
-        );
+        let relative = session.scratch_relative("src/Corpus", "vue");
         let file = session.publish_workspace_file(&relative, "<template />");
         Self {
             relative,
