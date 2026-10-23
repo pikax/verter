@@ -2533,6 +2533,23 @@ impl VerterHost {
         observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical: &str,
     ) -> Option<FileAnalysisSnapshot> {
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            self.get_raw_analysis_snapshot_in_pollable::<M>(observation, canonical),
+        )
+    }
+
+    /// [`Self::get_raw_analysis_snapshot_in`] as a pollable computation: the
+    /// owner's artifact and its imports' resolution suspend instead of
+    /// parking.
+    pub(crate) async fn get_raw_analysis_snapshot_in_pollable<
+        M: verter_audit::observe::ObserveExec,
+    >(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical: &str,
+    ) -> Option<FileAnalysisSnapshot> {
         let _ = observation;
         component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"get_raw_analysis_snapshot",
             format!("owner={} store_view={}", canonical, false),
@@ -2560,7 +2577,8 @@ impl VerterHost {
                     return None;
                 }
                 let mut snapshot = snapshot;
-                self.resolve_snapshot_imports::<M>(observation, canonical, &mut snapshot);
+                self.resolve_snapshot_imports_pollable::<M>(observation, canonical, &mut snapshot)
+                    .await;
                 self.enrich_destructured_bindings(&mut snapshot);
                 if self.template_analysis_required() {
                     // Thread the inputs joined at the snapshot's own
@@ -2590,10 +2608,13 @@ impl VerterHost {
         }
 
         // FileArtifactStore path: covers imported deps and non-scheduler files.
-        let serve = self.ensure_indexed_ready_serve_in::<M>(observation, canonical)?;
+        let serve = self
+            .ensure_indexed_ready_serve_in_pollable::<M>(observation, canonical)
+            .await?;
         let facts = serve.indexed;
         let mut snapshot = (*facts.snapshot).clone();
-        self.resolve_snapshot_imports::<M>(observation, canonical, &mut snapshot);
+        self.resolve_snapshot_imports_pollable::<M>(observation, canonical, &mut snapshot)
+            .await;
         self.enrich_destructured_bindings(&mut snapshot);
         if self.template_analysis_required() {
             // Thread the artifact's own base-authoritative source +

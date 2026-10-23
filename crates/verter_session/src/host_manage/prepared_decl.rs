@@ -2284,14 +2284,35 @@ impl VerterHost {
         observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            self.ensure_indexed_ready_serve_in_pollable::<M>(observation, canonical_id),
+        )
+    }
+
+    /// [`Self::ensure_indexed_ready_serve_in`] as a pollable computation: a
+    /// cold file's materialization suspends on its owner shard, or follows
+    /// another task's materialization of it, instead of parking.
+    pub(crate) async fn ensure_indexed_ready_serve_in_pollable<
+        M: verter_audit::observe::ObserveExec,
+    >(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) -> Option<IndexedReadyServe> {
         let _ = observation;
         verter_session_query::probe_scope!(ENSURE_INDEXED_READY);
+        let located = verter_audit::attribution::attribute_polls(
+            verter_audit::attribution::WorkSite::IndexedReadyBuild,
+            self.ensure_indexed_ready_serve_located_pollable::<M>(observation, canonical_id, None),
+        )
+        .await;
         verter_audit::attribute_scope!(IndexedReadyBuild);
-        let (serve, current_hit) =
-            match self.ensure_indexed_ready_serve_located::<M>(observation, canonical_id, None) {
-                Some(located) => (Some(located.serve), located.current_hit),
-                None => (None, None),
-            };
+        let (serve, current_hit) = match located {
+            Some(located) => (Some(located.serve), located.current_hit),
+            None => (None, None),
+        };
         // Test-only deterministic fenced-serve override: convert a would-be
         // PUBLISHED serve into a FENCED one (fire the non-cacheability fan-out +
         // `store_published = false`) WITHOUT a `project_generation` bump, so a

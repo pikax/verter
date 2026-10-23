@@ -2141,6 +2141,22 @@ impl VerterHost {
         parent_canonical_id: &str,
         snapshot: &mut FileAnalysisSnapshot,
     ) {
+        let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
+        verter_execution::blocking::drive_pending(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            self.resolve_snapshot_imports_pollable::<M>(observation, parent_canonical_id, snapshot),
+        );
+    }
+
+    /// [`Self::resolve_snapshot_imports`] as a pollable computation: the
+    /// owner's artifact it establishes first suspends instead of parking.
+    /// Each import's route is still resolved synchronously.
+    pub(crate) async fn resolve_snapshot_imports_pollable<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        parent_canonical_id: &str,
+        snapshot: &mut FileAnalysisSnapshot,
+    ) {
         let _ = observation;
         verter_session_query::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
         // Establish the owner's canonical post-parse artifact FIRST. The
@@ -2157,7 +2173,9 @@ impl VerterHost {
         //   the enclosing cacheability scope, so a consumer building a
         //   durable entry from a superseded basis refuses its own
         //   admission.
-        let _ = self.ensure_indexed_ready_serve_in::<M>(observation, parent_canonical_id);
+        let _ = self
+            .ensure_indexed_ready_serve_in_pollable::<M>(observation, parent_canonical_id)
+            .await;
 
         let mut resolved_imports = Vec::new();
         for (index, import) in snapshot.imports.iter().enumerate() {
