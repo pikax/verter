@@ -31,7 +31,6 @@ fn export_table_refusals_keep_the_complete_answer_and_typed_reason() {
             let account = SemanticRetentionAccount::new(RetentionLimits {
                 aggregate_ceiling_bytes: 1,
                 max_entry_bytes: 1,
-                active_ceiling_bytes: 1,
                 pin_threshold_bytes: 1,
             });
             let mut routes = crate::resolver_core::route_db::RouteDb::new();

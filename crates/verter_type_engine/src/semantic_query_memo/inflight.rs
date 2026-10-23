@@ -28,9 +28,11 @@ use super::prepared::PreparedKeyHandle;
 pub struct FlightCell {
     pub(super) site: crate::semantic_query::checker_policy::TupleSplicePosition,
     pub(super) state: Mutex<InflightState>,
-    /// The cell's block and its slot in the flight table, pinned for as
+    /// The cell's block and its slot in the flight table, charged for as
     /// long as the cell lives — through every subscriber that still holds
-    /// it after the flight retires. A flight is live work, never refused.
+    /// it after the flight retires. A flight is in-flight computation the
+    /// dispatcher already admitted: its storage is charged ACTIVE, never
+    /// refused, and the charge falls when the last holder drops the cell.
     _storage: Option<verter_session_query::retention::RetentionCharge>,
 }
 
@@ -138,14 +140,15 @@ impl FlightCell {
         wakers.wake();
     }
 
-    /// An unclaimed cell whose storage is pinned against `account`.
+    /// An unclaimed cell whose storage is charged as in-flight work
+    /// against `account`.
     pub(super) fn charged(
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
             site: Default::default(),
             state: Mutex::new(InflightState::default()),
-            _storage: Some(account.pin(flight_storage_bytes())),
+            _storage: Some(account.reserve_in_flight(flight_storage_bytes())),
         }
     }
 
@@ -319,8 +322,9 @@ pub struct InlineMemberFlight {
     /// The member's decided value, owned from the moment its component
     /// closes until the batched publish stages it: the construction scope
     /// that computed it may close first.
-    /// The root set's own block is pinned against the store's retention
-    /// account for as long as it is held.
+    /// The root set's own block is charged as in-flight work against the
+    /// store's retention account for as long as it is held — ACTIVE
+    /// until the batched publish or the abort ends the hold.
     held: Option<(
         super::node_roots::NodeRootSet,
         verter_session_query::retention::shared::CallerHold,
@@ -359,7 +363,7 @@ impl InlineMemberFlight {
         }
         match graph.root_nodes(nodes) {
             Ok(roots) => {
-                let charge = verter_session_query::retention::shared::CallerHold::pin(
+                let charge = verter_session_query::retention::shared::CallerHold::in_flight(
                     graph.retention_account(),
                     roots.heap_bytes(),
                 );

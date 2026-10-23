@@ -819,6 +819,13 @@ A document CLOSE is the moment its edited versions become unreachable, and the c
 
 **Held-answer charge witness.** Under the same `test`, `test-support` or default-off `verter_session/soak-support` profile (capture and `semantic-observe` off), `HeldChargeWitness::of_flow_return(&result)` observes what a flow return delivered by `get_flow_return_type_with_audit` keeps charged, allocation by allocation: its shared payload (`Retained` while a cache candidate holds it, `Pinned` with the same bytes once `close()` retires the cache, released by the last reader), and its delivery bookkeeping, pinned and charged apart. Each entry carries the bytes the allocation measures, so a consumer checks an exact transfer against the allocation itself rather than another transfer or the shared account totals. Reading it changes no charge or lifetime. Contract: `/type-resolution` → `references/counted-node-ownership.md` → Held-answer charge witness.
 
+**Resident occupancy snapshots.** Capture-summary and skeleton-name-index counts
+follow their shared allocation's lifetime through `ResidentCharge`. Each storage
+kind's ledger updates all occupancy slots and its allocation total under one
+short mutex, and snapshots copy them under that same mutex. Worker-thread
+release and recharge cannot expose a partial update. Different storage kinds
+are sampled independently; the whole host snapshot is not one atomic reading.
+
 ### Freeze Prevention (Fast Typing)
 
 Three layers prevent tokio runtime starvation during rapid typing:
