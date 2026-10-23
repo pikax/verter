@@ -135,6 +135,7 @@ fn scoped_cache_handoffs_share_the_semantic_wait_graph() {
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let granted = verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::ScopedCacheNode,
             Some(std::time::Duration::from_millis(1)),
             |waker| {
                 assert!(

@@ -746,6 +746,9 @@ impl Subscription<'_> {
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
+        verter_execution::blocking::enter_wait(
+            verter_execution::blocking::WaitFamily::SemanticFlight,
+        );
         let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
         // The wait time is a measurement-only counter; without the

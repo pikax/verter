@@ -306,7 +306,11 @@ impl Drop for DriveScope {
 /// pending until the producer it waits on wakes it. Parking is timed so a
 /// stop stays observable while the producer has not woken this thread.
 pub(crate) fn block_on<T>(poll: impl FnMut(&Waker) -> Poll<T>) -> T {
-    verter_execution::blocking::block_on(Some(PARK_SLICE), poll)
+    verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::SemanticDrive,
+        Some(PARK_SLICE),
+        poll,
+    )
 }
 
 /// Whether a drive is running on this thread: a synchronous entry reached

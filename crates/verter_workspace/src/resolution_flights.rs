@@ -223,13 +223,17 @@ impl<T> FlightSubscription<T> {
     /// driver.
     pub(crate) fn wait(mut self, cancelled: Option<&dyn Fn() -> bool>) -> FlightOutcome<T> {
         let slice = cancelled.map(|_| CANCELLATION_SLICE);
-        verter_execution::blocking::block_on(slice, |waker| match self.poll(waker) {
-            Poll::Pending if cancelled.is_some_and(|cancelled| cancelled()) => {
-                self.detach();
-                Poll::Ready(FlightOutcome::Detached)
-            }
-            answer => answer,
-        })
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::WorkspaceResolution,
+            slice,
+            |waker| match self.poll(waker) {
+                Poll::Pending if cancelled.is_some_and(|cancelled| cancelled()) => {
+                    self.detach();
+                    Poll::Ready(FlightOutcome::Detached)
+                }
+                answer => answer,
+            },
+        )
     }
 
     /// Stop waiting: withdraw this subscription's registration and leave

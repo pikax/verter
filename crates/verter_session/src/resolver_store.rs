@@ -3938,7 +3938,11 @@ impl StoreViewManager {
         }
         let mut release = BuildRelease::new(self, state);
         parking_lot::MutexGuard::unlocked(state, || {
-            verter_execution::blocking::block_on(None, |waker| release.poll(waker));
+            verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::StoreViewBuild,
+                None,
+                |waker| release.poll(waker),
+            );
             drop(release);
         });
         #[cfg(test)]

@@ -1227,7 +1227,12 @@ impl DeclLoweringService {
         source_type: oxc_span::SourceType,
     ) -> LeaseOutcome {
         let mut handoff = self.begin_acquire_lease(key, source, source_type);
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker)).0
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
+        .0
     }
 
     /// [`Self::acquire_lease`] as a pollable handoff to the worker owning
@@ -1271,7 +1276,11 @@ impl DeclLoweringService {
         R: Send + 'static,
     {
         let mut handoff = self.begin_acquire_lease_and_run(key, source, source_type, job);
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker))
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
     }
 
     /// [`Self::acquire_lease_and_run`] as a pollable handoff to the worker
@@ -1640,7 +1649,11 @@ impl DeclLoweringService {
         R: Send + 'static,
     {
         let mut handoff = self.begin_run_leased(key, job);
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker))
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
     }
 
     /// [`Self::run_leased`] as a pollable handoff to the worker owning
@@ -1725,7 +1738,11 @@ impl DeclLoweringService {
         R: Send + 'static,
     {
         let mut handoff = self.begin_run_leased_batch(jobs);
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker))
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
     }
 
     /// [`Self::run_leased_batch`] as one pollable handoff per occupied

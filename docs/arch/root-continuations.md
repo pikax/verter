@@ -41,13 +41,62 @@ With a `slice`, each park is bounded, so a computation whose stop is
 observed only at its next poll (a cancelled request) is re-polled at least
 that often.
 
-The driver is reached only from synchronous public entries outside the
-computation. No poll-facing value hands a computation a way to call it.
 Each synchronous entry listed below is the driver applied to the pollable
 boundary beside it, so there is one implementation of each handoff, not a
 blocking copy next to a polling one. The semantic runtime's blocking drive
 (`SemanticExecution::drive`, `SemanticTask::drive`) uses the same driver,
 with a 2 ms slice so a stop stays observable.
+
+The target is that only a synchronous public entry outside the computation
+reaches the driver. The current tree does not meet it: the host roots are
+themselves synchronous, and they reach the driver, and the other waits in
+[Boundaries that still block](#boundaries-that-still-block), from deep
+inside their own computation. No poll-facing value hands a computation a
+way to call it, but no root is pollable yet either.
+
+## Measuring what a root still reaches
+
+Every synchronous wait on a dependency announces itself on entry through
+`verter_execution::blocking::enter_wait(WaitFamily)`, before it checks
+readiness, locks or parks; `block_on` takes the family as its first
+argument and announces it. `WaitProbe::record()` lists the families the
+installing thread enters; `WaitProbe::forbid()` makes entering any of them
+panic, naming the family, before the wait has any effect. Probes cover the
+installing thread only and nest (an inner probe under a forbidding one
+forbids too). The probe is test evidence: it compiles only under `test` or
+`verter_execution`'s `test-support` feature, and a production build keeps
+each announcement as an empty inline call.
+
+`verter_session`'s `root_continuations_tests` group runs the public roots
+under a recording probe over an owner component that imports a props
+module and a child component:
+
+| Path | Families reached by the root's own thread |
+| --- | --- |
+| Host construction and source registration | `SchedulerCompletion`, `SchedulerAdmission` |
+| Cold component metadata (`get_component_meta_output`) | `SemanticDrive`, `DeclLowering` |
+| Warm component metadata | none, uncontended |
+| Mixed: child warm, owner cold after a props-module edit | `SemanticDrive`, `DeclLowering` |
+| Single-request compile (`compile_request`, runtime client and IDE companion), cold or warm | `ScopedCacheNode`, `CpuPool` |
+| Batch compile (`compile_many`), cold or warm | `CpuPool`; each input runs on a pool thread outside the probe |
+| Host drop | none |
+
+A single-request run never reaches the contention-only families
+(`SemanticFlight`, `CacheFlight`, `ResolverFlight`, `StoreViewBuild`):
+another request's flight or store-view build has to be in progress. The
+tests pin each path's reached set: a conversion that removes a family from
+a path fails its pin until this table and the pin move together.
+
+The same group holds the Pending-before-release harness. It polls once on
+its own thread under a forbidding probe and a bounded deadline while the
+test holds a real dependency (another task's semantic flight). A pollable
+subscriber answers `Pending`, is woken by the release and answers. Two
+planted controls fail it: the synchronous `Subscription::wait` is refused
+by the probe at once, and an unannounced park fails at an injected 50 ms
+deadline. In both, the harness releases the hold and joins its thread
+before reporting. Removing the `SemanticFlight` announcement turns the
+first control into a deadline failure, so the announcement is what the
+refusal rests on.
 
 ## Delivered boundaries
 
@@ -234,32 +283,33 @@ All of these are in `crates/verter_semantic_source/src/decl_lowering.rs`.
 ## Boundaries that still block
 
 These are the production waits a component-meta or compile root can reach
-in the current tree. Each one parks the polling thread inside whatever poll
-reaches it, so a root that reaches one is not yet pollable. Semantic memo
-flights and scoped cache-node followers share `TaskRegistry` wait edges;
-the remaining families do not yet register their waits there.
+in the current tree, with the `WaitFamily` each announces. Each one parks
+the polling thread inside whatever poll reaches it, so a root that reaches
+one is not yet pollable. Semantic memo flights and scoped cache-node
+followers share `TaskRegistry` wait edges; the remaining families do not
+yet register their waits there.
 
-| Wait | Owner | Reached from | Pollable form today |
-| --- | --- | --- | --- |
-| Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
-| Semantic task drive (`SemanticTask::drive`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
-| Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | private `SlotJoin::poll`; synchronous callers still drive it to completion |
-| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | same `SlotJoin::poll`; callers still synchronous |
-| Resolver request singleflight follower (`SingleflightGroup::run_retaining`; thread-identity owner) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | private owned `FlightJoin::poll`; callers still synchronous |
-| Store-view build park (`StoreViewManager::park_for_build`) | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | private `BuildRelease::poll`; callers still synchronous |
-| Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
-| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `CompletionSubscription::poll` on the handle; the adapter still parks |
-| Batch upsert completion (`Scheduler::wait_batch`) | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
-| Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
-| Scheduler inbox submission (`send_submission`) | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
-| Workspace import-resolution flight (`FlightSubscription::wait`) | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` registers a waker; callers still synchronous |
-| Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) | `verter_session/src/host_batch_coordinator.rs` | `compile_many`, `get_component_meta_batch` | none; the batch topology itself is the executor's to replace |
+| Wait | Family | Owner | Reached from | Pollable form today |
+| --- | --- | --- | --- | --- |
+| Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | `SemanticFlight` | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
+| Semantic task drive (`SemanticTask::drive`) | `SemanticDrive` | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `drive_query` for instantiations, `typeof` and callback-typing flow returns | `SemanticTask::poll`, test drivers only |
+| Artifact cache singleflight joiner (`cooperative_admit_impl`) | `CacheFlight` | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | private `SlotJoin::poll`; synchronous callers still drive it to completion |
+| Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `CacheFlight` | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | same `SlotJoin::poll`; callers still synchronous |
+| Resolver request singleflight follower (`SingleflightGroup::run_retaining`; thread-identity owner) | `ResolverFlight` | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | private owned `FlightJoin::poll`; callers still synchronous |
+| Store-view build park (`StoreViewManager::park_for_build`) | `StoreViewBuild` | `verter_session/src/resolver_store.rs` | `capture_batch_fixed_view` at every component-meta entry | private `BuildRelease::poll`; callers still synchronous |
+| Carrier publication lanes (`publish_or_get`, `await_stable_parse`) | `CarrierPublication` | `verter_session/src/carrier_publication_store/mod.rs` | the scheduler's source stage; session overlay structure | private `LaneWait::poll` and stable-parse poll; callers still synchronous |
+| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`), a completion handle's `wait` | `SchedulerCompletion` | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs`, `verter_scheduler/src/job.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `CompletionSubscription::poll` on the handle; the adapter still parks |
+| Batch upsert completion (`Scheduler::wait_batch`) | `SchedulerCompletion` | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
+| Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | `ScopedCacheNode`, then `CpuPool` | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
+| Scheduler inbox submission (`send_submission`) | `SchedulerAdmission` | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
+| Workspace import-resolution flight (`FlightSubscription::wait`) | `WorkspaceResolution` | `verter_workspace/src/resolution_flights.rs` | `resolve_import_outcome*` from host loading, the analysis stage and compile hydration | `FlightSubscription::poll` registers a waker; callers still synchronous |
+| Declaration-lowering synchronous entries (`acquire_lease*`, `run_leased*`) | `DeclLowering` | `verter_semantic_source/src/decl_lowering.rs` | the declaration body memo, from inside semantic evaluation | the `begin_*` handoffs above; callers still synchronous |
+| Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) and the scheduler pool's `install` | `CpuPool` | `verter_session/src/host_batch_coordinator.rs`, `verter_scheduler/src/execution/` | `compile_many`, `get_component_meta_batch`, scoped cache-node producers | none; the batch topology itself is the executor's to replace |
 
-The declaration-lowering waits that used to be on this list are now the
-pollable handoffs above. Their synchronous entries, which the declaration
-body memo calls from inside semantic evaluation, still block through the
-external driver. What remains is to make the computations that call them
-suspend instead.
+The declaration-lowering row's handoffs are pollable; what still blocks is
+their synchronous entries, which the declaration body memo calls from
+inside semantic evaluation. What remains is to make the computations that
+call them suspend instead.
 
 ## What a pollable root still needs
 

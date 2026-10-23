@@ -1076,44 +1076,48 @@ impl CarrierPublicationStore {
             );
             drop(state);
             let mut wait = LaneWait::new(&lane.waiters);
-            verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
-                if request.cancellation.is_cancelled() {
-                    self.audit.push(
-                        &request,
-                        &artifact_id,
-                        PublicationAuditKind::WaiterDetachedCancelled,
-                    );
-                    return Poll::Ready(PublicationOutcome::Cancelled);
-                }
-                let state = lane
-                    .state
-                    .lock()
-                    .expect("publication lane lock poisoned by a worker panic");
-                match &*state {
-                    LaneState::Terminal(outcome) => {
-                        if self
-                            .grammar_authority
-                            .validate_accepted_current(&self.source_authority, accepted)
-                            .is_err()
-                        {
-                            return Poll::Ready(PublicationOutcome::Superseded(
-                                CurrentSourceEvidence {
-                                    current_source: None,
-                                },
-                            ));
+            verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::CarrierPublication,
+                Some(LANE_CANCELLATION_SLICE),
+                |waker| {
+                    if request.cancellation.is_cancelled() {
+                        self.audit.push(
+                            &request,
+                            &artifact_id,
+                            PublicationAuditKind::WaiterDetachedCancelled,
+                        );
+                        return Poll::Ready(PublicationOutcome::Cancelled);
+                    }
+                    let state = lane
+                        .state
+                        .lock()
+                        .expect("publication lane lock poisoned by a worker panic");
+                    match &*state {
+                        LaneState::Terminal(outcome) => {
+                            if self
+                                .grammar_authority
+                                .validate_accepted_current(&self.source_authority, accepted)
+                                .is_err()
+                            {
+                                return Poll::Ready(PublicationOutcome::Superseded(
+                                    CurrentSourceEvidence {
+                                        current_source: None,
+                                    },
+                                ));
+                            }
+                            Poll::Ready(
+                                outcome
+                                    .outcome()
+                                    .unwrap_or(PublicationOutcome::RetryExhausted),
+                            )
                         }
-                        Poll::Ready(
-                            outcome
-                                .outcome()
-                                .unwrap_or(PublicationOutcome::RetryExhausted),
-                        )
+                        LaneState::Vacant | LaneState::Producing => {
+                            wait.register(waker);
+                            Poll::Pending
+                        }
                     }
-                    LaneState::Vacant | LaneState::Producing => {
-                        wait.register(waker);
-                        Poll::Pending
-                    }
-                }
-            })
+                },
+            )
         }
     }
 
@@ -1407,35 +1411,39 @@ impl CarrierPublicationStore {
         artifact_id: &FrameworkArtifactId,
     ) -> StableShared {
         let mut wait = LaneWait::new(&lane.waiters);
-        verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
-            if request.cancellation.is_cancelled() {
-                self.audit.push(
-                    request,
-                    artifact_id,
-                    PublicationAuditKind::WaiterDetachedCancelled,
-                );
-                return Poll::Ready(StableShared::Done(PublicationOutcome::Cancelled));
-            }
-            let state = lane
-                .state
-                .lock()
-                .expect("stable-parse lane lock poisoned by a worker panic");
-            match &*state {
-                StableParseState::Ready(outcome) => Poll::Ready(match outcome.clone() {
-                    StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
-                    StableParseOutcome::Rejected(reject) => StableShared::Done(
-                        PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
-                    ),
-                    StableParseOutcome::Panicked => {
-                        StableShared::Done(PublicationOutcome::WinnerPanicked)
-                    }
-                }),
-                StableParseState::Producing => {
-                    wait.register(waker);
-                    Poll::Pending
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::CarrierPublication,
+            Some(LANE_CANCELLATION_SLICE),
+            |waker| {
+                if request.cancellation.is_cancelled() {
+                    self.audit.push(
+                        request,
+                        artifact_id,
+                        PublicationAuditKind::WaiterDetachedCancelled,
+                    );
+                    return Poll::Ready(StableShared::Done(PublicationOutcome::Cancelled));
                 }
-            }
-        })
+                let state = lane
+                    .state
+                    .lock()
+                    .expect("stable-parse lane lock poisoned by a worker panic");
+                match &*state {
+                    StableParseState::Ready(outcome) => Poll::Ready(match outcome.clone() {
+                        StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
+                        StableParseOutcome::Rejected(reject) => StableShared::Done(
+                            PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
+                        ),
+                        StableParseOutcome::Panicked => {
+                            StableShared::Done(PublicationOutcome::WinnerPanicked)
+                        }
+                    }),
+                    StableParseState::Producing => {
+                        wait.register(waker);
+                        Poll::Pending
+                    }
+                }
+            },
+        )
     }
 
     fn finish_stable_parse(

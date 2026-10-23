@@ -486,24 +486,28 @@ impl Scheduler {
         #[cfg(not(target_arch = "wasm32"))]
         use caller_kind::CallerKind;
         let mut pending = PendingSubmission::new(&self.inbox, Some(submission));
-        verter_execution::blocking::block_on(None, |waker| {
-            let polled = pending.poll(self, waker);
-            if polled.is_ready() {
-                return polled;
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if !matches!(
-                CallerKind::current(),
-                CallerKind::Driver | CallerKind::Inline
-            ) && self.driver_handle.lock().is_some()
-            {
-                return std::task::Poll::Pending;
-            }
-            if let Ok(older) = self.inbox.receiver.try_recv() {
-                self.process_submission(older);
-            }
-            std::task::Poll::Pending
-        })
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::SchedulerAdmission,
+            None,
+            |waker| {
+                let polled = pending.poll(self, waker);
+                if polled.is_ready() {
+                    return polled;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if !matches!(
+                    CallerKind::current(),
+                    CallerKind::Driver | CallerKind::Inline
+                ) && self.driver_handle.lock().is_some()
+                {
+                    return std::task::Poll::Pending;
+                }
+                if let Ok(older) = self.inbox.receiver.try_recv() {
+                    self.process_submission(older);
+                }
+                std::task::Poll::Pending
+            },
+        )
     }
 
     /// Drain all available submissions from the inbox.

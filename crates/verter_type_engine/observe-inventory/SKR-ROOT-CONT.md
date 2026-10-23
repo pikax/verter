@@ -10,6 +10,8 @@ The interface itself is described in
 | --- | --- | --- | --- | --- | --- |
 | `PARK_WAKER` (thread-local unparking waker) and `UnparkThread` | `blocking::block_on` polls with it and parks between polls; `verter_type_engine`'s blocking drive and every declaration-lowering synchronous entry go through it. This supersedes the copy the continuation runtime's inventory lists in `verter_type_engine/src/semantic_execution.rs`, which no longer exists. | REQUIRED | The thread | `src/blocking.rs` | always |
 | `WakerSet`, `WakeRegistration`, `TakenWakers` | Completion, queue, flight and publication owners register under their state lock, withdraw one subscriber, or take registrations for wake after unlock | REQUIRED | One producer and one entry per pending subscriber | `src/wake.rs` | always |
+| `WaitFamily` and the `enter_wait` announcement at every synchronous dependency wait (`block_on` announces its family argument) | none in a production build: there `enter_wait` is an empty inline call | REQUIRED (the family vocabulary); the announcement body is OPTIONAL | Static | `src/blocking.rs` | vocabulary always; announcement body `cfg(any(test, feature = "test-support"))` |
+| `WaitProbe` and its thread-local `PROBE` slot (recording and forbidding modes) | none; `verter_session`'s `root_continuations_tests` inventory and Pending-before-release harness read it | OPTIONAL | One installing thread, until the probe drops | `src/blocking.rs` | `cfg(any(test, feature = "test-support"))` |
 
 ## verter_scheduler
 

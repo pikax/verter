@@ -2369,16 +2369,20 @@ where
             // sibling about to claim leadership and waits for the terminal
             // like any other follower.
             let mut join = FlightJoin::new(state);
-            let terminal = verter_execution::blocking::block_on(None, |waker| {
-                let polled = join.poll(waker);
-                #[cfg(test)]
-                if polled.is_pending() {
-                    if let Some(tx) = self.joiner_park_tx.lock().clone() {
-                        let _ = tx.send(());
+            let terminal = verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::ResolverFlight,
+                None,
+                |waker| {
+                    let polled = join.poll(waker);
+                    #[cfg(test)]
+                    if polled.is_pending() {
+                        if let Some(tx) = self.joiner_park_tx.lock().clone() {
+                            let _ = tx.send(());
+                        }
                     }
-                }
-                polled
-            });
+                    polled
+                },
+            );
             match terminal {
                 FlightTerminal::Done(result) => {
                     self.unpin(&lane_key, &join.state);

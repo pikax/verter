@@ -866,37 +866,44 @@ impl Scheduler {
     {
         let mut handoff = self.begin_scoped_cache_node(request)?;
         let mut build = Some(build);
-        verter_execution::blocking::block_on(Some(std::time::Duration::from_millis(2)), |waker| {
-            loop {
-                match handoff.poll(waker) {
-                    std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) => {
-                        return std::task::Poll::Ready(Ok(value));
-                    }
-                    std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) => {
-                        let operation = build.take().expect("only one producer is transferred");
-                        #[cfg(not(target_arch = "wasm32"))]
-                        self.cpu_pool.install(move || producer.run(operation));
-                        #[cfg(target_arch = "wasm32")]
-                        producer.run(operation);
-                    }
-                    std::task::Poll::Ready(Err(error)) => {
-                        return std::task::Poll::Ready(Err(error))
-                    }
-                    std::task::Poll::Pending => {
-                        // Execution remains outside the polling capability.
-                        #[cfg(not(target_arch = "wasm32"))]
-                        let progress = self
-                            .pump_ready(PumpReason::WaitOrDrive, caller_kind::CallerKind::current())
-                            .made_progress();
-                        #[cfg(target_arch = "wasm32")]
-                        let progress = self.drive_one();
-                        if !progress {
-                            return std::task::Poll::Pending;
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::ScopedCacheNode,
+            Some(std::time::Duration::from_millis(2)),
+            |waker| {
+                loop {
+                    match handoff.poll(waker) {
+                        std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) => {
+                            return std::task::Poll::Ready(Ok(value));
+                        }
+                        std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) => {
+                            let operation = build.take().expect("only one producer is transferred");
+                            #[cfg(not(target_arch = "wasm32"))]
+                            self.cpu_pool.install(move || producer.run(operation));
+                            #[cfg(target_arch = "wasm32")]
+                            producer.run(operation);
+                        }
+                        std::task::Poll::Ready(Err(error)) => {
+                            return std::task::Poll::Ready(Err(error))
+                        }
+                        std::task::Poll::Pending => {
+                            // Execution remains outside the polling capability.
+                            #[cfg(not(target_arch = "wasm32"))]
+                            let progress = self
+                                .pump_ready(
+                                    PumpReason::WaitOrDrive,
+                                    caller_kind::CallerKind::current(),
+                                )
+                                .made_progress();
+                            #[cfg(target_arch = "wasm32")]
+                            let progress = self.drive_one();
+                            if !progress {
+                                return std::task::Poll::Pending;
+                            }
                         }
                     }
                 }
-            }
-        })
+            },
+        )
     }
 
     /// Begin a cache-node computation without waiting for inbox capacity or
@@ -2326,6 +2333,9 @@ impl Scheduler {
         handle: &crate::job::CompletionHandle<T>,
         caller_kind: crate::caller_kind::CallerKind,
     ) -> crate::job::CompletionState<T> {
+        verter_execution::blocking::enter_wait(
+            verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        );
         // `caller_kind` discriminates driver/worker/external waiters and is
         // read only on native (the driver-aware park/cooperative paths
         // below). wasm is single-threaded with no driver, so it takes the
