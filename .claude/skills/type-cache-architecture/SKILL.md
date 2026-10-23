@@ -291,6 +291,18 @@ the family is keyed and released with it. The origin-edge store's tables,
 edge lists, source lists and pooled fence blocks are part of the memo's
 bookkeeping pin, settled on every mutation.
 
+**A store's teardown releases its graph at once** (`ArenaTeardown`,
+`semantic_query_memo/arena.rs`). `SemanticGraphStore::drop` begins it before
+any field drops; while the caches drop, their root releases are deferred, and
+the guard (the store's last field) ends it. An arena no one else holds then
+drops whole — storage pin, payloads and dedup shards together, no per-node
+release. An arena a reader still holds releases the deferred roots in order,
+so exactly what that reader reaches stays live and charged. `ProjectTypeStore`
+declares its construction lane and `semantic_graph` last, so every project
+cache holding graph nodes drops first and the common teardown is the whole
+drop. Guards: `a_store_teardown_no_reader_outlives_releases_no_slot_one_by_one`,
+`a_store_teardown_leaves_charged_only_what_an_outliving_reader_reaches`.
+
 **Artifact and request caches.** The content-addressed artifact caches driven by
 `cache_runtime::lookup` (`ArtifactNode`: the component-meta shape,
 declaration-lookup, owner-collection and resolvability caches, the
