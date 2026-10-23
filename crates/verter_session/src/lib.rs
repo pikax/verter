@@ -197,6 +197,9 @@ mod cross_file_augmentation_merge_equivalence_tests;
 mod decl_body_dispatch_equivalence_tests;
 #[cfg(test)]
 mod decl_body_memo_tests;
+// Reads the optional decl-lowering counters: runs in the instrumentation lane.
+#[cfg(all(test, feature = "semantic-observe"))]
+mod component_meta_wide_props_tests;
 pub mod fact_emission;
 pub mod framework;
 pub mod global_contributors;

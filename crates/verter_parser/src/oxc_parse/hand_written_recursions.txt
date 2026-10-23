@@ -161,7 +161,6 @@ verter_semantic/src/analysis/function_program_access.rs collect_targets
 verter_semantic/src/analysis/function_program_hash.rs visit_expression
 verter_semantic/src/analysis/function_program_hash.rs visit_ts_type_name
 verter_semantic/src/analysis/macros.rs collect
-verter_semantic/src/analysis/macros.rs collect_from_type
 verter_semantic/src/analysis/macros.rs extract_emit_fields_from_type_at
 verter_semantic/src/analysis/macros.rs extract_prop_fields_from_type
 verter_semantic/src/analysis/macros.rs extract_slot_fields_from_type
