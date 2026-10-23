@@ -4,6 +4,15 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 The interface itself is described in
 [`docs/arch/root-continuations.md`](../../../docs/arch/root-continuations.md).
 
+This inventory classifies the state already present; it does not certify
+complete root resumability. Snapshot/overlay capture and the scoped compile
+handoff suspend, while metadata computation, extraction, output materialization,
+nested semantic dispatch, macro traversal and compile-blocker hydration still
+reach synchronous waits. `SlotJoin` and `CompletionSubscription` retain readiness
+registrations but do not yet provide uniform cancellation and shared-registry
+wait ownership. The root driver and work-count proofs cover the converted
+boundaries only; see the reference's current delivery boundary.
+
 ## verter_execution
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |

@@ -94,7 +94,10 @@ back into the host for a service it was not given.
   or `complete_now` where it never waits), and a scope it holds across a
   suspension — request context, spend log, span, fact tracer, request audit,
   construction lane (`ProjectSemanticDispatch::suspendable`) — is owned by the
-  computation and installed per poll.
+  computation and installed per poll. Only the converted boundaries suspend:
+  nested metadata evaluation and the handed-out compile producer can still
+  block. The [delivery boundary](../../../docs/arch/root-continuations.md#current-delivery-boundary)
+  distinguishes the current API from complete root resumability.
 - `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
   is the only route by which a workspace receives it, both at construction and on
   `set_workspace`. Resident resolution state needs no service: every workspace
