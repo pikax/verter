@@ -57,10 +57,16 @@ fn main() {
     }
 
     // Verter: the release configuration in every Cargo profile, matching the
-    // MSVC path below. The CMake build type is pinned rather than derived from
-    // the profile's opt-level, and assertion checking is off, so a dev or test
-    // build runs the allocator a release build ships.
-    cmake_config.profile("Release").define("MI_DEBUG", "OFF");
+    // MSVC path below, so a dev or test build runs the allocator a release
+    // build ships. The CMake build type is pinned rather than derived from the
+    // profile's opt-level. `MI_NO_DEBUG` adds `NDEBUG` for every generator,
+    // multi-config ones (Xcode, Ninja Multi-Config) included, which leaves
+    // `MI_DEBUG` at 0; `MI_DEBUG=OFF` keeps CMake's per-config default, which
+    // would select `MI_DEBUG=2` for a Debug configuration, out of the build.
+    cmake_config
+        .profile("Release")
+        .define("MI_DEBUG", "OFF")
+        .define("MI_NO_DEBUG", "ON");
 
     if target_env == "musl" {
         cmake_config
@@ -96,16 +102,6 @@ fn main() {
         && env::var_os("CARGO_FEATURE_NO_THP").is_some()
     {
         cmake_config.define("MI_NO_THP", "1");
-    }
-
-    if env::var_os("CARGO_FEATURE_DEBUG").is_some()
-        || (env::var_os("CARGO_FEATURE_DEBUG_IN_DEBUG").is_some() && cfg!(debug_assertions))
-    {
-        cmake_config.define("MI_DEBUG_FULL", "ON");
-        cmake_config.define("MI_SHOW_ERRORS", "ON");
-    } else {
-        // Remove heavy debug assertions etc
-        cmake_config.define("MI_DEBUG_FULL", "OFF");
     }
 
     // replicate naming logic from https://github.com/microsoft/mimalloc/blob/0ddf397796fbefa35b3278bd4431c2913a9892eb/CMakeLists.txt#L595-L599

@@ -170,9 +170,16 @@ fn two_addon_images_with_their_own_mimalloc_share_one_node_process() {
 
     // The child's mimalloc copies read no purge delay from the environment,
     // so the load-time configuration is what decides it.
-    let run = Command::new("node")
-        .env_remove("MIMALLOC_PURGE_DELAY")
-        .env_remove("MIMALLOC_RESET_DELAY")
+    // mimalloc matches environment names case-insensitively on Unix, so every
+    // spelling of either name is removed.
+    let mut node = Command::new("node");
+    for (key, _) in std::env::vars_os() {
+        let upper = key.to_string_lossy().to_ascii_uppercase();
+        if upper == "MIMALLOC_PURGE_DELAY" || upper == "MIMALLOC_RESET_DELAY" {
+            node.env_remove(&key);
+        }
+    }
+    let run = node
         .arg(&driver)
         .arg(&addon_a)
         .arg(&addon_b)
