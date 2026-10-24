@@ -2316,12 +2316,16 @@ pub(super) mod component_meta_scope_shadowing_memo {
 
             self.match_depth += 1;
             for arm in &node.arms {
-                if let Some((_, guard)) = &arm.guard {
+                let (pat, guard) = match &arm.pat {
+                    syn::Pat::Guard(guarded) => (&*guarded.pat, Some(&*guarded.guard)),
+                    pat => (pat, None),
+                };
+                if let Some(guard) = guard {
                     // A guard expression is not the `None`-arm body.
                     self.in_engine_none_arm = false;
                     self.visit_expr(guard);
                 }
-                self.in_engine_none_arm = top_level && scrutinee_is_engine && pat_is_none(&arm.pat);
+                self.in_engine_none_arm = top_level && scrutinee_is_engine && pat_is_none(pat);
                 self.visit_expr(&arm.body);
             }
             self.match_depth -= 1;

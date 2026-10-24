@@ -133,7 +133,7 @@ toml = "1.1"
 verter_lsp = { path = ".", features = ["test-support"] }
 # Used by `tests/cases/typed_prop_callable_role_guard.rs` to AST-parse
 # `src/features/completion.rs`.
-syn = { version = "2.0", features = ["full", "visit", "parsing"] }
+syn = { version = "3.0", features = ["full", "visit", "parsing"] }
 # Used by `tests/stdio_launch_smoke.rs` to build the verter-lsp launch argv and
 # initializationOptions through the SHARED editor-client launch contract, so the
 # stdio handshake smoke also pins that contract (the same source the Lapce/Zed

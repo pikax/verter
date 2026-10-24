@@ -40,5 +40,5 @@ protoc-bin-vendored = "3.3.0"
 static_assertions = "1.1.0"
 # Tier 1A — `component_meta_flags_audit.rs` parses the syn-AST of the
 # semantic crate to verify D123's `has_macro_failure` field shape.
-syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"] }
+syn = { version = "3.0", features = ["full", "extra-traits", "visit", "parsing"] }
 quote = "1.0.47"
