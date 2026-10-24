@@ -12,6 +12,10 @@ use verter_lsp::type_provider::traits::TypeProvider;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind, TypeProviderTopology};
 use verter_session::{HostConfig, VerterHost};
 
+/// The process allocator (mimalloc on native targets): see `verter_alloc`.
+#[global_allocator]
+static GLOBAL: verter_alloc::Allocator = verter_alloc::ALLOCATOR;
+
 /// Start the server on a thread with an explicitly sized stack.
 ///
 /// `#[tokio::main]` would run the runtime — and therefore `outbound::serve`, and
@@ -22,6 +26,7 @@ use verter_session::{HostConfig, VerterHost};
 /// `verter_lsp::serve_until_exit` documents why the process exits without
 /// tearing the runtime down.
 fn main() {
+    verter_alloc::configure();
     verter_lsp::serve_until_exit(serve);
 }
 

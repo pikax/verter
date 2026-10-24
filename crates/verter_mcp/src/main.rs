@@ -18,8 +18,13 @@ use clap::Parser;
 
 use verter_mcp::config::Cli;
 
+/// The process allocator (mimalloc on native targets): see `verter_alloc`.
+#[global_allocator]
+static GLOBAL: verter_alloc::Allocator = verter_alloc::ALLOCATOR;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    verter_alloc::configure();
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -30,4 +35,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     verter_mcp::run::run(cli).await
+}
+
+#[cfg(test)]
+mod tests {
+    /// The binary runs on the allocator `verter_alloc` selects for it: mimalloc
+    /// on a native build, so a block from the global heap is mimalloc's.
+    #[test]
+    fn the_selected_global_allocator_serves_this_binary() {
+        assert_eq!(
+            verter_alloc::mimalloc_serves_global_allocations(),
+            verter_alloc::SELECTED == verter_alloc::AllocatorKind::Mimalloc
+        );
+    }
 }

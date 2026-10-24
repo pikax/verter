@@ -19,7 +19,10 @@ members = [
 # and testing the capture-off configuration it exists to verify. The lane
 # runs the crate by manifest path instead
 # (scripts/compile-contracts.mjs, session-observe stage).
-exclude = ["crates/verter_compile_contracts_session_observe"]
+#
+# `vendor/libmimalloc-sys2` is third-party code patched in below, not a
+# Verter crate, so `--workspace` lint, format and test runs leave it alone.
+exclude = ["crates/verter_compile_contracts_session_observe", "vendor/libmimalloc-sys2"]
 resolver = "2"
 
 [workspace.package]
@@ -206,3 +209,10 @@ opt-level = 2
 inherits = "release"
 lto = "thin"
 codegen-units = 16
+
+# The sys crate behind `mimalloc-safe` (the native global allocator,
+# crates/verter_alloc), vendored so it builds upstream mimalloc v3.5.3 rather
+# than the release the published crate bundles.
+# vendor/libmimalloc-sys2/Cargo.toml lists every difference from that crate.
+[patch.crates-io]
+libmimalloc-sys2 = { path = "vendor/libmimalloc-sys2" }

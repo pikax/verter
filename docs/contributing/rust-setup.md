@@ -15,6 +15,9 @@ Guide for setting up Rust development for Verter.
   rustc's own diagnostic text; building on any other version reports failures that are not
   yours.
 - **wasm-bindgen CLI** for WASM glue generation: `cargo install wasm-bindgen-cli --version 0.2.122 --locked`
+- **A C compiler, plus CMake on macOS and Linux.** The native binaries and the Node addon
+  compile the mimalloc allocator from C (see [Allocator](#allocator)): MSVC on Windows, gcc or
+  clang elsewhere. WASM builds need neither.
 
 Verify your installation — `rustc` must report the version in `rust-toolchain.toml`:
 
@@ -95,6 +98,29 @@ cargo build --release -p verter_lsp
 cargo build --release -p verter_wasm --target wasm32-unknown-unknown
 wasm-bindgen --target web --out-dir packages/wasm/wasm --out-name verter_wasm target/wasm32-unknown-unknown/release/verter_wasm.wasm
 ```
+
+### Allocator
+
+The native entry points — `verter-lsp`, `verter-tsc`, `verter-mcp`, `verter-mcp-server` and
+the `@verter/native` addon — install mimalloc v3 as their global allocator through
+`crates/verter_alloc`, with a 10 ms purge delay, exit-time collection skipped and secure mode
+off. `crates/verter_alloc/src/lib.rs` records why. The sys crate is vendored under
+`vendor/libmimalloc-sys2` so that it builds a pinned upstream mimalloc release. WASM keeps the
+target's default allocator (dlmalloc).
+
+For a build that keeps the platform heap's hardening (Windows LFH randomisation and encoded
+headers, glibc safe-linking), enable the entry point's `system-allocator` feature:
+
+```bash
+cargo build --release -p verter_tsc --features system-allocator
+cargo build --release -p verter_lsp --features system-allocator
+cargo build --release -p verter_mcp --bin verter-mcp --features system-allocator
+# the addon, from packages/native
+npx napi build --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --features system-allocator
+```
+
+mimalloc reads `MIMALLOC_*` environment variables at startup, so `MIMALLOC_PURGE_DELAY`
+overrides the purge delay without a rebuild.
 
 ### Quick Rebuild for Native Bindings
 

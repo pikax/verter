@@ -1,0 +1,48 @@
+[package]
+name = "verter_alloc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "The global allocator Verter's native executables and Node addon install: mimalloc v3 on native targets, the target default on wasm32"
+keywords = ["vue", "compiler"]
+categories = ["memory-management"]
+
+[features]
+# Build the platform heap (`std::alloc::System`) instead of mimalloc, for
+# hardened builds that want its protections back (Windows LFH randomisation
+# and encoded headers, glibc safe-linking and tcache double-free checks).
+# Each native entry point forwards its own `system-allocator` feature here:
+#   cargo build --release -p verter_tsc --features system-allocator
+# mimalloc's C sources still compile under it (features are additive, so the
+# dependency stays in the graph); they are not linked.
+system-allocator = []
+# Compile mimalloc with the local-dynamic TLS model. Only the Node addon
+# enables it, on Linux: a `dlopen`ed image with initial-exec TLS can fail to
+# load once the process's static TLS surplus is used up. Executables keep the
+# faster initial-exec model.
+local-dynamic-tls = ["mimalloc-safe/local_dynamic_tls"]
+
+# mimalloc v3 through `mimalloc-safe` rather than the plain `mimalloc` crate:
+# on macOS the plain crate's v3 uses a fixed TLS slot that every statically
+# linked v3 copy in a process shares, so the addon would abort next to another
+# mimalloc-v3 addon such as rolldown's (microsoft/mimalloc#1301);
+# `mimalloc-safe` builds the thread-local model there. Exact pins: the sys
+# crate is the vendored copy patched in from the workspace root, which carries
+# the C allocator `MIMALLOC_VERSION` names.
+#
+# - `v3`: the allocator measured; v3's design shares pages between threads.
+# - `skip_collect_on_exit`: no heap collection while background threads may
+#   still be running as the process exits.
+# - no `secure`: secure mode cancels the whole speed gain on this workload.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+mimalloc-safe = { version = "=0.1.67", default-features = false, features = ["v3", "skip_collect_on_exit"] }
+libmimalloc-sys2 = { version = "=0.1.63", default-features = false, features = ["v3", "extended"] }
+
+# mimalloc's CMake build defaults to `-march=armv8.1-a` on arm64. Keep Linux
+# arm64 at the target's own baseline (ARMv8.0, which Rust's `aarch64-*-linux-*`
+# targets assume) so the binaries still run on ARMv8.0 cores.
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+mimalloc-safe = { version = "=0.1.67", default-features = false, features = ["no_opt_arch"] }
