@@ -40,7 +40,7 @@ pub(super) struct ClassReceiver {
 
 /// What a read of member `name` off a receiver's evaluated members found
 /// ([`FlowEvaluator::receiver_member_read`]).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ReceiverMemberRead {
     /// The receiver's own evaluated member, as an object of its entries.
     Own(SemanticNodeId),
@@ -50,58 +50,88 @@ pub(super) enum ReceiverMemberRead {
     Base(Option<SemanticNodeId>),
 }
 
-/// The member reads made off one receiver while at least one nested
-/// function's evaluation records them, in read order. Every read of a
-/// receiver's evaluated members and declared names goes through
-/// [`FlowEvaluator::this_member_source`], and a reused nested signature
-/// logs the reads it stands on again, so the log holds every way a recorded
-/// evaluation observed the receiver's growing state.
-#[derive(Default)]
-pub(super) struct ReceiverReadLog {
-    recorders: std::cell::Cell<u32>,
-    reads: std::cell::RefCell<Vec<(Arc<str>, ReceiverMemberRead)>>,
+/// One member read off a receiver: the member's name and what it found.
+/// Reads compare by name — a recording window reads each name once, since
+/// the receiver's members do not change while a body inside the window
+/// evaluates.
+#[derive(Clone)]
+pub(super) struct ReceiverRead {
+    pub(super) name: Arc<str>,
+    pub(super) read: ReceiverMemberRead,
 }
 
+impl PartialEq for ReceiverRead {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for ReceiverRead {}
+
+impl std::hash::Hash for ReceiverRead {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
+impl std::borrow::Borrow<str> for ReceiverRead {
+    fn borrow(&self) -> &str {
+        &self.name
+    }
+}
+
+/// The member reads made off one receiver while a nested function's
+/// evaluation records them. Every read of a receiver's evaluated members and
+/// declared names goes through [`FlowEvaluator::this_member_source`], and a
+/// reused nested signature logs the reads it stands on again, so the log
+/// holds every way a recorded evaluation observed the receiver's growing
+/// state.
+#[derive(Default)]
+pub(super) struct ReceiverReadLog(std::cell::RefCell<super::nested::WindowedLog<ReceiverRead>>);
+
 impl ReceiverReadLog {
-    /// Start recording: the position later reads are logged from.
+    /// Open a recording window: the position later reads are logged from.
     pub(super) fn begin(&self) -> usize {
-        self.recorders.set(self.recorders.get() + 1);
-        self.reads.borrow().len()
+        self.0.borrow_mut().begin()
     }
 
-    /// Stop the recording begun at `start`: the reads it logged. The log
-    /// empties once no recording is left.
-    pub(super) fn finish(&self, start: usize) -> Vec<(Arc<str>, ReceiverMemberRead)> {
-        let mut reads = self.reads.borrow_mut();
-        let logged = reads.get(start..).map(<[_]>::to_vec).unwrap_or_default();
-        let recorders = self.recorders.get().saturating_sub(1);
-        self.recorders.set(recorders);
-        if recorders == 0 {
-            reads.clear();
-        }
-        logged
+    /// Close the window opened at `start`: each distinct read made in it.
+    pub(super) fn finish(&self, start: usize) -> Vec<ReceiverRead> {
+        self.0.borrow_mut().finish(start)
     }
 
-    /// Log a read while a recording is live.
+    /// Log the read of member `name`, which found `read`.
     pub(super) fn log(&self, name: &str, read: ReceiverMemberRead) {
-        if self.recorders.get() > 0 {
-            self.reads.borrow_mut().push((Arc::from(name), read));
-        }
+        self.0.borrow_mut().log(name, || ReceiverRead {
+            name: Arc::from(name),
+            read,
+        });
     }
 }
 
 impl ClassReceiver {
-    /// A receiver whose members are those of `binder` alone.
-    pub(super) fn of_type(binder: SemanticNodeId, base: Option<SemanticNodeId>) -> Self {
+    /// A receiver binding `binder` over `base`, declaring `declared`, whose
+    /// members are filled in as they evaluate.
+    pub(super) fn new(
+        binder: SemanticNodeId,
+        base: Option<SemanticNodeId>,
+        declared: rustc_hash::FxHashSet<Arc<str>>,
+        infer_literal_members: bool,
+    ) -> Self {
         Self {
             binder,
             members: std::cell::RefCell::new(Vec::new()),
-            declared: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
+            declared: std::cell::RefCell::new(declared),
             base,
-            infer_literal_members: false,
+            infer_literal_members,
             forward_read: std::cell::Cell::new(false),
             reads: ReceiverReadLog::default(),
         }
+    }
+
+    /// A receiver whose members are those of `binder` alone.
+    pub(super) fn of_type(binder: SemanticNodeId, base: Option<SemanticNodeId>) -> Self {
+        Self::new(binder, base, rustc_hash::FxHashSet::default(), false)
     }
 }
 
@@ -444,27 +474,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Open the class's receiver and order its members.
     fn class_begin_members(&mut self, frame: &mut ClassEvalFrame<'_>) {
         let class = frame.class;
-        let receiver = std::rc::Rc::new(ClassReceiver {
-            binder: self
-                .dispatch
+        let receiver = std::rc::Rc::new(ClassReceiver::new(
+            self.dispatch
                 .this_binder(self.canonical, self.owner, &class.name, None),
-            members: std::cell::RefCell::new(Vec::new()),
-            declared: std::cell::RefCell::new(
-                class
-                    .members
-                    .iter()
-                    .filter(|member| !member.is_static)
-                    .filter_map(|member| match &member.key {
-                        SliceObjectKey::Static(name) => Some(Arc::clone(name)),
-                        SliceObjectKey::Computed { .. } => None,
-                    })
-                    .collect(),
-            ),
-            base: frame.base.as_ref().and_then(|base| base.instance),
-            infer_literal_members: true,
-            forward_read: std::cell::Cell::new(false),
-            reads: ReceiverReadLog::default(),
-        });
+            frame.base.as_ref().and_then(|base| base.instance),
+            class
+                .members
+                .iter()
+                .filter(|member| !member.is_static)
+                .filter_map(|member| match &member.key {
+                    SliceObjectKey::Static(name) => Some(Arc::clone(name)),
+                    SliceObjectKey::Computed { .. } => None,
+                })
+                .collect(),
+            true,
+        ));
         frame.enclosing_receiver = Some(self.receiver.replace(receiver.clone()));
         frame.receiver = Some(receiver);
         frame.order = (0..class.members.len())

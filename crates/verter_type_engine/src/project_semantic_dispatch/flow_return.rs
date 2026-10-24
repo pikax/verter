@@ -347,6 +347,24 @@ pub mod flow_admission_fault_injection {
         pub indexed_argument_identity_work: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         #[cfg(any(test, feature = "test-support"))]
         pub short_nested_execution_ledger: AtomicBool,
+        /// How many times a nested function value's capture preparation
+        /// asked the frame creating it to seed a captured value.
+        #[cfg(any(test, feature = "test-support"))]
+        pub nested_capture_seeds: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// When armed, a nested function value's slice content reads as
+        /// unavailable.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fail_nested_slice_content: AtomicBool,
+        /// When armed, every call a nested function value's body evaluates
+        /// counts as having consumed one undecided relation outcome.
+        #[cfg(any(test, feature = "test-support"))]
+        pub undecided_nested_call_relations: AtomicBool,
+        /// When armed, every call evidence a flow evaluation records is
+        /// copied to `call_evidence` as whether its relations were decided.
+        #[cfg(any(test, feature = "test-support"))]
+        pub observe_call_evidence: AtomicBool,
+        #[cfg(any(test, feature = "test-support"))]
+        pub call_evidence: std::sync::Mutex<Vec<bool>>,
 
         /// When armed, `build_flow_return` removes the `flow_completion`
         /// proof token from its build output while leaving the boolean
@@ -9966,41 +9984,6 @@ impl FlowBinderEnv {
     }
 }
 
-/// The parts of a [`FlowBinderEnv`] that differ between the environments
-/// of one file: the scope its binders declare into, the binders by name,
-/// their declarations, the completed clause operands and the explicit
-/// name-resolution overlay. The scope payload and shadow set derive from
-/// the file.
-#[derive(PartialEq, Eq)]
-pub(super) struct FlowBinderIdentity {
-    scope: crate::semantic_query::NodeScopeId,
-    env: rustc_hash::FxHashMap<String, SemanticNodeId>,
-    type_param_decls: Vec<crate::semantic_query::TypeParamDecl>,
-    exact_binders: rustc_hash::FxHashSet<String>,
-    name_resolution: rustc_hash::FxHashMap<
-        verter_type_expr::OwnedStr,
-        verter_session_query::type_solver::host::ResolvedRootIdentity,
-    >,
-}
-
-impl FlowBinderEnv {
-    /// What a lowering against this environment reads that another
-    /// environment of the same file may bind differently.
-    fn identity(&self) -> FlowBinderIdentity {
-        FlowBinderIdentity {
-            scope: self.scope.clone(),
-            env: self.env.clone(),
-            type_param_decls: self
-                .type_param_decls
-                .iter()
-                .map(crate::semantic_query::TypeParamDecl::copy)
-                .collect(),
-            exact_binders: self.exact_binders.clone(),
-            name_resolution: self.name_resolution.clone(),
-        }
-    }
-}
-
 /// The TYPE-PARAMETER lowering environment a frame's signature positions
 /// are lowered against. It is not evaluator dataflow state: the frame's
 /// semantic state lives entirely in the typed-subject `FlowProductStore`,
@@ -10434,13 +10417,11 @@ enum CalleeStatementEffect {
     Undecided,
 }
 
-/// A nested function value's selected capture inputs, their basis bytes,
-/// and the first degradation preparing them met when it was set aside to
-/// record where the signature evaluation would have recorded it.
+/// A nested function value's selected capture inputs and their basis
+/// bytes ([`PreparedFlowCaptureInput::basis_bytes`]).
 struct NestedCaptureInputs {
     capture_inputs: Vec<PreparedFlowCaptureInput>,
     capture_basis: Vec<Vec<u8>>,
-    degradation: Option<FlowReturnDegradation>,
 }
 
 /// Immutable values prepared for one selected child capture. Source annotation
@@ -10486,6 +10467,31 @@ impl PreparedFlowCaptureInput {
         {
             self.reaching = Some(ReachingTypeProduct::of(node));
         }
+    }
+
+    /// Every field of this input the nested body observes: the products it
+    /// imports into the body's store (declared type, the whole reaching
+    /// product, definite assignment), whether the body reads it at all,
+    /// whether it entered extended, and the declared type the body's own
+    /// creations inherit. Its subject is fixed by the function's selection,
+    /// and the deferred write it was read under is folded into its reaching.
+    fn basis_bytes(&self) -> Vec<u8> {
+        let mut e = verter_identity::encoding::CanonicalEncoder::new(
+            "verter.session.flow.nested_capture.v1",
+        );
+        e.field_bytes(
+            1,
+            &FlowProductStore::captured_input_bytes(
+                self.declared,
+                self.reaching.as_ref(),
+                self.assignment,
+            ),
+        );
+        e.field_bool(2, self.value_demanded);
+        e.field_bool(3, self.extended);
+        let inferred = self.inferred_declared.map(|node| node.0.to_le_bytes());
+        e.field_option(4, inferred.as_ref().map(|bytes| bytes.as_slice()));
+        e.finish()
     }
 }
 
@@ -10535,26 +10541,79 @@ impl super::flow_products::FlowSemanticAlgebra for ObservedFlowAlgebra<'_> {
     }
 }
 
-/// The child observation includes its actual parameter and selected capture
-/// inputs. The demand's separate graph/query basis owns binding identities.
-/// The parent is named by its digest; its whole basis rides the demand's
-/// ancestry ([`super::flow_solve::FlowInputAncestry`]), which keeps the
-/// identity exact without a copy of the parent's bytes at every level.
-struct NestedFlowInputBasis<'a> {
+/// Everything a nested function value's evaluation reads from outside its
+/// body, apart from its parameter types: the enclosing evaluation (named by
+/// its digest; its whole basis rides the demand's ancestry,
+/// [`super::flow_solve::FlowInputAncestry`], which keeps the identity exact
+/// without a copy of the parent's bytes at every level), every field of each
+/// selected capture input ([`PreparedFlowCaptureInput::basis_bytes`]), the
+/// type-parameter environment the function sits in, the contextual
+/// signature it is checked under, and the enclosing receiver it reads `this`
+/// through. The environment's scope, scope payload and shadow set derive
+/// from the evaluation's file, and its name-resolution overlay is empty.
+/// Within one root evaluation the function, its lexical context and these
+/// fix its slice content and its parameter types, so an evaluation of one
+/// function on equal inputs reuses another's signature
+/// (`nested::NestedSignatureMemo`). The demand's separate graph/query basis
+/// owns binding identities.
+struct NestedFlowInputs<'a> {
     parent: verter_identity::encoding::CanonicalDigest,
-    parameters: &'a [SemanticNodeId],
     captures: &'a [Vec<u8>],
+    binders: &'a FlowBinderEnv,
+    contextual: Option<&'a ContextualSignature>,
+    receiver: Option<&'a class_expression::ClassReceiver>,
+}
+
+impl verter_identity::encoding::CanonicalEncode for NestedFlowInputs<'_> {
+    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_inputs.v3";
+    fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
+        e.field_bytes(1, self.parent.as_bytes());
+        for capture in self.captures {
+            e.field_bytes(2, capture);
+        }
+        let mut env: Vec<_> = self.binders.env.iter().collect();
+        env.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        for (name, node) in env {
+            e.field_str(3, name);
+            e.field_u64(4, node.0);
+        }
+        for decl in &self.binders.type_param_decls {
+            e.field_str(5, &decl.name);
+            e.field_u64(6, decl.param.0);
+            let constraint = decl.constraint.map(|node| node.0.to_le_bytes());
+            e.field_option(7, constraint.as_ref().map(|bytes| bytes.as_slice()));
+            let default = decl.default.map(|node| node.0.to_le_bytes());
+            e.field_option(8, default.as_ref().map(|bytes| bytes.as_slice()));
+            e.field_bool(9, decl.is_const);
+        }
+        e.field_sorted_set(10, self.binders.exact_binders.iter().map(String::as_bytes));
+        e.field_bool(11, self.contextual.is_some());
+        if let Some(contextual) = self.contextual {
+            contextual.encode_fields(e, 12);
+        }
+        e.field_bool(16, self.receiver.is_some());
+        if let Some(receiver) = self.receiver {
+            e.field_u64(17, receiver.binder.0);
+            let base = receiver.base.map(|node| node.0.to_le_bytes());
+            e.field_option(18, base.as_ref().map(|bytes| bytes.as_slice()));
+            e.field_bool(19, receiver.infer_literal_members);
+        }
+    }
+}
+
+/// A nested evaluation's input basis: its inputs ([`NestedFlowInputs`]),
+/// named by their digest, and its actual parameter types.
+struct NestedFlowInputBasis<'a> {
+    inputs: verter_identity::encoding::CanonicalDigest,
+    parameters: &'a [SemanticNodeId],
 }
 
 impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
-    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_inputs.v2";
+    const DOMAIN_TAG: &'static str = "verter.session.flow.nested_basis.v1";
     fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
-        e.field_bytes(1, self.parent.as_bytes());
+        e.field_bytes(1, self.inputs.as_bytes());
         for parameter in self.parameters {
             e.field_u64(2, parameter.0);
-        }
-        for capture in self.captures {
-            e.field_bytes(3, capture);
         }
     }
 }
@@ -10591,7 +10650,7 @@ mod disjunction;
 #[cfg(any(test, feature = "test-support"))]
 pub use arm_index::{index_preparation_for_tests, indexed_arm_visits_for_tests};
 #[cfg(any(test, feature = "test-support"))]
-pub use nested::nested_body_evaluations_for_tests;
+pub use nested::{nested_body_evaluations_for_tests, nested_signature_reuses_for_tests};
 #[path = "flow_return_footprint.rs"]
 mod footprint;
 #[cfg(any(test, feature = "semantic-observe"))]
@@ -14644,8 +14703,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let receiver = inherited_receiver.or_else(|| {
             (!data_only || contextual.is_some() || contextual_this.is_some()).then(|| {
-                std::rc::Rc::new(class_expression::ClassReceiver {
-                    binder: contextual_this.unwrap_or_else(|| {
+                std::rc::Rc::new(class_expression::ClassReceiver::new(
+                    contextual_this.unwrap_or_else(|| {
                         self.dispatch.this_binder(
                             self.canonical,
                             self.owner,
@@ -14653,13 +14712,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             None,
                         )
                     }),
-                    members: std::cell::RefCell::new(Vec::new()),
-                    declared: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
-                    base: contextual_this,
+                    contextual_this,
+                    rustc_hash::FxHashSet::default(),
                     infer_literal_members,
-                    forward_read: std::cell::Cell::new(false),
-                    reads: class_expression::ReceiverReadLog::default(),
-                })
+                ))
             })
         });
         if let Some(receiver) = receiver.as_ref() {
@@ -19299,19 +19355,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         self.collect_throw_points = collect;
     }
 
+    /// The parameter ordinal, key and default presence of `binding` when
+    /// it is an element a parameter destructures.
+    fn destructured_param_element(
+        &self,
+        binding: &FlowProductSubject,
+    ) -> Option<(usize, Arc<str>, bool)> {
+        self.param_names
+            .iter()
+            .enumerate()
+            .find_map(|(ordinal, param)| {
+                param
+                    .destructured
+                    .iter()
+                    .find(|element| matches!(binding, FlowProductSubject::Local(id) if *id == element.binding))
+                    .map(|element| (ordinal, Arc::clone(&element.key), element.has_default))
+            })
+    }
+
     fn seed_destructured_param_element_value(&mut self, binding: &FlowProductSubject) {
-        let Some((ordinal, key, has_default)) =
-            self.param_names
-                .iter()
-                .enumerate()
-                .find_map(|(ordinal, param)| {
-                    param
-                        .destructured
-                        .iter()
-                        .find(|element| matches!(binding, FlowProductSubject::Local(id) if *id == element.binding))
-                        .map(|element| (ordinal, Arc::clone(&element.key), element.has_default))
-                })
-        else {
+        let Some((ordinal, key, has_default)) = self.destructured_param_element(binding) else {
             return;
         };
         let projected = self
@@ -27549,34 +27612,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return NestedSignatureStep::Done(self.unmodeled_position());
         };
         let inputs = FlowProductInputs::for_bound_graph(&bound);
-        let captures = match precomputed_captures {
-            // Prepared before the body's slice content was read: the first
-            // degradation that preparation met is recorded here, where its
-            // own run would have recorded it.
-            Some(captures) => {
-                if let Some(degradation) = captures.degradation {
-                    self.record_degradation(degradation);
-                }
-                captures
-            }
-            None => self.prepare_nested_capture_inputs(
+        // Inputs read before the slice content changed no frame, and no
+        // frame changed since: they are the ones read here.
+        let Some(NestedCaptureInputs {
+            capture_inputs,
+            capture_basis,
+        }) = precomputed_captures.or_else(|| {
+            self.prepare_nested_capture_inputs(
                 &inputs,
                 planned,
                 capture_context,
                 declared_evolving_captures,
                 extended_captures,
-            ),
+                false,
+            )
+        })
+        else {
+            unreachable!("a preparation that may change a frame always completes");
         };
-        let NestedCaptureInputs {
-            capture_inputs,
-            capture_basis,
-            degradation: _,
-        } = captures;
+        let nested_inputs =
+            self.nested_flow_inputs(&capture_basis, outer_env, capture_context, contextual);
         let input_basis =
             verter_identity::identity::InputBasisId::from_canonical(&NestedFlowInputBasis {
-                parent: self.execution_selection.basis().input_basis.digest(),
+                inputs: nested_inputs.digest(),
                 parameters: &params,
-                captures: &capture_basis,
             });
         let request = super::flow_solve::FlowDemandRequest {
             query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
@@ -27668,8 +27727,46 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }))
     }
 
+    /// The inputs of a nested function value created here
+    /// ([`NestedFlowInputs`]), its captures' basis bytes `captures`.
+    fn nested_flow_inputs(
+        &self,
+        captures: &[Vec<u8>],
+        outer_env: &FlowBinderEnv,
+        capture_context: &verter_session_query::flow::slice::NestedFlowContext,
+        contextual: Option<&ContextualSignature>,
+    ) -> verter_identity::identity::InputBasisId {
+        verter_identity::identity::InputBasisId::from_canonical(&NestedFlowInputs {
+            parent: self.execution_selection.basis().input_basis.digest(),
+            captures,
+            binders: outer_env,
+            contextual,
+            receiver: self.enclosing_receiver_of(capture_context).as_deref(),
+        })
+    }
+
+    /// The enclosing receiver a nested function value created here reads
+    /// `this` through: this frame's, when the function's context binds one.
+    fn enclosing_receiver_of(
+        &self,
+        capture_context: &verter_session_query::flow::slice::NestedFlowContext,
+    ) -> Option<std::rc::Rc<class_expression::ClassReceiver>> {
+        matches!(
+            capture_context.this(),
+            Some(
+                verter_session_query::flow::slice::SliceThis::Receiver
+                    | verter_session_query::flow::slice::SliceThis::Explicit
+            )
+        )
+        .then(|| self.receiver.clone())
+        .flatten()
+    }
+
     /// The selected capture inputs of a nested function value's body, read
-    /// where the function is created, and their basis bytes.
+    /// where the function is created, and their basis bytes. With `peek`,
+    /// no frame changes: `None` when reading them would seed a captured
+    /// value, record a degradation, or lower and keep a capture's declared
+    /// authority.
     fn prepare_nested_capture_inputs(
         &mut self,
         inputs: &FlowProductInputs,
@@ -27677,7 +27774,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         capture_context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
         declared_evolving_captures: &[verter_session_query::function_program::FlowBindingIdentity],
         extended_captures: &[verter_session_query::flow::skeleton::SkeletonBindingId],
-    ) -> NestedCaptureInputs {
+        peek: bool,
+    ) -> Option<NestedCaptureInputs> {
+        let mut changes_frame = false;
         // Prepare exactly the selected input values before sealing their basis.
         // Only this transient evaluator owns execution handles; descriptors keep
         // structural source locators and never retain semantic state.
@@ -27710,8 +27809,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 if value_demanded
                     && self.products.contains_subject(&parent)
                     && self.products.reaching(&parent).is_none()
+                    && self.destructured_param_element(&parent).is_some()
                 {
-                    self.seed_destructured_param_element(&parent);
+                    if peek {
+                        changes_frame = true;
+                    } else {
+                        #[cfg(any(test, feature = "test-support"))]
+                        self.dispatch
+                            .observers
+                            .flow
+                            .nested_capture_seeds
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.seed_destructured_param_element(&parent);
+                    }
                 }
                 // A captured EVOLVING array reads its declared type, or
                 // (a `let` past its last assignment) continues from the
@@ -27784,9 +27894,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 if inferred_declared == Some(None) {
                     // The declarator never supplied its type (it was not
                     // evaluated on any path before the creation).
-                    self.record_degradation(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                        verter_session_query::flow::policy::FlowGap::ClosureCapture,
-                    ));
+                    if peek {
+                        changes_frame = true;
+                    } else {
+                        self.record_degradation(
+                            crate::semantic_query::FlowReturnDegradation::FlowGap(
+                                verter_session_query::flow::policy::FlowGap::ClosureCapture,
+                            ),
+                        );
+                    }
                 }
                 let inferred_declared = inferred_declared.flatten();
                 PreparedFlowCaptureInput {
@@ -27870,6 +27986,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .into_iter()
             })
             .collect();
+        if changes_frame {
+            return None;
+        }
         let mut unresolved: Vec<_> = (0..capture_inputs.len()).collect();
         while !unresolved.is_empty() {
             let mut missing = Vec::new();
@@ -27900,11 +28019,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .indexed_flow_source(self.canonical)
                 .and_then(|(_, demand)| demand?.flow_capture_authorities(&locators));
             let Some(authorities) = authorities else {
+                if peek {
+                    return None;
+                }
                 self.record_degradation(
                     crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
                 );
                 break;
             };
+            // An authority to lower and keep on its declaring frame, or one
+            // that cannot be read, changes a frame.
+            if peek
+                && authorities
+                    .iter()
+                    .any(|authority| !matches!(authority, Some(None)))
+            {
+                return None;
+            }
             for ((index, locator, source), authority) in missing.into_iter().zip(authorities) {
                 match authority {
                     None => self.record_degradation(
@@ -27924,19 +28055,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let capture_basis: Vec<_> = capture_inputs
             .iter()
-            .map(|input| {
-                FlowProductStore::captured_input_bytes(
-                    input.declared,
-                    input.reaching.as_ref(),
-                    input.assignment,
-                )
-            })
+            .map(PreparedFlowCaptureInput::basis_bytes)
             .collect();
-        NestedCaptureInputs {
+        Some(NestedCaptureInputs {
             capture_inputs,
             capture_basis,
-            degradation: None,
-        }
+        })
     }
 
     /// The CALLEE's own type-parameter clause at a direct-call site.
@@ -31193,9 +31317,8 @@ mod nested_input_basis_tests {
         let mut parent = CanonicalDigest::of_bytes(root);
         for level in 0..levels {
             let basis = InputBasisId::from_canonical(&NestedFlowInputBasis {
-                parent,
+                inputs: parent,
                 parameters: &[SemanticNodeId(level as u64)],
-                captures: &[],
             });
             if let Some(previous) = bases.last() {
                 ancestry = ancestry.with(InputBasisId::clone(previous));
@@ -31233,6 +31356,56 @@ mod nested_input_basis_tests {
         assert!(left != shorter);
     }
 
+    /// A nested capture's basis holds every field of the reaching product
+    /// it imports: two inputs equal but for an evolving array's elements, or
+    /// for whether a path reaches the declaration only, have different
+    /// bases, so neither reuses the other's signature.
+    #[test]
+    fn a_capture_basis_tells_every_reaching_field_apart() {
+        use super::super::flow_products::{
+            DefiniteAssignmentProduct, EvolvingElement, ReachingTypeProduct,
+        };
+        use super::{FlowProductSubject, PreparedFlowCaptureInput};
+        let input = |reaching: ReachingTypeProduct| PreparedFlowCaptureInput {
+            subject: FlowProductSubject::Local(
+                verter_session_query::flow::skeleton::SkeletonBindingId(0),
+            ),
+            value_demanded: true,
+            extended: true,
+            assignment: DefiniteAssignmentProduct::default(),
+            reaching: Some(reaching),
+            declared: None,
+            inferred_declared: None,
+            deferred_write: None,
+        };
+        let finalized = SemanticNodeId(7);
+        let element = |node| EvolvingElement {
+            node: SemanticNodeId(node),
+            widening_nullish: false,
+        };
+        let one = input(ReachingTypeProduct::evolving(
+            finalized,
+            [element(1)].into(),
+        ));
+        let two = input(ReachingTypeProduct::evolving(
+            finalized,
+            [element(1), element(2)].into(),
+        ));
+        let plain = input(ReachingTypeProduct::of(finalized));
+        let declaration_only = input(ReachingTypeProduct::of(finalized).declaration_only());
+        assert_ne!(one.basis_bytes(), two.basis_bytes());
+        assert_ne!(one.basis_bytes(), plain.basis_bytes());
+        assert_ne!(plain.basis_bytes(), declaration_only.basis_bytes());
+        assert_eq!(
+            one.basis_bytes(),
+            input(ReachingTypeProduct::evolving(
+                finalized,
+                [element(1)].into()
+            ))
+            .basis_bytes()
+        );
+    }
+
     /// An ancestry is as long as its nest and drops from a loop: 100,000
     /// levels release on a 64 KiB thread.
     #[test]
@@ -31241,9 +31414,8 @@ mod nested_input_basis_tests {
             .stack_size(64 << 10)
             .spawn(|| {
                 let basis = InputBasisId::from_canonical(&NestedFlowInputBasis {
-                    parent: CanonicalDigest::of_bytes(b"root"),
+                    inputs: CanonicalDigest::of_bytes(b"root"),
                     parameters: &[],
-                    captures: &[],
                 });
                 let ancestry = (0..100_000).fold(FlowInputAncestry::default(), |ancestry, _| {
                     ancestry.with(InputBasisId::clone(&basis))

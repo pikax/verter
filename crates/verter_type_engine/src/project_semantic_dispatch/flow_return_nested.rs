@@ -87,8 +87,9 @@ impl NestedDemand {
 /// first, each flagged once a return it depends on is found to read it
 /// again, and each function's first position on it, so a re-entry is found
 /// without scanning the stack (a scan per nested function cost the square
-/// of the nesting) — and the signatures they composed
-/// ([`NestedSignatureMemo`]).
+/// of the nesting) — the functions a recorded evaluation looked up on it,
+/// how many times a return was found circular, and the signatures the
+/// evaluations composed ([`NestedSignatureMemo`]).
 #[derive(Default)]
 pub(super) struct NestedResolution {
     stack: Vec<(
@@ -96,21 +97,28 @@ pub(super) struct NestedResolution {
         bool,
     )>,
     first: rustc_hash::FxHashMap<verter_session_query::function_program::FunctionProgramKey, usize>,
+    probes: WindowedLog<verter_session_query::function_program::FunctionProgramKey>,
+    circular_marks: u64,
+    open_recordings: usize,
     signatures: NestedSignatureMemo,
 }
 
 impl NestedResolution {
-    /// The first position of `function` on the stack.
-    fn position(
-        &self,
+    /// The first position of `function` on the stack, logged for every
+    /// recording window open: an evaluation that found it absent reads the
+    /// same only while it stays absent.
+    fn probe(
+        &mut self,
         function: &verter_session_query::function_program::FunctionProgramKey,
     ) -> Option<usize> {
+        self.probes.log(function, || function.clone());
         self.first.get(function).copied()
     }
 
     /// Flag every function from `position` up: each reads the re-entered
     /// one's return while it is being resolved.
     fn mark_circular_from(&mut self, position: usize) {
+        self.circular_marks += 1;
         for (_, circular) in self.stack[position..].iter_mut() {
             *circular = true;
         }
@@ -122,22 +130,6 @@ impl NestedResolution {
         self.stack.push((function, false));
     }
 
-    /// The functions on the stack, the outermost first.
-    fn functions(&self) -> Vec<verter_session_query::function_program::FunctionProgramKey> {
-        self.stack
-            .iter()
-            .map(|(function, _)| function.clone())
-            .collect()
-    }
-
-    /// How many functions below `position` are flagged.
-    fn circular_below(&self, position: usize) -> usize {
-        self.stack[..position.min(self.stack.len())]
-            .iter()
-            .filter(|(_, circular)| *circular)
-            .count()
-    }
-
     /// Take the innermost function off, with whether it was flagged.
     fn pop(&mut self) -> Option<bool> {
         let (function, circular) = self.stack.pop()?;
@@ -145,6 +137,70 @@ impl NestedResolution {
             self.first.remove(&function);
         }
         Some(circular)
+    }
+}
+
+/// Reads made while recording windows are open, the innermost window
+/// last. A read is logged once per window it is made in: a window that
+/// already holds it does not log it again, so an evaluation reading one
+/// name many times re-checks it once.
+pub(super) struct WindowedLog<T> {
+    reads: Vec<T>,
+    windows: Vec<(usize, rustc_hash::FxHashSet<T>)>,
+}
+
+impl<T> Default for WindowedLog<T> {
+    fn default() -> Self {
+        Self {
+            reads: Vec::new(),
+            windows: Vec::new(),
+        }
+    }
+}
+
+impl<T: Clone + Eq + std::hash::Hash> WindowedLog<T> {
+    /// Open a window; its reads are logged from the returned position.
+    pub(super) fn begin(&mut self) -> usize {
+        let start = self.reads.len();
+        self.windows.push((start, rustc_hash::FxHashSet::default()));
+        start
+    }
+
+    /// Log the read `key` names, made by `read`, when a window is open and
+    /// the innermost does not hold it.
+    pub(super) fn log<Q>(&mut self, key: &Q, read: impl FnOnce() -> T)
+    where
+        T: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        let Some((_, seen)) = self.windows.last_mut() else {
+            return;
+        };
+        if seen.contains(key) {
+            return;
+        }
+        let read = read();
+        seen.insert(read.clone());
+        self.reads.push(read);
+    }
+
+    /// Close the innermost window, opened at `start`: each distinct read
+    /// made in it, in read order. The log empties once no window is left.
+    pub(super) fn finish(&mut self, start: usize) -> Vec<T> {
+        self.windows.pop();
+        let mut seen = rustc_hash::FxHashSet::default();
+        let reads = self
+            .reads
+            .get(start..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|read| seen.insert(*read))
+            .cloned()
+            .collect();
+        if self.windows.is_empty() {
+            self.reads.clear();
+        }
+        reads
     }
 }
 
@@ -242,112 +298,47 @@ pub(super) struct NestedFinish<'d> {
     type_param_decls: Vec<crate::semantic_query::TypeParamDecl>,
     contextual: Option<ContextualSignature>,
     /// The recording that admits the composed signature to the root
-    /// evaluation's [`NestedSignatureMemo`], when its basis is reusable.
+    /// evaluation's [`NestedSignatureMemo`], when its inputs are reusable.
     recording: Option<Box<NestedSignatureRecording<'d>>>,
 }
 
-/// Everything a nested function value's signature evaluation reads from
-/// outside its body, besides the function itself and the members it reads
-/// off its enclosing receiver ([`NestedSignatureEntry::receiver_reads`]).
-/// Two evaluations of one function on equal bases evaluate its body to the
-/// same signature with the same effects, so the second reuses the first.
-///
-/// - `parent`: the enclosing evaluation's exact flow basis;
-/// - `captures`: per selected capture, its basis bytes (declared type,
-///   reaching type, definite assignment), whether it entered extended and
-///   the declared type an unannotated capture reads, which the body's own
-///   creations inherit;
-/// - `binders`: the type-parameter environment the function sits in;
-/// - `context`: the lexical context at the function's position, its `this`
-///   binding included;
-/// - `contextual`: the contextual signature it is checked under (its
-///   parameter types, receiver and the return type a fresh literal return
-///   keeps its literal under);
-/// - `receiver`: the immutable shape of the enclosing receiver the body
-///   reads `this` through, when it reads one;
-/// - `resolving`: the return-resolution stack, whose members a read from
-///   the body finds circular.
-///
-/// The function's slice content, and so its parameter and type-parameter
-/// lowering, is fixed by the function, its context and its binders within
-/// one evaluation; the parameter types its contextual signature supplies
-/// are the contextual signature's.
-#[derive(PartialEq, Eq)]
-pub(super) struct NestedSignatureBasis {
-    parent: super::super::flow_solve::FlowDemandBasis,
-    captures: Vec<(Vec<u8>, bool, Option<SemanticNodeId>)>,
-    binders: FlowBinderIdentity,
-    context: Arc<verter_session_query::flow::slice::NestedFlowContext>,
-    contextual: Option<ContextualSignature>,
-    receiver: Option<(SemanticNodeId, Option<SemanticNodeId>, bool)>,
-    resolving: Vec<verter_session_query::function_program::FunctionProgramKey>,
-}
-
-impl NestedSignatureBasis {
-    pub(super) fn new(
-        parent: super::super::flow_solve::FlowDemandBasis,
-        captures: &NestedCaptureInputs,
-        binders: FlowBinderIdentity,
-        context: Arc<verter_session_query::flow::slice::NestedFlowContext>,
-        contextual: Option<ContextualSignature>,
-        receiver: Option<&class_expression::ClassReceiver>,
-        resolving: &std::cell::RefCell<NestedResolution>,
-    ) -> Self {
-        Self {
-            parent,
-            captures: captures
-                .capture_inputs
-                .iter()
-                .zip(&captures.capture_basis)
-                .map(|(input, bytes)| (bytes.clone(), input.extended, input.inferred_declared))
-                .collect(),
-            binders,
-            context,
-            contextual,
-            receiver: receiver.map(|receiver| {
-                (
-                    receiver.binder,
-                    receiver.base,
-                    receiver.infer_literal_members,
-                )
-            }),
-            resolving: resolving.borrow().functions(),
-        }
-    }
-}
-
-/// One composed nested signature the root evaluation may reuse: its basis,
-/// the members its evaluation read off the enclosing receiver (each read
-/// again on reuse and required to find the same), the signature, and what
-/// its evaluation did to the enclosing evaluator and the enclosing build.
+/// One composed nested signature the root evaluation may reuse. It is
+/// reused by an evaluation of the same function whose inputs
+/// ([`NestedFlowInputs`]) and lexical context are equal, whose enclosing
+/// receiver still finds every member this evaluation read off it, and on
+/// whose resolution stack every function this evaluation looked up is
+/// still absent.
 struct NestedSignatureEntry {
-    basis: Box<NestedSignatureBasis>,
-    receiver_reads: Vec<(Arc<str>, class_expression::ReceiverMemberRead)>,
+    inputs: verter_identity::identity::InputBasisId,
+    context: Arc<verter_session_query::flow::slice::NestedFlowContext>,
+    receiver_reads: Vec<class_expression::ReceiverRead>,
+    probes: Vec<verter_session_query::function_program::FunctionProgramKey>,
     signature: SemanticNodeId,
-    /// The first degradation the evaluation recorded on the enclosing
-    /// evaluator, from its slice content read to its signature's composition.
-    window_degradation: Option<crate::semantic_query::FlowReturnDegradation>,
     effects: NestedSignatureEffects,
 }
 
 /// What a nested function's evaluation left on its enclosing evaluator and
 /// the builds around it, replayed when its signature is reused: its read
-/// rails ([`super::super::dispatch_txn::FlowMemberReuse`]), its walk, call
-/// evidence, heritage roots and checker diagnostics, and the constructive
-/// evidence of its value and signature.
+/// rails ([`super::super::dispatch_txn::FlowMemberReuse`]), the first
+/// degradation its signature's composition
+/// recorded on the enclosing evaluator, and its body's effects.
 struct NestedSignatureEffects {
     reuse: verter_session_query::facts::reuse::ReuseClass,
     replay: super::super::dispatch_txn::FlowMemberReuse,
+    degradation: Option<crate::semantic_query::FlowReturnDegradation>,
     body: NestedBodyEffects,
 }
 
 /// What a nested function's body evaluation left on its enclosing
-/// evaluator.
+/// evaluator: its walk, call evidence, heritage roots, checker diagnostics,
+/// the undecided relation outcomes its calls consumed, and the
+/// constructive evidence of its value and signature.
 pub(super) struct NestedBodyEffects {
     walk: ExecutedSliceWalk,
     call_evidence: Vec<FlowCallEvidence>,
     heritage_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     checker_diagnostics: Vec<crate::semantic_query::CheckerDiagnosticOccurrence>,
+    undecided_relations: u64,
     constructive_value: Option<(SemanticNodeId, ConstructiveValue)>,
     constructive_signature: bool,
 }
@@ -355,8 +346,9 @@ pub(super) struct NestedBodyEffects {
 /// The nested signatures one root evaluation composed completely, by
 /// function. Shared by every nested evaluator of the root evaluation and
 /// dropped with it: it lives no longer than the evaluation whose builds its
-/// replays fold into, and holds one entry per distinct basis the
-/// evaluation's own work met.
+/// replays fold into. Only the outermost [`NESTED_RECORDING_DEPTH`] nested
+/// evaluations around a read record it, so the memo keeps each read a
+/// bounded number of times however deep the nest.
 #[derive(Default)]
 pub(super) struct NestedSignatureMemo {
     by_function: rustc_hash::FxHashMap<
@@ -365,19 +357,25 @@ pub(super) struct NestedSignatureMemo {
     >,
 }
 
+/// How many nested evaluations' recordings may be open around one another.
+const NESTED_RECORDING_DEPTH: usize = 4;
+
 /// A nested function's evaluation being recorded for the memo, from its
-/// body's evaluator's construction to its signature's composition.
+/// slice content's read to its signature's composition.
 pub(super) struct NestedSignatureRecording<'d> {
     function: verter_session_query::function_program::FunctionProgramKey,
-    basis: Box<NestedSignatureBasis>,
+    inputs: verter_identity::identity::InputBasisId,
+    context: Arc<verter_session_query::flow::slice::NestedFlowContext>,
     reads: super::super::build::TransactionReadRecording<'d>,
     /// The enclosing receiver the body reads `this` through, and where
     /// its read log stood when the recording began.
     receiver: Option<(std::rc::Rc<class_expression::ClassReceiver>, usize)>,
-    /// The function's position on the resolution stack, and how many
-    /// functions below it were flagged circular when the recording began.
-    resolving_position: usize,
-    circular_below: usize,
+    /// Where the resolution stack's lookup log stood, and how many returns
+    /// had been found circular, when the recording began.
+    probes_start: usize,
+    circular_marks: u64,
+    /// The call resolutions' undecided relation count when it began.
+    undecided_relations: u64,
     /// The enclosing evaluator's degradation when the recording began,
     /// given back, first-recorded first, when it ends.
     degradation_before: Option<crate::semantic_query::FlowReturnDegradation>,
@@ -400,6 +398,19 @@ thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn nested_body_evaluations_for_tests() -> usize {
     NESTED_BODY_EVALUATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// How many nested signatures this thread reused; test-only.
+    static NESTED_SIGNATURE_REUSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many nested signatures this thread reused from the memo so far
+/// (test-only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn nested_signature_reuses_for_tests() -> usize {
+    NESTED_SIGNATURE_REUSES.with(std::cell::Cell::get)
 }
 
 /// The locals of a nested function's signature evaluation its body's
@@ -641,68 +652,73 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 verter_session_query::flow::slice::FlowSliceSelection::from_slice_ir(&lowered),
             ))
         };
-        // A class expression member (or an arrow it creates) runs against
-        // the receiver the class binds.
-        let enclosing_receiver = matches!(
-            context.this(),
-            Some(
-                verter_session_query::flow::slice::SliceThis::Receiver
-                    | verter_session_query::flow::slice::SliceThis::Explicit
-            )
-        )
-        .then(|| self.receiver.clone())
-        .flatten();
-        // A body evaluated from its slice, not re-entered while its return
-        // resolves, and outside a contextual window (where a read may stop
-        // the run instead of completing) is reused on an equal basis: its
-        // capture inputs are read here, before its slice content.
-        let mut precomputed_captures = None;
+        // A body evaluated from its slice, outside a contextual window (where
+        // a read may stop the run instead of completing), and not re-entered
+        // while its return resolves is reused on equal inputs: they are read
+        // here, before its slice content, without changing any frame — a
+        // capture whose reading would change one keeps the function from the
+        // memo and is read in its place below.
         let mut recording = None;
-        if let Some((planned, _)) = planned_and_selection.as_ref().filter(|_| {
-            self.resolving_functions
-                .borrow()
-                .position(function)
-                .is_none()
-                && !self.dispatch.contextual_window_open()
-        }) {
-            let captures = self.set_aside_capture_inputs(
+        let mut precomputed_captures = None;
+        if let Some((planned, _)) = planned_and_selection
+            .as_ref()
+            .filter(|_| !self.dispatch.contextual_window_open())
+        {
+            let captures = self.prepare_nested_capture_inputs(
                 &FlowProductInputs::for_bound_graph(&bound),
                 planned,
                 context,
                 declared_evolving_captures,
                 extended_captures,
+                true,
             );
-            let basis = Box::new(NestedSignatureBasis::new(
-                self.execution_selection.basis().clone(),
-                &captures,
-                outer_env.identity(),
-                Arc::clone(context),
-                contextual.clone(),
-                enclosing_receiver.as_deref(),
-                &self.resolving_functions,
-            ));
-            if let Some(reused) =
-                self.reuse_nested_signature(function, &basis, enclosing_receiver.as_deref())
-            {
-                if reused.constructive {
-                    self.constructive_signatures
-                        .insert(function.clone(), reused.signature);
+            let inputs = captures.as_ref().map(|captures| {
+                self.nested_flow_inputs(
+                    &captures.capture_basis,
+                    outer_env,
+                    context,
+                    contextual.as_ref(),
+                )
+            });
+            let reentered = self
+                .resolving_functions
+                .borrow_mut()
+                .probe(function)
+                .is_some();
+            if let Some(inputs) = inputs.filter(|_| !reentered) {
+                if let Some(reused) = self.reuse_nested_signature(function, &inputs, context) {
+                    if reused.constructive {
+                        self.constructive_signatures
+                            .insert(function.clone(), reused.signature);
+                    }
+                    return NestedPrepared::Value(reused.signature);
                 }
-                return NestedPrepared::Value(reused.signature);
+                recording = self.begin_nested_signature_recording(function, inputs, context);
             }
-            recording =
-                self.begin_nested_signature_recording(function, basis, enclosing_receiver.clone());
-            precomputed_captures = Some(captures);
+            precomputed_captures = captures;
         }
-        let content = site.source_demand.flow_slice_content_with_context(
-            matched,
-            planned_and_selection
-                .as_ref()
-                .map(|(_, selection)| selection.clone()),
-            &bound,
-            Some(Arc::clone(context)),
-            self.policy(),
-        );
+        #[cfg(any(test, feature = "test-support"))]
+        let content_withheld = self
+            .dispatch
+            .observers
+            .flow
+            .fail_nested_slice_content
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(any(test, feature = "test-support")))]
+        let content_withheld = false;
+        let content = (!content_withheld)
+            .then(|| {
+                site.source_demand.flow_slice_content_with_context(
+                    matched,
+                    planned_and_selection
+                        .as_ref()
+                        .map(|(_, selection)| selection.clone()),
+                    &bound,
+                    Some(Arc::clone(context)),
+                    self.policy(),
+                )
+            })
+            .flatten();
         let planned = planned_and_selection.map(|(planned, _)| planned);
         let Some(content) = content else {
             self.end_nested_signature_recording(recording);
@@ -721,7 +737,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // circular return: every return from the re-entered one inward is
         // `any` (`getReturnTypeOfSignature` when `popTypeResolution`
         // fails). A declared return is never resolved from the body.
-        let reentered = self.resolving_functions.borrow().position(function);
+        let reentered = self.resolving_functions.borrow_mut().probe(function);
         if let Some(position) = reentered {
             self.resolving_functions
                 .borrow_mut()
@@ -775,6 +791,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             bound,
             skeleton,
         } = parts;
+        let enclosing_receiver = self.enclosing_receiver_of(context);
         #[cfg(any(test, feature = "test-support"))]
         NESTED_BODY_EVALUATIONS.with(|evaluations| evaluations.set(evaluations.get() + 1));
         let enclosing_frames = self.enclosing_frames.with(
@@ -928,7 +945,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // completed with nothing held, degraded or aborted, and the effects
         // its evaluation left on this evaluator.
         let mut body_complete = false;
-        let mut recorded_effects = None;
+        let mut recorded_effects: Option<NestedBodyEffects> = None;
         let mut constructive_value = None;
         let signature = {
             let graph = self.dispatch.graph();
@@ -1083,12 +1100,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         && !nested_evaluator.executed_walk.aborted
                         && !nested_evaluator.executed_walk.local_aborted
                         && crate::request_context::current_execution_abort().is_none();
-                    recorded_effects = Some((
-                        nested_evaluator.executed_walk,
-                        nested_evaluator.call_evidence.clone(),
-                        nested_evaluator.heritage_self_roots.clone(),
-                        nested_evaluator.checker_diagnostics.clone(),
-                    ));
+                    recorded_effects = Some(NestedBodyEffects {
+                        walk: nested_evaluator.executed_walk,
+                        call_evidence: nested_evaluator.call_evidence.clone(),
+                        heritage_self_roots: nested_evaluator.heritage_self_roots.clone(),
+                        checker_diagnostics: nested_evaluator.checker_diagnostics.clone(),
+                        undecided_relations: 0,
+                        constructive_value: constructive_value.take(),
+                        constructive_signature: false,
+                    });
                 }
                 self.holds.append(&mut nested_evaluator.holds);
                 // A call the NESTED body evaluated is still an evaluated call
@@ -1229,22 +1249,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         drop(nested_evaluator);
         let value = self.nested_function_postlude(circular, declared_return_none, signature);
         if let Some(recording) = recording {
-            let effects = recorded_effects.map(
-                |(walk, call_evidence, heritage_self_roots, checker_diagnostics)| {
-                    NestedBodyEffects {
-                        walk,
-                        call_evidence,
-                        heritage_self_roots,
-                        checker_diagnostics,
-                        constructive_value,
-                        constructive_signature,
-                    }
-                },
-            );
             self.admit_nested_signature(
                 *recording,
                 (body_complete && value == signature).then_some(signature),
-                effects,
+                recorded_effects.map(|effects| NestedBodyEffects {
+                    constructive_signature,
+                    ..effects
+                }),
             );
         }
         if constructive_signature && value == signature {
@@ -1271,99 +1282,136 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// The signature the root evaluation composed for `function` on
-    /// `basis`, when every member its evaluation read off the enclosing
-    /// receiver reads the same off `receiver` now: its effects replayed on
-    /// this evaluator and the builds around it, exactly as evaluating the
-    /// body again would leave them.
+    /// `inputs` in `context`, when every member its evaluation read off the
+    /// enclosing receiver reads the same now and every function it looked
+    /// up on the resolution stack is still absent from it: its effects
+    /// replayed on this evaluator and the builds around it, exactly as
+    /// evaluating the body again would leave them.
     pub(super) fn reuse_nested_signature(
         &mut self,
         function: &verter_session_query::function_program::FunctionProgramKey,
-        basis: &NestedSignatureBasis,
-        receiver: Option<&class_expression::ClassReceiver>,
+        inputs: &verter_identity::identity::InputBasisId,
+        context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
     ) -> Option<ReusedNestedSignature> {
+        let receiver = self.enclosing_receiver_of(context);
         let resolution = std::rc::Rc::clone(&self.resolving_functions);
-        let resolution = resolution.borrow();
+        let mut resolution = resolution.borrow_mut();
         let entry = resolution
             .signatures
             .by_function
             .get(function)?
             .iter()
             .find(|entry| {
-                *entry.basis == *basis
-                    && entry.receiver_reads.iter().all(|(name, read)| {
-                        receiver.is_some_and(|receiver| {
-                            self.receiver_member_read(receiver, name) == *read
+                entry.inputs == *inputs
+                    && (Arc::ptr_eq(&entry.context, context) || entry.context == *context)
+                    && entry.receiver_reads.iter().all(|read| {
+                        receiver.as_deref().is_some_and(|receiver| {
+                            self.receiver_member_read(receiver, &read.name) == read.read
                         })
                     })
+                    && entry
+                        .probes
+                        .iter()
+                        .all(|probe| !resolution.first.contains_key(probe))
             })?;
-        // The reads the reuse stands on are reads of the evaluation around
-        // it too: a recording around this one keeps them.
-        if let Some(receiver) = receiver {
-            for (name, read) in &entry.receiver_reads {
-                receiver.reads.log(name, *read);
+        let receiver_reads = entry.receiver_reads.clone();
+        let probes = entry.probes.clone();
+        let signature = entry.signature;
+        let NestedSignatureEffects {
+            reuse,
+            replay,
+            degradation,
+            body,
+        } = &entry.effects;
+        let (reuse, replay, degradation) = (*reuse, replay.clone(), *degradation);
+        let body = NestedBodyEffects {
+            walk: body.walk,
+            call_evidence: body.call_evidence.clone(),
+            heritage_self_roots: body.heritage_self_roots.clone(),
+            checker_diagnostics: body.checker_diagnostics.clone(),
+            undecided_relations: body.undecided_relations,
+            constructive_value: body.constructive_value.clone(),
+            constructive_signature: body.constructive_signature,
+        };
+        // What the reuse stands on is read by the evaluation around it too:
+        // a recording around this one keeps it.
+        for probe in &probes {
+            resolution.probes.log(probe, || probe.clone());
+        }
+        drop(resolution);
+        if let Some(receiver) = receiver.as_deref() {
+            for read in &receiver_reads {
+                receiver.reads.log(&read.name, read.read);
             }
         }
-        if let Some(degradation) = entry.window_degradation {
+        if let Some(degradation) = degradation {
             self.record_degradation(degradation);
         }
-        let effects = &entry.effects;
+        self.dispatch.replay_transaction_read(&reuse, &replay);
         self.dispatch
-            .replay_transaction_read(&effects.reuse, &effects.replay);
-        let body = &effects.body;
+            .restore_call_relation_observations(body.undecided_relations);
         self.call_evidence
             .extend(body.call_evidence.iter().copied());
         self.executed_walk.absorb(body.walk);
-        for root in &body.heritage_self_roots {
-            if !self.heritage_self_roots.contains(root) {
-                self.heritage_self_roots.push(root.clone());
+        for root in body.heritage_self_roots {
+            if !self.heritage_self_roots.contains(&root) {
+                self.heritage_self_roots.push(root);
             }
         }
-        for diagnostic in &body.checker_diagnostics {
-            self.record_checker_diagnostic(diagnostic.clone());
+        for diagnostic in body.checker_diagnostics {
+            self.record_checker_diagnostic(diagnostic);
         }
-        if let Some((node, proof)) = &body.constructive_value {
-            self.constructive_values.insert(*node, proof.clone());
+        if let Some((node, proof)) = body.constructive_value {
+            self.constructive_values.insert(node, proof);
         }
+        #[cfg(any(test, feature = "test-support"))]
+        NESTED_SIGNATURE_REUSES.with(|reuses| reuses.set(reuses.get() + 1));
         Some(ReusedNestedSignature {
-            signature: entry.signature,
+            signature,
             constructive: body.constructive_signature,
         })
     }
 
-    /// Begin recording the evaluation of `function` on `basis`, whose body
-    /// reads `this` through `receiver`. `None` when the read could not be
-    /// replayed (see [`super::super::ProjectSemanticDispatch::begin_transaction_read`]).
+    /// Begin recording the evaluation of `function` on `inputs` in
+    /// `context`. `None` when the read could not be replayed (see
+    /// [`super::super::ProjectSemanticDispatch::begin_transaction_read`]).
     fn begin_nested_signature_recording(
         &mut self,
         function: &verter_session_query::function_program::FunctionProgramKey,
-        basis: Box<NestedSignatureBasis>,
-        receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
+        inputs: verter_identity::identity::InputBasisId,
+        context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
     ) -> Option<Box<NestedSignatureRecording<'d>>> {
         let dispatch: &'d FlowCx<'d, D> = self.dispatch;
+        // Every fact a body reads reaches each recording open around it, so
+        // only the outermost few nested evaluations around a read record it:
+        // a nest of any depth keeps each read a bounded number of times.
+        if self.resolving_functions.borrow().open_recordings >= NESTED_RECORDING_DEPTH {
+            return None;
+        }
         let reads = dispatch.begin_transaction_read()?;
-        // The function enters the resolution stack at its top.
-        let resolving_position = basis.resolving.len();
-        let circular_below = self
-            .resolving_functions
-            .borrow()
-            .circular_below(resolving_position);
-        let receiver = receiver.map(|receiver| {
+        let receiver = self.enclosing_receiver_of(context).map(|receiver| {
             let start = receiver.reads.begin();
             (receiver, start)
         });
+        let (probes_start, circular_marks) = {
+            let mut resolution = self.resolving_functions.borrow_mut();
+            resolution.open_recordings += 1;
+            (resolution.probes.begin(), resolution.circular_marks)
+        };
         Some(Box::new(NestedSignatureRecording {
             function: function.clone(),
-            basis,
+            inputs,
+            context: Arc::clone(context),
             reads,
             receiver,
-            resolving_position,
-            circular_below,
+            probes_start,
+            circular_marks,
+            undecided_relations: dispatch.call_undecided_relations(),
             degradation_before: self.degradation.take(),
         }))
     }
 
-    /// End `recording` (when one began) without keeping a signature: the
-    /// evaluation it recorded did not reach a body.
+    /// End `recording` (when one began) without keeping a signature.
     fn end_nested_signature_recording(
         &mut self,
         recording: Option<Box<NestedSignatureRecording<'d>>>,
@@ -1371,30 +1419,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(recording) = recording {
             self.admit_nested_signature(*recording, None, None);
         }
-    }
-
-    /// The selected capture inputs of a nested function value, prepared
-    /// ahead of its signature evaluation: the first degradation the
-    /// preparation meets is set aside, to be recorded where the evaluation
-    /// itself would have prepared them.
-    fn set_aside_capture_inputs(
-        &mut self,
-        inputs: &FlowProductInputs,
-        planned: &crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
-        capture_context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
-        declared_evolving_captures: &[verter_session_query::function_program::FlowBindingIdentity],
-        extended_captures: &[SkeletonBindingId],
-    ) -> NestedCaptureInputs {
-        let before = self.degradation.take();
-        let mut captures = self.prepare_nested_capture_inputs(
-            inputs,
-            planned,
-            capture_context,
-            declared_evolving_captures,
-            extended_captures,
-        );
-        captures.degradation = std::mem::replace(&mut self.degradation, before);
-        captures
     }
 
     /// A nested function value whose slice could not be read: the
@@ -1406,8 +1430,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     /// End `recording` and keep its `signature` for reuse when the body
     /// completed (`signature` is `Some`), read no member of the enclosing
-    /// receiver ahead of its evaluation, flagged no function below it on
-    /// the resolution stack circular, and its reads are replayable.
+    /// receiver ahead of its evaluation, found no return circular, gave back
+    /// no undecided relation outcome it did not consume, and its reads are
+    /// replayable.
     fn admit_nested_signature(
         &mut self,
         recording: NestedSignatureRecording<'d>,
@@ -1416,28 +1441,41 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) {
         let NestedSignatureRecording {
             function,
-            basis,
+            inputs,
+            context,
             reads,
             receiver,
-            resolving_position,
-            circular_below,
+            probes_start,
+            circular_marks,
+            undecided_relations,
             degradation_before,
         } = recording;
-        let window_degradation = self.degradation.take();
-        self.degradation = degradation_before.or(window_degradation);
+        let degradation = self.degradation.take();
+        self.degradation = degradation_before.or(degradation);
         let receiver_reads = receiver
             .map(|(receiver, start)| receiver.reads.finish(start))
             .unwrap_or_default();
+        let (probes, marks_now) = {
+            let mut resolution = self.resolving_functions.borrow_mut();
+            resolution.open_recordings -= 1;
+            (
+                resolution.probes.finish(probes_start),
+                resolution.circular_marks,
+            )
+        };
+        let undecided_now = self.dispatch.call_undecided_relations();
+        let body = body
+            .filter(|_| undecided_now >= undecided_relations)
+            .map(|body| NestedBodyEffects {
+                undecided_relations: undecided_now - undecided_relations,
+                ..body
+            });
         let admissible = signature.is_some()
             && body.is_some()
+            && marks_now == circular_marks
             && receiver_reads
                 .iter()
-                .all(|(_, read)| *read != class_expression::ReceiverMemberRead::Forward)
-            && self
-                .resolving_functions
-                .borrow()
-                .circular_below(resolving_position)
-                == circular_below;
+                .all(|read| read.read != class_expression::ReceiverMemberRead::Forward);
         let replay = self.dispatch.finish_transaction_read(reads, admissible);
         let (Some(signature), Some(body), Some((reuse, replay)), true) =
             (signature, body, replay, admissible)
@@ -1451,13 +1489,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .entry(function)
             .or_default()
             .push(NestedSignatureEntry {
-                basis,
+                inputs,
+                context,
                 receiver_reads,
+                probes,
                 signature,
-                window_degradation,
                 effects: NestedSignatureEffects {
                     reuse,
                     replay,
+                    degradation,
                     body,
                 },
             });

@@ -142,3 +142,120 @@ fn an_edit_to_a_method_body_or_the_contextual_this_changes_the_answer() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Body evaluations and the outcome of `probe` over `source` on a fresh
+/// host `arm` configured.
+fn evaluations_on(
+    source: &str,
+    probe: &str,
+    arm: impl FnOnce(&crate::VerterHost),
+) -> (usize, std::sync::Arc<crate::VerterHost>, Option<String>) {
+    let host = default_probe_host();
+    arm(&host);
+    let before = super::flow_return::nested_body_evaluations_for_tests();
+    let rendered = super::checker_probe_lane_tests::with_probe_outcome_on_host(
+        &host,
+        ProbeProject::default(),
+        source,
+        probe,
+        |dispatch, outcome| {
+            outcome.into_usable_node().map(|node| {
+                crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                    dispatch, node, 0,
+                )
+            })
+        },
+    );
+    (
+        super::flow_return::nested_body_evaluations_for_tests() - before,
+        host,
+        rendered,
+    )
+}
+
+/// A loop's second pass reuses the signature of the callback its first pass
+/// evaluated, and its call's evidence keeps the relation outcomes the
+/// callback's calls consumed: every call here consumed an undecided one, so
+/// no recorded call claims its relations decided, the reused pass's
+/// included.
+#[test]
+fn a_reused_body_keeps_the_undecided_relations_its_calls_consumed() {
+    use std::sync::atomic::Ordering;
+    let source = "declare function inner(x: number): number;\n\
+                  declare function g<T>(cb: () => T): T;\n\
+                  export function lp(n: number) { let r = 0; for (let i = 0; i < n; i++) { r = g(() => inner(1)); } return r; }\n";
+    let reuses = super::flow_return::nested_signature_reuses_for_tests();
+    let (_, host, rendered) = evaluations_on(source, "ReturnType<typeof lp>", |host| {
+        let knobs = &host.flow_fault_injection;
+        knobs.observe_call_evidence.store(true, Ordering::Relaxed);
+        knobs
+            .undecided_nested_call_relations
+            .store(true, Ordering::Relaxed);
+    });
+    assert_eq!(rendered.as_deref(), Some("number"));
+    assert!(
+        super::flow_return::nested_signature_reuses_for_tests() > reuses,
+        "the loop's second pass reuses the callback"
+    );
+    let evidence = host
+        .flow_fault_injection
+        .call_evidence
+        .lock()
+        .unwrap()
+        .clone();
+    assert!(!evidence.is_empty());
+    assert!(
+        evidence.iter().all(|decided| !decided),
+        "no call claims decided relations: {evidence:?}"
+    );
+}
+
+/// A capture whose reading degrades the frame (a `let` read before its
+/// declarator ran) keeps its function out of the memo, so every pass of
+/// the loop reads the capture and records the degradation where it reads
+/// it; the same loop reading a variable declared before it reuses the
+/// callback from its second pass.
+#[test]
+fn a_degrading_capture_is_read_by_every_preparation() {
+    let reused = |source: &str| {
+        let before = super::flow_return::nested_signature_reuses_for_tests();
+        let (_, _, rendered) = evaluations_on(source, "ReturnType<typeof dg>", |_| {});
+        assert_eq!(rendered.as_deref(), Some("number"), "{source}");
+        super::flow_return::nested_signature_reuses_for_tests() - before
+    };
+    assert_eq!(
+        reused(
+            "declare function g<T>(cb: () => T): T;\n\
+             export function dg(n: number) { let r = 0; for (let i = 0; i < n; i++) { r = g(() => z); } let z = 1; return r; }\n"
+        ),
+        0
+    );
+    assert!(
+        reused(
+            "declare function g<T>(cb: () => T): T;\n\
+             export function dg(n: number) { let z = 1; let r = 0; for (let i = 0; i < n; i++) { r = g(() => z); } return r; }\n"
+        ) > 0
+    );
+}
+
+/// A nested function value whose slice content cannot be read returns
+/// before its captures are read: the destructured parameter element it
+/// captures is not seeded on the frame creating it. Read normally, the
+/// capture seeds it.
+#[test]
+fn a_preparation_that_returns_early_leaves_its_frame_unchanged() {
+    use std::sync::atomic::Ordering;
+    let source = "export function sd({ a }: { a: number }) { return () => a; }\n";
+    let seeds = |withheld: bool| {
+        let (_, host, _) = evaluations_on(source, "ReturnType<typeof sd>", |host| {
+            host.flow_fault_injection
+                .fail_nested_slice_content
+                .store(withheld, Ordering::Relaxed);
+        });
+        host.flow_fault_injection
+            .nested_capture_seeds
+            .load(Ordering::Relaxed)
+    };
+    assert_eq!(seeds(true), 0);
+    assert!(seeds(false) > 0);
+}
