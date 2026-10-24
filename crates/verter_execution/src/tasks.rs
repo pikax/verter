@@ -879,10 +879,8 @@ mod composition_tests {
         let refused = AtomicUsize::new(0);
         std::thread::scope(|scope| {
             let reader = scope.spawn(|| {
-                drop(waiter.wait_for(&producer).unwrap());
-                accepted.fetch_add(1, Ordering::Relaxed);
                 start.wait();
-                while !done.load(Ordering::Acquire) {
+                loop {
                     match waiter.wait_for(&producer) {
                         Ok(edge) => {
                             accepted.fetch_add(1, Ordering::Relaxed);
@@ -891,6 +889,9 @@ mod composition_tests {
                         Err(_) => {
                             refused.fetch_add(1, Ordering::Relaxed);
                         }
+                    }
+                    if done.load(Ordering::Acquire) {
+                        break;
                     }
                 }
             });
