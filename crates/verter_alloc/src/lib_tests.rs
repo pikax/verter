@@ -180,24 +180,50 @@ mod mimalloc_build {
         assert_eq!(declared, checked);
     }
 
+    /// mimalloc's built-in purge delay, from the vendored `options.c`.
+    fn built_in_purge_delay_ms() -> i64 {
+        let options = vendored("c_src/mimalloc3/src/options.c");
+        let row = options
+            .lines()
+            .find(|line| line.contains("MI_OPTION_LEGACY(purge_delay,"))
+            .expect("options.c declares purge_delay");
+        row.trim()
+            .trim_start_matches('{')
+            .split(',')
+            .next()
+            .and_then(|value| value.trim().parse().ok())
+            .expect("the purge_delay row starts with its default")
+    }
+
     #[test]
     fn configure_sets_the_purge_delay_unless_the_environment_did() {
         // mimalloc read its environment when it initialised, before this test
-        // ran, and an option it read from there stays in force. Compare what
-        // it reports before and after, rather than re-parsing the variables.
-        let from_environment = ["MIMALLOC_PURGE_DELAY", "MIMALLOC_RESET_DELAY"]
-            .iter()
-            .any(|name| std::env::var_os(name).is_some());
-        let before = purge_delay_ms();
+        // ran. What decides the outcome is mimalloc's own state, read back
+        // before and after, not whether a variable is present: mimalloc
+        // ignores a value it cannot parse, matches names case-insensitively on
+        // Unix, and also reads the legacy name.
+        let built_in = built_in_purge_delay_ms();
+        let before = purge_delay_ms().expect("mimalloc is linked");
         configure();
-        let after = purge_delay_ms();
-        if from_environment {
+        let after = purge_delay_ms().expect("mimalloc is linked");
+        if before != built_in {
+            // Only the environment moves the value off its default before
+            // `configure`, and that value stays in force.
             assert_eq!(
                 after, before,
                 "an environment purge delay must stay in force"
             );
-        } else {
-            assert_eq!(after, Some(i64::from(PURGE_DELAY_MS)));
+        } else if after != i64::from(PURGE_DELAY_MS) {
+            // The one way to keep the built-in value: the environment set it
+            // explicitly, under either name, in any case.
+            let named_in_environment = std::env::vars_os().any(|(key, _)| {
+                let key = key.to_string_lossy().to_ascii_uppercase();
+                key == "MIMALLOC_PURGE_DELAY" || key == "MIMALLOC_RESET_DELAY"
+            });
+            assert!(
+                named_in_environment && after == built_in,
+                "configure left the purge delay at {after}, not {PURGE_DELAY_MS}"
+            );
         }
     }
 

@@ -11,8 +11,9 @@
 # - The v2 tree is not vendored, so `build.rs` refuses a build without `v3`.
 # - `build.rs` builds the release configuration in every Cargo profile, on
 #   both paths: the MSVC path defines `MI_DEBUG=0`, and the cmake path pins
-#   the Release build type with `MI_DEBUG=OFF`. The published crate turns
-#   assertion checking (MSVC) or error printing (cmake) on for dev builds.
+#   the Release build type with `MI_DEBUG=OFF` and `MI_NO_DEBUG=ON` (NDEBUG
+#   for every generator). The published crate turns assertion checking (MSVC)
+#   or error printing (cmake) on for dev builds.
 # - The option constants in `src/extended.rs` are generated from the v3
 #   `mi_option_e` enum; the published ones follow the v2 numbering, which
 #   diverges from v3. `verter_alloc`'s tests compare each against the header.

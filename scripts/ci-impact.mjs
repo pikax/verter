@@ -177,6 +177,9 @@ const STP1 = readStp1Inventory(REPO_ROOT);
 export const PATH_FILTERS = Object.freeze({
   rust: [
     "crates/**",
+    // Rust source outside the workspace that a workspace crate compiles (see
+    // OUT_OF_WORKSPACE_SOURCES): the Rust tests build it.
+    "vendor/libmimalloc-sys2/**",
     // Read by Rust tests (`verter_source_policy_gate` validates the schemas;
     // the style-IR corpora are read and `include_str!`-ed), so this lane owns
     // them; nothing else does.
@@ -548,12 +551,6 @@ export const PATH_FILTERS = Object.freeze({
   // playground manifests and the lockfile; STS0 joins the Svelte profile lock
   // to the conformance harness's evidence and fixtures and typechecks against
   // @verter/svelte-jsx; STP1 requires every fixture its inventory selects.
-  // The vendored sys crate behind the native global allocator
-  // (crates/verter_alloc). It sits outside the workspace, so the crate half
-  // never maps it; every lane that builds or links a native entry point
-  // (Rust tests, the N-API addon, the LSP binaries, the editor build) names
-  // this filter in its gate.
-  native_allocator: ["vendor/libmimalloc-sys2/**"],
   sfc_projection: [
     "tests/sfc-projection/**",
     "scripts/sfc-projection/**",
@@ -653,6 +650,27 @@ export function matchPathFilters(changedFiles, filters = COMPILED_PATH_FILTERS) 
 }
 
 /**
+ * Source trees outside the workspace that a workspace crate compiles, by path
+ * prefix, mapped to that crate. The crate half classifies a change under one
+ * as a change to the crate, so every lane downstream of it follows. A mapped
+ * crate missing from the metadata maps nothing, so the file falls back to
+ * running every lane; ci-impact.test.mjs checks every mapped crate exists.
+ */
+export const OUT_OF_WORKSPACE_SOURCES = Object.freeze({
+  // The vendored sys crate behind the native global allocator, patched in
+  // from the workspace manifest and compiled into verter_alloc.
+  "vendor/libmimalloc-sys2": "verter_alloc",
+});
+
+/** The workspace crate that compiles `file` from outside the workspace, if any. */
+function outOfWorkspaceOwner(index, file) {
+  for (const [prefix, crate] of Object.entries(OUT_OF_WORKSPACE_SOURCES)) {
+    if (file === prefix || file.startsWith(`${prefix}/`)) return index.byName.get(crate) ?? null;
+  }
+  return null;
+}
+
+/**
  * The crates each impact lane is built from. A lane is impacted when a
  * changed crate is one of these or anything they transitively depend on.
  * Every name must be a workspace member; `classifyCiImpact` refuses otherwise.
@@ -704,7 +722,7 @@ export const LANE_ROOTS = Object.freeze({
  * `filters` is a pure pass-through of its filters.
  */
 export const LANE_GATES = Object.freeze({
-  rust: { filters: ["rust", "native_allocator"] },
+  rust: { filters: ["rust"] },
   proto: { filters: ["proto"] },
   // js-build-test: the JavaScript workspace and the scripts' self-tests.
   js: { filters: ["js", "scripts"] },
@@ -714,7 +732,7 @@ export const LANE_GATES = Object.freeze({
   jetbrains: { filters: ["jetbrains"] },
   // Subsystem gates.
   wasm: { filters: ["wasm"], impact: ["wasm"] },
-  native: { filters: ["js", "native_allocator"], impact: ["native"] },
+  native: { filters: ["js"], impact: ["native"] },
   playground: { filters: ["playground"], impact: ["playground"] },
   // Transport equivalence compares the two artifacts, so either subsystem
   // moving demands BOTH artifacts (see the artifact gates below).
@@ -722,10 +740,10 @@ export const LANE_GATES = Object.freeze({
   // Artifact gates: a producer runs whenever any consumer of it runs.
   native_artifact: { gates: ["native", "playground", "transport"] },
   wasm_artifact: { gates: ["wasm", "playground", "transport"] },
-  vscode: { filters: ["vscode", "native_allocator"], impact: ["lsp"] },
-  dx: { filters: ["dx", "native_allocator"], impact: ["lsp"] },
-  editor_lsp: { filters: ["editor_lsp", "native_allocator"], impact: ["lsp"] },
-  editors: { filters: ["editors", "native_allocator"], impact: ["editors"] },
+  vscode: { filters: ["vscode"], impact: ["lsp"] },
+  dx: { filters: ["dx"], impact: ["lsp"] },
+  editor_lsp: { filters: ["editor_lsp"], impact: ["lsp"] },
+  editors: { filters: ["editors"], impact: ["editors"] },
   providers: { filters: ["providers"], impact: ["providers"] },
   compiler_contracts: { filters: ["compiler_contracts"], impact: ["compiler_contracts"] },
   bf2: { filters: ["bf2"], impact: ["bf2"] },
@@ -938,7 +956,7 @@ export function classifyCiImpact(changedFiles, metadata, laneRoots = LANE_ROOTS,
       if (hatch.everything) everything = true;
       continue;
     }
-    const crate = mapPathToCrate(index, file);
+    const crate = mapPathToCrate(index, file) ?? outOfWorkspaceOwner(index, file);
     if (crate) {
       directCrates.add(crate.name);
       continue;
