@@ -91,73 +91,62 @@ impl OverlayArtifactIdentity {
     }
 
     /// The bytes `view` holds for the raw owner, their content hash, the
-    /// language they are read under and their exact parse identity — every
-    /// value from one read of one authority, so the key that reads an
-    /// artifact and the bytes and key that publish it agree. `None` when the
-    /// view holds no content for the raw owner (a declined or tombstoned
-    /// canonical, or an id the view does not hash).
+    /// language they are read under and their exact parse identity: the
+    /// values the key that reads an artifact is built from, and the bytes
+    /// and identity a materialisation publishes. `None` exactly where the
+    /// view holds no source or no content hash for the raw owner.
     ///
-    /// - An overlay's bytes are fixed for the view's lifetime; the view
-    ///   derives their identity once (a carrier's under its registered
-    ///   grammar).
-    /// - A canonical the view does not overlay, whose content in the view is
-    ///   the host's current base revision, comes from that ONE source
-    ///   snapshot: its own identity when the raw owner is its own analysis
-    ///   canonical; for a runtime script analysed through its declaration
-    ///   companion, the script's bytes read under the companion's language,
-    ///   an identity the snapshot derives once for its own bytes.
-    /// - Bytes the view serves that are not the host's (a view holding
-    ///   content of its own without declaring an overlay) are keyed from
-    ///   those bytes, provided they are the bytes the view's content hash
-    ///   names. No production view does this, so the derivation is not
-    ///   cached.
+    /// The bytes and the hash are the view's own (`source`,
+    /// `content_hash_for`), read as every reader reads them. Their identity:
+    ///
+    /// - An overlay's comes from the view, derived once per view (a
+    ///   carrier's under its registered grammar).
+    /// - When the view's bytes are the host's current source snapshot of the
+    ///   raw owner — the snapshot's own allocation, under the snapshot's
+    ///   hash — the snapshot's identity, with no pass over the bytes: its own
+    ///   when the raw owner is its analysis canonical, else the bytes read
+    ///   under the analysis canonical's language, which the snapshot derives
+    ///   once per revision for that language.
+    /// - Otherwise (a view serving bytes of its own, a host snapshot that
+    ///   moved on between the two reads, or one without host data) the
+    ///   view's bytes are derived under the analysis canonical's language.
     pub(crate) fn view_content(
         &self,
         host: &VerterHost,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<ViewContent> {
         let raw = self.raw_overlay_owner.as_str();
-        if let Some(overlay_hash) = view.overlay_content_hash_for(raw) {
-            let source = view.source(raw)?;
+        let source = view.source(raw)?;
+        let content_hash = view.content_hash_for(raw)?;
+        if view.overlay_content_hash_for(raw).is_some() {
             let file_language = self.file_language(host);
             let parse_key = view.overlay_source_parse_key(raw, &file_language);
             return Some(ViewContent {
                 source,
-                content_hash: overlay_hash,
-                file_language,
-                parse_key,
-            });
-        }
-        let content_hash = view.content_hash_for(raw)?;
-        // The host snapshot of the canonical `view.source` resolves the raw
-        // id to.
-        let snapshot = host.authoritative_current_source(&host.resolve_alias_or_canonical(raw));
-        if let Some(snapshot) = snapshot.filter(|snapshot| snapshot.whole_hash == content_hash) {
-            let hd = snapshot.downcast_data::<crate::host_executor::HostSourceData>()?;
-            let (file_language, parse_key) = if raw == self.analysis_canonical {
-                (hd.file_language.clone(), hd.source_parse_key())
-            } else {
-                let file_language = self.file_language(host);
-                let parse_key =
-                    crate::host_executor::snapshot_parse_key_under(&snapshot, &file_language);
-                (file_language, parse_key)
-            };
-            return Some(ViewContent {
-                source: Arc::clone(&snapshot.source),
                 content_hash,
                 file_language,
                 parse_key,
             });
         }
-        let source = view.source(raw)?;
-        if host
-            .authoritative_current_source(&host.resolve_alias_or_canonical(raw))
-            .is_some_and(|snapshot| Arc::ptr_eq(&snapshot.source, &source))
-            || verter_semantic_source::source_hash::hash_16(source.as_bytes()) != content_hash
-        {
-            // The host's bytes under another revision's hash: a base edit
-            // landed between the two reads. Or bytes the hash does not name.
-            return None;
+        if let Some(snapshot) = host.authoritative_current_source(raw).filter(|snapshot| {
+            Arc::ptr_eq(&snapshot.source, &source) && snapshot.whole_hash == content_hash
+        }) {
+            if let Some(hd) = snapshot.downcast_data::<crate::host_executor::HostSourceData>() {
+                let (file_language, parse_key) = if raw == self.analysis_canonical {
+                    (hd.file_language.clone(), hd.source_parse_key())
+                } else {
+                    let file_language = self.file_language(host);
+                    let parse_key =
+                        crate::host_executor::snapshot_parse_key_under(&snapshot, &file_language);
+                    (file_language, parse_key)
+                };
+                return Some(ViewContent {
+                    source,
+                    content_hash,
+                    file_language,
+                    parse_key,
+                });
+            }
         }
         let file_language = self.file_language(host);
         let parse_key = crate::parse::source_parse_key_for(&source, &file_language);

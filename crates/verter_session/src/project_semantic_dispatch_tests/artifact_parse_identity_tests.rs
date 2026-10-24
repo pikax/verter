@@ -368,8 +368,7 @@ fn companion_keys() {
 
 /// A raw id the host resolves through an alias: the view serves the
 /// canonical's bytes for it but hashes no content under the alias, so the
-/// read keys nothing and nothing materialises — never a key built from one
-/// canonical's check and another's bytes.
+/// read keys nothing and nothing materialises.
 #[test]
 fn an_aliased_id_keys_nothing_the_view_does_not_hash() {
     const CANONICAL: &str = "/wb/real.ts";
@@ -405,6 +404,136 @@ fn an_aliased_id_keys_nothing_the_view_does_not_hash() {
         canonical.current_read_key(&host, &view),
         host.authoritative_current_artifact_key(CANONICAL),
         "the canonical id itself is keyed as the host keys it"
+    );
+}
+
+/// A view over the host that reports, for one canonical, the content hash
+/// and source it is given rather than its own.
+struct ScriptedView {
+    base: crate::session_view::HostView,
+    canonical: &'static str,
+    content_hash: Option<verter_session_query::analysis::types::Hash16>,
+    source: Option<Arc<str>>,
+}
+
+impl crate::session_view::SessionView for ScriptedView {
+    fn source(&self, canonical: &str) -> Option<Arc<str>> {
+        if canonical == self.canonical {
+            return self.source.clone();
+        }
+        crate::session_view::SessionView::source(&self.base, canonical)
+    }
+
+    fn content_hash_for(
+        &self,
+        canonical: &str,
+    ) -> Option<verter_session_query::analysis::types::Hash16> {
+        if canonical == self.canonical {
+            return self.content_hash;
+        }
+        crate::session_view::SessionView::content_hash_for(&self.base, canonical)
+    }
+
+    fn project_identity(&self) -> verter_session_query::resolution::ProjectIdentity {
+        crate::session_view::SessionView::project_identity(&self.base)
+    }
+
+    fn env_hashes(&self) -> &verter_session_query::resolution::EnvHashes {
+        crate::session_view::SessionView::env_hashes(&self.base)
+    }
+
+    fn resolved_import_facts(
+        &self,
+        canonical: &str,
+    ) -> Option<crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>>
+    {
+        crate::session_view::SessionView::resolved_import_facts(&self.base, canonical)
+    }
+}
+
+/// The bytes a view serves decide the read, never the host's snapshot
+/// behind it: a view that hashes the host's revision but declines its
+/// source keys nothing, and one that serves bytes of its own under the
+/// host's hash keys those bytes.
+#[test]
+fn a_view_passing_the_host_hash_through_keys_its_own_bytes() {
+    const FILE: &str = "/wb/chain.ts";
+    let base = chain(5, "T | undefined");
+    let files = [("chain.ts", base.as_str())];
+    let host = probe_host(ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    });
+    let identity = host.overlay_artifact_identity(FILE);
+    let host_key = host
+        .authoritative_current_artifact_key(FILE)
+        .expect("the host holds a live base revision");
+    let view = |source: Option<Arc<str>>| ScriptedView {
+        base: crate::session_view::HostView::new(Arc::clone(&host)),
+        canonical: FILE,
+        content_hash: Some(host_key.content_hash),
+        source,
+    };
+    assert_eq!(
+        identity.current_read_key(&host, &view(None)),
+        None,
+        "a view declining the source keys nothing, though it hashes the host's revision"
+    );
+    let own = chain(5, "T | null");
+    let serving = view(Some(Arc::from(own.as_str())));
+    let key = identity
+        .current_read_key(&host, &serving)
+        .expect("the view's own bytes are keyed");
+    assert_eq!(key.content_hash, host_key.content_hash);
+    assert_eq!(
+        Some(&key.parse_key),
+        crate::parse::source_parse_key_for(&own, &key.file_language_id).as_ref(),
+        "the view's bytes are keyed, not the host snapshot's"
+    );
+    assert_ne!(key.parse_key, host_key.parse_key);
+}
+
+/// A base edit between the view's hash read and its source read (the view
+/// hashes the earlier revision, serves the current one): the read still
+/// keys the bytes the view served, under the hash it reported, and a
+/// materialisation still serves — never no answer.
+#[test]
+fn a_base_edit_between_the_two_view_reads_still_keys_the_served_bytes() {
+    const FILE: &str = "/wb/chain.ts";
+    let base = chain(5, "T | undefined");
+    let files = [("chain.ts", base.as_str())];
+    let host = probe_host(ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    });
+    let identity = host.overlay_artifact_identity(FILE);
+    let earlier = host
+        .authoritative_current_artifact_key(FILE)
+        .expect("the earlier revision's key");
+    let edited = chain(5, "T | null");
+    upsert_probe_files(&host, &[("chain.ts", edited.as_str())]);
+    let current = host.get_source(FILE).expect("the current revision's bytes");
+    let raced = ScriptedView {
+        base: crate::session_view::HostView::new(Arc::clone(&host)),
+        canonical: FILE,
+        content_hash: Some(earlier.content_hash),
+        source: Some(Arc::clone(&current)),
+    };
+    let content = identity
+        .view_content(&host, &raced)
+        .expect("the raced read still has content");
+    assert!(Arc::ptr_eq(&content.source, &current));
+    assert_eq!(content.content_hash, earlier.content_hash);
+    assert_eq!(
+        content.parse_key,
+        crate::parse::source_parse_key_for(&edited, &content.file_language),
+        "the served bytes are keyed"
+    );
+    assert!(identity.current_read_key(&host, &raced).is_some());
+    assert!(
+        host.materialize_overlay_indexed_ready_serve_with_view(FILE, &raced)
+            .is_some(),
+        "the raced materialisation still serves"
     );
 }
 
