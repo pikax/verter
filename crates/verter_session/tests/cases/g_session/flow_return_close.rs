@@ -606,3 +606,69 @@ fn a_cancelled_or_failed_first_request_closes_back_to_the_pre_demand_footprint()
         assert_at_baseline(&host, &baseline, &format!("cancelled={cancelled}, reused"));
     }
 }
+
+/// A request cancelled while its work is under way — after the flow-slice
+/// graph bundles and primitive vocabulary it demands are acquired — still
+/// closes the host back to its pre-demand footprint. Cancelling as the Nth
+/// query family opens sweeps the cancellation across the request's work; the
+/// sweep must land at least one cancellation that left flow owners charged
+/// before the close, so the baseline comparison has residue to release.
+#[test]
+fn a_request_cancelled_mid_work_closes_back_to_the_pre_demand_footprint() {
+    let _serial = serial();
+    let expected = fresh_answer(Workload::Diagnostic, 0);
+    let mut cancelled_holding_owners = 0usize;
+    let mut completed = false;
+    for nth in [1usize, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610] {
+        let host = ClosingHost::fresh();
+        let baseline = retained(&host);
+        let (canonical, symbol, source) = Workload::Diagnostic.document(0);
+        upsert(&host, &canonical, &source);
+        let token = CancellationToken::new();
+        let outcome = {
+            let _cancel =
+                verter_type_engine::cancel_trace::cancel_at_family_entry(token.clone(), nth);
+            host.get_flow_return_type_with_audit_cancellable(
+                &function(&canonical, &symbol),
+                ReturnProjectionDemand::whole_return(),
+                token,
+            )
+        }
+        .into_parts()
+        .0;
+        let context = format!("cancelled as family {nth} opens");
+        match &outcome {
+            Err(FlowReturnError::Cancelled) => {
+                let during = retained(&host);
+                if during.flow_graphs > baseline.flow_graphs
+                    || during.flow_lowered_entries > baseline.flow_lowered_entries
+                    || during.semantic_nodes > baseline.semantic_nodes
+                {
+                    cancelled_holding_owners += 1;
+                }
+            }
+            Ok(result) => {
+                Workload::Diagnostic.assert_valid(&answer(&host, result));
+                completed = true;
+            }
+            Err(other) => panic!("{context}: unexpected outcome {other:?}"),
+        }
+        drop(outcome);
+        host.retire();
+        assert_at_baseline(&host, &baseline, &context);
+
+        let result = demand(&host, Workload::Diagnostic, 0);
+        assert_eq!(answer(&host, &result), expected, "{context}");
+        drop(result);
+        host.retire();
+        assert_at_baseline(&host, &baseline, &format!("{context}, reused"));
+    }
+    assert!(
+        cancelled_holding_owners > 0,
+        "some cancellation landed after the request acquired flow owners"
+    );
+    assert!(
+        completed,
+        "the sweep reaches past the request's last family"
+    );
+}
