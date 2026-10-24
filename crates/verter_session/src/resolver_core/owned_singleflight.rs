@@ -262,6 +262,8 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
         }
     }
     fn release_join(&mut self) {
+        // A joined value's destructor may re-enter the task graph.
+        self.edge = None;
         if let Some(join) = self.join.take() {
             self.group
                 .as_ref()
@@ -269,7 +271,6 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
                 .unpin(self.key.as_ref().expect("live key"), &join.state);
             drop(join);
         }
-        self.edge = None;
     }
     fn transfer_inline(&mut self) -> CorePoll<K, V, E, F, R> {
         // The synchronous recursion/cycle escape transfers nested work to

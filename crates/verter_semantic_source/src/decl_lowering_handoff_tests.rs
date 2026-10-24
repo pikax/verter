@@ -305,6 +305,103 @@ fn stopping_an_owned_acquisition_detaches_before_queue_or_reply_release() {
 }
 
 #[test]
+fn cancelling_the_last_lowering_subscriber_leaves_its_running_producer_live() {
+    use verter_execution::cancellation::CancellationToken;
+    use verter_execution::dependency::DependencyStop;
+    use verter_execution::tasks::TaskRegistry;
+
+    for retain_service in [true, false] {
+        let service = service(2);
+        let k = key("/ws/last-subscriber.ts", 25);
+        let lease = acquire(&service, &k);
+        let alive = service.workers()[0].alive.clone();
+        let retained = retain_service.then(|| service.clone());
+        let registry = TaskRegistry::default();
+        let token = CancellationToken::new();
+        let (started_tx, started) = channel();
+        let (release, released) = channel::<()>();
+        let mut handoff = service
+            .begin_run_leased(&k, move |_| {
+                started_tx.send(()).unwrap();
+                let _ = released.recv();
+            })
+            .owned(registry.register_task(), token.clone());
+        assert!(handoff.poll(Waker::noop()).is_pending());
+        started.recv_timeout(DEADLINE).unwrap();
+        drop(lease);
+        drop(service);
+        token.cancel();
+
+        let (returned_tx, returned) = channel();
+        let poller = std::thread::spawn(move || {
+            let cancelled = matches!(
+                handoff.poll(Waker::noop()),
+                Poll::Ready(Err(DependencyStop::Cancelled))
+            );
+            returned_tx.send(cancelled).unwrap();
+        });
+        let before_release = returned.recv_timeout(DEADLINE);
+        let edges_before_release = registry.wait_graph_occupancy().edges;
+        let producer_still_running = matches!(
+            alive.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        );
+        // Release and join even when cancellation polling entered worker drainage.
+        drop(release);
+        poller.join().unwrap();
+        drop(retained);
+        assert!(matches!(
+            alive.recv_timeout(DEADLINE),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        ));
+        assert_eq!(before_release.ok(), Some(true), "retained={retain_service}");
+        assert!(producer_still_running);
+        assert_eq!(edges_before_release, 0);
+        assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    }
+}
+
+#[test]
+fn cancelling_the_final_unsubmitted_lowering_handoff_defers_worker_drainage() {
+    use verter_execution::cancellation::CancellationToken;
+    use verter_execution::dependency::DependencyStop;
+    use verter_execution::tasks::TaskRegistry;
+
+    let service = service(2);
+    let alive = service.workers()[0].alive.clone();
+    let release = hold_worker(&service, false);
+    let registry = TaskRegistry::default();
+    let token = CancellationToken::new();
+    let mut handoff = service
+        .begin_acquire_lease(
+            &key("/ws/unsubmitted.ts", 26),
+            &source(),
+            oxc_span::SourceType::ts(),
+        )
+        .owned(registry.register_task(), token.clone());
+    drop(service);
+    token.cancel();
+    let (returned_tx, returned) = channel();
+    let poller = std::thread::spawn(move || {
+        returned_tx
+            .send(matches!(
+                handoff.poll(Waker::noop()),
+                Poll::Ready(Err(DependencyStop::Cancelled))
+            ))
+            .unwrap();
+    });
+    let before_release = returned.recv_timeout(DEADLINE);
+    drop(release);
+    poller.join().unwrap();
+    assert!(matches!(
+        alive.recv_timeout(DEADLINE),
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+    ));
+    assert_eq!(before_release.ok(), Some(true));
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
+}
+
+#[test]
 fn an_owned_lowering_contains_job_panic_and_installs_its_producer_task() {
     use verter_execution::cancellation::CancellationToken;
     use verter_execution::tasks::{ExecutionScope, TaskRegistry};

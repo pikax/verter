@@ -301,7 +301,10 @@ producer on the existing CPU pool.
   even if the successor inbox is full. The handoff and producer retain the
   scheduler independently and can move between threads with exclusive
   polling. Dropping a handoff withdraws its registrations and detaches only
-  its owner; a surviving sibling keeps shared work live.
+  its owner; a surviving sibling keeps shared work live. Attaching owners
+  collected before admission holds a temporary aggregate registration until
+  every request is attached, so an already-cancelled request cannot retire
+  the flight ahead of an existing live sibling.
 - **Errors:** cancellation, shutdown/reset, panic, mismatched result type and
   same-path re-entry retain the existing typed outcomes. Cancellation is
   checked and registered at each poll. A stop wakes only its subscriber;
@@ -350,8 +353,8 @@ Polling does not compute or run the retention policy. `run_retaining` and
   prevents its later execution or publication.
 - **Lifetime and backpressure:** each subscriber owns one readiness and stop
   registration and exactly its own task edge. Terminalization withdraws them
-  and drops retained callbacks, keys, group handles and task pins. Producer
-  transfer has no queue or pool admission. Dropping an unrun producer wakes
+  before dropping joined values, retained callbacks, keys, group handles and
+  task pins. Producer transfer has no queue or pool admission. Dropping an unrun producer wakes
   followers with a typed failure; dropping a follower leaves siblings live.
 
 The metadata request and fallthrough flight callers belong to metadata
@@ -470,10 +473,16 @@ the service or host.
   registration it holds and abandons its reply. If the answer has already
   arrived, it is dropped. If it arrives later, the worker drops it on its
   own thread. Either way, a lease acquired for an abandoned handoff is
-  released on the shard that pinned it, so no live lease and no retained
-  parse outlives its handoff. While a handoff is outstanding it holds the
-  service, and so its workers, alive. Polling after the answer is a
-  contract violation.
+  released on the shard that pinned it, leaving no abandoned lease or parse
+  retained after shard cleanup. While a handoff is outstanding it holds the
+  service, and so its workers, alive. After releasing unclaimed answers and
+  unsubmitted closures, a final handoff atomically extracts the service and
+  closes its queues without joining workers. Already-admitted jobs finish
+  independently and their workers release shard state on exit. Even cancelling
+  the final unsubmitted subscriber cannot enter worker drainage inside poll.
+  A final external service owner retains joining shutdown; a worker dropping
+  the final service handle joins only other workers. Polling after the answer
+  is a contract violation.
 - **Batches:** each poll advances every share still outstanding, so every
   shard's share is offered on the first poll and the shards lower in
   parallel. The batch answers once every share has answered, and the first

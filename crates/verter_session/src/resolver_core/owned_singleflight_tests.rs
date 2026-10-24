@@ -341,6 +341,62 @@ fn resolver_stop_before_poll_never_claims_a_flight() {
 }
 
 #[test]
+fn abandoning_the_final_non_retained_follower_withdraws_its_edge_before_value_drop() {
+    struct ObserveDrop {
+        registry: TaskRegistry,
+        observed_edges: Arc<AtomicUsize>,
+        _producer: verter_execution::tasks::ExecutionTask,
+    }
+    impl Drop for ObserveDrop {
+        fn drop(&mut self) {
+            self.observed_edges
+                .store(self.registry.wait_graph_occupancy().edges, Ordering::SeqCst);
+        }
+    }
+    let registry = TaskRegistry::default();
+    let observed_edges = Arc::new(AtomicUsize::new(usize::MAX));
+    let group = SingleflightGroup::<String, ObserveDrop, ()>::default();
+    let from_producer = registry.clone();
+    let observed = observed_edges.clone();
+    let mut leader = group.begin_owned_retaining(
+        "key".into(),
+        TOKEN,
+        registry.register_task(),
+        CancellationToken::new(),
+        move || {
+            Ok(ObserveDrop {
+                registry: from_producer,
+                observed_edges: observed,
+                _producer: ExecutionScope::current_task().unwrap(),
+            })
+        },
+        |_| false,
+    );
+    let Poll::Ready(Ok(ResolverFlightStep::Produce(producer))) = leader.poll(Waker::noop()) else {
+        panic!("cold producer");
+    };
+    let mut follower = group.begin_owned_retaining(
+        "key".into(),
+        TOKEN,
+        registry.register_task(),
+        CancellationToken::new(),
+        || panic!("follower must join"),
+        |_| false,
+    );
+    assert!(follower.poll(Waker::noop()).is_pending());
+    producer.run();
+    let Poll::Ready(Ok(ResolverFlightStep::Value(answer))) = leader.poll(Waker::noop()) else {
+        panic!("leader answer");
+    };
+    drop(answer);
+    assert_eq!(observed_edges.load(Ordering::SeqCst), usize::MAX);
+    assert_eq!(registry.wait_graph_occupancy().edges, 1);
+    drop(follower);
+    assert_eq!(observed_edges.load(Ordering::SeqCst), 0);
+    assert_eq!(registry.active_task_count_for_tests(), 0);
+}
+
+#[test]
 fn dropping_owned_resolver_follower_withdraws_only_its_edge_and_wake() {
     let registry = TaskRegistry::default();
     let group = SingleflightGroup::<String, usize, ()>::default();

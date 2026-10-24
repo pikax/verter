@@ -688,7 +688,9 @@ impl<T> Drop for ReplySender<T> {
 /// Cancellation and lifetime: dropping the handoff withdraws whichever
 /// registration it holds and abandons its reply; the worker drops an
 /// abandoned answer on its own thread, releasing whatever it acquired for
-/// it. Polling after the handoff answered is a contract violation.
+/// it. A final handoff closes the service's queues without joining its workers;
+/// admitted jobs drain on those existing workers independently of the poller.
+/// Polling after the handoff answered is a contract violation.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct ShardHandoff<T> {
     /// The job, until the worker's queue admits it.
@@ -701,7 +703,7 @@ pub(crate) struct ShardHandoff<T> {
     reply: Arc<ShardReply<T>>,
     /// Keeps the service, and so its workers, alive while the handoff is
     /// outstanding.
-    _service: Arc<DeclLoweringService>,
+    service: Option<Arc<DeclLoweringService>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -738,7 +740,7 @@ impl<T> ShardHandoff<T> {
             space: Arc::clone(&worker.space),
             space_registration: WakeRegistration::default(),
             reply,
-            _service: service,
+            service: Some(service),
         }
     }
 
@@ -794,11 +796,9 @@ impl<T> Drop for ShardHandoff<T> {
         if self.space_registration.is_registered() {
             self.space.lock().withdraw(&mut self.space_registration);
         }
-        if self.job.is_some() {
-            // Never admitted: the job, and its reply sender, drop here.
-            return;
-        }
-        let unclaimed = {
+        let unclaimed = if self.job.is_some() {
+            None
+        } else {
             let mut state = self.reply.state.lock();
             match std::mem::replace(&mut *state, ReplyState::Abandoned) {
                 ReplyState::Answered(answer) => Some(answer),
@@ -811,6 +811,15 @@ impl<T> Drop for ShardHandoff<T> {
         };
         // An answer nobody took is dropped after the reply's lock.
         drop(unclaimed);
+        // Release any unsubmitted closure and its captured service references
+        // while this handoff still holds its own service pin.
+        drop(self.job.take());
+        // Atomic extraction avoids a last-owner race with another Arc drop.
+        // A subscriber must never invoke the service's joining destructor:
+        // closing queues lets admitted jobs drain before their workers exit.
+        if let Some(mut service) = Arc::into_inner(self.service.take().expect("handoff service")) {
+            drop(service.workers.take());
+        }
     }
 }
 
@@ -1009,9 +1018,11 @@ impl std::fmt::Debug for DeclLoweringService {
     }
 }
 
-/// Closing the job queues ends the workers; joining them means a dropped
-/// service has released every retained snapshot and the retention charge
-/// pinning it by the time its drop returns. Every lease holds the service,
+/// Closing the job queues ends the workers; joining them means an external
+/// final service owner has released every retained snapshot and its retention
+/// charge by the time its drop returns. A final handoff instead takes and closes
+/// the queues without joining, leaving admitted work to drain independently.
+/// Every lease holds the service,
 /// so none is left to release afterwards. A worker never joins itself: if
 /// the last handle drops on one, that worker exits once its job returns.
 #[cfg(not(target_arch = "wasm32"))]
