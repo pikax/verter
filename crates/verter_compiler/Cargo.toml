@@ -75,6 +75,7 @@ hotpath-alloc = ["semantic-observe", "verter_parser/hotpath-alloc", "hotpath/hot
 test-support = []
 
 [dependencies]
+verter_retention = { path = "../verter_retention" }
 verter_session_query = { workspace = true }
 verter_debug_assert = { workspace = true }
 verter_ecma = { workspace = true }

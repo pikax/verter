@@ -197,11 +197,8 @@ impl ResolutionStringMemo {
         {
             return cached;
         }
-        let candidates = arc_strings(build_probe_candidate_list(
-            base,
-            apply_source_sibling,
-            prefers_declarations,
-        ));
+        let candidates =
+            build_probe_candidate_list(base, apply_source_sibling, prefers_declarations);
         for candidate in &*candidates {
             self.remember_canonical(candidate);
         }
@@ -361,6 +358,11 @@ impl<'a> ResolveFrame<'a> {
     }
 
     fn seed_precomputed_geometry(&self) {
+        // The relative spellings are seeded together: size the table once.
+        self.memo
+            .normalized
+            .borrow_mut()
+            .reserve(self.geometry.relative_probe_candidates.len() + 1);
         if let Some(base) = &self.geometry.relative_base {
             self.memo.remember_canonical(base);
         }
@@ -561,13 +563,7 @@ fn build_source_geometry(
     });
     let relative_probe_candidates = relative_base.as_deref().map_or_else(
         || Arc::from([]),
-        |base| {
-            arc_strings(build_probe_candidate_list(
-                base,
-                apply_source_sibling,
-                prefers_declarations,
-            ))
-        },
+        |base| build_probe_candidate_list(base, apply_source_sibling, prefers_declarations),
     );
 
     let boundary = owner_index.map(|index| Arc::from(projects[index].workspace_root.as_str()));
@@ -602,11 +598,8 @@ fn build_project_geometry(
 ) -> ProjectResolutionGeometry {
     let mapping = |candidate: String| {
         let normalized: Arc<str> = Arc::from(candidate);
-        let probe_candidates = arc_strings(build_probe_candidate_list(
-            &normalized,
-            apply_source_sibling,
-            prefers_declarations,
-        ));
+        let probe_candidates =
+            build_probe_candidate_list(&normalized, apply_source_sibling, prefers_declarations);
         MappingCandidate {
             normalized,
             probe_candidates,
@@ -668,14 +661,6 @@ fn prefers_declaration_files(context: ResolutionContext) -> bool {
             _
         )
     )
-}
-
-fn arc_strings(values: Vec<String>) -> Arc<[Arc<str>]> {
-    values
-        .into_iter()
-        .map(Arc::<str>::from)
-        .collect::<Vec<_>>()
-        .into()
 }
 
 #[cfg(test)]

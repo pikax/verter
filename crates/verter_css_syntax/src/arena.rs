@@ -160,6 +160,17 @@ impl FrozenBump {
     }
 }
 
+impl verter_retention::heap_size::HeapSize for FrozenBump {
+    fn heap_size<'t>(
+        &'t self,
+        _meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        // One aggregate arena reservation, including spare capacity and
+        // bumpalo's chunk metadata. Bump-backed children own no separate heap.
+        verter_retention::allocation::heap_block_bytes(self.0.allocated_bytes_including_metadata())
+    }
+}
+
 // Safety: the inner bump is never allocated into after freeze. Child
 // `BumpSlice`s are never written, so sharing a finished IR across threads
 // is sound even though `bumpalo::Bump` is `!Sync`.

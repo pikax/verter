@@ -21,6 +21,7 @@ publish = false
 test-support = []
 
 [dependencies]
+verter_retention = { path = "../verter_retention" }
 verter_audit = { path = "../verter_audit" }
 verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span" }

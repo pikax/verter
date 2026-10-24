@@ -2,10 +2,9 @@ use std::any::Any;
 use std::sync::Arc;
 
 use verter_compiler::framework_common::FrameworkParseArtifact;
-use verter_language::{
-    CarrierParse, FrameworkAdapterId, FrameworkParseCommon, LanguageId,
-};
+use verter_language::{CarrierParse, FrameworkAdapterId, FrameworkParseCommon, LanguageId};
 
+#[derive(verter_retention::heap_size::HeapSize)]
 struct Payload;
 
 impl CarrierParse for Payload {

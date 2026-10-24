@@ -333,7 +333,7 @@ impl<'a> PlainCssInput<'a> {
 ///
 /// Companion carrier — not a field on public `StyleBlockAnalysis`. Clone is
 /// Arc-cheap. Excluded from request/cache identity.
-#[derive(Clone)]
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
 pub struct PreparedStyleIr {
     ir: Arc<StyleSyntaxIr>,
 }

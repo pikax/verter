@@ -238,3 +238,96 @@ fn need_inputs_result_carries_no_completed_attempt() {
     // miss's output has nowhere to leak into.
     assert_eq!(outcome.complete(), None);
 }
+
+/// A candidate that records into the frontier's live output is recorded
+/// only once its reads settle as a hit or a miss: one that needs an input,
+/// or fails, never reaches its recorder, and its input is unioned as usual.
+#[test]
+fn only_a_settled_hit_or_miss_reaches_its_recorder() {
+    use super::{CandidateRead, CandidateRecorder, PriorityFrontierState};
+
+    struct Unreachable;
+    impl CandidateRecorder<(), ()> for Unreachable {
+        type Answer = String;
+        fn record_hit(self, (): (), _: &mut AttemptOutput) -> Result<String, AttemptFailure> {
+            panic!("a candidate that needs an input was recorded")
+        }
+        fn record_miss(self, (): (), _: &mut AttemptOutput) -> Result<(), AttemptFailure> {
+            panic!("a candidate that needs an input was recorded")
+        }
+        fn admit_discarded_miss(self, (): ()) -> Result<(), AttemptFailure> {
+            panic!("a candidate that needs an input was admitted")
+        }
+    }
+
+    let mut frontier = PriorityFrontierState::new_with_budgets(
+        basis(1),
+        verter_session_query::resolution::InputResolutionBudgets::default(),
+    );
+    assert!(frontier
+        .push_read(
+            CandidateRead::NeedInput(path_probe_key("/p/a.ts"), basis(1)),
+            Unreachable,
+        )
+        .is_none());
+    // A hit after the block cannot win, and is not recorded either.
+    match frontier.push_read(CandidateRead::Hit(()), Unreachable) {
+        Some(AttemptOutcome::NeedInputs(load_set)) => {
+            assert_eq!(load_set.keys(), [path_probe_key("/p/a.ts")]);
+        }
+        other => panic!("expected the input to be needed, got {other:?}"),
+    }
+}
+
+/// A frontier's first kept output may come from another operation, whose
+/// witnesses must each be admitted against this frontier's own ledger. When
+/// that fails part-way, the frontier ends terminal and keeps nothing: the
+/// witnesses admitted before the failure are released at once, not held by
+/// a half-merged output for as long as the frontier lives.
+#[test]
+fn a_failed_first_merge_keeps_nothing_retained() {
+    use super::PriorityFrontierState;
+    use crate::InputResolutionRetention;
+
+    let tight =
+        verter_session_query::resolution::InputResolutionBudgets::try_tightened_with_retention(
+            128, 512, 65_536, 32, 4, 3, 2,
+        )
+        .expect("a tightened witness budget of two");
+    let frontier_operation = InputResolutionRetention::new(tight);
+    let other_operation = InputResolutionRetention::default();
+    let foreign = other_operation.scope(|| {
+        let mut output = AttemptOutput::new();
+        for consumer in ["a", "b", "c"] {
+            output
+                .record_ambient_dependency(canonical(consumer), canonical("virtual"))
+                .expect("within default budget");
+        }
+        output
+    });
+
+    frontier_operation.scope(|| {
+        let mut frontier = PriorityFrontierState::new_with_budgets(basis(1), tight);
+        let outcome = frontier.push::<String>(AttemptOutcome::Complete(CompletedAttempt::new(
+            None, foreign,
+        )));
+        assert!(
+            matches!(
+                outcome,
+                Some(AttemptOutcome::Terminal(
+                    AttemptFailure::InputResolutionCompletedWitnessRetentionLimit { .. }
+                ))
+            ),
+            "the third witness breaches a budget of two: {outcome:?}"
+        );
+        assert_eq!(
+            frontier_operation.retained_for_test().2,
+            0,
+            "the frontier still alive holds no witness of the failed merge"
+        );
+        drop(frontier);
+    });
+
+    // Revert control: installing the new output before merging into it
+    // leaves the two admitted witnesses retained while the frontier lives.
+}

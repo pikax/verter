@@ -397,14 +397,20 @@ impl StaticClassFact {
     }
 }
 
+#[derive(verter_retention::heap_size::HeapSize)]
 struct StyleSyntaxIrData {
     source: CssSource,
+    #[heap_size(inline)]
     dialect: CssDialect,
+    // Storage is owned and measured by `_bump`, including unused capacity.
+    #[heap_size(inline)]
     statements: BumpSlice<StyleStatement>,
+    #[heap_size(with = "inline_vec_heap")]
     diagnostics: Vec<CssDiagnostic>,
     /// Every stylesheet this one pulls in, in ascending source order. Minted
     /// by the parse that already had to recognise the at-rule; nothing
     /// downstream re-derives inclusion structure from bytes.
+    #[heap_size(with = "inline_vec_heap")]
     dependencies: Vec<StyleDependency>,
     /// Every `/* … */` / line-comment span the tokenizer visited while
     /// parsing this stylesheet, in ascending source order (comments cannot
@@ -413,12 +419,14 @@ struct StyleSyntaxIrData {
     /// construction). Retained so a consumer can find comment boundaries
     /// within a byte range through [`StyleSyntaxIr::comment_spans_in`] instead of
     /// re-lexing the source for comment/string state itself.
+    #[heap_size(with = "inline_vec_heap")]
     comment_spans: Vec<Span>,
     /// The span of a `<!--` CDO token that was never paired with a later
     /// `-->` CDC token in this stylesheet. CSS Syntax Module ignores CDO/CDC
     /// as trivia; Svelte's `read/style.js` treats `<!-- … -->` as a required
     /// paired HTML comment. Minted from the parse's own token stream so the
     /// Svelte reject projection does not re-scan source for the pairing.
+    #[heap_size(inline)]
     unpaired_cdo_span: Option<Span>,
     /// Frozen last so the bump outlives every bump-backed child on drop.
     /// A live [`Bump`] cannot inhabit this struct: freeze is the type-state.
@@ -426,9 +434,18 @@ struct StyleSyntaxIrData {
 }
 
 /// Parsed stylesheet. `Clone` is an `Arc` clone and keeps bump-backed nodes valid.
-#[derive(Clone)]
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
 pub struct StyleSyntaxIr {
     data: Arc<StyleSyntaxIrData>,
+}
+
+// These records retain only inline fields; the Copy bound makes changing
+// one to own a String, Vec, Box, or Arc require revisiting its measurement.
+fn inline_vec_heap<'t, T: Copy>(
+    values: &'t Vec<T>,
+    _meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+) -> usize {
+    verter_retention::allocation::heap_block_bytes(values.capacity() * std::mem::size_of::<T>())
 }
 
 impl StyleSyntaxIr {

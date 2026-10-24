@@ -16,7 +16,7 @@ use crate::source::snapshot::SnapshotKey;
 
 /// Identity of one observed indexed input: the snapshot it was read from, a
 /// per-observation id, and its language / parse identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct IndexedInputIdentity {
     pub source: SnapshotKey,
     pub observation_id: u64,
@@ -25,8 +25,10 @@ pub struct IndexedInputIdentity {
 }
 
 /// The owned record of one served post-parse artifact.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct IndexedInputRecord {
+    storage: verter_retention::pinned_heap::StoragePin,
     pub identity: IndexedInputIdentity,
     pub whole_hash: Hash16,
     pub file_language: FileLanguage,
@@ -47,7 +49,7 @@ pub struct IndexedInputRecord {
     #[cfg(feature = "test-support")]
     pub declares_interface_app_config: bool,
     route_surface_hash: OnceLock<Option<Hash16>>,
-    source_parse_identity: OnceLock<Option<ParseKey>>,
+    source_parse_identity: verter_retention::pinned_heap::PinnedOnce<Option<ParseKey>>,
 }
 
 impl IndexedInputRecord {
@@ -68,11 +70,12 @@ impl IndexedInputRecord {
         snapshot: Arc<FileAnalysisSnapshot>,
         cached_source_parse_key: Option<Option<ParseKey>>,
     ) -> Self {
-        let source_parse_identity = OnceLock::new();
+        let source_parse_identity = verter_retention::pinned_heap::PinnedOnce::new();
         if let Some(key) = cached_source_parse_key {
             let _ = source_parse_identity.set(key);
         }
         Self {
+            storage: Default::default(),
             identity,
             whole_hash,
             file_language,
@@ -124,6 +127,16 @@ impl IndexedInputRecord {
                 crate::inputs::route_surface::hash_route_surface_inputs(&self.shallow_state)
             })
         })
+    }
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for IndexedInputRecord {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
     }
 }
 

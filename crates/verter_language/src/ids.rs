@@ -5,7 +5,7 @@
 //! framework vertical registers a new id without a central enum edit.
 //!
 //! The intern table is deliberately crate-local: this crate is a
-//! zero-dependency leaf and no lower-level crate exposes a reusable
+//! low-level language authority and no lower-level crate exposes a reusable
 //! interning facility (`verter_span` owns spans, not strings;
 //! `verter_session`'s semantic-query interner sits far above this
 //! crate). The table only grows with DISTINCT id strings, and ids
@@ -37,7 +37,9 @@ fn intern(value: &str) -> Arc<str> {
 ///
 /// `"vue"` and `"svelte"` are the built-in carrier rows; future
 /// verticals add their own ids through their registry rows.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
+)]
 pub struct FrameworkAdapterId(Arc<str>);
 
 impl FrameworkAdapterId {
@@ -88,7 +90,9 @@ impl fmt::Display for FrameworkAdapterId {
 ///
 /// Distinguishes the languages one adapter can own (e.g. an adapter's
 /// carrier language vs. its external template language).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
+)]
 pub struct LanguageId(Arc<str>);
 
 impl LanguageId {
@@ -115,7 +119,9 @@ impl fmt::Display for LanguageId {
 /// from project state before its candidate classification applies. This
 /// crate only names capabilities; deriving and snapshotting them is
 /// host-level work.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
+)]
 pub struct CapabilityId(Arc<str>);
 
 impl CapabilityId {
