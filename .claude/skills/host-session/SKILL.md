@@ -159,7 +159,9 @@ executing resolver or IO work. Flights and publication gates register readiness
 and task edges in the host's existing TaskRegistry, injected through
 `WorkspaceServices::attach`. Captured worlds, overlay input, input-budget ledger
 and filesystem discovery/frozen replay survive suspension. Directory receipts
-follow the continuation across worker migration. A replaced pinned publication
+follow the continuation across worker migration. Shared-workspace attachment joins existing task
+cycle authorities without replacing task identities, live waits or installed
+scopes; released registration owners leave no pool history. A replaced pinned publication
 is refused at the final fence. Synchronous importer/project entries drive the
 same continuations externally. Adapter workspaces lacking this ownership protocol
 return typed `Unsupported` from the owned entry. Full result, cancellation,

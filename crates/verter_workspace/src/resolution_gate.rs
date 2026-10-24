@@ -13,7 +13,11 @@ use verter_execution::wake::{WakeRegistration, WakerSet};
 pub(crate) struct Authority(Arc<RwLock<Option<TaskRegistry>>>);
 impl Authority {
     pub(crate) fn bind(&self, registry: TaskRegistry) {
-        *self.0.write() = Some(registry);
+        let mut current = self.0.write();
+        if let Some(existing) = current.as_ref() {
+            existing.share_authority_with(&registry);
+        }
+        *current = Some(registry);
     }
     pub(crate) fn registry(&self) -> TaskRegistry {
         if let Some(registry) = self.0.read().as_ref() {

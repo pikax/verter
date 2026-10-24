@@ -545,8 +545,14 @@ TLS. Frozen-reader completeness and independent live validation still govern
 filesystem admission.
 
 The host injects its TaskRegistry through `WorkspaceServices::attach`, including
-workspace replacement. Standalone workspace compatibility calls use their own
-composition authority. Flights own producer leases across threads; every joining
+workspace replacement. If a workspace is shared by hosts, attach joins their
+existing cycle graphs through `TaskRegistry::share_authority_with`; it never
+revokes earlier tasks or creates another task service. Generation-qualified task
+ids retain their registration namespace, live wait edges survive composition,
+and installed scopes follow the joined authority. Union by rank and ordered
+root locks make concurrent joins safe. The last registration-owner release
+removes its pool, so repeated workspace swaps retain no pool history.
+Standalone workspace compatibility calls use their own composition authority. Flights own producer leases across threads; every joining
 task has its own subscription and wait edge. Same-path and mixed scheduler/flight
 cycles return `Cycle`, including a nested request on the same OS thread. A shared
 candidate is adopted only after validation in the subscriber's captured world;

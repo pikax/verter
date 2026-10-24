@@ -982,8 +982,9 @@ fn workspace_resolution_shares_scheduler_authority_on_attach_and_replacement() {
         if replace {
             host.set_workspace(make_workspace());
         }
+        let _sibling = VerterHost::new(HostConfig::default(), host.workspace());
         let scope = host.scheduler.enter_execution_scope();
-        let mut resolution = host.workspace().begin_resolution(
+        let mut resolution = host.workspace_read().begin_resolution(
             ResolutionRequest {
                 importer: "/p/main.ts".into(),
                 specifier: "./dep".into(),

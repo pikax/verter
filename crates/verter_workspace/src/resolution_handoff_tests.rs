@@ -485,3 +485,25 @@ fn wake_repolling_before_a_running_slice_returns_is_not_lost() {
         "publishing the suspended future must wake the re-registered producer poller"
     );
 }
+
+#[test]
+fn attaching_another_host_authority_preserves_the_first_hosts_owned_resolution() {
+    let (ws, first) = fixture();
+    let second = TaskRegistry::default();
+    let scope = verter_execution::tasks::ExecutionScope::enter(&first);
+    ws.bind_execution_registry(second.clone());
+    let (_, waker) = waker();
+    let mut root = ws.clone().begin_resolution(
+        request(),
+        scope.task().clone(),
+        CancellationToken::default(),
+    );
+    let mut owner = producer(&mut root, &waker);
+    finish(&mut owner, &waker);
+    assert_target(&mut root, &waker);
+    drop((owner, root, scope));
+    assert_eq!(first.wait_graph_occupancy().edges, 0);
+    assert_eq!(second.wait_graph_occupancy().edges, 0);
+    assert_eq!(first.active_task_count_for_tests(), 0);
+    assert_eq!(second.active_task_count_for_tests(), 0);
+}
