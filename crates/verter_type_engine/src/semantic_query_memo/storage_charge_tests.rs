@@ -31,7 +31,10 @@ fn graph_storage_is_pinned_while_its_nodes_live_and_released_with_them() {
             pinned >= NODES * payload,
             "every live payload block is charged: {pinned} < {NODES} x {payload}"
         );
-        assert_eq!(pinned, store.graph_storage_charge_for_tests());
+        assert_eq!(
+            pinned,
+            store.graph_storage_charge_for_tests() + store.project_dep_name_pinned_bytes()
+        );
     });
     assert_eq!(harness.live_nodes(), 0);
     let after = account.snapshot().pinned_bytes;
@@ -43,8 +46,8 @@ fn graph_storage_is_pinned_while_its_nodes_live_and_released_with_them() {
         );
         assert_eq!(
             after,
-            store.graph_storage_charge_for_tests(),
-            "what stays pinned is the dedup tables' retained capacity"
+            store.graph_storage_charge_for_tests() + store.project_dep_name_pinned_bytes(),
+            "what stays pinned is the dedup tables' retained capacity and the              store's name"
         );
     });
     assert!(after < NODES * payload);
@@ -72,7 +75,11 @@ fn a_retired_signature_epoch_releases_its_storage_with_its_last_holder() {
         charged >= SPELLINGS * 64,
         "every interned spelling's text is charged: {charged}"
     );
-    let kernel_pinned = || account.snapshot().pinned_bytes - store.graph_storage_charge_for_tests();
+    let kernel_pinned = || {
+        account.snapshot().pinned_bytes
+            - store.graph_storage_charge_for_tests()
+            - store.project_dep_name_pinned_bytes()
+    };
     assert_eq!(kernel_pinned(), charged);
 
     let reader = kernel.lease_epoch(kernel.epoch()).expect("current epoch");
@@ -347,19 +354,29 @@ fn a_payload_a_reader_holds_past_the_store_stays_charged_until_its_own_drop() {
 }
 
 /// Every project-generation dependency entry of a store names the store's
-/// one `"<project>"` allocation, pinned once when the store mints it: many
-/// entries add no charge, a cache hold moves the one charge into retention
-/// and back, the store keeps the name charged while it holds it, and the
-/// charge leaves once the store releases its idle name.
+/// one `"<project>"` allocation, minted with the store and pinned once as
+/// its own storage: many entries add no charge, a cache hold moves the one
+/// charge into retention and back, and the charge lives exactly as long as
+/// the allocation — past the store while an entry still names it.
 #[test]
-fn the_project_dependency_name_is_one_allocation_charged_once_while_the_store_holds_it() {
+fn the_project_dependency_name_is_one_allocation_charged_once_for_its_life() {
     use crate::semantic_query::DepVersion;
     use verter_session_query::retention::owned::{ChargeCtx, OwnedStr};
     use verter_session_query::retention::ChargeClass;
 
     let account = account();
     let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
-    let before = account.snapshot();
+    let charge = OwnedStr::charge_for_len("<project>".len());
+    let minted = account.snapshot();
+    assert!(
+        minted.pinned_bytes >= charge,
+        "the store pins its name when it is built: {minted:?}"
+    );
+    assert_eq!(
+        minted.pinned_bytes,
+        store.store_storage_pins_for_tests(),
+        "the name is counted as the store's own storage"
+    );
     let entries: Vec<_> = (0..100u64)
         .map(|generation| store.project_dep_entry(DepVersion::ProjectGeneration(generation)))
         .collect();
@@ -369,12 +386,10 @@ fn the_project_dependency_name_is_one_allocation_charged_once_while_the_store_ho
             .all(|entry| OwnedStr::ptr_eq(&entry.0, &entries[0].0) && entry.0 == "<project>"),
         "every entry names the store's one allocation"
     );
-    let charge = OwnedStr::charge_for_len("<project>".len());
-    let minted = account.snapshot();
     assert_eq!(
-        minted.pinned_bytes - before.pinned_bytes,
-        charge,
-        "a hundred entries pin the one name once"
+        account.snapshot(),
+        minted,
+        "a hundred entries take no charge and no admission"
     );
     assert_eq!(entries[0].0.charge_class(), Some(ChargeClass::Pinned));
 
@@ -393,56 +408,25 @@ fn the_project_dependency_name_is_one_allocation_charged_once_while_the_store_ho
     assert_eq!(entries[0].0.charge_class(), Some(ChargeClass::Pinned));
     assert_eq!(account.snapshot().total_bytes(), minted.total_bytes());
 
+    let survivor = entries[7].clone();
     drop(entries);
-    assert_eq!(
-        account.snapshot().pinned_bytes - before.pinned_bytes,
-        charge,
-        "the store keeps its name, so the name stays charged"
-    );
-    assert!(
-        OwnedStr::ptr_eq(
-            &store.project_dep_entry(DepVersion::ProjectGeneration(0)).0,
-            &store.project_dep_entry(DepVersion::ProjectGeneration(1)).0,
-        ),
-        "a later entry names the same allocation"
-    );
-
-    let survivor = store.project_dep_entry(DepVersion::ProjectGeneration(2));
-    store.release_drained_storage();
-    assert_eq!(
-        account.snapshot().pinned_bytes - before.pinned_bytes,
-        charge,
-        "a name an entry still names is not released"
-    );
-    drop(survivor);
-    store.release_drained_storage();
-    assert_eq!(
-        account.snapshot().total_bytes(),
-        before.total_bytes(),
-        "an idle name leaves with the drained storage"
-    );
-    let remint = store.project_dep_entry(DepVersion::ProjectGeneration(3));
-    assert_eq!(
-        account.snapshot().pinned_bytes - before.pinned_bytes,
-        charge,
-        "the next entry mints and charges the name again, once"
-    );
-    drop(remint);
     drop(store);
     assert_eq!(
         account.snapshot().total_bytes(),
-        0,
-        "the store's teardown releases the name with everything else"
+        charge,
+        "an entry outliving the store keeps the name charged, once"
     );
+    drop(survivor);
+    assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
-/// The store's name is a liveness obligation: an account with no headroom
-/// left still charges it, never refuses it, and the pinned bytes consume
-/// headroom a later refusable reservation is then refused for.
+/// The store's name is a liveness obligation charged when the store is
+/// built, so an account with no headroom left serves entries without a
+/// reservation to refuse, and the pin keeps consuming headroom a later
+/// refusable reservation is then refused for.
 #[test]
-fn the_project_dependency_name_is_charged_at_a_full_account() {
+fn project_dependency_entries_need_no_admission_at_a_full_account() {
     use crate::semantic_query::DepVersion;
-    use verter_session_query::retention::owned::OwnedStr;
     use verter_session_query::retention::{ChargeClass, RetentionAdmission};
 
     let limits = RetentionLimits {
@@ -458,11 +442,13 @@ fn the_project_dependency_name_is_charged_at_a_full_account() {
         panic!("the remaining headroom is admitted");
     };
     let full = account.snapshot();
-    let entry = store.project_dep_entry(DepVersion::ProjectGeneration(7));
+    let entries: Vec<_> = (0..10u64)
+        .map(|generation| store.project_dep_entry(DepVersion::ProjectGeneration(generation)))
+        .collect();
     assert_eq!(
-        account.snapshot().pinned_bytes - full.pinned_bytes,
-        OwnedStr::charge_for_len("<project>".len()),
-        "the name is charged although the account is full"
+        account.snapshot(),
+        full,
+        "entries at a full account take nothing and are refused nothing"
     );
     assert!(
         matches!(
@@ -472,7 +458,7 @@ fn the_project_dependency_name_is_charged_at_a_full_account() {
         "the pinned name consumes headroom a cache cannot then take"
     );
     drop(filler);
-    drop(entry);
+    drop(entries);
     drop(store);
     assert_eq!(account.snapshot().total_bytes(), 0);
 }

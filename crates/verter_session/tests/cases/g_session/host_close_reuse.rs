@@ -392,11 +392,13 @@ fn repeated_distinct_demand_close_cycles_return_to_the_same_footprint() {
 #[test]
 fn closing_one_host_keeps_an_unrelated_live_hosts_data_and_charges() {
     let _serial = serial();
+    // Both hosts exist before either is measured: a host charges its own
+    // store storage from construction, and the account is the process's.
     let live = VerterHost::new_standalone(HostConfig::default());
+    let closed = VerterHost::new_standalone(HostConfig::default());
     let (live_answer, live_rendered) = demand(&live, 7);
     let live_footprint = retained(&live.retention_snapshot());
 
-    let closed = VerterHost::new_standalone(HostConfig::default());
     let closed_baseline = retained(&closed.retention_snapshot());
     let (answer, _) = demand(&closed, 8);
     drop(answer);
@@ -502,6 +504,8 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
             drop((control_answer, control_artifact));
             control.close();
             drain(&control);
+            // The control goes with its own store storage once compared.
+            drop(control);
             let readers_only = total(&host);
             assert!(
                 readers_only <= total_before_close,
