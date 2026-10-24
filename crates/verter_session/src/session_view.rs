@@ -106,18 +106,21 @@ pub trait SessionView: Send + Sync {
     /// `canonical` (one [`Self::overlay_content_hash_for`] reports), read as a
     /// file of `file_language` ([`crate::parse::source_parse_key_for`]: a
     /// carrier's under its registered grammar), `None` where the view holds
-    /// no overlay source for it or that refuses. A canonical the view does
-    /// not overlay is keyed from the base host's source snapshot, never
-    /// through this method; a view without overlay sources holds none.
+    /// no source for it or that refuses. Read only for a canonical the view
+    /// overlays; any other is keyed by the base host's published key.
     ///
-    /// An overlay-bearing view's overlay sources are immutable for its
-    /// lifetime, so it derives each overlay's identity at most once.
+    /// The default derives from [`Self::source`] on every read, so a view
+    /// that reports an overlay and its source is keyed correctly without
+    /// overriding this. The overlay-bearing views override it to derive each
+    /// overlay's identity at most once, their overlay sources being
+    /// immutable for their lifetime.
     fn overlay_source_parse_key(
         &self,
-        _canonical: &str,
-        _file_language: &verter_language::FileLanguage,
+        canonical: &str,
+        file_language: &verter_language::FileLanguage,
     ) -> Option<verter_language::ParseKey> {
-        None
+        let source = self.source(canonical)?;
+        crate::parse::source_parse_key_for(&source, file_language)
     }
 
     /// Content hash of the **explicit overlay** covering `canonical`,
@@ -500,7 +503,8 @@ impl OverlayParseKeys {
     /// The parse identity of `source`, one of `overlays`' sources, under
     /// `file_language` ([`crate::parse::source_parse_key_for`]): derived on
     /// the first read, reused after. A read under another language than the
-    /// cell's derives without caching.
+    /// cell's, or of bytes in an allocation the overlay map does not hold,
+    /// derives without caching.
     fn get(
         &self,
         overlays: &FxHashMap<String, Arc<str>>,
@@ -514,9 +518,10 @@ impl OverlayParseKeys {
                 .map(|overlay| (Self::address(overlay), OverlayParseKeyCell::new()))
                 .collect()
         });
-        let (language, parse_key) = cells
-            .get(&Self::address(source))?
-            .get_or_init(|| (file_language.clone(), derive()));
+        let Some(cell) = cells.get(&Self::address(source)) else {
+            return derive();
+        };
+        let (language, parse_key) = cell.get_or_init(|| (file_language.clone(), derive()));
         if language == file_language {
             parse_key.clone()
         } else {

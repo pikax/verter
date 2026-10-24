@@ -1659,12 +1659,25 @@ pub(crate) fn registered_carrier_parse_key(
     source: &str,
     file_language: &verter_language::FileLanguage,
 ) -> Option<ParseKey> {
-    let grammar =
-        verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
-            file_language.adapter_id()?,
-            file_language.carrier_language_id()?,
-        )?;
+    let grammar = registered_carrier_grammar(
+        file_language.adapter_id()?,
+        file_language.carrier_language_id()?,
+    )?;
     carrier_parse_key_under(source, file_language, grammar)
+}
+
+/// The registered grammar a carrier of `adapter_id` × `carrier_language_id`
+/// is accepted and keyed under: the one lookup every carrier parse, its
+/// publication key and its read key go through. `None` for a carrier with
+/// no registered grammar fact.
+pub(crate) fn registered_carrier_grammar(
+    adapter_id: &FrameworkAdapterId,
+    carrier_language_id: &LanguageId,
+) -> Option<&'static verter_language::carrier_grammar::CarrierGrammarConfig> {
+    verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+        adapter_id,
+        carrier_language_id,
+    )
 }
 
 /// The parse identity of carrier `source` under `grammar`'s parse options.
@@ -1692,6 +1705,9 @@ fn carrier_parse_key_under(
     // The language crate owns the (language, options) → compatibility
     // domain/epoch selection: a carrier of any adapter keys under its OWN
     // domain, never another framework's.
+    #[cfg(any(test, feature = "test-support"))]
+    verter_session_query::source::framework_parse::count_source_parse_identity_derivation_for_tests(
+    );
     verter_language::parse_identity_for(source, file_language, &options)
         .ok()
         .map(|(_, parse_key)| parse_key)

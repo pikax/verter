@@ -115,10 +115,7 @@ pub fn exact_source_parse_key(
         Some(carrier) => carrier_source_parse_key(file_language, carrier),
         None => {
             #[cfg(feature = "test-support")]
-            SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
-            #[cfg(feature = "test-support")]
-            SOURCE_PARSE_IDENTITY_DERIVATIONS_IN_PROCESS
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            count_source_parse_identity_derivation_for_tests();
             verter_language::default_parse_identity_for(source, file_language)
                 .ok()
                 .map(|(_, parse_key)| parse_key)
@@ -148,6 +145,16 @@ thread_local! {
     /// script's whole source through [`exact_source_parse_key`].
     static SOURCE_PARSE_IDENTITY_DERIVATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+}
+
+/// Count one parse identity derived by hashing a whole source, on this
+/// thread and in this process. Every whole-source derivation records itself
+/// here: [`exact_source_parse_key`]'s, and a carrier's under its registered
+/// grammar, which the host derives.
+#[cfg(feature = "test-support")]
+pub fn count_source_parse_identity_derivation_for_tests() {
+    SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
+    SOURCE_PARSE_IDENTITY_DERIVATIONS_IN_PROCESS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// How many parse identities this thread derived from a plain script's whole
