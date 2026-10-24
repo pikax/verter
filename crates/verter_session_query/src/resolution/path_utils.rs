@@ -34,14 +34,35 @@ pub fn carrier_source_extensions() -> Vec<String> {
         .collect()
 }
 
+/// The ancestor directories of `path` whose recovery scopes a resolution
+/// observes, nearest first, borrowed from `path`: each prefix before a `/`,
+/// up to and including the root `/` when `path` is absolute.
+///
+/// The one definition of the walk: the resolver's witnesses and the
+/// workspace's recovery facts both derive from it, so the two always name
+/// the same scopes.
+pub fn ancestor_scope_prefixes(path: &str) -> impl Iterator<Item = &str> {
+    let mut current = Some(path);
+    std::iter::from_fn(move || {
+        let path = current?;
+        let index = path.rfind('/')?;
+        let prefix = if index == 0 { "/" } else { &path[..index] };
+        current = (prefix != "/").then_some(prefix);
+        Some(prefix)
+    })
+}
+
 #[must_use]
 pub fn path_is_carrier(path: &str) -> bool {
     verter_language::LanguageRegistry::global()
         .carrier_extensions()
         .iter()
         .any(|ext| {
-            let needle = format!(".{ext}");
-            path.len() > needle.len() && path.ends_with(&needle)
+            // `path` ends with `.{ext}` and is longer than it, checked
+            // without spelling the suffix.
+            path.len() > ext.len() + 1
+                && path.ends_with(ext)
+                && path.as_bytes()[path.len() - ext.len() - 1] == b'.'
         })
 }
 
@@ -222,4 +243,26 @@ pub fn resolve_known_dependency_base(owner_id: &str, specifier: &str) -> Option<
 #[must_use]
 pub fn normalize_known_file_id(file_id: &str) -> String {
     collapse_path(file_id)
+}
+
+#[cfg(test)]
+mod ancestor_scope_tests {
+    use super::ancestor_scope_prefixes;
+
+    fn prefixes(path: &str) -> Vec<&str> {
+        ancestor_scope_prefixes(path).collect()
+    }
+
+    /// The walk every recovery-scope witness and fact derives from: nearest
+    /// first, ending at the root of an absolute path and at the first
+    /// segment of a drive or relative one.
+    #[test]
+    fn ancestor_scopes_walk_up_to_the_root() {
+        assert_eq!(prefixes("/repo/src/a.ts"), ["/repo/src", "/repo", "/"]);
+        assert_eq!(prefixes("/a.ts"), ["/"]);
+        assert_eq!(prefixes("c:/repo/a.ts"), ["c:/repo", "c:"]);
+        assert_eq!(prefixes("src/a.ts"), ["src"]);
+        assert!(prefixes("a.ts").is_empty());
+        assert_eq!(prefixes("//a"), ["/"]);
+    }
 }

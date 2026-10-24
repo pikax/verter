@@ -303,3 +303,58 @@ fn type_and_namespace_spaces_have_distinct_fingerprints() {
     assert_eq!(namespaces.entries.len(), 1);
     assert_ne!(types.fingerprint, namespaces.fingerprint);
 }
+
+/// Ingestion publishes a snapshot per file, and most are superseded before
+/// any lookup reads them, so a snapshot must not pay for lookup views until
+/// one is materialized. Counted by which snapshots hold a view table: none
+/// of the published ones until a lookup, then only the one looked up.
+#[test]
+fn unread_snapshots_allocate_no_lookup_views() {
+    let store = FileArtifactStore::new();
+    let mut snapshots = Vec::new();
+    for index in 0..8 {
+        publish(
+            &store,
+            &format!("/globals-{index}.d.ts"),
+            &format!(
+                "export {{}};\ndeclare global {{ interface Window {{ x{index}: number }} }}\n"
+            ),
+        );
+        snapshots.push(store.global_contributor_index().snapshot());
+    }
+    assert!(
+        snapshots
+            .iter()
+            .all(|snapshot| !snapshot.has_allocated_views()),
+        "no lookup has read a snapshot yet"
+    );
+
+    let absent = lookup_global(&store, "NobodyDeclaresThis");
+    assert!(absent.entries.is_empty());
+    assert!(
+        !store
+            .global_contributor_index()
+            .snapshot()
+            .has_allocated_views(),
+        "an undeclared name is answered without a view"
+    );
+
+    let first = lookup_global(&store, "Window");
+    let again = lookup_global(&store, "Window");
+    assert_eq!(first.entries.len(), 8);
+    assert!(
+        Arc::ptr_eq(&first.entries, &again.entries),
+        "the view is shared"
+    );
+    let current = store.global_contributor_index().snapshot();
+    assert!(current.has_allocated_views());
+    assert!(
+        snapshots[..7]
+            .iter()
+            .all(|snapshot| !snapshot.has_allocated_views()),
+        "superseded snapshots stay unread"
+    );
+
+    // Revert control: building the view tables with the snapshot makes
+    // every published snapshot report allocated tables.
+}
