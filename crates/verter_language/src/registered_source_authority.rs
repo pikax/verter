@@ -442,108 +442,20 @@ pub(crate) fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
     }
 }
 
-/// Linux, Android and browser wasm draw from the `getrandom` crate. On Linux
-/// and Android it issues the `getrandom(2)` system call itself (falling back
-/// to `/dev/urandom` on kernels without it), so no libc symbol is involved.
-/// Do not declare libc's `getrandom` here: std declares
-/// that symbol `extern_weak` and null-checks it, fat LTO merges every
-/// declaration of it into one that can stay weak, and a static musl link does
-/// not pull an archive member in for a weak reference. The unchecked call
-/// then jumps to address 0 at host construction.
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    all(target_arch = "wasm32", target_os = "unknown")
-))]
+/// Every target draws OS entropy through the `getrandom` crate, version 0.2.
+/// On Linux and Android it issues the `getrandom(2)` system call through
+/// `libc::syscall` (falling back to `/dev/urandom` on kernels without it), so
+/// no weakly declared libc symbol is involved.
+///
+/// Keep it that way. std declares libc's `getrandom` `extern_weak` and
+/// null-checks it, and fat LTO merges every declaration of that symbol into
+/// one that can stay weak. A static musl link does not pull an archive member
+/// in for a weak reference, so the symbol resolves to address 0. A hand-written
+/// declaration then crashes at host construction. getrandom 0.4's musl backend
+/// takes the same symbol's address: it survives a null result, but only by
+/// silently falling back to `/dev/urandom`.
 fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
-    getrandom::getrandom(bytes).map_err(|error| match error.raw_os_error() {
-        Some(code) => io::Error::from_raw_os_error(code),
-        None => io::Error::other(error.to_string()),
-    })
-}
-
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd",
-    target_os = "dragonfly"
-))]
-fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
-    unsafe extern "C" {
-        fn getentropy(buffer: *mut u8, length: usize) -> i32;
-    }
-
-    if bytes.len() > 256 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "getentropy accepts at most 256 bytes",
-        ));
-    }
-    // SAFETY: `bytes` is a valid writable buffer of exactly the supplied
-    // length; getentropy either fills all bytes or reports failure.
-    if unsafe { getentropy(bytes.as_mut_ptr(), bytes.len()) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
-    use std::ffi::c_void;
-    use std::ptr;
-
-    #[link(name = "bcrypt")]
-    unsafe extern "system" {
-        fn BCryptGenRandom(
-            algorithm: *mut c_void,
-            buffer: *mut u8,
-            buffer_len: u32,
-            flags: u32,
-        ) -> i32;
-    }
-
-    const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
-    let len = u32::try_from(bytes.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "random buffer too large"))?;
-    // SAFETY: the system-preferred RNG accepts a null algorithm handle, and
-    // `bytes` supplies a valid writable buffer of exactly `len` bytes.
-    let status = unsafe {
-        BCryptGenRandom(
-            ptr::null_mut(),
-            bytes.as_mut_ptr(),
-            len,
-            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-        )
-    };
-    if status >= 0 {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "BCryptGenRandom failed with NTSTATUS {status:#x}"
-        )))
-    }
-}
-
-#[cfg(not(any(
-    windows,
-    all(target_arch = "wasm32", target_os = "unknown"),
-    target_os = "linux",
-    target_os = "android",
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd",
-    target_os = "dragonfly"
-)))]
-fn fill_random(_bytes: &mut [u8]) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "no operating-system entropy source on this target",
-    ))
+    getrandom::getrandom(bytes).map_err(io::Error::from)
 }
 
 pub(crate) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
@@ -762,32 +674,29 @@ mod tests {
         (authority, snapshot)
     }
 
-    /// The OS entropy source fills the whole buffer with output that is
-    /// neither constant nor repeated between calls, so a stubbed source or a
-    /// fill that stops short fails here instead of at host construction. The
-    /// fat-LTO musl link failure this source once had depends on the final
-    /// binary's link, which this test binary does not reproduce.
+    /// The entropy source overwrites the whole buffer, and two fills differ,
+    /// so a stubbed source or a fill that stops short fails here rather than
+    /// at host construction. The fat-LTO musl link failure this source once
+    /// had depends on the final binary's link, which a test binary does not
+    /// reproduce. Browser wasm has no `crypto.getRandomValues` under a plain
+    /// test runner.
     #[test]
-    fn fill_random_yields_non_constant_output() {
-        let mut first = [0_u8; 64];
-        let mut second = [0_u8; 64];
+    #[cfg_attr(
+        all(target_arch = "wasm32", target_os = "unknown"),
+        ignore = "browser wasm entropy needs a JavaScript host"
+    )]
+    fn fill_random_overwrites_the_buffer() {
+        const SENTINEL: u8 = 0xA5;
+        let mut first = [SENTINEL; 64];
+        let mut second = [SENTINEL; 64];
         fill_random(&mut first).expect("first entropy fill");
         fill_random(&mut second).expect("second entropy fill");
-        assert!(
-            first.iter().any(|byte| *byte != first[0]),
-            "64 entropy bytes are all {:#04x}",
-            first[0]
+        assert_ne!(
+            first[48..],
+            [SENTINEL; 16],
+            "the buffer tail was not filled"
         );
         assert_ne!(first, second, "two entropy fills returned the same bytes");
-        assert!(
-            first[32..].iter().any(|byte| *byte != 0),
-            "the tail of the entropy buffer was left unfilled"
-        );
-        assert_ne!(
-            random_bytes::<16>().expect("namespace bytes"),
-            random_bytes::<16>().expect("namespace bytes"),
-            "two namespace mints drew the same bytes"
-        );
     }
 
     /// An overlay re-registered under a new view fingerprint retracts the
