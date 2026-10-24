@@ -2652,3 +2652,30 @@ fn a_view_captured_below_a_finished_artifact_publication_is_not_current() {
         "the current view holds the published artifact"
     );
 }
+
+/// A mutation still in flight unsettles no capture by itself: it advances
+/// the artifact generation only after it finishes, so a view captured while
+/// it applies, with nothing finished above it, is current.
+#[test]
+fn a_view_captured_beside_an_unfinished_artifact_mutation_is_current() {
+    let (host, canonical) = host_with_one_file();
+    let store = host.project_type_store().indexed();
+    let in_flight = store.hold_membership_epoch_for_test();
+    assert!(
+        store.capture_root().is_settled(),
+        "a root captured beside an unfinished mutation, with nothing finished above it, is settled"
+    );
+    host.bump_store_view_epoch();
+    let read = host.resolver_store_view_read();
+    assert!(
+        read.is_current_for_tests(),
+        "a view captured beside an unfinished mutation is current"
+    );
+    assert!(
+        read.view_for_tests()
+            .whole_hash_for_tests(&canonical)
+            .is_some(),
+        "the current view tracks the loaded file"
+    );
+    drop(in_flight);
+}
