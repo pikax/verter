@@ -139,7 +139,10 @@ impl Default for TaskRegistry {
         Self {
             owner: Arc::new(RegistryOwner {
                 namespace,
-                graph: Arc::new(Mutex::new(RegistryState::default())),
+                graph: Arc::new(Mutex::new(RegistryState {
+                    pools: [(namespace, TaskPool::default())].into_iter().collect(),
+                    ..RegistryState::default()
+                })),
             }),
         }
     }
@@ -253,10 +256,12 @@ impl TaskRegistry {
 
     fn same_authority(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.owner, &other.owner)
-            || Arc::ptr_eq(
-                &root_graph(&self.owner.graph),
-                &root_graph(&other.owner.graph),
-            )
+            || with_graph(&self.owner.graph, |state| {
+                // Pools live for their registration owner, including before
+                // its first task. One locked membership read stays valid if
+                // another join forwards this graph during the comparison.
+                state.pools.contains_key(&other.owner.namespace)
+            })
     }
 
     /// Register a fresh task. It stays active while any handle to it lives.
@@ -858,6 +863,51 @@ mod composition_tests {
                 assert_eq!(registry.active_task_count_for_tests(), 0);
             }
         }
+    }
+
+    #[test]
+    fn already_joined_tasks_keep_accepting_waits_during_further_composition() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let a = TaskRegistry::default();
+        let b = TaskRegistry::default();
+        a.share_authority_with(&b);
+        let waiter = a.register_task();
+        let producer = b.register_task();
+        let start = std::sync::Barrier::new(2);
+        let done = AtomicBool::new(false);
+        let accepted = AtomicUsize::new(0);
+        let refused = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                drop(waiter.wait_for(&producer).unwrap());
+                accepted.fetch_add(1, Ordering::Relaxed);
+                start.wait();
+                while !done.load(Ordering::Acquire) {
+                    match waiter.wait_for(&producer) {
+                        Ok(edge) => {
+                            accepted.fetch_add(1, Ordering::Relaxed);
+                            drop(edge);
+                        }
+                        Err(_) => {
+                            refused.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+            start.wait();
+            for rank in 1..=256 {
+                let joining = TaskRegistry::default();
+                // A higher-rank fixture forces forwarding on every join,
+                // exercising the race without an exponential forest.
+                with_graph(&joining.owner.graph, |state| state.rank = rank + 1);
+                a.share_authority_with(&joining);
+            }
+            done.store(true, Ordering::Release);
+            reader.join().unwrap();
+        });
+        assert!(accepted.load(Ordering::Relaxed) > 0);
+        assert_eq!(refused.load(Ordering::Relaxed), 0);
+        assert_eq!(a.wait_count_for_tests(), 0);
     }
 
     #[test]

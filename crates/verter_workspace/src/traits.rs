@@ -927,12 +927,12 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// of `cc.dependencies` union equality.
     fn replace_semantic_transitive(&self, canonical_id: &str, deps: BTreeSet<String>);
 
-    /// Set the workspace's reverse-dep-stripping extension list. Merges
-    /// with `probe_extensions()` and sorts longest-first at set-time.
     /// Compose the host's task authority with workspace dependency ownership.
     /// Adapter workspaces with no engine retain their own ordinary read API.
     fn bind_execution_registry(&self, _registry: verter_execution::tasks::TaskRegistry) {}
 
+    /// Set the workspace's reverse-dep-stripping extension list. Merges
+    /// with `probe_extensions()` and sorts longest-first at set-time.
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>);
 
     /// Monotonic generation of the SOURCE-ENV compaction domain — the
