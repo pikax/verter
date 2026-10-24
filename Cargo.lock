@@ -4373,6 +4373,7 @@ dependencies = [
  "verter_tsgo_api",
  "verter_type_expr",
  "walkdir",
+ "windows-sys",
  "xxhash-rust",
 ]
 
