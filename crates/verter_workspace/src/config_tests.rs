@@ -354,17 +354,8 @@ fn parse_extends_override() {
         .to_string_lossy()
         .replace('\\', "/");
     let opts = load_compiler_options(&ws, &tsconfig_path);
-    assert_eq!(opts.paths.len(), 1);
-    // Should use the overridden value, not the base
-    assert!(
-        opts.paths[0].1[0].contains("src"),
-        "should override paths from base, got: {}",
-        opts.paths[0].1[0]
-    );
-    assert!(
-        !opts.paths[0].1[0].contains("lib"),
-        "should NOT contain base path target"
-    );
+    let expected = normalize_canonical_id(&normalize_path_buf(&tmp.path().join("src/*")));
+    assert_eq!(opts.paths, vec![("@/*".to_string(), vec![expected])]);
 }
 
 #[test]
