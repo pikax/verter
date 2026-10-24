@@ -74,6 +74,13 @@ pub struct HostSourceData {
     /// `framework_parse` key). `None` for carriers, and for a language
     /// with no default parse identity.
     pub(crate) script_parse_key: Option<verter_language::ParseKey>,
+    /// This revision's bytes read under ANOTHER language than their own
+    /// ([`snapshot_parse_key_under`]), derived on first demand. One cell
+    /// suffices: the other language is the one the file is analysed under
+    /// (a runtime script's declaration companion's), one per revision; a
+    /// read under yet another language derives without caching.
+    pub(crate) analysis_parse_key:
+        std::sync::OnceLock<(FileLanguage, Option<verter_language::ParseKey>)>,
     /// Sole registered envelope owner for carrier sources.
     pub(crate) structure: Option<crate::carrier_publication_store::RegisteredFileStructure>,
     pub(crate) revision_token: crate::carrier_publication_store::HostSourceRevisionToken,
@@ -92,6 +99,31 @@ pub struct HostSourceData {
     pub(crate) eval_source: Arc<str>,
     /// Wall-clock parse duration in milliseconds.
     pub(crate) parse_duration_ms: f64,
+}
+
+/// The exact parse identity of `snapshot`'s own bytes read as a file of
+/// `file_language`: the snapshot's identity under its own language,
+/// otherwise [`crate::parse::source_parse_key_for`] over the snapshot's
+/// bytes, derived once per revision ([`HostSourceData::analysis_parse_key`]).
+/// It takes the snapshot, never separate bytes, so the cell can only ever
+/// hold the identity of the revision that owns it.
+pub(crate) fn snapshot_parse_key_under(
+    snapshot: &verter_scheduler::node::SourceSnapshot,
+    file_language: &FileLanguage,
+) -> Option<verter_language::ParseKey> {
+    let hd = snapshot.downcast_data::<HostSourceData>()?;
+    if *file_language == hd.file_language {
+        return hd.source_parse_key();
+    }
+    let derive = || crate::parse::source_parse_key_for(&snapshot.source, file_language);
+    let (language, parse_key) = hd
+        .analysis_parse_key
+        .get_or_init(|| (file_language.clone(), derive()));
+    if language == file_language {
+        parse_key.clone()
+    } else {
+        derive()
+    }
 }
 
 impl SnapshotData for HostSourceData {
@@ -527,6 +559,7 @@ impl HostStageExecutor {
                     parse: parse_snapshot,
                     framework_parse: Some(framework_parse),
                     script_parse_key: None,
+                    analysis_parse_key: std::sync::OnceLock::new(),
                     structure: Some(structure),
                     revision_token,
                     file_language,
@@ -563,6 +596,7 @@ impl HostStageExecutor {
                     parse: parse_snapshot,
                     framework_parse: None,
                     script_parse_key,
+                    analysis_parse_key: std::sync::OnceLock::new(),
                     structure: None,
                     revision_token,
                     file_language,

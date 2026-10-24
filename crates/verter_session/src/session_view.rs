@@ -109,16 +109,19 @@ pub trait SessionView: Send + Sync {
     /// no source for it or that refuses. Read only for a canonical the view
     /// overlays; any other is keyed by the base host's published key.
     ///
-    /// The default derives from [`Self::source`] on every read, so a view
-    /// that reports an overlay and its source is keyed correctly without
-    /// overriding this. The overlay-bearing views override it to derive each
-    /// overlay's identity at most once, their overlay sources being
-    /// immutable for their lifetime.
+    /// The default derives from [`Self::source`] on every read, and only
+    /// for a canonical the view reports an overlay for (`None` otherwise,
+    /// never a base source's identity), so a view that reports an overlay
+    /// and its source is keyed correctly without overriding this. The
+    /// overlay-bearing views override it to derive each overlay's identity
+    /// at most once, their overlay sources being immutable for their
+    /// lifetime.
     fn overlay_source_parse_key(
         &self,
         canonical: &str,
         file_language: &verter_language::FileLanguage,
     ) -> Option<verter_language::ParseKey> {
+        self.overlay_content_hash_for(canonical)?;
         let source = self.source(canonical)?;
         crate::parse::source_parse_key_for(&source, file_language)
     }
@@ -503,8 +506,7 @@ impl OverlayParseKeys {
     /// The parse identity of `source`, one of `overlays`' sources, under
     /// `file_language` ([`crate::parse::source_parse_key_for`]): derived on
     /// the first read, reused after. A read under another language than the
-    /// cell's, or of bytes in an allocation the overlay map does not hold,
-    /// derives without caching.
+    /// cell's derives without caching.
     fn get(
         &self,
         overlays: &FxHashMap<String, Arc<str>>,
@@ -519,6 +521,8 @@ impl OverlayParseKeys {
                 .collect()
         });
         let Some(cell) = cells.get(&Self::address(source)) else {
+            // Every caller passes the overlay map's own allocation.
+            verter_debug_assert!(false, "an overlay source the view's map holds has a cell");
             return derive();
         };
         let (language, parse_key) = cell.get_or_init(|| (file_language.clone(), derive()));

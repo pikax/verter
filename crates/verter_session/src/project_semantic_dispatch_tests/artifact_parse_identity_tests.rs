@@ -2,10 +2,9 @@
 //! from the view, derived once per view (a carrier's under its registered
 //! grammar, the identity its framework parse records), so the key that
 //! publishes an overlay artifact is the key that reads it. A file the view
-//! does not overlay, while the view holds its base content, is keyed by the
-//! host's published base key from one source snapshot — for a runtime
-//! script analysed through its declaration companion, the companion's; a
-//! view that declines the file keys nothing.
+//! does not overlay, while the view holds its base content, is keyed from
+//! one base source snapshot, the bytes a materialisation publishes from
+//! included; a view that declines the file keys nothing.
 //!
 //! Derivations are counted across every thread of the process, so each
 //! counting test runs in a fresh process of its own ([`in_a_fresh_process`]).
@@ -17,6 +16,7 @@ use rustc_hash::FxHashMap;
 use super::checker_probe_lane_tests::{
     in_a_fresh_process, probe_host, test_path, upsert_probe_files, ProbeProject,
 };
+use crate::file_artifact_store::FileArtifactKeySource;
 use crate::session_view::OverlaidViewRef;
 use verter_session_query::source::framework_parse::source_parse_identity_derivations_in_process_for_tests as derivations;
 
@@ -125,14 +125,16 @@ fn overlay_and_base_keys() {
         "a base read keys the chain file as the host does"
     );
     let old_source = host.get_source(CHAIN_FILE).expect("the chain file's bytes");
-    assert_eq!(
-        identity.materialization_identity(&host, &view, &old_source),
-        (
-            base_key.file_language_id.clone(),
-            Some(base_key.parse_key.clone())
-        ),
-        "bytes the base snapshot holds materialise under the read key's language and identity"
+    let content = identity
+        .view_content(&host, &view)
+        .expect("the view holds the chain file's base content");
+    assert!(
+        Arc::ptr_eq(&content.source, &old_source),
+        "a materialisation reads the snapshot's own bytes"
     );
+    assert_eq!(content.content_hash, base_key.content_hash);
+    assert_eq!(content.file_language, base_key.file_language_id);
+    assert_eq!(content.parse_key.as_ref(), Some(&base_key.parse_key));
 
     // A base edit while the view is live: the read key follows it, and the
     // superseded bytes are no longer seeded.
@@ -148,18 +150,16 @@ fn overlay_and_base_keys() {
         host.authoritative_current_artifact_key(CHAIN_FILE).as_ref(),
         "the live view's base read keys the new revision"
     );
-    assert_eq!(
-        identity
-            .materialization_identity(&host, &view, &old_source)
-            .1,
-        None,
-        "bytes the base snapshot moved past are not seeded"
-    );
     let new_source = host.get_source(CHAIN_FILE).expect("the edited bytes");
-    assert_eq!(
-        identity.materialization_identity(&host, &view, &new_source),
-        (new_key.file_language_id.clone(), Some(new_key.parse_key))
+    let content = identity
+        .view_content(&host, &view)
+        .expect("the view holds the edited base content");
+    assert!(
+        Arc::ptr_eq(&content.source, &new_source) && !Arc::ptr_eq(&content.source, &old_source),
+        "a materialisation after the edit reads the new revision's bytes"
     );
+    assert_eq!(content.content_hash, new_key.content_hash);
+    assert_eq!(content.parse_key, Some(new_key.parse_key));
 }
 
 /// A view over the host that declines one canonical (no source, no
@@ -235,10 +235,6 @@ fn a_view_that_declines_a_file_keys_no_base_artifact_for_it() {
         None,
         "a declined file keys nothing"
     );
-    assert!(identity
-        .lookup_overlay_artifacts(&host, &declining)
-        .is_none());
-
     let other = chain(5, "T | null");
     let serving = OneCanonicalView {
         base: crate::session_view::HostView::new(Arc::clone(&host)),
@@ -258,15 +254,27 @@ fn a_view_that_declines_a_file_keys_no_base_artifact_for_it() {
         "the view's own bytes are keyed, not the host's"
     );
     assert_ne!(Some(key), host.authoritative_current_artifact_key(FILE));
+    let language = host
+        .effective_file_state(FILE, None)
+        .expect("a source state")
+        .file_language;
+    assert_eq!(
+        crate::session_view::SessionView::overlay_source_parse_key(&serving, FILE, &language),
+        None,
+        "a view reporting no overlay derives no overlay identity, though it serves bytes"
+    );
+    assert!(identity
+        .lookup_overlay_artifacts(&host, &declining)
+        .is_none());
 }
 
-/// A runtime script analysed through its declaration companion is keyed,
-/// on a base read, by the key the host publishes the companion's artifact
-/// under — the companion's own snapshot identity, with no derivation — and
-/// follows an edit to the companion. The script's own bytes never seed an
-/// artifact under that key.
+/// A runtime script analysed through its declaration companion is read
+/// and published by one key: the script's own bytes and content hash, read
+/// under the companion's language. Its materialisation is found again by
+/// that key on the next request, the identity is derived once per revision
+/// of the script across views, and an edit to the script keys it anew.
 #[test]
-fn a_script_read_through_its_declaration_companion_keys_the_companion_artifact() {
+fn a_script_read_through_its_declaration_companion_is_read_back_by_its_publish_key() {
     in_a_fresh_process(test_path!(), companion_keys);
 }
 
@@ -286,9 +294,13 @@ fn companion_keys() {
         COMPANION,
         "the script is analysed through its declaration companion"
     );
-    let tombstones = std::collections::HashSet::new();
-    let (sources, hashes) = overlay_maps("/wb/other.ts", "export {};\n");
-    let view = OverlaidViewRef::new(&host, &sources, &hashes, &tombstones);
+    let companion_language = host
+        .effective_file_state(COMPANION, None)
+        .expect("the companion has a source state")
+        .file_language;
+    // An overlay-free view: the materialiser publishes its base-passthrough
+    // artifact under the base key.
+    let view = crate::session_view::HostView::new(Arc::clone(&host));
 
     let before = derivations();
     let key = identity
@@ -297,37 +309,102 @@ fn companion_keys() {
     for _ in 0..50 {
         assert_eq!(identity.current_read_key(&host, &view).as_ref(), Some(&key));
     }
+    let second_view = crate::session_view::HostView::new(Arc::clone(&host));
     assert_eq!(
-        derivations() - before,
-        0,
-        "the companion's snapshot identity is read, not derived"
+        identity.current_read_key(&host, &second_view).as_ref(),
+        Some(&key)
     );
+    let derived = derivations() - before;
     assert_eq!(
-        Some(&key),
-        host.authoritative_current_artifact_key(COMPANION).as_ref(),
-        "the read key is the key the host publishes the companion under"
+        key.content_hash,
+        verter_semantic_source::source_hash::hash_16(script.as_bytes()),
+        "the key names the script's own bytes"
     );
-    let script_bytes = host.get_source(SCRIPT).expect("the script's bytes");
+    assert_eq!(key.file_language_id, companion_language);
     assert_eq!(
-        identity
-            .materialization_identity(&host, &view, &script_bytes)
-            .1,
-        None,
-        "the script's own bytes are never seeded with the companion's key"
+        Some(&key.parse_key),
+        crate::parse::source_parse_key_for(script, &companion_language).as_ref()
     );
 
-    upsert_probe_files(
-        &host,
-        &[("lib.d.ts", "export declare function f<T>(x: T): [T];\n")],
+    let indexed = host
+        .materialize_overlay_indexed_ready_with_view(SCRIPT, &view)
+        .expect("the script materialises");
+    assert_eq!(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_indexed(
+            Arc::from(COMPANION),
+            &indexed,
+            key.parse_env_hash,
+        ),
+        key,
+        "the publish key is the read key"
     );
+    let read_back = identity
+        .lookup_overlay_artifacts(&host, &second_view)
+        .expect("the next request reads the published artifact back");
+    assert!(Arc::ptr_eq(&read_back.indexed, &indexed));
+    let again = host
+        .materialize_overlay_indexed_ready_with_view(SCRIPT, &second_view)
+        .expect("the script materialises again");
+    assert!(
+        Arc::ptr_eq(&again, &indexed),
+        "the next request hits the published artifact"
+    );
+
+    assert_eq!(
+        derived, 1,
+        "every read of one script revision, across views, derives its identity once"
+    );
+
+    upsert_probe_files(&host, &[("lib.js", "export function f(y) { return y; }\n")]);
     let edited = identity
         .current_read_key(&host, &view)
-        .expect("the script has a key after the companion's edit");
-    assert_ne!(edited.parse_key, key.parse_key);
+        .expect("the edited script has a key");
+    assert_ne!(edited.content_hash, key.content_hash);
+    assert_ne!(
+        edited.parse_key, key.parse_key,
+        "an edit keys the script anew"
+    );
+}
+
+/// A raw id the host resolves through an alias: the view serves the
+/// canonical's bytes for it but hashes no content under the alias, so the
+/// read keys nothing and nothing materialises — never a key built from one
+/// canonical's check and another's bytes.
+#[test]
+fn an_aliased_id_keys_nothing_the_view_does_not_hash() {
+    const CANONICAL: &str = "/wb/real.ts";
+    const ALIAS: &str = "/wb/alias.ts";
+    let host = probe_host(ProbeProject::default());
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some(CANONICAL.to_owned()),
+            input_id: CANONICAL.to_owned(),
+            source: Arc::from("export type T = 1;\n"),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: vec![ALIAS.to_owned()],
+        })
+        .expect("the aliased file upserts");
+    let view = crate::session_view::HostView::new(Arc::clone(&host));
+    assert!(
+        crate::session_view::SessionView::source(&view, ALIAS).is_some(),
+        "the view serves the canonical's bytes under the alias"
+    );
     assert_eq!(
-        Some(&edited),
-        host.authoritative_current_artifact_key(COMPANION).as_ref(),
-        "the read key follows the companion's new revision"
+        crate::session_view::SessionView::content_hash_for(&view, ALIAS),
+        None,
+        "the view hashes no content under the alias"
+    );
+    let identity = host.overlay_artifact_identity(ALIAS);
+    assert!(identity.view_content(&host, &view).is_none());
+    assert_eq!(identity.current_read_key(&host, &view), None);
+    assert!(host
+        .materialize_overlay_indexed_ready_with_view(ALIAS, &view)
+        .is_none());
+    let canonical = host.overlay_artifact_identity(CANONICAL);
+    assert_eq!(
+        canonical.current_read_key(&host, &view),
+        host.authoritative_current_artifact_key(CANONICAL),
+        "the canonical id itself is keyed as the host keys it"
     );
 }
 
