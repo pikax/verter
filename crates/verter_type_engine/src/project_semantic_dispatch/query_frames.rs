@@ -77,6 +77,8 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 
+const ROOT_FRAME_DEPTH: u32 = 1;
+
 /// Where each relation operand's carrier walk stopped in a decision's last
 /// run, by operand and checking site: the point whose step reached a read
 /// without an answer, with the instantiations the walk took to reach it.
@@ -846,7 +848,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             graph: graph.store(),
             task: graph.execution_task(),
             retries: FxHashMap::default(),
-            child_depth: 1,
+            child_depth: ROOT_FRAME_DEPTH,
             #[cfg(any(test, feature = "test-support"))]
             held_call_needs: None,
         };
@@ -1494,9 +1496,11 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         if dispatch.request_local_is_open(key) {
             return Start::Answer(Ok(dispatch.recursion_delivery(key, Recursion::SamePath)));
         }
-        // A relation completes for the request only through its synchronous
-        // root, which keeps its component with it.
-        if !matches!(key, SemanticQueryKey::Relate { .. })
+        // Only dependencies can complete outside the family memo. A root
+        // retains the canonical candidate its synchronous entry would publish.
+        // A relation keeps its component at its own synchronous root.
+        if self.child_depth > ROOT_FRAME_DEPTH
+            && !matches!(key, SemanticQueryKey::Relate { .. })
             && dispatch.completes_nested_request_locally(key)
         {
             dispatch

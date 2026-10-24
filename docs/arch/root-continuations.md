@@ -509,6 +509,9 @@ because the request state they live on moves into the lent task until the
 task gives it back. The thread's execution scopes (audit attribution,
 construction scope, validity) are entered for each poll. `drive_query`
 blocks on the same root with the external-boundary driver.
+The root claims its family memo and publishes the same canonical candidate as
+the synchronous entry. Only dependency frames may complete a cheap intermediate
+for the request alone, outside that memo.
 
 Every other query enters as a cold root through the synchronous entry's own
 cold-query admission (`begin_cold_query`: canonical key, sealed isolated-root
