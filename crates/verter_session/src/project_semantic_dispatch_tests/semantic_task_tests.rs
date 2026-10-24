@@ -943,8 +943,20 @@ fn hold_producer<'g>(
     verter_execution::tasks::ExecutionTask,
     verter_type_engine::semantic_query_memo::ProducerLease<'g>,
 ) {
+    hold_producer_with(host, graph, key, ReadCapture::default())
+}
+
+/// [`hold_producer`] for a key checked at the site `capture` names.
+fn hold_producer_with<'g>(
+    host: &crate::VerterHost,
+    graph: &'g verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    key: SemanticQueryKey,
+    mut capture: ReadCapture<'_>,
+) -> (
+    verter_execution::tasks::ExecutionTask,
+    verter_type_engine::semantic_query_memo::ProducerLease<'g>,
+) {
     let other = graph.task_registry_for_tests().register_task();
-    let mut capture = ReadCapture::default();
     let Ok(mut attempt) = graph.begin_query_claim(host, host.request_flags(), key, &mut capture)
     else {
         panic!("a cold typeof has no warm answer");
@@ -1921,10 +1933,7 @@ mod semantic_poll_contract {
     /// goes away whether or not `body` returned before the deadline, and what
     /// `body` observed is returned for the caller to assert once everything
     /// it held is released.
-    fn while_held<R>(
-        lease: verter_type_engine::semantic_query_memo::ProducerLease<'_>,
-        body: impl FnOnce() -> R,
-    ) -> R {
+    fn while_held<L: Send, R>(lease: L, body: impl FnOnce() -> R) -> R {
         let (release, released) = std::sync::mpsc::channel::<()>();
         std::thread::scope(|scope| {
             let holder = scope.spawn(move || {
@@ -2115,6 +2124,249 @@ mod semantic_poll_contract {
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
         drop(other);
     }
+
+    /// What a root that joined another task's producer through its frame
+    /// reads, beside the work its receipt records: everything
+    /// [`read_summary`] compares, the receipt's footprint, depth and
+    /// prerequisites in place of its work, with `answer` rendering the value.
+    /// The frame's run that met the producer is run again once the producer
+    /// answers, and each entry that run makes again is charged again, so the
+    /// work is compared on its own: never below the synchronous entry's.
+    fn joined_evidence(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        read: &verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>,
+        answer: impl FnOnce(&QueryResult<SemanticQueryValue>) -> String,
+    ) -> (
+        (String, String, bool, bool, Vec<String>, Option<String>),
+        Option<u64>,
+    ) {
+        let (_, facts, suppress, partial, diagnostics, _) = read_summary(dispatch, read);
+        let receipt = read.receipt().priced();
+        (
+            (
+                answer(read.value()),
+                facts,
+                suppress,
+                partial,
+                diagnostics,
+                receipt.map(|receipt| {
+                    format!(
+                        "{:?}",
+                        (
+                            receipt.footprint(),
+                            receipt.depth(),
+                            receipt.prerequisites().len()
+                        )
+                    )
+                }),
+            ),
+            receipt.map(|receipt| receipt.exclusive().work),
+        )
+    }
+
+    /// Assert a joined read against its synchronous read
+    /// ([`joined_evidence`]).
+    fn assert_joined_matches(
+        joined: (
+            (String, String, bool, bool, Vec<String>, Option<String>),
+            Option<u64>,
+        ),
+        synchronous: &(
+            (String, String, bool, bool, Vec<String>, Option<String>),
+            Option<u64>,
+        ),
+    ) {
+        assert_eq!(joined.0, synchronous.0);
+        let (Some(joined), Some(synchronous)) = (joined.1, synchronous.1) else {
+            panic!("both complete reads carry a receipt");
+        };
+        assert!(
+            joined >= synchronous,
+            "a joined read is charged every entry its synchronous read is: {joined} < {synchronous}"
+        );
+    }
+
+    /// `boolean extends true ? string : number`, distributed.
+    fn distributed_union_key(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> SemanticQueryKey {
+        let graph = dispatch.graph_arc();
+        let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let yes = graph.intern_node(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::Boolean(true),
+        ));
+        let SemanticQueryKey::Conditional {
+            true_branch,
+            false_branch,
+            ..
+        } = primitive_conditional_key(dispatch, boolean, yes)
+        else {
+            unreachable!("the key is a conditional");
+        };
+        SemanticQueryKey::Conditional {
+            check: boolean,
+            extends: yes,
+            true_branch,
+            false_branch,
+            distributive: true,
+            pending: None,
+        }
+    }
+
+    /// The union a distributed decision reduces its members to: a query no
+    /// frame family owns, which the decision reads itself. Held in both
+    /// member orders, so whichever the canonical key is, another task is
+    /// producing it.
+    fn member_unions(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> [SemanticQueryKey; 2] {
+        let graph = dispatch.graph_arc();
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        [[string, number], [number, string]].map(|members| SemanticQueryKey::ReduceUnion {
+            members: Arc::from(members),
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        })
+    }
+
+    /// A decision's own read of a query no frame family owns, which another
+    /// task is producing, makes the decision's frame return `Pending`
+    /// instead of waiting that producer out on the polling thread. The
+    /// producer going away wakes the root; the frame then produces the
+    /// query itself, and the root delivers exactly what the synchronous
+    /// entry reads on a fresh host — answer, completeness, diagnostics and
+    /// receipt — with nothing left open.
+    #[test]
+    fn a_decision_joining_another_tasks_reduction_yields_and_reads_what_the_synchronous_entry_reads(
+    ) {
+        let synchronous = {
+            let host = chain_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let _builder = dispatch.enter_construction_scope();
+            let read = dispatch.execute_via_cold_build_helper(distributed_union_key(&dispatch));
+            joined_evidence(&dispatch, &read, |answer| display(&dispatch, answer))
+        };
+        assert_eq!(synchronous.0 .0, "Union(number | string)");
+        let host = chain_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let [first_order, second_order] = member_unions(&dispatch);
+        let (first_task, first_lease) = hold_producer(&host, graph, first_order);
+        let (second_task, second_lease) = hold_producer(&host, graph, second_order);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut entry = dispatch.poll_query(distributed_union_key(&dispatch));
+        let first = while_held((first_lease, second_lease), || entry.poll(&waker));
+        assert!(
+            first.is_pending(),
+            "the decision yields while another task produces its union, instead of waiting it out"
+        );
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the root"
+        );
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken decision produces the union itself"),
+        };
+        drop(entry);
+        assert_joined_matches(
+            joined_evidence(&dispatch, &read, |answer| display(&dispatch, answer)),
+            &synchronous,
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop((first_task, second_task));
+    }
+
+    /// The callable-shape reads of `both`'s type a flow evaluation of `f`
+    /// makes itself: a query no frame family owns.
+    fn callee_signature_reads(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> Vec<SemanticQueryKey> {
+        [ProjectionMode::Expanded, ProjectionMode::Navigate]
+            .into_iter()
+            .filter_map(|mode| {
+                let callee = dispatch.execute_read(dispatch.typeof_key_for(
+                    ValueRootKey {
+                        scope: ScopeId::file(
+                            CONTEXTUAL_FILE,
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        ),
+                        name: "both".into(),
+                    },
+                    ProjectionReductionContext::published(mode),
+                ));
+                match callee.value() {
+                    QueryResult::Value(callee) => Some(SemanticQueryKey::SignaturesOfType {
+                        subject: *callee,
+                        kind: verter_type_engine::semantic_query::SignatureKind::Call,
+                        context: verter_type_engine::semantic_query::SemanticContextId::production(
+                        ),
+                    }),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// A flow evaluation's own read of a query no frame family owns, which
+    /// another task is producing, makes the flow frame return `Pending`
+    /// instead of waiting that producer out on the polling thread, and the
+    /// woken root answers what the synchronous entry answers on a fresh host.
+    #[test]
+    fn a_flow_joining_another_tasks_signature_read_yields_and_answers_what_the_synchronous_entry_answers(
+    ) {
+        let synchronous = {
+            let host = contextual_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let read = dispatch.execute_via_cold_build_helper(contextual_return_key(&dispatch));
+            joined_evidence(&dispatch, &read, |answer| display_return(&host, answer))
+        };
+        assert!(!synchronous.0 .3, "the return is complete: {synchronous:?}");
+        let host = contextual_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        // The evaluation checks the callee at either site; another task
+        // produces both.
+        let mut keys = callee_signature_reads(&dispatch);
+        keys.dedup();
+        let (tasks, leases): (Vec<_>, Vec<_>) = keys
+            .into_iter()
+            .flat_map(|key| {
+                [
+                    hold_producer(&host, graph, key.clone()),
+                    hold_producer_with(&host, graph, key, ReadCapture::expression_for_tests()),
+                ]
+            })
+            .unzip();
+        assert!(!leases.is_empty(), "the callee has a callable type");
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut entry = dispatch.poll_query(contextual_return_key(&dispatch));
+        let first = while_held(leases, || entry.poll(&waker));
+        assert!(
+            first.is_pending(),
+            "the flow yields while another task produces its callee's signatures"
+        );
+        assert!(counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken flow reads the signatures itself"),
+        };
+        drop(entry);
+        assert_joined_matches(
+            joined_evidence(&dispatch, &read, |answer| display_return(&host, answer)),
+            &synchronous,
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop(tasks);
+    }
+
     /// A call root uses the same owned candidate walk as a nested call. A
     /// parameter's held alias must yield before the relation consumes it.
     #[test]

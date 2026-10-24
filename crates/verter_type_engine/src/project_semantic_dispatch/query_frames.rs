@@ -384,6 +384,14 @@ pub(super) struct DecisionSeam {
     conditional_children: bool,
 }
 
+/// The seam whose run made a read that joins another task's producer
+/// ([`ProjectSemanticDispatch::join_seam_for`]).
+#[derive(Clone, Copy)]
+pub(super) enum JoinSeam {
+    Decision,
+    Flow,
+}
+
 pub(super) struct ConditionalChildQueries<'d> {
     restore: Option<(&'d std::cell::RefCell<Option<DecisionSeam>>, bool)>,
 }
@@ -1498,10 +1506,13 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         }
         // Only dependencies can complete outside the family memo. A root
         // retains the canonical candidate its synchronous entry would publish.
-        // A relation keeps its component at its own synchronous root.
+        // A relation keeps its component at its own synchronous root. A key
+        // another task is producing is joined through the claim below, never
+        // computed beside it, as its synchronous entry joins it.
         if self.child_depth > ROOT_FRAME_DEPTH
             && !matches!(key, SemanticQueryKey::Relate { .. })
             && dispatch.completes_nested_request_locally(key)
+            && !self.graph.has_flight(&attempt)
         {
             dispatch
                 .request_local_open
@@ -2305,6 +2316,89 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .is_some_and(|seam| seam.nested == 0)
     }
 
+    /// The seam a read of `key` made here joins another task's producer
+    /// through: the running decision's or flow evaluation's own read of a
+    /// query outside the families its seam answers. Such a read meeting
+    /// another task's producer becomes the frame's need instead of waiting
+    /// the producer out on the polling thread; a read it evaluates in place
+    /// is unaffected. `None` for a read in place, outside any seam, or of a
+    /// family a frame owns: an instantiation, a `typeof`, a conditional — a
+    /// probe of one keeps its temporary checker context — a call or a flow
+    /// return.
+    pub(super) fn join_seam_for(&self, key: &SemanticQueryKey) -> Option<JoinSeam> {
+        if matches!(
+            key,
+            SemanticQueryKey::Instantiate(_)
+                | SemanticQueryKey::TypeOf { .. }
+                | SemanticQueryKey::Conditional { .. }
+                | SemanticQueryKey::ResolveCall(_)
+                | SemanticQueryKey::FlowReturn(_)
+        ) {
+            return None;
+        }
+        if self.deciding_on_the_runtime() {
+            Some(JoinSeam::Decision)
+        } else if self.flow_seam_reads_here() {
+            Some(JoinSeam::Flow)
+        } else {
+            None
+        }
+    }
+
+    /// The read of `key` at `seam` the frame already settled: the answer a
+    /// delivery holds, or the typed gap while it is still one of the run's
+    /// needs. `None` when the run has neither, and the read claims.
+    pub(super) fn read_joined_at_seam(
+        &self,
+        seam: JoinSeam,
+        key: &SemanticQueryKey,
+    ) -> Option<ValueRead> {
+        let site = self.checking_site.get();
+        let probe =
+            |answers: &FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
+             needs: &SeamNeeds| {
+                (
+                    answers.get(&(key.clone(), site)).cloned(),
+                    needs.contains(key, site),
+                )
+            };
+        let (answer, waiting) = match seam {
+            JoinSeam::Decision => {
+                let installed = self.decision_seam.borrow();
+                let seam = installed.as_ref()?;
+                probe(&seam.answers, &seam.needs)
+            }
+            JoinSeam::Flow => {
+                let installed = self.flow_seam.borrow();
+                let seam = installed.as_ref()?;
+                probe(&seam.answers, &seam.needs)
+            }
+        };
+        match answer {
+            // The read is the one nested query level its synchronous entry
+            // enters; only who produced it differs.
+            Some(delivery) => Some(self.read_delivery(delivery, Nesting::Entered)),
+            None if waiting => Some(self.suspended_decision_read()),
+            None => None,
+        }
+    }
+
+    /// Make a read that met another task's producer the need of the frame
+    /// whose run made it, its claim kept for the runtime to join again, and
+    /// read the typed gap nothing built from it keeps.
+    pub(super) fn suspend_joined_read(
+        &self,
+        seam: JoinSeam,
+        key: SemanticQueryKey,
+        claim: ClaimAttempt,
+    ) -> ValueRead {
+        match seam {
+            JoinSeam::Decision => self.with_decision_seam(|seam| seam.needs.push(key, claim)),
+            JoinSeam::Flow => self.with_flow_seam(|seam| seam.needs.push(key, claim)),
+        }
+        self.suspended_decision_read()
+    }
+
     /// One step of an instantiation's frame: its taint frame and tracer
     /// installed, it begins or resumes its build and runs it until the
     /// build needs another instantiation or completes.
@@ -2471,10 +2565,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         };
                         self.drain_flow(&frame.key, build, None, frame.depth + 1)
                     }
-                    _ => unreachable!(
-                        "a frame produces an instantiation, a typeof, a conditional decision, \
-                         a call resolution or a flow return"
-                    ),
+                    // A dependency of a family without frames of its own: a
+                    // read a decision or flow evaluation joined at its seam
+                    // whose producer went away before the join answered.
+                    // It builds in one step, as its synchronous producer
+                    // builds it.
+                    _ => FramePoll::Done(Box::new(self.build_cold_query_family(&frame.key))),
                 }
             }
         };

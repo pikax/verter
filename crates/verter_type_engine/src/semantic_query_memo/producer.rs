@@ -265,6 +265,15 @@ pub struct PendingAcquire<'s> {
     subscription: Subscription<'s>,
 }
 
+impl PendingAcquire<'_> {
+    /// The claim this acquisition continues, for another owner to make
+    /// again. Dropping the subscription withdraws only its own readiness
+    /// registration and wait edge; the producer it joined is left alone.
+    pub(crate) fn into_claim(self) -> ClaimAttempt {
+        self.attempt
+    }
+}
+
 /// How an acquisition that meets another task's producer waits for it.
 pub enum AcquireWait<'w, 's> {
     /// Wait it out on this thread: the synchronous entry.

@@ -4739,6 +4739,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return read;
             }
         }
+        // The seam this read is its own read of, decided before the read
+        // counts as evaluating in place.
+        let join = (publication.is_none() && operand_evidence.is_none())
+            .then(|| self.join_seam_for(&key))
+            .flatten();
         let _nested = self.nested_decision_query();
         // An instantiation or a `typeof` read for its value alone, outside
         // any drive, runs on the continuation runtime: the chain of
@@ -4747,7 +4752,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if publication.is_none() && operand_evidence.is_none() && self.drives_on_the_runtime(&key) {
             return self.drive_query(key);
         }
-        self.execute_cold_query_owned(key, publication, operand_evidence)
+        self.execute_cold_query_owned(key, publication, operand_evidence, join)
     }
 
     /// A relation read whose raw key carries no exact inference context:
@@ -4789,19 +4794,49 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         operand_evidence: Option<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
+        join: Option<query_frames::JoinSeam>,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
         let plain_read = publication.is_none() && operand_evidence.is_none();
         let entry = match self.begin_cold_query(key, plain_read) {
             ColdBegin::Answered(read) => return read,
             ColdBegin::Entered(entry) => entry,
         };
+        // A read a decision or flow evaluation makes itself joins another
+        // task's producer through its frame. A root, an isolated root's
+        // sealed refusal or a normalized carrier subject keeps its entry's
+        // own state, which a frame does not carry: it waits here.
+        let join = join.filter(|_| {
+            entry.isolated_root.is_none()
+                && !entry.connected.is_root()
+                && entry.carrier_prelude.is_none()
+        });
+        // A joined read the frame settled is answered once it enters,
+        // charged as every entry of the read is.
+        if let Some(seam) = join {
+            if let Some(read) = self.read_joined_at_seam(seam, entry.key()) {
+                return read;
+            }
+        }
         let mut claim = ColdClaim::default();
-        let std::task::Poll::Ready(claimed) =
-            self.claim_cold_query(&entry, &mut claim, publication, operand_evidence, None)
-        else {
-            unreachable!("a blocking claim waits its subscriptions out")
-        };
-        self.finish_cold_query(entry, claimed)
+        let waker = std::task::Waker::noop();
+        match self.claim_cold_query(
+            &entry,
+            &mut claim,
+            publication,
+            operand_evidence,
+            join.map(|_| waker),
+        ) {
+            std::task::Poll::Ready(claimed) => self.finish_cold_query(entry, claimed),
+            // Only a joining read yields: its claim becomes the frame's need,
+            // and the subscription it polled withdraws.
+            std::task::Poll::Pending => {
+                let (Some(seam), Some(pending)) = (join, claim.waiting.take()) else {
+                    unreachable!("only a joining claim yields, keeping what it waits on")
+                };
+                let ColdEntry { key, .. } = entry;
+                self.suspend_joined_read(seam, key, pending.into_claim())
+            }
+        }
     }
 
     /// The admission of one cold-query entry, before its family-memo claim:
@@ -4997,118 +5032,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         cache_read
     }
 
-    /// The family-memo protocol of one cold-query entry: a warm lookup,
-    /// then a claim for this execution's task — the recursion carrier,
-    /// another task's result, or this key's producer, which runs the traced
-    /// build, settles, is admitted and completes — or a request-local
-    /// completion ([`completes_request_locally`]). Ready with the read,
-    /// whether a cold build ran, and the facts a sealed refusal of an
-    /// isolated root keeps.
-    ///
-    /// Without a waker the claim waits out another task's producer here:
-    /// the synchronous entry. With one it yields instead — `Pending`, the
-    /// claim kept in `claim` with the waker registered on the producer's
-    /// flight — and the next call with the same `claim` continues it: a
-    /// polled root entry. Either way it is this one protocol.
+    /// The cold build of `key`'s family, run by whichever producer owns
+    /// the claim: the synchronous entry's traced build and a continuation
+    /// frame producing a dependency no frame family owns. One body, so the
+    /// two producers compute the same answer.
     #[inline(never)]
-    pub(super) fn claim_cold_query<'s>(
-        &'s self,
-        entry: &ColdEntry<'_>,
-        claim: &mut ColdClaim<'s>,
-        publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
-        operand_evidence: Option<
-            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
-        >,
-        wait: Option<&std::task::Waker>,
-    ) -> std::task::Poll<ClaimedCold> {
-        let key = &entry.key;
-        let carrier_prelude = &entry.carrier_prelude;
-        let isolated_root = entry.isolated_root.is_some();
-        let connected_root = entry.connected.is_root();
-        let plain_read = publication.is_none() && operand_evidence.is_none();
-        // A relation decided as the root of its checker transaction captures
-        // its publication for the members of its component; completed for
-        // the request, it keeps them in the request tier instead and leaves
-        // the capture empty.
-        let relation_root =
-            matches!(key, SemanticQueryKey::Relate { .. }) && operand_evidence.is_none();
-        let graph = self.graph();
-        // Per-key recursion sentinel: when the memo detects same-path
-        // re-entry on an `Instantiate` key, extract the decl name and
-        // emit `Opaque(RecursiveRef { name })`. The materialiser
-        // recognises `TypeExpr::RecursiveRef` as a leaf and stops
-        // expansion, terminating recursive aliases like `type Tree =
-        // { children: Tree[] }` without stack overflow.
-        // Non-Instantiate re-entry falls back to `Opaque(Miss)`.
-        // The sentinel and the build closures borrow the entry's key and
-        // state: they run within this call or not at all, so a warm read
-        // copies nothing for a build it never runs.
-        let sentinel = || {
-            if let SemanticQueryKey::Instantiate(k) = key {
-                return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                    name: k.base().merged_symbol_name.clone(),
-                    args: Arc::clone(k.args()).into(),
-                }));
-            }
-            graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
-        };
-        let key_for_build = key;
-        #[cfg(any(test, feature = "test-support"))]
-        let key_for_close = key;
-        let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput<
-            SemanticQueryValue,
-        > {
-            if let SemanticQueryKey::ClassifyBroadRuntime { subject, .. } = key_for_build {
-                return self.build_classify_broad_runtime(subject);
-            }
-            if let SemanticQueryKey::ClassifyMaterializationCycleGate(key) = key_for_build {
-                return self.build_classify_materialization_cycle_gate(key);
-            }
-            if let SemanticQueryKey::ClassifyTruthinessDomain { subject } = key_for_build {
-                return self.build_classify_truthiness_domain(*subject);
-            }
-            // The SOLE relation authority (design
-            // `.claude/skills/type-resolution/SKILL.md`): `execute(Relate)`
-            // is a LIVE producer — decided binary judgements admit into
-            // the `Relate` family slot, `BudgetExceeded` returns-but-
-            // never-admits, undecided judgements surface `Miss`. The
-            // degenerate `Opaque(Miss)` arm and the execute-invisibility
-            // fence are deleted.
-            if let SemanticQueryKey::Relate { .. } = key_for_build {
-                return self.build_relate(&crate::semantic_query::RelateMemoKey::from_query_key(
-                    key_for_build,
-                ));
-            }
-            if let SemanticQueryKey::FlowReturn(key) = key_for_build {
-                return self.build_flow_return(key);
-            }
-            if let SemanticQueryKey::ResolveCall(key) = key_for_build {
-                return self.build_resolve_call(key);
-            }
-            if let SemanticQueryKey::SignaturesOfType {
-                subject,
-                kind,
-                context,
-            } = key_for_build
-            {
-                return self.build_signatures_of_type(*subject, *kind, context.clone());
-            }
-            if let SemanticQueryKey::ReadSignatureResult(key) = key_for_build {
-                return self.build_read_signature_result(key);
-            }
-            if let SemanticQueryKey::ProjectObjectSpread {
-                program,
-                selector,
-                context,
-            } = key_for_build
-            {
-                return self.build_project_object_spread(*program, selector, *context);
-            }
-            let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            if let Some(refusal) = self.cold_build_budget_refusal(key_for_build) {
+    pub(super) fn build_cold_query_family(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+        if let SemanticQueryKey::ClassifyBroadRuntime { subject, .. } = key {
+            return self.build_classify_broad_runtime(subject);
+        }
+        if let SemanticQueryKey::ClassifyMaterializationCycleGate(key) = key {
+            return self.build_classify_materialization_cycle_gate(key);
+        }
+        if let SemanticQueryKey::ClassifyTruthinessDomain { subject } = key {
+            return self.build_classify_truthiness_domain(*subject);
+        }
+        // The SOLE relation authority (design
+        // `.claude/skills/type-resolution/SKILL.md`): `execute(Relate)`
+        // is a LIVE producer — decided binary judgements admit into
+        // the `Relate` family slot, `BudgetExceeded` returns-but-
+        // never-admits, undecided judgements surface `Miss`. The
+        // degenerate `Opaque(Miss)` arm and the execute-invisibility
+        // fence are deleted.
+        if let SemanticQueryKey::Relate { .. } = key {
+            return self.build_relate(&crate::semantic_query::RelateMemoKey::from_query_key(key));
+        }
+        if let SemanticQueryKey::FlowReturn(key) = key {
+            return self.build_flow_return(key);
+        }
+        if let SemanticQueryKey::ResolveCall(key) = key {
+            return self.build_resolve_call(key);
+        }
+        if let SemanticQueryKey::SignaturesOfType {
+            subject,
+            kind,
+            context,
+        } = key
+        {
+            return self.build_signatures_of_type(*subject, *kind, context.clone());
+        }
+        if let SemanticQueryKey::ReadSignatureResult(key) = key {
+            return self.build_read_signature_result(key);
+        }
+        if let SemanticQueryKey::ProjectObjectSpread {
+            program,
+            selector,
+            context,
+        } = key
+        {
+            return self.build_project_object_spread(*program, selector, *context);
+        }
+        let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            if let Some(refusal) = self.cold_build_budget_refusal(key) {
                 return refusal;
             }
-            match key_for_build {
+            match key {
                 SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
                 SemanticQueryKey::TypeOf {
                     value_root,
@@ -5124,16 +5105,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // these variants on the rewritten key; the arms below
                 // are pure exhaustiveness.
                 SemanticQueryKey::ProjectMember { base, member, mode } => {
-                    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
-                        vec![PathSegment::Member(PropertyKey::identifier(member.clone()))]
-                        .into_boxed_slice(),
-                    );
+                    let path: verter_type_expr::OwnedSlice<PathSegment> =
+                        verter_type_expr::OwnedSlice::from(
+                            vec![PathSegment::Member(PropertyKey::identifier(member.clone()))]
+                                .into_boxed_slice(),
+                        );
                     let ctx = crate::semantic_query::ProjectionReductionContext::published(*mode);
                     self.build_project_path(*base, &path, ctx)
                 }
                 SemanticQueryKey::IndexedAccess { base, index, mode } => {
                     let path: verter_type_expr::OwnedSlice<PathSegment> =
-                        verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
+                        verter_type_expr::OwnedSlice::from(
+                            vec![PathSegment::Index(index.clone())].into_boxed_slice(),
+                        );
                     let ctx = crate::semantic_query::ProjectionReductionContext::published(*mode);
                     self.build_project_path(*base, &path, ctx)
                 }
@@ -5174,14 +5158,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } => self.build_reduce_intersection(input.clone(), *purpose, context.clone()),
                 SemanticQueryKey::ProjectObjectSpread { .. } => {
                     unreachable!(
-                        "ProjectObjectSpread returns its typed projection value before node-domain build"
-                    )
+                    "ProjectObjectSpread returns its typed projection value before node-domain build"
+                )
                 }
                 // The relation authority is handled BEFORE this match
                 // (the `build_relate` branch in `raw_build` above) — this
                 // arm is unreachable.
                 SemanticQueryKey::Relate { .. } => {
-                    unreachable!("execute(Relate) routes through build_relate, not the node-domain match")
+                    unreachable!(
+                        "execute(Relate) routes through build_relate, not the node-domain match"
+                    )
                 }
                 SemanticQueryKey::ResolveMacroPayload {
                     owner,
@@ -5281,8 +5267,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let fence = self.project_generation_signature();
                     let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
                         (QueryResult::Error(QueryError::Miss), fence).into();
-                    if let Some(gap) = flow_solve::typed_gap_for_pending_root(key_for_build.tag())
-                    {
+                    if let Some(gap) = flow_solve::typed_gap_for_pending_root(key.tag()) {
                         // The reducer for this root does not exist yet:
                         // the answer is genuinely absent — mark the
                         // no-surface partial class so the universal read
@@ -5292,10 +5277,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // just its presence).
                         output.cache_suppress = true;
                         output.mark_partial();
-                        output.add_partial_reasons(crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE);
+                        output.add_partial_reasons(
+                            crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE,
+                        );
                         output
-                            .walker_diagnostics
-                            .push(crate::project_semantic_dispatch::walk::ShallowDiagnostic::PendingFlowRoot { gap });
+                        .walker_diagnostics
+                        .push(crate::project_semantic_dispatch::walk::ShallowDiagnostic::PendingFlowRoot { gap });
                     }
                     output
                 }
@@ -5306,25 +5293,85 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // FlowReturn is a typed producer handled by the early
                 // if-let arm above (with the other non-node-domain
                 // producers); it never reaches the node-domain match.
-                SemanticQueryKey::FlowReturn(_) => unreachable!(
-                    "FlowReturn builds through the early typed-producer arm"
-                ),
-                SemanticQueryKey::ResolveCall(_) => unreachable!(
-                    "ResolveCall builds through the early typed-producer arm"
-                ),
+                SemanticQueryKey::FlowReturn(_) => {
+                    unreachable!("FlowReturn builds through the early typed-producer arm")
+                }
+                SemanticQueryKey::ResolveCall(_) => {
+                    unreachable!("ResolveCall builds through the early typed-producer arm")
+                }
                 SemanticQueryKey::SignaturesOfType { .. }
-                | SemanticQueryKey::ReadSignatureResult(_) => unreachable!(
-                    "signature discovery builds through the early typed-producer arm"
-                ),
-            }
-            };
-            let output = build_node();
-            if matches!(key_for_build, SemanticQueryKey::ResolveOverloadSet { .. }) {
-                self.overload_set_value_output(output)
-            } else {
-                output.into()
+                | SemanticQueryKey::ReadSignatureResult(_) => {
+                    unreachable!("signature discovery builds through the early typed-producer arm")
+                }
             }
         };
+        let output = build_node();
+        if matches!(key, SemanticQueryKey::ResolveOverloadSet { .. }) {
+            self.overload_set_value_output(output)
+        } else {
+            output.into()
+        }
+    }
+
+    /// The family-memo protocol of one cold-query entry: a warm lookup,
+    /// then a claim for this execution's task — the recursion carrier,
+    /// another task's result, or this key's producer, which runs the traced
+    /// build, settles, is admitted and completes — or a request-local
+    /// completion ([`completes_request_locally`]). Ready with the read,
+    /// whether a cold build ran, and the facts a sealed refusal of an
+    /// isolated root keeps.
+    ///
+    /// Without a waker the claim waits out another task's producer here:
+    /// the synchronous entry. With one it yields instead — `Pending`, the
+    /// claim kept in `claim` with the waker registered on the producer's
+    /// flight — and the next call with the same `claim` continues it: a
+    /// polled root entry. Either way it is this one protocol.
+    #[inline(never)]
+    pub(super) fn claim_cold_query<'s>(
+        &'s self,
+        entry: &ColdEntry<'_>,
+        claim: &mut ColdClaim<'s>,
+        publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
+        operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
+        wait: Option<&std::task::Waker>,
+    ) -> std::task::Poll<ClaimedCold> {
+        let key = &entry.key;
+        let carrier_prelude = &entry.carrier_prelude;
+        let isolated_root = entry.isolated_root.is_some();
+        let connected_root = entry.connected.is_root();
+        let plain_read = publication.is_none() && operand_evidence.is_none();
+        // A relation decided as the root of its checker transaction captures
+        // its publication for the members of its component; completed for
+        // the request, it keeps them in the request tier instead and leaves
+        // the capture empty.
+        let relation_root =
+            matches!(key, SemanticQueryKey::Relate { .. }) && operand_evidence.is_none();
+        let graph = self.graph();
+        // Per-key recursion sentinel: when the memo detects same-path
+        // re-entry on an `Instantiate` key, extract the decl name and
+        // emit `Opaque(RecursiveRef { name })`. The materialiser
+        // recognises `TypeExpr::RecursiveRef` as a leaf and stops
+        // expansion, terminating recursive aliases like `type Tree =
+        // { children: Tree[] }` without stack overflow.
+        // Non-Instantiate re-entry falls back to `Opaque(Miss)`.
+        // The sentinel and the build closures borrow the entry's key and
+        // state: they run within this call or not at all, so a warm read
+        // copies nothing for a build it never runs.
+        let sentinel = || {
+            if let SemanticQueryKey::Instantiate(k) = key {
+                return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+                    name: k.base().merged_symbol_name.clone(),
+                    args: Arc::clone(k.args()).into(),
+                }));
+            }
+            graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
+        };
+        let key_for_build = key;
+        #[cfg(any(test, feature = "test-support"))]
+        let key_for_close = key;
+        let raw_build = move || self.build_cold_query_family(key_for_build);
         // Wrap the raw cold-build closure with the fact tracer, then
         // build the published memo entry's self-version-rooted carrier.
         //
@@ -5892,6 +5939,14 @@ impl CarrierNormalizationPrelude {
             partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             normalized_source: None,
         }
+    }
+
+    /// Whether the prelude is the no-op one: the subject was not a carrier.
+    pub(super) fn is_none(&self) -> bool {
+        self.facts.is_none()
+            && !self.cache_suppress
+            && self.partial_reasons.is_empty()
+            && self.normalized_source.is_none()
     }
 
     /// Whether the prelude forces the enclosing entry out of the memo (an
