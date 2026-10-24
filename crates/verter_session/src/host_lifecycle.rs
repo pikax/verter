@@ -504,6 +504,18 @@ impl VerterHost {
             )
             .collect();
 
+        #[cfg(test)]
+        self.test_force.host_load_publish_seam_hook.fire_once();
+
+        // Source replacement and integration share one publication turn. The
+        // captured source may already be superseded; refuse before any writes.
+        let _admission = self.block_content.admission_fence.lock();
+        let eviction_revision = self
+            .derived_raw_cache()
+            .get(canonical_id)
+            .map_or(0, |state| state.eviction_revision());
+        fence.check(self, canonical_id, eviction_revision)?;
+
         // D48 split — DependencyState owns aliases/dependencies/generation;
         // DerivedRawState owns import_routes/evicted; ProfileState owns
         // per-profile compile outputs. Update each in turn (the
@@ -516,34 +528,20 @@ impl VerterHost {
                 .entry(canonical_id.to_string())
                 .or_default();
         }
-        let old_aliases = {
-            let mut dep_ref = self
-                .dependency_cache()
-                .entry(canonical_id.to_string())
-                .or_default();
-            let dep = dep_ref.value_mut();
-            let old_aliases = dep.aliases.clone();
-            dep.aliases = aliases.clone();
-            dep.dependencies = deps;
-            dep.generation = snap.generation;
-            old_aliases
-        };
+        let old_aliases = self
+            .dependency_cache()
+            .get(canonical_id)
+            .map(|dep| dep.aliases.clone())
+            .unwrap_or_default();
         // PRESERVE derived.import_routes. Bundler may have set them via
         // set_import_dependencies before source was loaded. Cloning
         // here so we can re-apply to workspace below without holding the
         // entry lock.
-        #[cfg(test)]
-        self.test_force.host_load_publish_seam_hook.fire_once();
-        let preserved_routes = {
-            let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
-            let derived = derived_ref.value_mut();
-            fence.check(self, canonical_id, derived.eviction_revision())?;
-            let preserved_routes = derived.import_routes.clone();
-            derived.evicted = false;
-            // derived.import_routes is NOT cleared (preserves bundler
-            // pre-load route flow).
-            preserved_routes
-        };
+        let preserved_routes = self
+            .derived_raw_cache()
+            .get(canonical_id)
+            .map(|derived| derived.import_routes.clone())
+            .unwrap_or_default();
 
         self.update_alias_map(canonical_id, &old_aliases, &aliases);
 
@@ -574,6 +572,19 @@ impl VerterHost {
                 exact_resolutions,
             );
         }
+        // A dependency row is the integrated-load marker. Publish it only once
+        // aliases and workspace edges are complete, and then expose reloads.
+        {
+            let mut dep = self
+                .dependency_cache()
+                .entry(canonical_id.to_string())
+                .or_default();
+            dep.aliases = aliases;
+            dep.dependencies = deps;
+            dep.generation = snap.generation;
+        }
+        self.derived_raw_entry_or_default(canonical_id.to_string())
+            .evicted = false;
         Ok(true)
     }
 
@@ -1213,6 +1224,7 @@ impl VerterHost {
     /// gate makes the file invisible to host accessors until
     /// `ensure_loaded()` re-integrates.
     pub fn evict(&self, canonical_id: &str) {
+        let _admission = self.block_content.admission_fence.lock();
         self.ws().notify_close(canonical_id);
         self.evict_loaded_content(canonical_id);
     }
@@ -1220,6 +1232,7 @@ impl VerterHost {
     /// Discard host content for a workspace-only replacement while preserving
     /// the workspace's active overlay and snapshot authority.
     pub(crate) fn evict_loaded_content(&self, canonical_id: &str) {
+        let _admission = self.block_content.admission_fence.lock();
         self.semantic_db().invalidate(canonical_id);
         // Evict what the semantic substrate cached for this document: its
         // memo entries, union views, hash-cons memos, signature-token roots

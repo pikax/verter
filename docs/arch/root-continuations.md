@@ -175,10 +175,16 @@ host, cancellation, changed source incarnation/generation or a changed canonical
 eviction revision or project authority. This fence also applies to warm commits
 and prevents an old commit reversing a later eviction. Unrelated-file evictions
 and additive load-generation changes remain compatible. The same stop, source,
-project and revision fence is rechecked under the existing derived-state row
-lock immediately before clearing its eviction marker; no callback runs in that
-critical section. The caller assignments above this handoff are DISPATCH for
-shared resolver loading, META for metadata traversal and COMPILE for compilation.
+project and revision fence is rechecked before any integration writes, under
+the existing host admission fence shared with source replacement and eviction.
+The fence permits same-thread nested contributor loading during ingress while
+excluding concurrent writers. Ambient ingestion takes admission before its
+snapshot cursor, matching upsert's lock order even when ingestion loads a file.
+Workspace edges and aliases land before the dependency row marks integration
+complete. A refused cold commit leaves no integrated marker; a superseded commit
+cannot overwrite replacement dependencies. The caller assignments above this
+handoff are DISPATCH for shared resolver loading, META for metadata traversal
+and COMPILE for compilation.
 
 The synchronous `ensure_loaded` entry drives this same handoff. Its external
 driver rechecks cancellation after yielding, parks external native callers on
@@ -323,8 +329,12 @@ Polling does not compute or run the retention policy. `run_retaining` and
 
 - **Ownership:** host composition binds every resolver flight family to the
   host's existing registry. Production compatibility entries install that
-  authority; a transferred producer installs its actual distinct task while
-  running. The waiting parent keeps its edge until terminalization or drop.
+  authority; a transferred producer installs its actual distinct task and
+  installs a live aggregate cancellation owner while running. A cancelled waiter
+  whose thread executes the producer cannot stop shared work through either
+  its job or request token. Other request accounting stays installed.
+  Compatibility drivers retain ambient cancellation. The waiting parent keeps its edge until
+  terminalization or drop.
 - **Cancellation and errors:** cancellation stops one subscriber without
   stopping its producer or siblings. `Cycle`, `ProducerUnowned`,
   `ProducerDropped`, `ProducerPanicked`, `Reset` and the original producer

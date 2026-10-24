@@ -208,6 +208,10 @@ fn owned_artifact_admission_transfers_compute_and_cancels_only_one_waiter() {
         1u32,
         |v: &u32| Some(*v),
         move || {
+            assert!(
+                !verter_execution::cancellation::current_job_cancellation_token()
+                    .is_some_and(|token| token.is_cancelled())
+            );
             producer_calls.fetch_add(1, Ordering::SeqCst);
             *observed_task.lock().unwrap() = ExecutionScope::current_task().map(|t| t.id());
             ComputeAdmission::Cacheable(42)
@@ -256,7 +260,17 @@ fn owned_artifact_admission_transfers_compute_and_cancels_only_one_waiter() {
         Poll::Ready(Err(OwnedAdmissionError::Cancelled))
     ));
     assert_eq!(registry.wait_count_for_tests(), 1);
-    std::thread::spawn(move || producer.run()).join().unwrap();
+    std::thread::spawn(move || {
+        let _scope = verter_execution::cancellation::JobCancellationGuard::install(stop);
+        producer.run();
+        assert!(
+            verter_execution::cancellation::current_job_cancellation_token()
+                .unwrap()
+                .is_cancelled()
+        );
+    })
+    .join()
+    .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_ne!(*observed.lock().unwrap(), Some(waiter_id));
     assert!(matches!(
@@ -437,6 +451,106 @@ fn owned_artifact_ready_hit_and_pre_cancel_do_not_register_wait_edges() {
 }
 
 #[test]
+fn abandoning_a_follower_withdraws_edges_before_dropping_callback_captures() {
+    struct ObserveDrop(TaskRegistry, Arc<AtomicUsize>);
+    impl Drop for ObserveDrop {
+        fn drop(&mut self) {
+            self.1
+                .store(self.0.wait_count_for_tests(), Ordering::SeqCst);
+        }
+    }
+    let registry = TaskRegistry::default();
+    let flights = InflightTable::new();
+    let map = Arc::new(DashMap::new());
+    let mut leader = artifact(map.clone(), &flights, &registry, || {
+        ComputeAdmission::Cacheable(7)
+    });
+    let producer = take_producer(&mut leader, Waker::noop());
+    let observed = Arc::new(AtomicUsize::new(usize::MAX));
+    let capture = ObserveDrop(registry.clone(), observed.clone());
+    let mut follower = artifact(map, &flights, &registry, move || {
+        drop(capture);
+        panic!("follower must not compute")
+    });
+    assert!(follower.poll(Waker::noop()).is_pending());
+    assert_eq!(registry.wait_count_for_tests(), 2);
+    drop(follower);
+    let at_drop = observed.load(Ordering::SeqCst);
+    drop((producer, leader));
+    assert_eq!(
+        at_drop, 1,
+        "only the leader edge survives capture destruction"
+    );
+    assert_eq!(registry.wait_count_for_tests(), 0);
+}
+
+#[test]
+fn stale_artifact_poll_transfers_cleanup_while_the_retention_writer_is_held() {
+    for stale in [false, true] {
+        let registry = TaskRegistry::default();
+        let flights = InflightTable::new();
+        let map = Arc::new(DashMap::new());
+        map.insert(1u32, Arc::new(6u32));
+        let fence = Arc::new(parking_lot::RwLock::new(()));
+        let removals = Arc::new(AtomicUsize::new(0));
+        let cleaned = removals.clone();
+        let mut admission = owned_admit_with_post_publish(
+            map.clone(),
+            &flights,
+            1u32,
+            move |v: &u32| (!stale).then_some(*v),
+            || ComputeAdmission::Cacheable(7),
+            |v| *v,
+            |_| true,
+            move |_, _| {
+                cleaned.fetch_add(1, Ordering::SeqCst);
+            },
+            |_, _| {},
+            Some(fence.clone()),
+            registry.register_task(),
+            CancellationToken::new(),
+        );
+        let held = fence.write();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let poller = std::thread::spawn(move || {
+            let step = admission.poll(Waker::noop());
+            tx.send(()).unwrap();
+            (admission, step)
+        });
+        let returned = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop(held);
+        let (mut admission, step) = poller.join().unwrap();
+        assert!(
+            returned.is_ok(),
+            "poll must return while the lifecycle writer is held (stale={stale})"
+        );
+        assert_eq!(
+            removals.load(Ordering::SeqCst),
+            0,
+            "poll never cleans stale state"
+        );
+        if stale {
+            let Poll::Ready(Ok(OwnedAdmissionStep::Produce(producer))) = step else {
+                panic!("stale lookup transfers work")
+            };
+            producer.run();
+            assert!(matches!(
+                admission.poll(Waker::noop()),
+                Poll::Ready(Ok(OwnedAdmissionStep::Value(Some(7))))
+            ));
+            assert_eq!(removals.load(Ordering::SeqCst), 1);
+            assert_eq!(**map.get(&1).unwrap(), 7);
+        } else {
+            assert!(matches!(
+                step,
+                Poll::Ready(Ok(OwnedAdmissionStep::Value(Some(6))))
+            ));
+        }
+        assert_eq!(registry.wait_count_for_tests(), 0);
+    }
+}
+
+#[test]
 fn owned_artifact_refuses_foreign_authority_without_stopping_the_producer() {
     let registry = TaskRegistry::default();
     let foreign = TaskRegistry::default();
@@ -552,7 +666,17 @@ fn owned_query_published_joiner_validates_its_own_view_and_cancel_keeps_sibling(
                     bubble.fetch_add(1, Ordering::SeqCst);
                 })
             },
-            move || ComputeAdmission::Cacheable(expected),
+            move || {
+                assert!(
+                    !verter_execution::cancellation::current_job_cancellation_token()
+                        .is_some_and(|token| token.is_cancelled())
+                );
+                assert!(
+                    !crate::resolver_core::request_ports::CancellationCheckpoint::new()
+                        .is_cancelled()
+                );
+                ComputeAdmission::Cacheable(expected)
+            },
             |v| *v,
             |_| None,
             |_| true,
@@ -567,9 +691,9 @@ fn owned_query_published_joiner_validates_its_own_view_and_cancel_keeps_sibling(
     };
     let wake = Arc::new(CountWake(AtomicUsize::new(0)));
     let waker = Waker::from(wake.clone());
-    let mut winner = begin(7, CancellationToken::new());
-    let producer = take_producer(&mut winner, &waker);
     let stop = CancellationToken::new();
+    let mut winner = begin(7, stop.clone());
+    let producer = take_producer(&mut winner, &waker);
     let mut stopped = begin(7, stop.clone());
     let mut sibling = begin(7, CancellationToken::new());
     let mut other_view = begin(9, CancellationToken::new());
@@ -581,11 +705,23 @@ fn owned_query_published_joiner_validates_its_own_view_and_cancel_keeps_sibling(
         stopped.poll(&waker),
         Poll::Ready(Err(OwnedAdmissionError::Cancelled))
     ));
-    producer.run();
     assert!(matches!(
         winner.poll(&waker),
-        Poll::Ready(Ok(OwnedAdmissionStep::Value(Some(7))))
+        Poll::Ready(Err(OwnedAdmissionError::Cancelled))
     ));
+    {
+        let _request = crate::request_context::install_test_request_for("/shared-producer.ts");
+        crate::request_context::current_request_context()
+            .unwrap()
+            .cancel();
+        let _scope = verter_execution::cancellation::JobCancellationGuard::install(stop);
+        producer.run();
+        assert!(
+            verter_execution::cancellation::current_job_cancellation_token()
+                .unwrap()
+                .is_cancelled()
+        );
+    }
     assert!(matches!(
         sibling.poll(&waker),
         Poll::Ready(Ok(OwnedAdmissionStep::Value(Some(7))))

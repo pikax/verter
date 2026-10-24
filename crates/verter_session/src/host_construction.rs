@@ -1284,10 +1284,16 @@ impl VerterHost {
     /// IndexedReady before population lookup; ordinary scripts remain pending
     /// until that lookup. The cursor is scoped to the attached workspace.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
+        // Upsert already owns admission when it reaches this cursor. Match
+        // that order for standalone ingestion, whose loads also integrate
+        // under admission, so neither path can wait on the other's lock.
+        let _admission = self.block_content.admission_fence.lock();
         let index = self
             .project_type_store()
             .indexed()
             .global_contributor_index();
+        #[cfg(test)]
+        self.test_force.ambient_ingestion_cursor_hook.fire_once();
         let mut cursor = index.snapshot_ingestion_cursor();
         let workspace = self.workspace();
         let (revision, members) = if let Some(changes) = workspace.snapshot_changes_since(*cursor) {

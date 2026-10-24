@@ -129,6 +129,14 @@ pub struct OwnedResolverProducer<K: Eq + Hash + Clone, V, E: Clone> {
 }
 impl<K: Eq + Hash + Clone, V, E: Clone> OwnedResolverProducer<K, V, E> {
     pub fn run(self) {
+        // Producer ownership takes precedence over either ambient job or
+        // request cancellation, preserving the request's other accounting.
+        let cancellation = CancellationToken::aggregate();
+        let _owner = cancellation
+            .register_owner(None)
+            .expect("fresh producer owner");
+        let _cancellation =
+            verter_execution::cancellation::JobCancellationGuard::install(cancellation);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.core.run()));
     }
 }

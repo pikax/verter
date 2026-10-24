@@ -2106,7 +2106,6 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         }
     }
 
-    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     fn begin_project_resolution(
         self: Arc<Self>,
         request: crate::resolution_handoff::ProjectResolutionRequest,
@@ -2171,6 +2170,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         )
     }
 
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     fn resolve_import(
         &self,
         importer_id: &str,

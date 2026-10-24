@@ -127,20 +127,29 @@ the cache-runtime overhaul and any feature admitting cache entries.
 validates or subscribes; a cold winner transfers `OwnedAdmissionProducer`
 through `OwnedAdmissionStep::Produce`. The external owner runs that producer,
 then polls for `Value`. No queue, pool or cold computation runs within poll.
+Rejected artifact entries retain their exact identity for cleanup by the
+transferred producer before computation. Poll never takes the retention fence;
+removal and accounting still run together under that fence outside poll.
 
 Both synchronous admission adapters drive this same protocol with borrowed
 policies. With an execution scope they inherit its registry; standalone
 compatibility callers allocate no second authority. An explicit owned waiter
 cannot join a producer with absent or foreign registry authority.
 
-The producer installs its actual task scope. Its parent retains a wait edge
-through transferred work; followers register their own shared-registry edges
+The owned producer installs its actual task scope and replaces ambient job
+cancellation with a live aggregate producer owner, so neither the executing
+waiter's job nor its request cancellation can stop shared work. Request
+accounting and observation stay installed. Borrowed
+compatibility drivers preserve their ambient cancellation. Its parent retains a
+wait edge through transferred work; followers register their own shared-registry edges
 and readiness/stop subscriptions. Cancellation or drop detaches only that
 waiter. `Cancelled`, `Cycle`, `ProducerUnowned`, `ProducerDropped` and
 `ProducerPanicked` carry no partial value. A pending legacy producer with no
 task scope is `ProducerUnowned`, rather than a fabricated cycle. A completed
 answer requires no producer authority. Terminalization releases the waiter, key, table and callback
 captures even if the completed handle remains alive.
+Abandonment withdraws wait edges and subscriptions before destroying callback
+captures, so capture destructors may re-enter without observing abandoned edges.
 
 `Value(None)` preserves each adapter's existing failure policy: artifact
 followers surface a failed compute; query followers fork after panic or rejected

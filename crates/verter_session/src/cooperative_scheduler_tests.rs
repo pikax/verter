@@ -289,6 +289,93 @@ fn owned_reload_commit_observes_cancellation_at_the_visibility_write() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn cancelled_cold_load_does_not_publish_an_integrated_marker() {
+    use verter_execution::cancellation::CancellationToken;
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    workspace.inject_file(
+        "/cold.ts".into(),
+        Arc::from("import { n } from './dep'; export { n };"),
+    );
+    workspace.inject_file("/dep.ts".into(), Arc::from("export const n = 1;"));
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    let scope = host.scheduler.enter_execution_scope();
+    let stop = CancellationToken::new();
+    let mut load = host.begin_load("/cold.ts", scope.task().clone(), stop.clone());
+    let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker)).unwrap();
+    *host.test_force.host_load_publish_seam_hook.0.lock() = Some(Arc::new(move || stop.cancel()));
+    assert!(matches!(
+        commit.apply(&host),
+        Err(crate::HostLoadError::Cancelled)
+    ));
+    assert!(host.ensure_loaded("/cold.ts"));
+    assert_eq!(
+        host.ws()
+            .dependency_snapshot("/cold.ts")
+            .unwrap()
+            .parsed_resolved,
+        ["/dep.ts".to_string()].into()
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn superseded_load_preserves_replacement_dependencies_and_aliases() {
+    use verter_execution::cancellation::CancellationToken;
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    workspace.inject_file("/replaced.ts".into(), Arc::from("import './old';"));
+    workspace.inject_file("/old.ts".into(), Arc::from("export {};"));
+    workspace.inject_file("/new.ts".into(), Arc::from("export {};"));
+    let host = Arc::new(VerterHost::new(HostConfig::default(), workspace));
+    let scope = host.scheduler.enter_execution_scope();
+    let mut load = host.begin_load(
+        "/replaced.ts",
+        scope.task().clone(),
+        CancellationToken::new(),
+    );
+    let commit = verter_execution::blocking::block_on(None, |waker| load.poll(waker)).unwrap();
+    let weak = Arc::downgrade(&host);
+    *host.test_force.host_load_publish_seam_hook.0.lock() = Some(Arc::new(move || {
+        let host = weak.upgrade().unwrap();
+        let replacement = std::thread::spawn(move || {
+            let _update = host
+                .upsert(crate::types::UpsertRequest {
+                    canonical_id: Some("/replaced.ts".into()),
+                    input_id: "/replacement-alias.ts".into(),
+                    source: Arc::from("import './new';"),
+                    file_language: verter_language::FileLanguage::script_ts(),
+                    aliases: vec!["/replacement-alias.ts".into()],
+                })
+                .unwrap();
+        });
+        replacement.join().unwrap();
+    }));
+    assert!(matches!(
+        commit.apply(&host),
+        Err(crate::HostLoadError::Superseded)
+    ));
+    let dep = host.dependency_cache().get("/replaced.ts").unwrap();
+    assert_eq!(dep.dependencies, ["/new".to_string()].into());
+    assert!(dep.aliases.contains("/replacement-alias.ts"));
+    drop(dep);
+    assert_eq!(
+        host.ws()
+            .dependency_snapshot("/replaced.ts")
+            .unwrap()
+            .parsed_resolved,
+        ["/new.ts".to_string()].into()
+    );
+    assert!(host.ensure_loaded("/replaced.ts"));
+    assert_eq!(
+        host.dependency_cache()
+            .get("/replaced.ts")
+            .unwrap()
+            .dependencies,
+        ["/new".to_string()].into()
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn owned_load_commit_rechecks_its_fence_at_the_visibility_write() {
     use verter_execution::cancellation::CancellationToken;
     #[derive(Clone, Copy)]

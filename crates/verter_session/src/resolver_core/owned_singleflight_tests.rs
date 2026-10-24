@@ -32,12 +32,17 @@ fn owned_resolver_flight_transfers_work_and_cancels_only_one_follower() {
     let owner_id = owner.id();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
+    let owner_stop = CancellationToken::new();
     let mut leader = group.begin_owned_retaining(
         "key".into(),
         TOKEN,
         owner.clone(),
-        CancellationToken::new(),
+        owner_stop.clone(),
         move || {
+            assert!(
+                !verter_execution::cancellation::current_job_cancellation_token()
+                    .is_some_and(|token| token.is_cancelled())
+            );
             assert_ne!(ExecutionScope::current_task().unwrap().id(), owner_id);
             observed.fetch_add(1, Ordering::SeqCst);
             Ok(7)
@@ -77,13 +82,24 @@ fn owned_resolver_flight_transfers_work_and_cancels_only_one_follower() {
         cancelled.poll(&wake),
         Poll::Ready(Err(ResolverFlightError::Cancelled))
     ));
-    let producer_thread = std::thread::spawn(move || producer.run());
-    producer_thread.join().unwrap();
-    for flight in [&mut leader, &mut sibling] {
+    owner_stop.cancel();
+    assert!(matches!(
+        leader.poll(waker),
+        Poll::Ready(Err(ResolverFlightError::Cancelled))
+    ));
+    let producer_thread = std::thread::spawn(move || {
+        let _scope = verter_execution::cancellation::JobCancellationGuard::install(owner_stop);
+        producer.run();
         assert!(
-            matches!(flight.poll(waker), Poll::Ready(Ok(ResolverFlightStep::Value(value))) if *value.value == 7)
+            verter_execution::cancellation::current_job_cancellation_token()
+                .unwrap()
+                .is_cancelled()
         );
-    }
+    });
+    producer_thread.join().unwrap();
+    assert!(
+        matches!(sibling.poll(waker), Poll::Ready(Ok(ResolverFlightStep::Value(value))) if *value.value == 7)
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(registry.wait_graph_occupancy().edges, 0);
     drop((leader, cancelled, sibling, group, owner));
