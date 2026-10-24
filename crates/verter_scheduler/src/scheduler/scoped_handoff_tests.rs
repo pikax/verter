@@ -30,6 +30,47 @@ fn request() -> ScopedCacheNodeRequest {
 }
 
 #[test]
+fn attaching_pre_admission_owners_preserves_a_live_sibling_after_cancelled_first_owner() {
+    for cancel_all in [false, true] {
+        let scheduler = scheduler();
+        let flight = ScopedCacheFlight::new(
+            scheduler.dag.clone(),
+            scheduler.task_registry.register_task(),
+        );
+        assert!(flight.try_add_owner(1, Some(CancellationToken::new())));
+        assert!(flight.try_add_owner(2, Some(CancellationToken::new())));
+        // Use the actual map order: the cancelled owner must be attached first.
+        let (cancelled_id, sibling_id) = {
+            let state = flight.state.lock();
+            let mut owners = state.owners.iter();
+            let (cancelled_id, first) = owners.next().unwrap();
+            let (sibling_id, sibling) = owners.next().unwrap();
+            first.request.as_ref().unwrap().cancel();
+            if cancel_all {
+                sibling.request.as_ref().unwrap().cancel();
+            }
+            (*cancelled_id, *sibling_id)
+        };
+        let aggregate = CancellationToken::aggregate();
+        assert_eq!(flight.attach_aggregate(aggregate.clone()), !cancel_all);
+        assert_eq!(aggregate.is_cancelled(), cancel_all);
+        if cancel_all {
+            assert!(matches!(
+                flight.terminal(),
+                Some(ScopedCacheTerminal::Cancelled)
+            ));
+            assert_eq!(flight.owner_count(), 0);
+        } else {
+            assert!(flight.terminal().is_none());
+            assert_eq!(flight.owner_count(), 2);
+            assert!(!flight.detach_owner(cancelled_id));
+            assert!(flight.detach_owner(sibling_id));
+            assert!(aggregate.is_cancelled());
+        }
+    }
+}
+
+#[test]
 fn dropping_the_last_scoped_owner_releases_its_edge_before_notifying_the_producer() {
     use verter_execution::tasks::{ExecutionScope, ExecutionTask};
     struct Probe {

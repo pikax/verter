@@ -98,16 +98,27 @@ impl ScopedCacheFlight {
         if state.aggregate.is_some() {
             return true;
         }
-        for owner in state.owners.values_mut() {
-            let (registration, wakes) = aggregate.register_owner_deferred(owner.request.clone());
-            self.delivery.deliver(vec![wakes]);
-            let Some(registration) = registration else {
-                state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                self.clear_owners(&mut state);
-                self.delivery.deliver(vec![state.wakers.take()]);
-                return false;
-            };
-            owner.aggregate_registration = Some(registration);
+        // These owners already coexist. Keep initialization live while attaching
+        // them so a cancelled first entry cannot retire an existing sibling.
+        let (initializing, wakes) = aggregate.register_owner_deferred(None);
+        self.delivery.deliver(vec![wakes]);
+        if let Some(initializing) = initializing {
+            for owner in state.owners.values_mut() {
+                let (registration, wakes) =
+                    aggregate.register_owner_deferred(owner.request.clone());
+                self.delivery.deliver(vec![wakes]);
+                let Some(registration) = registration else {
+                    break;
+                };
+                owner.aggregate_registration = Some(registration);
+            }
+            self.delivery.deliver(vec![initializing.detach_deferred()]);
+        }
+        if aggregate.is_cancelled() {
+            state.terminal = Some(ScopedCacheTerminal::Cancelled);
+            self.clear_owners(&mut state);
+            self.delivery.deliver(vec![state.wakers.take()]);
+            return false;
         }
         state.aggregate = Some(aggregate);
         true
