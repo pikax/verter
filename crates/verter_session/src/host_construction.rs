@@ -140,7 +140,7 @@ impl HostResolverState {
 }
 
 /// The workspace-scoped services every workspace attached to a host
-/// receives: the host's resolve-extension policy.
+/// receives: the host's resolve-extension policy and shared execution registry.
 ///
 /// Built once by the composition root. [`Self::attach`] is the single
 /// route through which a workspace receives them — at construction and on
@@ -150,18 +150,21 @@ impl HostResolverState {
 /// retention account from its own construction.
 pub(crate) struct WorkspaceServices {
     resolve_extensions: Vec<String>,
+    registry: verter_execution::tasks::TaskRegistry,
 }
 
 impl WorkspaceServices {
-    fn new(config: &HostConfig) -> Self {
+    fn new(config: &HostConfig, registry: verter_execution::tasks::TaskRegistry) -> Self {
         Self {
             resolve_extensions: config.resolve_extensions.clone(),
+            registry,
         }
     }
 
     /// Hand `workspace` this host's workspace-scoped services.
     pub(crate) fn attach(&self, workspace: &dyn verter_workspace::WorkspaceAccess) {
         // Reverse-dep stem stripping honours the host policy from the start.
+        workspace.bind_execution_registry(self.registry.clone());
         workspace.set_default_resolve_extensions(self.resolve_extensions.clone());
     }
 }
@@ -423,7 +426,8 @@ impl VerterHost {
 
         // The workspace-scoped services, attached to the initial workspace
         // through the same route every later swap uses.
-        let workspace_services = WorkspaceServices::new(&config);
+        let task_registry = verter_execution::tasks::TaskRegistry::default();
+        let workspace_services = WorkspaceServices::new(&config, task_registry.clone());
         workspace_services.attach(workspace.as_ref());
         let engine_policy = engine_policy_for(&config);
 
@@ -460,7 +464,6 @@ impl VerterHost {
             .unwrap_or_else(|error| {
                 panic!("register composed capability-catalog carrier grammars: {error:?}")
             });
-        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let carrier_publication_store = Arc::new(
             crate::carrier_publication_store::CarrierPublicationStore::with_provenance(
                 Arc::clone(&registered_source_authority),

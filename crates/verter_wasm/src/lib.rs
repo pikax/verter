@@ -43,6 +43,8 @@ mod feasibility_probe_tests;
 mod host_compile_request_tests;
 mod input_snapshot;
 mod typeinfo;
+#[cfg(all(test, target_arch = "wasm32"))]
+mod workspace_resolution_wasm_tests;
 #[cfg(feature = "semantic-observe")]
 use audit::{
     audit_record_list_to_json_string, kind_matches_wasm, parse_bundler_kind_wasm,

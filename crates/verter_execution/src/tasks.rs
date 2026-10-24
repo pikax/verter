@@ -22,6 +22,7 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -51,6 +52,7 @@ impl dyn ProducerIdentity {
 /// Generation-qualified identity of one task in one registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TaskId {
+    namespace: u64,
     id: usize,
     generation: u64,
 }
@@ -76,9 +78,17 @@ struct TaskSlot {
 }
 
 #[derive(Debug, Default)]
-struct RegistryState {
+struct TaskPool {
     tasks: Vec<TaskSlot>,
     free_slots: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct RegistryState {
+    // Composition joins graphs, never task identities or registration pools.
+    pools: FxHashMap<u64, TaskPool>,
+    parent: Option<Arc<Mutex<RegistryState>>>,
+    rank: usize,
     /// Waiter → the producer it waits on. A task waits on at most one.
     waits: FxHashMap<TaskId, TaskId>,
     /// Producer → the waiters registered on it: the reverse side of
@@ -106,10 +116,71 @@ impl RegistryState {
     }
 }
 
-/// A task registry and its wait-for graph: one cycle authority.
-#[derive(Clone, Debug, Default)]
+/// A task registry and its wait-for graph: one cycle authority. Composition
+/// can join authorities when hosts share a dependency owner. Existing tasks,
+/// subscriptions and scopes keep their identities and follow the joined graph.
+#[derive(Clone, Debug)]
 pub struct TaskRegistry {
-    state: Arc<Mutex<RegistryState>>,
+    owner: Arc<RegistryOwner>,
+}
+#[derive(Debug)]
+struct RegistryOwner {
+    namespace: u64,
+    graph: Arc<Mutex<RegistryState>>,
+}
+impl Default for TaskRegistry {
+    fn default() -> Self {
+        static NEXT_NAMESPACE: AtomicU64 = AtomicU64::new(1);
+        let namespace = NEXT_NAMESPACE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("task registry namespace exhausted");
+        Self {
+            owner: Arc::new(RegistryOwner {
+                namespace,
+                graph: Arc::new(Mutex::new(RegistryState {
+                    pools: [(namespace, TaskPool::default())].into_iter().collect(),
+                    ..RegistryState::default()
+                })),
+            }),
+        }
+    }
+}
+
+fn with_graph<R>(
+    graph: &Arc<Mutex<RegistryState>>,
+    apply: impl FnOnce(&mut RegistryState) -> R,
+) -> R {
+    let mut graph = graph.clone();
+    loop {
+        let mut state = graph.lock();
+        if let Some(parent) = state.parent.clone() {
+            drop(state);
+            graph = parent;
+        } else {
+            return apply(&mut state);
+        }
+    }
+}
+fn root_graph(graph: &Arc<Mutex<RegistryState>>) -> Arc<Mutex<RegistryState>> {
+    let mut graph = graph.clone();
+    loop {
+        let parent = graph.lock().parent.clone();
+        match parent {
+            Some(parent) => graph = parent,
+            None => return graph,
+        }
+    }
+}
+impl Drop for RegistryOwner {
+    fn drop(&mut self) {
+        // Tasks and edges pin their registration owner. Its final release
+        // retires the empty pool too; repeated workspace swaps retain no pool
+        // history or backing arrays in the surviving authority.
+        let pool = with_graph(&self.graph, |state| state.pools.remove(&self.namespace));
+        drop(pool);
+    }
 }
 
 /// Current occupancy of a registry's wait-for graph, read under one lock.
@@ -138,12 +209,67 @@ pub struct WaitGraphOccupancy {
 pub struct WaitCycle;
 
 impl TaskRegistry {
+    /// Join two composition authorities without replacing any live task. All
+    /// old handles and scopes subsequently use one cycle graph. Graph locks
+    /// are acquired in address order, and a concurrent join is rechecked;
+    /// union by rank bounds forwarding depth. No task work or callback runs
+    /// while joining. This grants no CPU service, worker or admission permit.
+    pub fn share_authority_with(&self, other: &Self) {
+        loop {
+            let left = root_graph(&self.owner.graph);
+            let right = root_graph(&other.owner.graph);
+            if Arc::ptr_eq(&left, &right) {
+                return;
+            }
+            let (left, right) = if Arc::as_ptr(&left) < Arc::as_ptr(&right) {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            let mut a = left.lock();
+            let mut b = right.lock();
+            if a.parent.is_some() || b.parent.is_some() {
+                continue;
+            }
+            if a.rank >= b.rank {
+                if a.rank == b.rank {
+                    a.rank += 1;
+                }
+                Self::absorb_graph(&mut a, &mut b);
+                b.parent = Some(left.clone());
+            } else {
+                Self::absorb_graph(&mut b, &mut a);
+                a.parent = Some(right.clone());
+            }
+            return;
+        }
+    }
+
+    fn absorb_graph(target: &mut RegistryState, source: &mut RegistryState) {
+        // Disjoint authorities have disjoint namespaces, including slots
+        // with identical ordinals/generations. Their live waits cannot form
+        // a cycle until a subsequent cross-authority edge is registered.
+        target.pools.extend(std::mem::take(&mut source.pools));
+        target.waits.extend(std::mem::take(&mut source.waits));
+        target.waiters.extend(std::mem::take(&mut source.waiters));
+    }
+
+    fn same_authority(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+            || with_graph(&self.owner.graph, |state| {
+                // Pools live for their registration owner, including before
+                // its first task. One locked membership read stays valid if
+                // another join forwards this graph during the comparison.
+                state.pools.contains_key(&other.owner.namespace)
+            })
+    }
+
     /// Register a fresh task. It stays active while any handle to it lives.
     pub fn register_task(&self) -> ExecutionTask {
-        let id = {
-            let mut state = self.state.lock();
-            if let Some(id) = state.free_slots.pop() {
-                let slot = &mut state.tasks[id];
+        let id = with_graph(&self.owner.graph, |state| {
+            let pool = state.pools.entry(self.owner.namespace).or_default();
+            if let Some(id) = pool.free_slots.pop() {
+                let slot = &mut pool.tasks[id];
                 verter_debug_assert!(!slot.active, "a free task slot must be inactive");
                 slot.generation = slot
                     .generation
@@ -151,18 +277,23 @@ impl TaskRegistry {
                     .expect("task generation exhausted");
                 slot.active = true;
                 TaskId {
+                    namespace: self.owner.namespace,
                     id,
                     generation: slot.generation,
                 }
             } else {
-                let id = state.tasks.len();
-                state.tasks.push(TaskSlot {
+                let id = pool.tasks.len();
+                pool.tasks.push(TaskSlot {
                     generation: 1,
                     active: true,
                 });
-                TaskId { id, generation: 1 }
+                TaskId {
+                    namespace: self.owner.namespace,
+                    id,
+                    generation: 1,
+                }
             }
-        };
+        });
         ExecutionTask(Arc::new(TaskRecord {
             id,
             registry: self.clone(),
@@ -170,75 +301,74 @@ impl TaskRegistry {
         }))
     }
 
-    /// Register `waiter -> producer` before `waiter` parks on one of
-    /// `producer`'s flights. Refused when the edge would close a cycle, when
-    /// either task is gone, or when the waiter already waits.
+    /// Register `waiter -> producer` before waiting. Refused when it would
+    /// close a cycle, either task is gone, or the waiter already waits.
     pub fn register_wait(&self, waiter: TaskId, producer: TaskId) -> Result<WaitEdge, WaitCycle> {
-        let mut state = self.state.lock();
-        if !Self::is_active(&state, waiter)
-            || !Self::is_active(&state, producer)
-            || state.waits.contains_key(&waiter)
-        {
-            // A task that is gone, or one already waiting, cannot safely
-            // park: refuse it onto the same nonpublishing escape rail.
-            return Err(WaitCycle);
-        }
-        let mut cursor = producer;
-        let mut seen = FxHashSet::default();
-        while seen.insert(cursor) {
-            if cursor == waiter {
+        with_graph(&self.owner.graph, |state| {
+            if !Self::is_active(state, waiter)
+                || !Self::is_active(state, producer)
+                || state.waits.contains_key(&waiter)
+            {
                 return Err(WaitCycle);
             }
-            let Some(next) = state.waits.get(&cursor).copied() else {
-                break;
-            };
-            cursor = next;
-        }
-        state.link_wait(waiter, producer);
-        Ok(WaitEdge {
-            registry: self.clone(),
-            waiter,
-            producer,
+            let mut cursor = producer;
+            let mut seen = FxHashSet::default();
+            while seen.insert(cursor) {
+                if cursor == waiter {
+                    return Err(WaitCycle);
+                }
+                let Some(next) = state.waits.get(&cursor).copied() else {
+                    break;
+                };
+                cursor = next;
+            }
+            state.link_wait(waiter, producer);
+            Ok(WaitEdge {
+                registry: self.clone(),
+                waiter,
+                producer,
+            })
         })
     }
-
     fn is_active(state: &RegistryState, task: TaskId) -> bool {
         state
-            .tasks
-            .get(task.id)
+            .pools
+            .get(&task.namespace)
+            .and_then(|pool| pool.tasks.get(task.id))
             .is_some_and(|slot| slot.active && slot.generation == task.generation)
     }
-
     fn retire(&self, task: TaskId) {
-        let mut state = self.state.lock();
-        let Some(slot) = state.tasks.get_mut(task.id) else {
-            return;
-        };
-        if !slot.active || slot.generation != task.generation {
-            return;
-        }
-        slot.active = false;
-        state.unlink_wait(task);
-        for waiter in state.waiters.remove(&task).unwrap_or_default() {
-            state.waits.remove(&waiter);
-        }
-        state.free_slots.push(task.id);
+        with_graph(&self.owner.graph, |state| {
+            let Some(pool) = state.pools.get_mut(&task.namespace) else {
+                return;
+            };
+            let Some(slot) = pool.tasks.get_mut(task.id) else {
+                return;
+            };
+            if !slot.active || slot.generation != task.generation {
+                return;
+            }
+            slot.active = false;
+            pool.free_slots.push(task.id);
+            state.unlink_wait(task);
+            for waiter in state.waiters.remove(&task).unwrap_or_default() {
+                state.waits.remove(&waiter);
+            }
+        });
     }
-
     fn remove_wait(&self, waiter: TaskId, producer: TaskId) {
-        let mut state = self.state.lock();
-        if state
-            .waits
-            .get(&waiter)
-            .is_some_and(|registered| *registered == producer)
-        {
-            state.unlink_wait(waiter);
-        }
+        with_graph(&self.owner.graph, |state| {
+            if state
+                .waits
+                .get(&waiter)
+                .is_some_and(|registered| *registered == producer)
+            {
+                state.unlink_wait(waiter);
+            }
+        });
     }
-
-    /// Identity of this registry, for the per-thread entry adapter.
-    fn identity(&self) -> usize {
-        Arc::as_ptr(&self.state) as usize
+    fn identity(&self) -> u64 {
+        self.owner.namespace
     }
 
     /// Retire `task` as its last handle would.
@@ -246,52 +376,50 @@ impl TaskRegistry {
     pub fn retire_for_tests(&self, task: TaskId) {
         self.retire(task);
     }
-
     /// Remove `waiter -> producer` as its edge's drop would.
     #[cfg(any(test, feature = "test-support"))]
     pub fn remove_wait_for_tests(&self, waiter: TaskId, producer: TaskId) {
         self.remove_wait(waiter, producer);
     }
 
-    /// Current occupancy of the wait-for graph and its reverse index.
+    /// Current occupancy of the shared cycle graph and its reverse index.
     pub fn wait_graph_occupancy(&self) -> WaitGraphOccupancy {
-        let state = self.state.lock();
-        WaitGraphOccupancy {
+        with_graph(&self.owner.graph, |state| WaitGraphOccupancy {
             edges: state.waits.len(),
             edges_capacity: state.waits.capacity(),
             producers: state.waiters.len(),
             reverse_entries: state.waiters.values().map(FxHashSet::len).sum(),
             reverse_capacity: state.waiters.capacity(),
             reverse_entries_capacity: state.waiters.values().map(FxHashSet::capacity).sum(),
-        }
+        })
     }
-
-    /// Whether `task` is registered and not retired.
+    /// Whether `task` is registered and not retired in this authority.
     #[cfg(any(test, feature = "test-support"))]
     pub fn is_active_for_tests(&self, task: TaskId) -> bool {
-        Self::is_active(&self.state.lock(), task)
+        with_graph(&self.owner.graph, |state| Self::is_active(state, task))
     }
-
-    /// How many tasks are active.
+    /// How many tasks are active in this authority.
     #[cfg(any(test, feature = "test-support"))]
     pub fn active_task_count_for_tests(&self) -> usize {
-        self.state
-            .lock()
-            .tasks
-            .iter()
-            .filter(|slot| slot.active)
-            .count()
+        with_graph(&self.owner.graph, |state| {
+            state
+                .pools
+                .values()
+                .flat_map(|pool| &pool.tasks)
+                .filter(|slot| slot.active)
+                .count()
+        })
     }
-
     /// How many wait-for edges are registered.
     #[cfg(any(test, feature = "test-support"))]
     pub fn wait_count_for_tests(&self) -> usize {
-        let state = self.state.lock();
-        verter_debug_assert!(
-            state.waits.len() == state.waiters.values().map(FxHashSet::len).sum::<usize>(),
-            "both sides of every wait-for edge are registered",
-        );
-        state.waits.len()
+        with_graph(&self.owner.graph, |state| {
+            verter_debug_assert!(
+                state.waits.len() == state.waiters.values().map(FxHashSet::len).sum::<usize>(),
+                "both sides of every wait-for edge are registered"
+            );
+            state.waits.len()
+        })
     }
 }
 
@@ -341,7 +469,7 @@ impl ExecutionTask {
     /// Register a dependency on another task from this same authority.
     /// Cross-registry identities must never alias by slot and generation.
     pub fn wait_for(&self, producer: &ExecutionTask) -> Result<WaitEdge, WaitCycle> {
-        if !Arc::ptr_eq(&self.0.registry.state, &producer.0.registry.state) {
+        if !self.0.registry.same_authority(&producer.0.registry) {
             return Err(WaitCycle);
         }
         self.0.registry.register_wait(self.id(), producer.id())
@@ -433,7 +561,7 @@ impl Drop for WaitEdge {
 
 thread_local! {
     /// The task each registry's synchronous entry installed on this thread.
-    static INSTALLED_TASKS: RefCell<Vec<(usize, ExecutionTask)>> =
+    static INSTALLED_TASKS: RefCell<Vec<(u64, ExecutionTask)>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -441,9 +569,10 @@ thread_local! {
 /// its whole nested evaluation on the native stack, so every execution
 /// nested inside it joins the one task the outermost entry installed; the
 /// outermost entry registers that task and uninstalls it when it returns.
-/// Installed tasks are keyed by registry identity.
+/// Installed scopes follow joined authorities while retaining their exact
+/// registration identity for removal.
 pub struct ExecutionScope {
-    registry_identity: usize,
+    registry_identity: u64,
     task: ExecutionTask,
     installed: bool,
 }
@@ -457,13 +586,12 @@ impl ExecutionScope {
 
     /// The task installed on this thread for `registry`, if any.
     pub fn current(registry: &TaskRegistry) -> Option<ExecutionTask> {
-        let identity = registry.identity();
         INSTALLED_TASKS.with(|installed| {
             installed
                 .borrow()
                 .iter()
                 .rev()
-                .find(|(owner, _)| *owner == identity)
+                .find(|(_, task)| task.registry().same_authority(registry))
                 .map(|(_, task)| task.clone())
         })
     }
@@ -541,7 +669,7 @@ mod tests {
     use super::*;
 
     fn reverse_index(registry: &TaskRegistry) -> FxHashMap<TaskId, FxHashSet<TaskId>> {
-        registry.state.lock().waiters.clone()
+        with_graph(&registry.owner.graph, |state| state.waiters.clone())
     }
 
     /// Retiring a producer removes exactly the edges into it, through the
@@ -663,5 +791,144 @@ mod tests {
         assert!(reverse_index(&registry).is_empty());
         drop(edge);
         assert_eq!(registry.wait_count_for_tests(), 0);
+    }
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::*;
+
+    #[test]
+    fn joining_live_authorities_preserves_edges_scopes_and_namespaced_task_ids() {
+        let a = TaskRegistry::default();
+        let b = TaskRegistry::default();
+        let a0 = a.register_task();
+        let a1 = a.register_task();
+        let b0 = b.register_task();
+        let b1 = b.register_task();
+        assert_eq!(a0.id().slot(), b0.id().slot());
+        assert_eq!(a0.id().generation(), b0.id().generation());
+        assert_ne!(
+            a0.id(),
+            b0.id(),
+            "task identities survive joining equal local slots"
+        );
+        let a_edge = a1.wait_for(&a0).unwrap();
+        let b_edge = b1.wait_for(&b0).unwrap();
+        let scope = ExecutionScope::enter(&a);
+        assert!(ExecutionScope::current(&b).is_none());
+        a.share_authority_with(&b);
+        assert!(ExecutionScope::current(&b).unwrap().same_task(scope.task()));
+        assert_eq!(a.wait_count_for_tests(), 2);
+        assert_eq!(b.wait_count_for_tests(), 2);
+        let connecting = a0.wait_for(&b1).unwrap();
+        assert!(b0.wait_for(&a1).is_err(), "cross-owner cycles are refused");
+        drop(a_edge);
+        assert_eq!(b.wait_count_for_tests(), 2);
+        drop((connecting, b_edge, scope, a0, a1, b0, b1));
+        assert_eq!(a.wait_count_for_tests(), 0);
+        assert_eq!(b.active_task_count_for_tests(), 0);
+    }
+
+    #[test]
+    fn concurrent_composition_joins_have_one_cycle_authority() {
+        for _ in 0..8 {
+            let registries = [
+                TaskRegistry::default(),
+                TaskRegistry::default(),
+                TaskRegistry::default(),
+            ];
+            let tasks: Vec<_> = registries.iter().map(TaskRegistry::register_task).collect();
+            let start = std::sync::Barrier::new(3);
+            std::thread::scope(|scope| {
+                let joins: Vec<_> = (0..3)
+                    .map(|i| {
+                        let registries = &registries;
+                        let start = &start;
+                        scope.spawn(move || {
+                            start.wait();
+                            registries[i].share_authority_with(&registries[(i + 1) % 3]);
+                        })
+                    })
+                    .collect();
+                for join in joins {
+                    join.join().unwrap();
+                }
+            });
+            let first = tasks[0].wait_for(&tasks[1]).unwrap();
+            let second = tasks[1].wait_for(&tasks[2]).unwrap();
+            assert!(tasks[2].wait_for(&tasks[0]).is_err());
+            drop((first, second, tasks));
+            for registry in &registries {
+                assert_eq!(registry.active_task_count_for_tests(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn already_joined_tasks_keep_accepting_waits_during_further_composition() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let a = TaskRegistry::default();
+        let b = TaskRegistry::default();
+        a.share_authority_with(&b);
+        let waiter = a.register_task();
+        let producer = b.register_task();
+        let start = std::sync::Barrier::new(2);
+        let done = AtomicBool::new(false);
+        let accepted = AtomicUsize::new(0);
+        let refused = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                start.wait();
+                loop {
+                    match waiter.wait_for(&producer) {
+                        Ok(edge) => {
+                            accepted.fetch_add(1, Ordering::Relaxed);
+                            drop(edge);
+                        }
+                        Err(_) => {
+                            refused.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    if done.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+            });
+            start.wait();
+            for rank in 1..=256 {
+                let joining = TaskRegistry::default();
+                // A higher-rank fixture forces forwarding on every join,
+                // exercising the race without an exponential forest.
+                with_graph(&joining.owner.graph, |state| state.rank = rank + 1);
+                a.share_authority_with(&joining);
+            }
+            done.store(true, Ordering::Release);
+            reader.join().unwrap();
+        });
+        assert!(accepted.load(Ordering::Relaxed) > 0);
+        assert_eq!(refused.load(Ordering::Relaxed), 0);
+        assert_eq!(a.wait_count_for_tests(), 0);
+    }
+
+    #[test]
+    fn released_registration_owners_retain_no_pool_history_after_composition() {
+        let surviving = TaskRegistry::default();
+        let task = surviving.register_task();
+        for _ in 0..32 {
+            let joined = TaskRegistry::default();
+            let temporary = joined.register_task();
+            let retired = temporary.id();
+            surviving.share_authority_with(&joined);
+            drop((temporary, joined));
+            assert!(!surviving.is_active_for_tests(retired));
+            assert_eq!(
+                with_graph(&surviving.owner.graph, |state| state.pools.len()),
+                1,
+                "only the live registration owner's backing remains"
+            );
+        }
+        drop(task);
+        assert_eq!(surviving.active_task_count_for_tests(), 0);
     }
 }

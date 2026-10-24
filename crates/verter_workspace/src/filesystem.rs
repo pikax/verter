@@ -16,7 +16,29 @@ use crate::types::{ExactResolution, ExactResolutionResult};
 thread_local! {
     #[cfg(any(test, feature = "semantic-observe"))]
     static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+    static OWNED_DIRECTORY_OBSERVATIONS: RefCell<Option<DirectoryEvidence>> = const { RefCell::new(None) };
     static RESOLUTION_DIRECTORY_OBSERVATIONS: RefCell<Vec<ResolutionDirectoryObservation>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Evidence follows the admitted continuation across worker migration. TLS
+/// installs this owned receiver only for an external work slice, never as the
+/// lifetime or identity of a suspended resolution.
+#[derive(Clone, Default)]
+pub(crate) struct DirectoryEvidence(Arc<parking_lot::Mutex<Vec<ResolutionDirectoryObservation>>>);
+pub(crate) struct DirectoryEvidenceScope(Option<DirectoryEvidence>);
+impl DirectoryEvidence {
+    pub(crate) fn install(&self) -> DirectoryEvidenceScope {
+        DirectoryEvidenceScope(
+            OWNED_DIRECTORY_OBSERVATIONS.with(|slot| slot.replace(Some(self.clone()))),
+        )
+    }
+}
+impl Drop for DirectoryEvidenceScope {
+    fn drop(&mut self) {
+        OWNED_DIRECTORY_OBSERVATIONS.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
 }
 
 /// A recorded directory-membership observation.
@@ -85,19 +107,26 @@ fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn record_resolution_directory_observation(canonical_id: &str, value: ResolutionDirectoryValue) {
-    RESOLUTION_DIRECTORY_OBSERVATIONS.with(|observations| {
-        observations
-            .borrow_mut()
-            .push(ResolutionDirectoryObservation {
-                canonical: verter_session_query::resolution::normalize_canonical_id(canonical_id),
-                value,
-            });
+    let observation = ResolutionDirectoryObservation {
+        canonical: verter_session_query::resolution::normalize_canonical_id(canonical_id),
+        value,
+    };
+    OWNED_DIRECTORY_OBSERVATIONS.with(|slot| {
+        if let Some(receiver) = slot.borrow().as_ref() {
+            receiver.0.lock().push(observation);
+        } else {
+            RESOLUTION_DIRECTORY_OBSERVATIONS
+                .with(|observations| observations.borrow_mut().push(observation));
+        }
     });
 }
 
 fn take_resolution_directory_evidence() -> Vec<ResolutionDirectoryObservation> {
-    RESOLUTION_DIRECTORY_OBSERVATIONS
-        .with(|observations| std::mem::take(&mut *observations.borrow_mut()))
+    OWNED_DIRECTORY_OBSERVATIONS.with(|slot| match slot.borrow().as_ref() {
+        Some(receiver) => std::mem::take(&mut *receiver.0.lock()),
+        None => RESOLUTION_DIRECTORY_OBSERVATIONS
+            .with(|observations| std::mem::take(&mut *observations.borrow_mut())),
+    })
 }
 
 fn take_resolution_directory_observations() -> Vec<String> {
@@ -441,19 +470,53 @@ impl FilesystemWorkspace {
         specifier: &str,
         ctx: verter_session_query::resolution::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
+        crate::resolution_handoff::drive_compat(
+            self.engine.authority.current(),
+            None,
+            |task, progress| {
+                Box::pin(self.resolve_import_in_project_snapshot_async(
+                    published,
+                    overlay,
+                    project,
+                    crate::resolution_handoff::ImportRequest::new(importer_id, specifier, ctx),
+                    task,
+                    progress,
+                ))
+            },
+        )
+    }
+
+    async fn resolve_import_in_project_snapshot_async(
+        &self,
+        published: &Arc<crate::published_state::PublishedRoot>,
+        overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
+        project: Option<&verter_session_query::resolution::ProjectOwnership>,
+        request: crate::resolution_handoff::ImportRequest<'_>,
+        task: verter_execution::tasks::ExecutionTask,
+        progress: crate::resolution_handoff::Progress,
+    ) -> Result<
+        crate::resolution_currency::ResolutionOutcome,
+        crate::resolution_handoff::ResolutionError,
+    > {
+        let crate::resolution_handoff::ImportRequest {
+            importer: importer_id,
+            specifier,
+            context: ctx,
+        } = request;
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
 
         loop {
+            progress
+                .at(crate::resolution_handoff::ResolutionPhase::Discover)
+                .await;
             let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(published));
             let discovery = self
                 .engine
-                .resolve_import_outcome_for_published_in_operation(
+                .resolve_import_continuation(
                     &recorder,
                     self.resolution_evidence_source(),
-                    importer_id,
-                    specifier,
-                    ctx,
+                    crate::resolution_handoff::ImportRequest::new(importer_id, specifier, ctx),
                     crate::engine::ResolutionOperation::pinned(
                         published,
                         &mut input_ledger,
@@ -461,7 +524,10 @@ impl FilesystemWorkspace {
                     )
                     .over(overlay)
                     .in_project(project),
-                );
+                    task.clone(),
+                    progress.clone(),
+                )
+                .await?;
             if matches!(
                 discovery.non_admission_reason(),
                 Some(
@@ -469,49 +535,53 @@ impl FilesystemWorkspace {
                         | verter_audit::NonAdmissionReason::BudgetExceeded
                 )
             ) {
-                return discovery;
+                return Ok(discovery);
             }
             input_ledger.discard_staged_loaded_inputs();
 
+            progress
+                .at(crate::resolution_handoff::ResolutionPhase::Freeze)
+                .await;
             let frozen = recorder.freeze();
             if !frozen.revalidate() {
                 if input_ledger.charge_outer_restart(self).is_err() {
-                    return crate::resolution_currency::ResolutionOutcome::refused(
+                    return Ok(crate::resolution_currency::ResolutionOutcome::refused(
                         None,
                         verter_audit::NonAdmissionReason::BudgetExceeded,
-                    );
+                    ));
                 }
                 continue;
             }
-            let final_valid = std::cell::Cell::new(true);
+            let final_valid = AtomicBool::new(true);
             let outcome = self
                 .engine
-                .resolve_import_outcome_for_published_in_operation(
+                .resolve_import_continuation(
                     &frozen,
                     self.resolution_evidence_source(),
-                    importer_id,
-                    specifier,
-                    ctx,
+                    crate::resolution_handoff::ImportRequest::new(importer_id, specifier, ctx),
                     crate::engine::ResolutionOperation::pinned(
                         published,
                         &mut input_ledger,
                         &|| {
                             let valid = frozen.complete() && frozen.revalidate();
-                            final_valid.set(valid);
+                            final_valid.store(valid, Ordering::Release);
                             valid
                         },
                     )
                     .over(overlay)
                     .in_project(project),
-                );
-            if final_valid.get() {
-                return outcome;
+                    task.clone(),
+                    progress.clone(),
+                )
+                .await?;
+            if final_valid.load(Ordering::Acquire) {
+                return Ok(outcome);
             }
             if input_ledger.charge_outer_restart(self).is_err() {
-                return crate::resolution_currency::ResolutionOutcome::refused(
+                return Ok(crate::resolution_currency::ResolutionOutcome::refused(
                     None,
                     verter_audit::NonAdmissionReason::BudgetExceeded,
-                );
+                ));
             }
         }
     }
@@ -2037,6 +2107,70 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     }
 
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
+    fn begin_project_resolution(
+        self: Arc<Self>,
+        request: crate::resolution_handoff::ProjectResolutionRequest,
+        waiter: verter_execution::tasks::ExecutionTask,
+        stop: verter_execution::cancellation::CancellationToken,
+    ) -> crate::resolution_handoff::WorkspaceResolution {
+        crate::resolution_handoff::WorkspaceResolution::new(
+            self.engine.authority.registry(),
+            waiter,
+            stop,
+            move |task, progress| {
+                Box::pin(async move {
+                    self.engine
+                        .resolve_project_continuation(
+                            self.as_ref(),
+                            &request.project,
+                            &request.specifier,
+                            request.context,
+                            task,
+                            progress,
+                        )
+                        .await
+                })
+            },
+        )
+    }
+
+    fn begin_resolution(
+        self: Arc<Self>,
+        request: crate::resolution_handoff::ResolutionRequest,
+        waiter: verter_execution::tasks::ExecutionTask,
+        stop: verter_execution::cancellation::CancellationToken,
+    ) -> crate::resolution_handoff::WorkspaceResolution {
+        crate::resolution_handoff::WorkspaceResolution::new(
+            self.engine.authority.registry(),
+            waiter,
+            stop,
+            move |task, progress| {
+                Box::pin(async move {
+                    let Some(published) = request.published.or_else(|| self.load_published())
+                    else {
+                        return Ok(crate::resolution_currency::ResolutionOutcome::refused(
+                            None,
+                            verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance,
+                        ));
+                    };
+                    self.resolve_import_in_project_snapshot_async(
+                        &published,
+                        request.overlay.as_ref(),
+                        request.project.as_ref(),
+                        crate::resolution_handoff::ImportRequest::new(
+                            &request.importer,
+                            &request.specifier,
+                            request.context,
+                        ),
+                        task,
+                        progress,
+                    )
+                    .await
+                })
+            },
+        )
+    }
+
     fn resolve_import(
         &self,
         importer_id: &str,
@@ -2399,6 +2533,10 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         deps: std::collections::BTreeSet<String>,
     ) {
         self.engine.replace_semantic_transitive(canonical_id, deps);
+    }
+
+    fn bind_execution_registry(&self, registry: verter_execution::tasks::TaskRegistry) {
+        self.engine.authority.bind(registry);
     }
 
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
