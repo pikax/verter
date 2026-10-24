@@ -28,10 +28,9 @@
 //!   result it costs and keeps that reservation until its own last holder
 //!   drops, so a receipt a reader outlives the cache with stays retained.
 //! * **Root metadata** — the delivery owner's own bookkeeping, charged
-//!   separately from what it delivers: the owner's block, with the root
-//!   sets naming the nodes the read roots inline in it and their spilled
-//!   operand lists (a caller hold a retaining cache adopts into retention
-//!   and hands back pinned).
+//!   separately from what it delivers: the owner's block (a caller hold a
+//!   retaining cache adopts into retention and hands back pinned) and the
+//!   shared blocks of the root sets naming the nodes the read roots.
 //!
 //! Store backing is NOT covered: the rooted nodes' payloads are the arena's
 //! storage, charged with the graph through its granular pins, and a

@@ -1,8 +1,9 @@
-//! What rooting a graph node costs the allocator. A root set is its arena
-//! and the ids it counts, kept inline in whatever holds it, with each count
-//! in the arena's slot table: acquiring, cloning and releasing a root
+//! What rooting a graph node costs the allocator. A short root set is its
+//! arena and the ids it counts, kept inline in whatever holds it, with each
+//! count in the arena's slot table: acquiring, cloning and releasing a root
 //! allocates nothing, so the bookkeeping per rooted node is zero
-//! allocations however many nodes a request roots.
+//! allocations however many nodes a request roots. A longer set lives in
+//! one shared block its clones share.
 
 use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData, SemanticNodeId};
 use verter_type_engine::semantic_query_memo::SemanticGraphStore;
@@ -53,5 +54,38 @@ fn rooting_a_node_allocates_nothing_at_any_graph_size() {
             allocations, 0,
             "rooting {nodes} nodes allocated {allocations} times"
         );
+    }
+}
+
+/// A root set too long to keep inline lives in one shared block: cloning it
+/// shares the block, so a thousand clones allocate nothing and copy no
+/// operand list, however long the list is.
+#[test]
+fn cloning_a_long_root_set_allocates_nothing() {
+    for operands in [5usize, 64, 1_024] {
+        let graph = SemanticGraphStore::new();
+        let scope = graph.enter_node_root_scope();
+        let ids: Vec<SemanticNodeId> = (0..operands)
+            .map(|index| {
+                graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(
+                    index as f64 + 0.25,
+                )))
+            })
+            .collect();
+        let set = graph.root_nodes(ids.iter().copied()).expect("live nodes");
+        drop(scope);
+        let mut clones = Vec::with_capacity(1_000);
+        reset_alloc_counter();
+        for _ in 0..1_000 {
+            clones.push(set.clone());
+        }
+        let allocations = alloc_count();
+        assert_eq!(
+            allocations, 0,
+            "1000 clones of a {operands}-operand set allocated {allocations} times"
+        );
+        assert!(clones
+            .iter()
+            .all(|clone| clone.operands() == set.operands()));
     }
 }

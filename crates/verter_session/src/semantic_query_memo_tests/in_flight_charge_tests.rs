@@ -279,12 +279,17 @@ fn crossing_a_small_ceiling_cannot_abort_the_admitted_read() {
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
-/// The charge classes a held delivery's witness names: the delivered
-/// allocations' own cells, each once, in the class its settlement chose.
-/// Reused by the reopen proof below through the public host in
-/// `tests/cases/g_session`.
+/// An inline member's flight holds the nodes of its decided value until
+/// its batch ends. A value of more operands than a root set keeps inline is
+/// held through the set's shared block, charged ACTIVE — in flight, never a
+/// pin — for exactly the bytes the block occupies, shared by every clone of
+/// the flight, and released with the counts it holds when the batch ends.
 #[test]
-fn an_inline_member_flight_is_charged_in_flight_until_its_batch_ends() {
+fn an_inline_member_hold_is_charged_in_flight_until_its_batch_ends() {
+    use verter_type_engine::semantic_query::{
+        DeclarationAnalysisValue, LiteralValue, SemanticNodeData, SemanticQueryValue,
+    };
+    const OPERANDS: usize = 6;
     let account = account(usize::MAX / 2);
     let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let before = account.snapshot().active_bytes;
@@ -297,42 +302,59 @@ fn an_inline_member_flight_is_charged_in_flight_until_its_batch_ends() {
             after_flight > before,
             "the member's flight storage charges in flight"
         );
-        // The hold roots the member's decided value with a root set held
-        // inline in the flight: its counts live in the arena's slot table
-        // and an operand list that fits inline has no heap of its own, so
-        // the hold adds no charge in any class — only a spilled operand
-        // list would, in flight. The construction scope stays open until
-        // the hold has rooted the value, so the node is live for it.
-        let (_scope, held_value) = {
-            let scope = store.enter_node_root_scope();
-            let node = store.intern_node(
-                verter_type_engine::semantic_query::SemanticNodeData::Literal(
-                    verter_type_engine::semantic_query::LiteralValue::String("member value".into()),
-                ),
-            );
-            (
-                scope,
-                QueryResult::Value(
-                    verter_type_engine::semantic_query::SemanticQueryValue::TypeNode(node),
-                ),
-            )
-        };
+        // The construction scope stays open until the hold has rooted the
+        // value, so its nodes are live for it.
+        let scope = store.enter_node_root_scope();
+        let nodes: Vec<_> = (0..OPERANDS)
+            .map(|index| {
+                store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                    "member value {index}"
+                ))))
+            })
+            .collect();
+        let held_value = QueryResult::Value(SemanticQueryValue::DeclarationAnalysis(
+            DeclarationAnalysisValue {
+                contributors: nodes.clone().into(),
+            },
+        ));
+        let counted = store.node_owner_count_for_tests(nodes[0]);
         let pinned_at_hold = account.snapshot().pinned_bytes;
         flight.hold_value_for_tests(store, &held_value);
         let after_hold = account.snapshot();
+        let block =
+            verter_type_engine::semantic_query_memo::node_roots::root_set_charge_bytes_for_tests(
+                OPERANDS,
+            );
+        assert!(block > 0, "premise: the value's set needs a shared block");
         assert_eq!(
-            after_hold.active_bytes, after_flight,
-            "an inline root set adds nothing to the flight's in-flight charge: \
-             {after_hold:?} vs {after_flight} charged before the hold"
+            after_hold.active_bytes - after_flight,
+            block,
+            "the hold charges its set's shared block in flight, exactly: {after_hold:?}"
         );
         assert_eq!(
             after_hold.pinned_bytes, pinned_at_hold,
             "the hold is in-flight work, not a pinned settlement"
         );
+        assert_eq!(
+            store.node_owner_count_for_tests(nodes[0]),
+            counted + 1,
+            "the hold counts every operand of the value"
+        );
+        // A clone of the flight shares the block, its counts and its charge.
+        let replay = flight.clone();
+        assert_eq!(account.snapshot().active_bytes, after_hold.active_bytes);
+        assert_eq!(store.node_owner_count_for_tests(nodes[0]), counted + 1);
+        drop(replay);
         // The batch refuses the whole component: the hold ends with the
-        // abort, releasing its in-flight bytes with it.
+        // abort, releasing its in-flight bytes and its counts with it.
         store.abort_inline_member_flight(&flight);
         drop(flight);
+        assert_eq!(
+            store.node_owner_count_for_tests(nodes[0]),
+            counted,
+            "the ended hold released its counts"
+        );
+        drop(scope);
     });
     assert_eq!(
         account.snapshot().active_bytes,

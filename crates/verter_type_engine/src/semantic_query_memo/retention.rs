@@ -247,18 +247,21 @@ impl SemanticGraphStore {
         carrier.extend(parts.lease.adopt_metadata()?);
         // Every delivered allocation is held in one charged slice, all or
         // nothing.
-        let delivered = OwnedHandles::of(|aliases| {
-            parts
-                .diagnostics
-                .owned()
-                .map_or(0, |diagnostics| diagnostics.offer(aliases))
-                + parts
-                    .dep_signature
+        let delivered = parts
+            .lease
+            .metadata_handles()
+            .merge(OwnedHandles::of(|aliases| {
+                parts
+                    .diagnostics
                     .owned()
-                    .map_or(0, |rail| rail.offer(aliases))
-        })
-        .merge(result_handles(parts.result))
-        .hold(self.charge_ctx())?;
+                    .map_or(0, |diagnostics| diagnostics.offer(aliases))
+                    + parts
+                        .dep_signature
+                        .owned()
+                        .map_or(0, |rail| rail.offer(aliases))
+            }))
+            .merge(result_handles(parts.result))
+            .hold(self.charge_ctx())?;
         // The slice keeping the carrier holds lives as long as they do.
         let carrier = carrier.into_boxed_slice();
         let carrier_backing = match account.reserve(

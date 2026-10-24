@@ -477,8 +477,9 @@ fn the_project_dependency_name_is_charged_at_a_full_account() {
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
-/// A delivery's root sets ride inline in its owner, so its metadata charge
-/// is the owner's block plus a spilled operand list, taken once at mint:
+/// A delivery's short root sets ride inline in its owner and a longer one
+/// names its shared block, so its metadata charge is the owner's block plus
+/// that block's cell, each taken once at mint:
 /// cloning the delivery adds no charge and no count, the delivery keeps its
 /// nodes live across requests (construction scopes) and a cache
 /// invalidation, and its last holder's drop releases both the charge and
@@ -566,4 +567,127 @@ fn a_delivery_charges_its_root_sets_once_and_holds_its_nodes_across_requests() {
         before,
         "the delivery's metadata charge leaves with its last holder"
     );
+}
+
+/// Every kind of holder of a root set too long to keep inline charges the
+/// set's shared block exactly once — the bytes the block's cell and list
+/// really occupy — and a clone of the holder, or of the set, adds no charge
+/// and no count: a delivery, a keyed root attachment, a kept union view and
+/// a construction scope capturing a cache hit.
+#[test]
+fn every_holder_of_a_long_root_set_charges_its_block_once_and_clones_add_nothing() {
+    use super::delivery_lease::SemanticDeliveryLease;
+    use super::node_roots::{root_set_charge_bytes_for_tests as block_bytes, IdentityNodeRoots};
+    use crate::semantic_query::composite::{CompositeList, UnionKind};
+    use crate::semantic_query::semantic_context::SemanticContext;
+    use crate::semantic_query::stable_key::semantic_union_members;
+    use verter_session_query::retention::allocation::AliasSet;
+    use verter_session_query::retention::owned::{child_registration_bytes, ChargeCtx, Owned};
+
+    const OPERANDS: usize = 6;
+    let account = account();
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let scope = store.enter_node_root_scope();
+    let members: Vec<_> = (0..OPERANDS - 1)
+        .map(|index| {
+            store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                "member-{index}"
+            ))))
+        })
+        .collect();
+    let union = store.intern_node(SemanticNodeData::Union(
+        CompositeList::<UnionKind>::authored_shell(Arc::from(members.clone())),
+    ));
+    let mut ids = members.clone();
+    ids.push(union);
+    // The nodes outlive their construction scope; with no scope open, a
+    // delivery's clones are captured by no construction owner.
+    let _kept = store.root_nodes(ids.iter().copied()).expect("live");
+    drop(scope);
+    // Everything the account holds beyond the store's own storage.
+    let charged = || account.snapshot().total_bytes() - store.store_storage_pins_for_tests();
+    let first = ids[0];
+    let counts = || store.node_owner_count_for_tests(first);
+    assert!(block_bytes(OPERANDS) > 0 && block_bytes(4) == 0);
+
+    // A delivery: its metadata is its owner's block plus the shared block.
+    let base = charged();
+    let short = SemanticDeliveryLease::from_roots(
+        store.root_nodes([first]).expect("live"),
+        store.retention_account(),
+    );
+    let owner_block = charged() - base;
+    assert_eq!(owner_block, short.own_charge_bytes_for_tests());
+    drop(short);
+    let before = counts();
+    let lease = SemanticDeliveryLease::from_roots(
+        store.root_nodes(ids.iter().copied()).expect("live"),
+        store.retention_account(),
+    );
+    assert_eq!(
+        charged() - base,
+        owner_block + block_bytes(OPERANDS),
+        "a delivery charges its owner's block and its set's shared block, once"
+    );
+    assert_eq!(counts(), before + 1);
+    let lease_clones: Vec<_> = (0..8).map(|_| lease.clone()).collect();
+    assert_eq!(charged() - base, owner_block + block_bytes(OPERANDS));
+    assert_eq!(counts(), before + 1, "a delivery's clones share its counts");
+    drop(lease_clones);
+    drop(lease);
+    assert_eq!(charged(), base);
+    assert_eq!(counts(), before);
+
+    // A keyed attachment: its own cell with its registration of the
+    // shared block nested in it, and that block.
+    let attachment_bytes = Owned::<super::node_roots::NodeRootSet>::cell_block_bytes()
+        + child_registration_bytes(1)
+        + block_bytes(OPERANDS);
+    let attachment = IdentityNodeRoots::in_graph(&store, ids.iter().copied());
+    let pin = |attachment: &IdentityNodeRoots| {
+        let mut aliases = AliasSet::new();
+        assert_eq!(attachment.owned_heap_bytes(&mut aliases), 0);
+        aliases.take_handles().pin(ChargeCtx::new(&account));
+    };
+    pin(&attachment);
+    assert_eq!(
+        charged() - base,
+        attachment_bytes,
+        "an attachment charges its cell and its set's shared block, once"
+    );
+    let attachment_clones: Vec<_> = (0..8).map(|_| attachment.clone()).collect();
+    for clone in &attachment_clones {
+        pin(clone);
+    }
+    assert_eq!(charged() - base, attachment_bytes);
+    assert_eq!(counts(), before + 1, "a key's clones share its counts");
+    drop(attachment_clones);
+    drop(attachment);
+    assert_eq!(charged(), base);
+    assert_eq!(counts(), before);
+
+    // A kept union view: its entry, the shared block of the set rooting the
+    // union and every member, and the entry's hold on that block.
+    let view_bytes = |view: &[crate::semantic_query::SemanticNodeId]| {
+        super::union_views::retained_view_bytes(view)
+            + verter_session_query::retention::owned::HeldHandles::backing_bytes_for(1)
+            + block_bytes(OPERANDS)
+    };
+    let _reading = store.enter_node_root_scope();
+    let ctx = SemanticContext::production();
+    let view = semantic_union_members(&store, union, &ctx);
+    assert_eq!(view.len(), OPERANDS - 1);
+    assert_eq!(
+        charged() - base,
+        view_bytes(&view),
+        "a kept view charges its entry and its set's shared block, once"
+    );
+    // A hit hands the open scope a share of the view's set: no charge, no
+    // count, however often it is read.
+    let kept = counts();
+    for _ in 0..8 {
+        assert_eq!(semantic_union_members(&store, union, &ctx), view);
+    }
+    assert_eq!(charged() - base, view_bytes(&view));
+    assert_eq!(counts(), kept, "scope captures share the view's counts");
 }

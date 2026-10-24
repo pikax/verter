@@ -322,10 +322,11 @@ pub struct InlineMemberFlight {
     /// The member's decided value, owned from the moment its component
     /// closes until the batched publish stages it: the construction scope
     /// that computed it may close first.
-    /// The root set rides inline here; its operand list, once it spills,
-    /// is charged as in-flight work against the store's retention account
-    /// for as long as it is held — ACTIVE until the batched publish or the
-    /// abort ends the hold.
+    /// A short root set rides inline here and has no charge of its own; a
+    /// longer one's shared block is charged as in-flight work against the
+    /// store's retention account for as long as it is held — ACTIVE until
+    /// the batched publish or the abort ends the hold. A clone of the flight
+    /// shares the block and its one charge.
     held: Option<(
         super::node_roots::NodeRootSet,
         Option<verter_session_query::retention::shared::CallerHold>,
@@ -364,11 +365,11 @@ impl InlineMemberFlight {
         }
         match graph.root_nodes(nodes) {
             Ok(roots) => {
-                let spill = roots.heap_bytes();
-                let charge = (spill > 0).then(|| {
+                let block = roots.heap_bytes();
+                let charge = (block > 0).then(|| {
                     verter_session_query::retention::shared::CallerHold::in_flight(
                         graph.retention_account(),
-                        spill,
+                        block,
                     )
                 });
                 self.held = Some((roots, charge));

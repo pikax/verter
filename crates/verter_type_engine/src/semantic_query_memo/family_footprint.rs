@@ -7,7 +7,7 @@
 //! [`family_key_heap_bytes`] walks every one of those allocations under the
 //! conventions of [`verter_session_query::retention::allocation`]: a `Box`
 //! costs its pointee's block plus the pointee's own heap, each `Arc`
-//! allocation (slices, names, interned records, shared root sets) is counted
+//! allocation (slices, names, interned records, root attachments) is counted
 //! once per [`AliasSet`], and a field whose type is `Copy` owns no heap —
 //! [`inline`] holds that as a bound, so a field that gains an allocation
 //! stops compiling here instead of going uncounted.

@@ -731,8 +731,9 @@ struct Chunk {
     /// [`NodeArenaCore::retain_held`]): a slot is destroyed only under the
     /// write lock once its count is zero, so a slot seen live under the read
     /// lock stays live while counts are added, and concurrent additions
-    /// commute. Every decrement, and every other change, happens under the
-    /// write lock.
+    /// commute. A release that leaves a slot still counted drops its count
+    /// under the read lock too ([`NodeArenaCore::release_roots`]); a count
+    /// reaching zero, and every other change, happens under the write lock.
     owners: Box<[std::sync::atomic::AtomicUsize]>,
     permanent: Box<[bool]>,
     /// Slots a per-node sidecar describes: destroying one logs its id for
@@ -2111,25 +2112,71 @@ impl NodeArenaCore {
         held.len()
     }
 
+    /// Drop one count of each of `ids`. A count that leaves its slot still
+    /// counted drops under the read lock: a slot is destroyed only under the
+    /// write lock once its count is zero, so a decrement that stops above
+    /// zero races no destruction, and it commutes with the read-locked
+    /// additions. Only the ids whose count would reach zero take the write
+    /// lock, where the count is dropped again and a slot left uncounted is
+    /// destroyed with the children it alone kept.
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
+        if ids.is_empty() {
+            return;
+        }
         if self.tearing_down.load(std::sync::atomic::Ordering::Acquire) {
             if let Some(deferred) = self.deferred_releases.lock().as_mut() {
                 deferred.extend_from_slice(ids);
                 return;
             }
         }
-        // Most releases only drop a count; the stack of dying nodes' children
-        // and the retired list allocate only once a node reaches zero.
-        let mut pending: Vec<SemanticNodeId> = Vec::new();
-        let mut retired: Vec<(SemanticNodeId, u64, bool)> = Vec::new();
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeRootRelease {
             blocked: self.inner.try_write().is_none(),
         });
+        let mut last: SmallVec<[SemanticNodeId; 8]> = SmallVec::new();
+        {
+            let inner = self.inner.read();
+            let mut index = 0;
+            while index < ids.len() {
+                let id = ids[index];
+                index += 1;
+                let Some(chunk) = inner.chunks.get(&(id.0 >> CHUNK_BITS)) else {
+                    continue;
+                };
+                let slot = (id.0 & CHUNK_MASK) as usize;
+                if chunk.nodes[slot].is_none() {
+                    continue;
+                }
+                let owners = &chunk.owners[slot];
+                let mut current = owners.load(std::sync::atomic::Ordering::Relaxed);
+                loop {
+                    if current <= 1 {
+                        last.push(id);
+                        break;
+                    }
+                    match owners.compare_exchange_weak(
+                        current,
+                        current - 1,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(seen) => current = seen,
+                    }
+                }
+            }
+        }
+        if last.is_empty() {
+            return;
+        }
+        // Most releases only drop a count; the stack of dying nodes' children
+        // and the retired list allocate only once a node reaches zero.
+        let mut pending: Vec<SemanticNodeId> = Vec::new();
+        let mut retired: Vec<(SemanticNodeId, u64, bool)> = Vec::new();
         let mut inner = self.inner.write();
         // Last id first, each dying node's descendants before the next id:
         // the order of one stack seeded with `ids`.
-        for &id in ids.iter().rev() {
+        for &id in last.iter().rev() {
             Self::release_root_locked(&mut inner, id, &mut pending, &mut retired);
             while let Some(child) = pending.pop() {
                 Self::release_root_locked(&mut inner, child, &mut pending, &mut retired);
@@ -2534,7 +2581,7 @@ impl NodeArena {
         super::node_roots::NodeRoot::adopt(Arc::clone(&self.core), id)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn owner_count(&self, id: SemanticNodeId) -> usize {
         self.inner
             .read()

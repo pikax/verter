@@ -568,6 +568,14 @@ impl SemanticGraphStore {
         )
     }
 
+    /// The counts `id`'s slot holds: one per root operand naming it and one
+    /// per live parent edge; zero once it is destroyed.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn node_owner_count_for_tests(&self, id: crate::semantic_query::SemanticNodeId) -> usize {
+        self.arena.owner_count(id)
+    }
+
     /// Claim an inline member's family flight exactly as the relation
     /// drain does.
     #[doc(hidden)]

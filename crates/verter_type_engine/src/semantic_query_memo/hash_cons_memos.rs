@@ -39,12 +39,16 @@ pub(crate) struct SubstituteMemoEntry {
 #[path = "hash_cons_memos_tests.rs"]
 mod tests;
 
-/// The bytes one memo entry keeps: its map slot and FIFO record, its value
-/// inline with the root set it embeds, and that set's spilled operands.
-fn hash_cons_entry_bytes<V>(roots: &super::node_roots::NodeRootSet) -> usize {
+/// The bytes one memo entry keeps: its map slot and FIFO record, and its
+/// value inline with the root set it embeds; a root set's shared block is
+/// offered as the handle it is.
+fn hash_cons_entry_bytes<V>(
+    roots: &super::node_roots::NodeRootSet,
+    aliases: &mut verter_session_query::retention::allocation::AliasSet,
+) -> usize {
     std::mem::size_of::<V>()
         + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-        + roots.heap_bytes()
+        + roots.owned_heap_bytes(aliases)
 }
 
 /// The completed cold evaluation handed to admission. The producer creates
@@ -129,21 +133,30 @@ impl SemanticGraphStore {
         SemanticNodeId,
         Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
     )> {
-        let hit =
-            self.substitute_memo
-                .get(&(node, parameter, arg))
-                .map(|entry| {
-                    let SubstituteMemoEntry {
-                        result,
-                        receipt,
-                        roots,
-                        ..
-                    } = entry.value();
-                    super::node_roots::NodeRootScope::capture(
-                        super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
-                    );
-                    (*result, Arc::clone(receipt))
-                });
+        // Under the map's shard guard the roots are shared without being
+        // counted: counting takes the arena's lock, which is never taken
+        // under a cache table's guard.
+        let shared = self
+            .substitute_memo
+            .get(&(node, parameter, arg))
+            .map(|entry| {
+                let SubstituteMemoEntry {
+                    result,
+                    receipt,
+                    roots,
+                    ..
+                } = entry.value();
+                (*result, Arc::clone(receipt), roots.share())
+            });
+        // An entry whose nodes a release destroyed once the guard was gone
+        // is a miss.
+        let hit = shared.and_then(|(result, receipt, roots)| {
+            let roots = roots.into_set().ok()?;
+            super::node_roots::NodeRootScope::capture(super::node_roots::NodeRoot::from_roots(
+                result, roots,
+            ));
+            Some((result, receipt))
+        });
         if super::records_telemetry::<M>() {
             let counter = if hit.is_some() {
                 &self.stats.substitute_memo_hits
@@ -207,16 +220,23 @@ impl SemanticGraphStore {
                 };
                 // Charged like every retained answer; one the account
                 // refuses is computed again on demand.
+                let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
                 let bytes = hash_cons_entry_bytes::<(
                     (SemanticNodeId, SemanticNodeId, SemanticNodeId),
                     SubstituteMemoEntry,
-                )>(&roots);
+                )>(&roots, &mut aliases);
+                // A root set's shared block is an owned allocation, charged
+                // by its own cell and held by the entry.
+                let handles = aliases.take_handles();
                 let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
                     self.retention_account().reserve(
                         verter_session_query::retention::ChargeClass::Retained,
                         bytes,
                     )
                 else {
+                    return;
+                };
+                let Ok(retention) = handles.retained_with(retention, self.charge_ctx()) else {
                     return;
                 };
                 slot.insert(SubstituteMemoEntry {

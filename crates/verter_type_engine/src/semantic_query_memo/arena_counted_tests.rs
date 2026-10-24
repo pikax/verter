@@ -789,3 +789,57 @@ fn an_acquisition_racing_the_last_release_roots_a_live_node_or_is_refused() {
         assert_eq!(arena.live_len(), 0);
     }
 }
+
+/// A root set too long to keep inline holds one count per operand in its
+/// shared block, whatever the number of holders: its clones share the block
+/// and take no count, an operand repeated in the list is counted once per
+/// repeat, and the last holder's drop releases every count — leaving
+/// neither a leaked count nor a count released twice.
+#[test]
+fn a_long_root_set_shares_one_set_of_counts_between_its_clones() {
+    use super::super::node_roots::NodeRootSet;
+    let arena = NodeArena::default();
+    let roots: Vec<_> = (0..6)
+        .map(|index| {
+            arena.intern_owned(
+                SemanticNodeData::Literal(LiteralValue::String(format!("long-{index}"))),
+                NodeScopeId::Global,
+            )
+        })
+        .collect();
+    let ids: Vec<_> = roots
+        .iter()
+        .map(super::super::node_roots::NodeRoot::id)
+        .collect();
+    let mut operands: super::super::node_roots::RootIds = ids.iter().copied().collect();
+    operands.push(ids[0]);
+    let set = NodeRootSet::acquire(Arc::clone(&arena.core), operands).expect("live operands");
+    assert_eq!(
+        arena.owner_count(ids[0]),
+        3,
+        "the repeated operand counts twice"
+    );
+    assert_eq!(arena.owner_count(ids[5]), 2);
+    let clones: Vec<NodeRootSet> = (0..16).map(|_| set.clone()).collect();
+    assert_eq!(
+        (arena.owner_count(ids[0]), arena.owner_count(ids[5])),
+        (3, 2),
+        "clones share the block's counts"
+    );
+    drop(roots);
+    drop(set);
+    assert!(
+        ids.iter().all(|id| arena.is_live(*id)),
+        "a clone still holds the block"
+    );
+    let mut clones = clones;
+    let last = clones.pop().expect("sixteen clones");
+    drop(clones);
+    assert_eq!(
+        (arena.owner_count(ids[0]), arena.owner_count(ids[5])),
+        (2, 1)
+    );
+    drop(last);
+    assert!(ids.iter().all(|id| !arena.is_live(*id)));
+    assert_eq!(arena.live_len(), 0);
+}
