@@ -1,10 +1,19 @@
 //! JSON (de)serialisation for [`TypeExpr`].
 //!
 //! `TypeExpr` is a recursively-`Arc`-linked tree; a serde derive would hit
-//! the recursion limit, so serialisation is hand-rolled as a runtime
-//! dispatch over `serde_json::Value`. The [`Serialize`]/[`Deserialize`]
-//! impls delegate to [`TypeExpr::to_json_value`] and
-//! [`type_expr_from_json`].
+//! the recursion limit, so both directions are hand-rolled. The
+//! [`Serialize`] impl streams each node straight into the serializer with
+//! no intermediate `serde_json::Value`, so encoding costs work proportional
+//! to the output at any nesting depth; [`TypeExpr::to_json_value`] is that
+//! same encoding collected into a `Value`. The [`Deserialize`] impl reads a
+//! `Value` and converts it through [`type_expr_from_json`].
+//!
+//! The wire form is the one a `serde_json::Value` of the node would write:
+//! every object's keys in sorted order (the workspace builds `serde_json`
+//! without `preserve_order`, so a `Value` map is a `BTreeMap`), an absent
+//! optional child written as `null`, a non-finite number as `null`, and a
+//! non-negative integer as unsigned. The encoder below writes its keys in
+//! that order by hand; the `type_expr_wire_golden` cases pin the bytes.
 //!
 //! These impls live here so JSON transport remains separate from the core type
 //! definitions in `lib.rs`. The orphan rule permits `impl Serialize`/`impl
@@ -12,13 +21,12 @@
 //! crate-local; the helpers reach every node type through `use crate::*`.
 
 use crate::*;
-use serde::ser::Serialize;
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use std::sync::Arc;
 
 impl Serialize for TypeExpr {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let value = self.to_json_value();
-        value.serialize(serializer)
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        encode_type_expr(self, serializer)
     }
 }
 
@@ -386,23 +394,6 @@ fn authored_property_key_from_json(v: &serde_json::Value) -> Option<TypeAuthored
     }
 }
 
-fn authored_property_key_to_json(key: &TypeAuthoredPropertyKey) -> serde_json::Value {
-    match key {
-        AuthoredPropertyKey::String(value) => {
-            serde_json::json!({ "kind": "string", "value": value })
-        }
-        AuthoredPropertyKey::Number(value) => {
-            serde_json::json!({ "kind": "number", "value": value.get() })
-        }
-        AuthoredPropertyKey::UniqueSymbol(identity) => {
-            serde_json::json!({ "kind": "uniqueSymbol", "identity": identity })
-        }
-        AuthoredPropertyKey::Computed(expression) => {
-            serde_json::json!({ "kind": "computed", "expression": expression.to_json_value() })
-        }
-    }
-}
-
 fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
     let mk = v.get("memberKind")?.as_str()?;
     match mk {
@@ -561,308 +552,538 @@ fn modifier_str(m: MappedModifier) -> &'static str {
 }
 
 impl TypeExpr {
-    /// Convert to a JSON Value for serialization.
-    /// Uses runtime dispatch to avoid serde derive recursion limit.
+    /// This node's JSON as a [`serde_json::Value`].
+    ///
+    /// The streaming [`Serialize`] encoding collected into a tree: each
+    /// output node is built once and moved into its parent, so the cost is
+    /// proportional to the output. Callers that only write the JSON out
+    /// should serialize the node directly and skip the tree.
     pub fn to_json_value(&self) -> serde_json::Value {
-        use serde_json::json;
+        serde_json::to_value(self)
+            .expect("a TypeExpr encodes into a JSON value: every map key it writes is a string")
+    }
+}
 
-        match self {
-            Self::Primitive(name) => json!({ "kind": "primitive", "name": name.as_str() }),
-            Self::Literal(lit) => match lit {
-                LiteralValue::String(s) => {
-                    json!({ "kind": "literal", "literalKind": "string", "value": s })
-                }
-                LiteralValue::Number(n) => {
-                    json!({ "kind": "literal", "literalKind": "number", "value": n })
-                }
-                LiteralValue::Boolean(b) => {
-                    json!({ "kind": "literal", "literalKind": "boolean", "value": b })
-                }
-                LiteralValue::BigInt(s) => {
-                    json!({ "kind": "literal", "literalKind": "bigInt", "value": s })
-                }
+/// Write `$key => $value` pairs as one JSON object. The keys must be given
+/// in sorted order, the order a `serde_json::Value` map writes them.
+macro_rules! object {
+    ($serializer:expr; $($key:literal => $value:expr),+ $(,)?) => {{
+        let mut map = $serializer.serialize_map(Some([$($key),+].len()))?;
+        $(map.serialize_entry($key, $value)?;)+
+        map.end()
+    }};
+}
+
+/// `Some` as its value and `None` as `null`, written the way
+/// `serde_json::Value::Null` writes it.
+struct OrNull<T>(Option<T>);
+
+impl<T: Serialize> Serialize for OrNull<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.0 {
+            Some(value) => value.serialize(serializer),
+            None => serializer.serialize_unit(),
+        }
+    }
+}
+
+/// A float written the way a `serde_json::Value` holds it: a non-finite
+/// value has no JSON number and becomes `null`.
+struct Float(f64);
+
+impl Serialize for Float {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.0.is_finite() {
+            serializer.serialize_f64(self.0)
+        } else {
+            serializer.serialize_unit()
+        }
+    }
+}
+
+/// An integer written the way a `serde_json::Value` holds it: unsigned when
+/// non-negative.
+struct Int(i64);
+
+impl Serialize for Int {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match u64::try_from(self.0) {
+            Ok(unsigned) => serializer.serialize_u64(unsigned),
+            Err(_) => serializer.serialize_i64(self.0),
+        }
+    }
+}
+
+/// A JSON array of the slice's items, each written through the encoder
+/// beside it.
+struct Many<'a, T, W>(&'a [T], fn(&'a T) -> W);
+
+impl<'a, T, W: Serialize> Serialize for Many<'a, T, W> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for item in self.0 {
+            seq.serialize_element(&(self.1)(item))?;
+        }
+        seq.end()
+    }
+}
+
+fn arc_str(value: &Arc<str>) -> &str {
+    value
+}
+
+fn encode_type_expr<S: Serializer>(expr: &TypeExpr, serializer: S) -> Result<S::Ok, S::Error> {
+    match expr {
+        TypeExpr::Primitive(name) => object!(serializer;
+            "kind" => "primitive",
+            "name" => name.as_str(),
+        ),
+        TypeExpr::Literal(LiteralValue::String(value)) => object!(serializer;
+            "kind" => "literal",
+            "literalKind" => "string",
+            "value" => value.as_str(),
+        ),
+        TypeExpr::Literal(LiteralValue::Number(value)) => object!(serializer;
+            "kind" => "literal",
+            "literalKind" => "number",
+            "value" => &Float(*value),
+        ),
+        TypeExpr::Literal(LiteralValue::Boolean(value)) => object!(serializer;
+            "kind" => "literal",
+            "literalKind" => "boolean",
+            "value" => value,
+        ),
+        TypeExpr::Literal(LiteralValue::BigInt(value)) => object!(serializer;
+            "kind" => "literal",
+            "literalKind" => "bigInt",
+            "value" => value.as_str(),
+        ),
+        TypeExpr::Union(types) => object!(serializer;
+            "kind" => "union",
+            "types" => &types[..],
+        ),
+        TypeExpr::Intersection(types) => object!(serializer;
+            "kind" => "intersection",
+            "types" => &types[..],
+        ),
+        TypeExpr::Array { element, readonly } => object!(serializer;
+            "element" => &**element,
+            "kind" => "array",
+            "readonly" => readonly,
+        ),
+        TypeExpr::Tuple { elements, readonly } => object!(serializer;
+            "elements" => &Many(&elements[..], TupleElementJson),
+            "kind" => "tuple",
+            "readonly" => readonly,
+        ),
+        TypeExpr::Object(obj) => {
+            let mut map = serializer.serialize_map(Some(2 + usize::from(obj.empty_literal)))?;
+            // `emptyLiteral` is written only when set, so a JSON object without
+            // it parses back as an ordinary object.
+            if obj.empty_literal {
+                map.serialize_entry("emptyLiteral", &true)?;
+            }
+            map.serialize_entry("kind", "object")?;
+            map.serialize_entry("properties", &Many(&obj.properties[..], ObjectMemberJson))?;
+            map.end()
+        }
+        TypeExpr::Function(func) => FunctionJson {
+            func,
+            kind: Some("function"),
+        }
+        .serialize(serializer),
+        TypeExpr::ConstructorType(func) => FunctionJson {
+            func,
+            kind: Some("constructorType"),
+        }
+        .serialize(serializer),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => object!(serializer;
+            "kind" => "ref",
+            "name" => &**name,
+            "typeArguments" => &type_arguments[..],
+        ),
+        // The wire form carries the OP IDENTITY as a closed token, never a
+        // free-form name, so no decoder can mistake it for a declaration
+        // reference — and an unknown op fails the decode outright.
+        TypeExpr::IntrinsicApplication { op, arguments } => object!(serializer;
+            "arguments" => &arguments[..],
+            "kind" => "intrinsicApplication",
+            "op" => op.wire_str(),
+        ),
+        TypeExpr::ImportType {
+            specifier,
+            qualifier,
+            typeof_query,
+            type_arguments,
+        } => object!(serializer;
+            "kind" => "importType",
+            "qualifier" => &Many(&qualifier[..], arc_str),
+            "specifier" => &**specifier,
+            "typeArguments" => &type_arguments[..],
+            "typeofQuery" => typeof_query,
+        ),
+        TypeExpr::TypeParameter(param) => TypeParamJson {
+            param,
+            kind: Some("typeParameter"),
+        }
+        .serialize(serializer),
+        TypeExpr::KeyOf(operand) => object!(serializer;
+            "kind" => "keyOf",
+            "operand" => &**operand,
+        ),
+        TypeExpr::TypeOf(value_ref) if value_ref.type_args.is_empty() => object!(serializer;
+            "kind" => "typeOf",
+            "path" => &value_ref.path,
+        ),
+        TypeExpr::TypeOf(value_ref) => object!(serializer;
+            "kind" => "typeOf",
+            "path" => &value_ref.path,
+            "typeArgs" => &value_ref.type_args,
+        ),
+        TypeExpr::IndexedAccess { object, index } => object!(serializer;
+            "index" => &**index,
+            "kind" => "indexedAccess",
+            "object" => &**object,
+        ),
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => object!(serializer;
+            "check" => &**check,
+            "extends" => &**extends,
+            "falseType" => &**false_type,
+            "kind" => "conditional",
+            "trueType" => &**true_type,
+        ),
+        TypeExpr::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+        } => object!(serializer;
+            "kind" => "mapped",
+            "nameType" => &OrNull(name_type.as_deref()),
+            "optional" => modifier_str(*optional),
+            "parameter" => parameter.as_str(),
+            "readonly" => modifier_str(*readonly),
+            "source" => &**source,
+            "value" => &**value,
+        ),
+        TypeExpr::TemplateLiteral {
+            quasis,
+            expressions,
+        } => object!(serializer;
+            "expressions" => &expressions[..],
+            "kind" => "templateLiteral",
+            "quasis" => quasis,
+        ),
+        TypeExpr::Infer {
+            name,
+            constraint: Some(constraint),
+        } => object!(serializer;
+            "constraint" => &**constraint,
+            "kind" => "infer",
+            "name" => name.as_str(),
+        ),
+        TypeExpr::Infer {
+            name,
+            constraint: None,
+        } => object!(serializer;
+            "kind" => "infer",
+            "name" => name.as_str(),
+        ),
+        TypeExpr::Rest(inner) => object!(serializer;
+            "inner" => &**inner,
+            "kind" => "rest",
+        ),
+        TypeExpr::Parenthesized(inner) => object!(serializer;
+            "inner" => &**inner,
+            "kind" => "parenthesized",
+        ),
+        TypeExpr::RecursiveRef {
+            name,
+            type_arguments,
+            conditional_context,
+        } => object!(serializer;
+            "conditionalContext" => &Many(&conditional_context[..], RecursiveFrameJson),
+            "kind" => "recursiveRef",
+            "name" => &**name,
+            "typeArguments" => &type_arguments[..],
+        ),
+        TypeExpr::SyntheticSlotBinding(key) => object!(serializer;
+            "bindingName" => &*key.binding_name,
+            "kind" => "syntheticSlotBinding",
+            "scopeCanonicalId" => &*key.scope_canonical_id,
+            "slotName" => &OrNull(key.slot_name.as_deref()),
+            "surfaceKind" => match key.surface_kind {
+                SyntheticCarrierSurfaceKind::SlotBinding => "slotBinding",
+                SyntheticCarrierSurfaceKind::Binding => "binding",
             },
-            Self::Union(types) => json!({
-                "kind": "union",
-                "types": types.iter().map(|t| t.to_json_value()).collect::<Vec<_>>()
-            }),
-            Self::Intersection(types) => json!({
-                "kind": "intersection",
-                "types": types.iter().map(|t| t.to_json_value()).collect::<Vec<_>>()
-            }),
-            Self::Array { element, readonly } => json!({
-                "kind": "array",
-                "element": element.to_json_value(),
-                "readonly": readonly
-            }),
-            Self::Tuple { elements, readonly } => json!({
-                "kind": "tuple",
-                "elements": elements.iter().map(|e| json!({
-                    "label": e.label,
-                    "ty": e.ty.to_json_value(),
-                    "optional": e.optional,
-                    "rest": e.rest
-                })).collect::<Vec<_>>(),
-                "readonly": readonly
-            }),
-            Self::Object(obj) => {
-                let mut value = json!({
-                "kind": "object",
-                "properties": obj.properties.iter().map(|m| match m {
-                    ObjectMember::Property(p) => {
-                        let mut member = json!({
-                            "memberKind": "property",
-                            "key": authored_property_key_to_json(&p.key),
-                            "ty": p.ty.to_json_value(),
-                            "optional": p.optional,
-                            "readonly": p.readonly
-                        });
-                        // Serialize `visibility` ONLY when non-public so an
-                        // all-public surface's JSON is byte-unchanged and a
-                        // missing field parses back as `Public`. Mirrors the
-                        // marker-only-for-non-public hash scheme.
-                        if !p.visibility.is_public() {
-                            member["visibility"] = json!(p.visibility.as_wire_str());
-                        }
-                        // Serialize `excessOrigin` ONLY when non-NonLiteral so
-                        // pre-freshness JSON is byte-unchanged and a missing
-                        // field parses back as `NonLiteral`.
-                        if p.excess_origin != ExcessPropertyOrigin::NonLiteral {
-                            member["excessOrigin"] = json!(excess_origin_wire_str(p.excess_origin));
-                        }
-                        member
-                    }
-                    ObjectMember::IndexSignature(idx) => json!({
-                        "memberKind": "indexSignature",
-                        "keyName": idx.key_name,
-                        "keyType": idx.key_type.to_json_value(),
-                        "valueType": idx.value_type.to_json_value(),
-                        "readonly": idx.readonly
-                    }),
-                    ObjectMember::CallSignature(f) => json!({
-                        "memberKind": "callSignature",
-                        "function": Self::function_to_json(f)
-                    }),
-                    ObjectMember::ConstructSignature(f) => json!({
-                        "memberKind": "constructSignature",
-                        "function": Self::function_to_json(f)
-                    }),
-                    ObjectMember::Method(m) => {
-                        let mut member = json!({
-                            "memberKind": "method",
-                            "key": authored_property_key_to_json(&m.key),
-                            "function": Self::function_to_json(&m.function),
-                            "optional": m.optional
-                        });
-                        if !m.visibility.is_public() {
-                            member["visibility"] = json!(m.visibility.as_wire_str());
-                        }
-                        if m.excess_origin != ExcessPropertyOrigin::NonLiteral {
-                            member["excessOrigin"] = json!(excess_origin_wire_str(m.excess_origin));
-                        }
-                        member
-                    }
-                    ObjectMember::Spread(s) => json!({
-                        "memberKind": "spread",
-                        "ty": s.ty.to_json_value()
-                    }),
-                }).collect::<Vec<_>>()
-                });
-                if obj.empty_literal {
-                    value["emptyLiteral"] = json!(true);
+            "valueNode" => &key.value_node.to_string(),
+        ),
+        TypeExpr::Unknown(value) => object!(serializer;
+            "kind" => "unknown",
+            "raw" => value.raw(),
+        ),
+    }
+}
+
+struct TupleElementJson<'a>(&'a TupleElement);
+
+impl Serialize for TupleElementJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let element = self.0;
+        object!(serializer;
+            "label" => &OrNull(element.label.as_deref()),
+            "optional" => &element.optional,
+            "rest" => &element.rest,
+            "ty" => &element.ty,
+        )
+    }
+}
+
+struct PropertyKeyJson<'a>(&'a TypeAuthoredPropertyKey);
+
+impl Serialize for PropertyKeyJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            AuthoredPropertyKey::String(value) => object!(serializer;
+                "kind" => "string",
+                "value" => &**value,
+            ),
+            AuthoredPropertyKey::Number(value) => object!(serializer;
+                "kind" => "number",
+                "value" => &Int(value.get()),
+            ),
+            AuthoredPropertyKey::UniqueSymbol(identity) => {
+                // The identity is a derived struct; going through a `Value`
+                // writes its fields in sorted key order like every other
+                // object here. It holds no `TypeExpr`, so this tree is small.
+                let identity = serde_json::to_value(identity)
+                    .map_err(<S::Error as serde::ser::Error>::custom)?;
+                object!(serializer;
+                    "identity" => &identity,
+                    "kind" => "uniqueSymbol",
+                )
+            }
+            AuthoredPropertyKey::Computed(expression) => object!(serializer;
+                "expression" => expression,
+                "kind" => "computed",
+            ),
+        }
+    }
+}
+
+struct ObjectMemberJson<'a>(&'a ObjectMember);
+
+impl Serialize for ObjectMemberJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            ObjectMember::Property(p) => {
+                // `visibility` is written ONLY when non-public, so an
+                // all-public surface's JSON carries no such key and a missing
+                // field parses back as `Public` (the marker-only-for-non-public
+                // hash scheme). `excessOrigin` likewise only when not
+                // `NonLiteral`, which a missing field parses back as.
+                let visibility = (!p.visibility.is_public()).then(|| p.visibility.as_wire_str());
+                let excess_origin = (p.excess_origin != ExcessPropertyOrigin::NonLiteral)
+                    .then(|| excess_origin_wire_str(p.excess_origin));
+                let len =
+                    5 + usize::from(visibility.is_some()) + usize::from(excess_origin.is_some());
+                let mut map = serializer.serialize_map(Some(len))?;
+                if let Some(excess_origin) = excess_origin {
+                    map.serialize_entry("excessOrigin", excess_origin)?;
                 }
-                value
-            }
-            Self::Function(func) => {
-                let mut value = Self::function_to_json(func);
-                value["kind"] = json!("function");
-                value
-            }
-            Self::ConstructorType(func) => {
-                let mut value = Self::function_to_json(func);
-                value["kind"] = json!("constructorType");
-                value
-            }
-            Self::Ref {
-                name,
-                type_arguments,
-            } => json!({
-                "kind": "ref",
-                "name": name,
-                "typeArguments": type_arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
-            }),
-            // The wire form carries the OP IDENTITY as a closed token, never a
-            // free-form name, so no decoder can mistake it for a declaration
-            // reference — and an unknown op fails the decode outright.
-            Self::IntrinsicApplication { op, arguments } => json!({
-                "kind": "intrinsicApplication",
-                "op": op.wire_str(),
-                "arguments": arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
-            }),
-            Self::ImportType {
-                specifier,
-                qualifier,
-                typeof_query,
-                type_arguments,
-            } => json!({
-                "kind": "importType",
-                "specifier": specifier.as_ref(),
-                "qualifier": qualifier.iter().map(|q| q.as_ref()).collect::<Vec<_>>(),
-                "typeofQuery": typeof_query,
-                "typeArguments": type_arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
-            }),
-            Self::TypeParameter(param) => {
-                let mut value = Self::type_param_to_json(param);
-                value["kind"] = json!("typeParameter");
-                value
-            }
-            Self::KeyOf(operand) => json!({ "kind": "keyOf", "operand": operand.to_json_value() }),
-            Self::TypeOf(vr) => {
-                if vr.type_args.is_empty() {
-                    json!({ "kind": "typeOf", "path": vr.path })
-                } else {
-                    json!({
-                        "kind": "typeOf",
-                        "path": vr.path,
-                        "typeArgs": vr.type_args.iter().map(|a| a.to_json_value()).collect::<Vec<_>>()
-                    })
+                map.serialize_entry("key", &PropertyKeyJson(&p.key))?;
+                map.serialize_entry("memberKind", "property")?;
+                map.serialize_entry("optional", &p.optional)?;
+                map.serialize_entry("readonly", &p.readonly)?;
+                map.serialize_entry("ty", &p.ty)?;
+                if let Some(visibility) = visibility {
+                    map.serialize_entry("visibility", visibility)?;
                 }
+                map.end()
             }
-            Self::IndexedAccess { object, index } => json!({
-                "kind": "indexedAccess",
-                "object": object.to_json_value(),
-                "index": index.to_json_value()
-            }),
-            Self::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => json!({
-                "kind": "conditional",
-                "check": check.to_json_value(),
-                "extends": extends.to_json_value(),
-                "trueType": true_type.to_json_value(),
-                "falseType": false_type.to_json_value()
-            }),
-            Self::Mapped {
-                parameter,
-                source,
-                value,
-                optional,
-                readonly,
-                name_type,
-            } => json!({
-                "kind": "mapped",
-                "parameter": parameter,
-                "source": source.to_json_value(),
-                "value": value.to_json_value(),
-                "optional": modifier_str(*optional),
-                "readonly": modifier_str(*readonly),
-                "nameType": name_type.as_ref().map(|n| n.to_json_value())
-            }),
-            Self::TemplateLiteral {
-                quasis,
-                expressions,
-            } => json!({
-                "kind": "templateLiteral",
-                "quasis": quasis,
-                "expressions": expressions.iter().map(|e| e.to_json_value()).collect::<Vec<_>>()
-            }),
-            Self::Infer { name, constraint } => match constraint {
-                Some(constraint) => json!({
-                    "kind": "infer",
-                    "name": name,
-                    "constraint": constraint.to_json_value(),
-                }),
-                None => json!({ "kind": "infer", "name": name }),
-            },
-            Self::Rest(inner) => json!({ "kind": "rest", "inner": inner.to_json_value() }),
-            Self::Parenthesized(inner) => {
-                json!({ "kind": "parenthesized", "inner": inner.to_json_value() })
-            }
-            Self::RecursiveRef {
-                name,
-                type_arguments,
-                conditional_context,
-            } => json!({
-                "kind": "recursiveRef",
-                "name": name,
-                "typeArguments": type_arguments.iter().map(|a| a.to_json_value()).collect::<Vec<_>>(),
-                "conditionalContext": conditional_context.iter().map(|f| json!({
-                    "branch": match f.branch {
-                        RecursiveConditionalBranch::True => "true",
-                        RecursiveConditionalBranch::False => "false",
+            ObjectMember::IndexSignature(idx) => object!(serializer;
+                "keyName" => idx.key_name.as_str(),
+                "keyType" => &idx.key_type,
+                "memberKind" => "indexSignature",
+                "readonly" => &idx.readonly,
+                "valueType" => &idx.value_type,
+            ),
+            ObjectMember::CallSignature(func) => object!(serializer;
+                "function" => &FunctionJson { func, kind: None },
+                "memberKind" => "callSignature",
+            ),
+            ObjectMember::ConstructSignature(func) => object!(serializer;
+                "function" => &FunctionJson { func, kind: None },
+                "memberKind" => "constructSignature",
+            ),
+            ObjectMember::Method(m) => {
+                let visibility = (!m.visibility.is_public()).then(|| m.visibility.as_wire_str());
+                let excess_origin = (m.excess_origin != ExcessPropertyOrigin::NonLiteral)
+                    .then(|| excess_origin_wire_str(m.excess_origin));
+                let len =
+                    4 + usize::from(visibility.is_some()) + usize::from(excess_origin.is_some());
+                let mut map = serializer.serialize_map(Some(len))?;
+                if let Some(excess_origin) = excess_origin {
+                    map.serialize_entry("excessOrigin", excess_origin)?;
+                }
+                map.serialize_entry(
+                    "function",
+                    &FunctionJson {
+                        func: &m.function,
+                        kind: None,
                     },
-                    "decided": f.decided,
-                    "check": f.check.to_json_value(),
-                    "extends": f.extends.to_json_value()
-                })).collect::<Vec<_>>()
-            }),
-            Self::SyntheticSlotBinding(key) => json!({
-                "kind": "syntheticSlotBinding",
-                "scopeCanonicalId": key.scope_canonical_id.as_ref(),
-                "surfaceKind": match key.surface_kind {
-                    SyntheticCarrierSurfaceKind::SlotBinding => "slotBinding",
-                    SyntheticCarrierSurfaceKind::Binding => "binding",
-                },
-                "slotName": key.slot_name.as_deref(),
-                "bindingName": key.binding_name.as_ref(),
-                "valueNode": key.value_node.to_string(),
-            }),
-            Self::Unknown(value) => json!({ "kind": "unknown", "raw": value.raw() }),
-        }
-    }
-
-    fn function_to_json(func: &FunctionExpr) -> serde_json::Value {
-        use serde_json::json;
-        let mut v = json!({
-            "parameters": func.parameters.iter().map(|p| json!({
-                "name": p.name,
-                "ty": p.ty.to_json_value(),
-                "optional": p.optional,
-                "rest": p.rest
-            })).collect::<Vec<serde_json::Value>>(),
-            "returnType": func.return_type.as_ref().map(|r| r.to_json_value()),
-        });
-        if !func.type_parameters.is_empty() {
-            v["typeParameters"] = json!(func
-                .type_parameters
-                .iter()
-                .map(Self::type_param_to_json)
-                .collect::<Vec<serde_json::Value>>());
-        }
-        if let Some(predicate) = func.predicate.as_deref() {
-            let mut encoded = json!({ "asserts": predicate.asserts });
-            match &predicate.subject {
-                TypePredicateSubject::Parameter(name) => {
-                    encoded["parameter"] = json!(name.as_ref());
+                )?;
+                map.serialize_entry("key", &PropertyKeyJson(&m.key))?;
+                map.serialize_entry("memberKind", "method")?;
+                map.serialize_entry("optional", &m.optional)?;
+                if let Some(visibility) = visibility {
+                    map.serialize_entry("visibility", visibility)?;
                 }
-                TypePredicateSubject::This => encoded["this"] = json!(true),
+                map.end()
             }
-            if let Some(ty) = predicate.ty.as_deref() {
-                encoded["ty"] = ty.to_json_value();
-            }
-            v["predicate"] = encoded;
+            ObjectMember::Spread(spread) => object!(serializer;
+                "memberKind" => "spread",
+                "ty" => &spread.ty,
+            ),
         }
-        if func.is_abstract {
-            v["abstract"] = json!(true);
-        }
-        v
     }
+}
 
-    fn type_param_to_json(param: &TypeParam) -> serde_json::Value {
-        use serde_json::json;
-        let mut obj = json!({ "name": param.name });
-        if let Some(ref constraint) = param.constraint {
-            obj["constraint"] = constraint.to_json_value();
+/// A function's parameters, return and optional parts; `kind` is present
+/// when the function is itself a `TypeExpr` node rather than a member's
+/// signature.
+struct FunctionJson<'a> {
+    func: &'a FunctionExpr,
+    kind: Option<&'static str>,
+}
+
+impl Serialize for FunctionJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let func = self.func;
+        let predicate = func.predicate.as_deref();
+        let has_type_parameters = !func.type_parameters.is_empty();
+        let len = 2
+            + usize::from(func.is_abstract)
+            + usize::from(self.kind.is_some())
+            + usize::from(predicate.is_some())
+            + usize::from(has_type_parameters);
+        let mut map = serializer.serialize_map(Some(len))?;
+        if func.is_abstract {
+            map.serialize_entry("abstract", &true)?;
         }
-        if let Some(ref default) = param.default {
-            obj["default"] = default.to_json_value();
+        if let Some(kind) = self.kind {
+            map.serialize_entry("kind", kind)?;
+        }
+        map.serialize_entry("parameters", &Many(&func.parameters[..], FunctionParamJson))?;
+        if let Some(predicate) = predicate {
+            map.serialize_entry("predicate", &TypePredicateJson(predicate))?;
+        }
+        map.serialize_entry("returnType", &OrNull(func.return_type.as_deref()))?;
+        if has_type_parameters {
+            map.serialize_entry(
+                "typeParameters",
+                &Many(&func.type_parameters[..], |param| TypeParamJson {
+                    param,
+                    kind: None,
+                }),
+            )?;
+        }
+        map.end()
+    }
+}
+
+struct FunctionParamJson<'a>(&'a FunctionParam);
+
+impl Serialize for FunctionParamJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let param = self.0;
+        object!(serializer;
+            "name" => &OrNull(param.name.as_deref()),
+            "optional" => &param.optional,
+            "rest" => &param.rest,
+            "ty" => &param.ty,
+        )
+    }
+}
+
+struct TypePredicateJson<'a>(&'a TypePredicate);
+
+impl Serialize for TypePredicateJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let predicate = self.0;
+        let ty = predicate.ty.as_deref();
+        let mut map = serializer.serialize_map(Some(2 + usize::from(ty.is_some())))?;
+        map.serialize_entry("asserts", &predicate.asserts)?;
+        match &predicate.subject {
+            TypePredicateSubject::Parameter(name) => map.serialize_entry("parameter", &**name)?,
+            TypePredicateSubject::This => map.serialize_entry("this", &true)?,
+        }
+        if let Some(ty) = ty {
+            map.serialize_entry("ty", ty)?;
+        }
+        map.end()
+    }
+}
+
+/// A type parameter's name and optional parts; `kind` is present when the
+/// parameter is itself a `TypeExpr` node rather than a declaration in a
+/// function's list.
+struct TypeParamJson<'a> {
+    param: &'a TypeParam,
+    kind: Option<&'static str>,
+}
+
+impl Serialize for TypeParamJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let param = self.param;
+        let constraint = param.constraint.as_deref();
+        let default = param.default.as_deref();
+        let len = 1
+            + usize::from(constraint.is_some())
+            + usize::from(default.is_some())
+            + usize::from(param.is_const)
+            + usize::from(self.kind.is_some());
+        let mut map = serializer.serialize_map(Some(len))?;
+        if let Some(constraint) = constraint {
+            map.serialize_entry("constraint", constraint)?;
+        }
+        if let Some(default) = default {
+            map.serialize_entry("default", default)?;
         }
         if param.is_const {
-            obj["isConst"] = serde_json::Value::Bool(true);
+            map.serialize_entry("isConst", &true)?;
         }
-        obj
+        if let Some(kind) = self.kind {
+            map.serialize_entry("kind", kind)?;
+        }
+        map.serialize_entry("name", param.name.as_str())?;
+        map.end()
+    }
+}
+
+struct RecursiveFrameJson<'a>(&'a RecursiveConditionalFrame);
+
+impl Serialize for RecursiveFrameJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let frame = self.0;
+        object!(serializer;
+            "branch" => match frame.branch {
+                RecursiveConditionalBranch::True => "true",
+                RecursiveConditionalBranch::False => "false",
+            },
+            "check" => &*frame.check,
+            "decided" => &frame.decided,
+            "extends" => &*frame.extends,
+        )
     }
 }

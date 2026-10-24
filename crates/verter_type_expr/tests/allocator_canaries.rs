@@ -147,3 +147,228 @@ mod canary_absolutize_already_absolute_zero_alloc {
         );
     }
 }
+
+fn alloc_bytes() -> u64 {
+    ALLOC_BYTES.with(Cell::get)
+}
+
+mod canary_type_expr_json_work_is_linear_in_output {
+    //! Serialising a `TypeExpr` costs work proportional to the JSON it
+    //! writes, at any nesting depth.
+    //!
+    //! Nested tuple, object and heritage-style shapes are encoded at depths
+    //! 10, 20 and 40. Written into a buffer already sized for the output, a
+    //! streaming encoder allocates nothing at all; one that builds a
+    //! `serde_json::Value` first, copying each finished child subtree into
+    //! its parent, requests bytes that grow with depth times size. The
+    //! `Value` form itself must request a flat number of bytes per output
+    //! byte as the depth grows.
+
+    use std::sync::Arc;
+
+    use verter_type_expr::{
+        FunctionExpr, FunctionParam, MappedModifier, ObjectExpr, ObjectMember, ObjectProperty,
+        PrimitiveName, TupleElement, TypeExpr, TypeParam,
+    };
+
+    use super::{alloc_bytes, alloc_count};
+
+    const DEPTHS: [usize; 3] = [10, 20, 40];
+
+    fn string() -> TypeExpr {
+        TypeExpr::Primitive(PrimitiveName::String)
+    }
+
+    fn tuple(depth: usize) -> TypeExpr {
+        let inner = if depth == 0 {
+            string()
+        } else {
+            tuple(depth - 1)
+        };
+        TypeExpr::Tuple {
+            elements: Arc::from(vec![
+                TupleElement {
+                    label: Some(format!("e{depth}")),
+                    ty: inner,
+                    optional: false,
+                    rest: false,
+                },
+                TupleElement {
+                    label: None,
+                    ty: string(),
+                    optional: true,
+                    rest: false,
+                },
+            ]),
+            readonly: false,
+        }
+    }
+
+    fn object(depth: usize) -> TypeExpr {
+        let inner = if depth == 0 {
+            string()
+        } else {
+            object(depth - 1)
+        };
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
+            properties: vec![
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                    format!("p{depth}").as_str().into(),
+                    inner,
+                    false,
+                    true,
+                )),
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                    "q".into(),
+                    string(),
+                    true,
+                    false,
+                )),
+            ],
+        }))
+    }
+
+    /// A heritage-style answer: each level is an object whose member is a
+    /// generic function over a mapped, conditional and indexed view of the
+    /// level below, returning that level.
+    fn heritage(depth: usize) -> TypeExpr {
+        let inner = Arc::new(if depth == 0 {
+            string()
+        } else {
+            heritage(depth - 1)
+        });
+        let reference = |name: &str| {
+            Arc::new(TypeExpr::Ref {
+                name: name.into(),
+                type_arguments: Arc::from(Vec::new()),
+            })
+        };
+        let mapped = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::KeyOf(reference("T"))),
+            value: Arc::new(TypeExpr::IndexedAccess {
+                object: reference("T"),
+                index: reference("K"),
+            }),
+            optional: MappedModifier::None,
+            readonly: MappedModifier::Add,
+            name_type: None,
+        };
+        let conditional = TypeExpr::Conditional {
+            check: Arc::new(mapped),
+            extends: Arc::new(string()),
+            true_type: Arc::new(TypeExpr::Union(Arc::from(vec![
+                string(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+            ]))),
+            false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+        };
+        let function = FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some(format!("a{depth}")),
+                conditional,
+                false,
+                false,
+            )],
+            Some(inner),
+            vec![TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+                is_const: false,
+            }],
+        );
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(
+                    format!("m{depth}").as_str().into(),
+                    TypeExpr::Function(Arc::new(function)),
+                    false,
+                    false,
+                ),
+            )],
+        }))
+    }
+
+    /// Encode `build(depth)` at every depth into a buffer already sized for
+    /// its output, and assert the encoder itself allocated nothing: no
+    /// intermediate tree, no per-node scratch.
+    fn assert_streams(label: &str, build: fn(usize) -> TypeExpr) {
+        for depth in DEPTHS {
+            let expr = build(depth);
+            let len = serde_json::to_vec(&expr).expect("serialises").len();
+            let mut out = Vec::with_capacity(len);
+            let (calls_before, bytes_before) = (alloc_count(), alloc_bytes());
+            serde_json::to_writer(&mut out, &expr).expect("serialises");
+            let calls = alloc_count() - calls_before;
+            let bytes = alloc_bytes() - bytes_before;
+            eprintln!(
+                "{label} depth {depth}: {len} B out, {calls} allocations, {bytes} B requested"
+            );
+            assert_eq!(out.len(), len, "{label}: both encodes write the same bytes");
+            assert_eq!(
+                (calls, bytes),
+                (0, 0),
+                "{label}: encoding {len} bytes at depth {depth} into a buffer of that size made \
+                 {calls} allocations requesting {bytes} bytes; a streaming encoder writes \
+                 straight into the buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn encoding_a_nested_tuple_into_a_sized_buffer_allocates_nothing() {
+        assert_streams("tuple", tuple);
+    }
+
+    #[test]
+    fn encoding_a_nested_object_into_a_sized_buffer_allocates_nothing() {
+        assert_streams("object", object);
+    }
+
+    #[test]
+    fn encoding_a_nested_heritage_shape_into_a_sized_buffer_allocates_nothing() {
+        assert_streams("heritage", heritage);
+    }
+
+    /// The `serde_json::Value` form builds one node per output node, so the
+    /// bytes it requests per byte of output stay flat as the depth grows.
+    #[test]
+    fn building_the_json_value_of_a_nested_shape_requests_bytes_linear_in_its_output() {
+        for (label, build) in [
+            ("tuple", tuple as fn(usize) -> TypeExpr),
+            ("object", object),
+            ("heritage", heritage),
+        ] {
+            let ratios: Vec<(usize, usize, f64)> = DEPTHS
+                .iter()
+                .map(|&depth| {
+                    let expr = build(depth);
+                    let len = serde_json::to_vec(&expr).expect("serialises").len();
+                    let before = alloc_bytes();
+                    let value = expr.to_json_value();
+                    let requested = alloc_bytes() - before;
+                    drop(value);
+                    (depth, len, requested as f64 / len as f64)
+                })
+                .collect();
+            let report = ratios
+                .iter()
+                .map(|(depth, len, ratio)| format!("depth {depth}: {len} B out, {ratio:.2} B/B"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            eprintln!("{label} to_json_value: {report}");
+            let shallow = ratios[0].2;
+            for &(depth, _, ratio) in &ratios {
+                assert!(
+                    ratio <= shallow * 1.25,
+                    "{label}: building the JSON value requested {ratio:.2} bytes per output \
+                     byte at depth {depth}, against {shallow:.2} at depth {}: {report}",
+                    DEPTHS[0]
+                );
+            }
+        }
+    }
+}
