@@ -564,6 +564,7 @@
           "remove",
           "close_file",
           "has_driver_thread",
+          "pump_owned_dependency",
           "driver_loop_native",
           "drive_one",
           "drive_all",

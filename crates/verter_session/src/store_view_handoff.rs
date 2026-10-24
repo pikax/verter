@@ -654,14 +654,10 @@ pub(super) fn drive(manager: &StoreViewManager, host: &VerterHost) -> StoreViewR
     let scope = host.scheduler.enter_execution_scope();
     let mut core = Core::new(host, scope.task().clone(), CancellationToken::new(), true);
     // The shared manager must be the host's exact cache owner.
-    let shares_manager = core
-        .manager
-        .as_ref()
-        .is_some_and(|owner| Arc::ptr_eq(&manager.state, &owner.state));
-    verter_debug_assert!(
-        shares_manager,
-        "the store-view drive runs on the host's own manager"
-    );
+    verter_debug_assert::verter_debug_assert!(Arc::ptr_eq(
+        &manager.state,
+        &core.manager.as_ref().expect("manager").state
+    ));
     loop {
         match verter_execution::blocking::block_on(None, |waker| core.poll(waker)) {
             Ok(Step::Produce(producer)) => producer.run(),

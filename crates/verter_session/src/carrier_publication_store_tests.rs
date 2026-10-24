@@ -15,7 +15,7 @@ use crate::carrier_publication_store::{
     PublicationSurface,
 };
 
-fn authorities() -> (Arc<RegisteredSourceAuthority>, Arc<CarrierGrammarAuthority>) {
+pub(crate) fn authorities() -> (Arc<RegisteredSourceAuthority>, Arc<CarrierGrammarAuthority>) {
     let source = Arc::new(RegisteredSourceAuthority::new().expect("source authority"));
     let grammar = Arc::new(CarrierGrammarAuthority::new().expect("grammar authority"));
     grammar
@@ -47,7 +47,7 @@ fn svelte_authorities() -> (Arc<RegisteredSourceAuthority>, Arc<CarrierGrammarAu
     (source, grammar)
 }
 
-fn accepted(
+pub(crate) fn accepted(
     source: &RegisteredSourceAuthority,
     grammar: &CarrierGrammarAuthority,
     generation: u64,
@@ -81,7 +81,7 @@ fn accepted_file(
         .expect("accept source")
 }
 
-fn request(
+pub(crate) fn request(
     id: u64,
     accepted: &verter_language::carrier_grammar::AcceptedRegisteredCarrierSource,
 ) -> PublicationRequestContext {
@@ -91,6 +91,48 @@ fn request(
         verter_execution::cancellation::CancellationToken::new(),
         accepted.source().snapshot_id().clone(),
     )
+}
+
+#[test]
+fn owned_publication_transfers_backend_work_and_keeps_delivery_until_consumed() {
+    use crate::carrier_publication_store::{PublicationProducerStep, PublicationStep};
+    use std::task::{Poll, Waker};
+    let (source, grammar) = authorities();
+    let accepted = accepted(&source, &grammar, 1, "<template>owned</template>");
+    let registry = verter_execution::tasks::TaskRegistry::default();
+    let store =
+        CarrierPublicationStore::with_stable_unit_retention(source, grammar, 0, registry.clone());
+    let mut handoff = store.begin_publication(
+        accepted.clone(),
+        request(1, &accepted),
+        registry.register_task(),
+    );
+    let Poll::Ready(Ok(PublicationStep::Produce(mut producer))) = handoff.poll(Waker::noop())
+    else {
+        panic!("cold publication transfers its producer");
+    };
+    assert_eq!(store.audit_snapshot().parser_started, 0);
+    loop {
+        match producer.poll(Waker::noop()) {
+            Poll::Ready(PublicationProducerStep::Work(work)) => work.run(),
+            Poll::Ready(PublicationProducerStep::Complete) => break,
+            Poll::Pending => panic!("all admitted work is driven deterministically"),
+        }
+    }
+    drop(producer);
+    let Poll::Ready(Ok(PublicationStep::Outcome(outcome))) = handoff.poll(Waker::noop()) else {
+        panic!("completed transfer keeps a strong answer for its subscriber");
+    };
+    let envelope = outcome.into_envelope().expect("complete uncached envelope");
+    let weak = Arc::downgrade(&envelope);
+    assert_eq!(store.audit_snapshot().parser_started, 1);
+    assert_eq!(store.retained_candidate_count(), 0);
+    drop(envelope);
+    assert!(
+        weak.upgrade().is_none(),
+        "drained demands restore weak retention"
+    );
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
 }
 
 /// A strict-parse Svelte defect (unterminated trailing comment) stays
@@ -116,7 +158,11 @@ fn strict_syntax_defect_still_publishes_a_recoverable_product_family() {
     let accepted = grammar
         .accept_registered_source(&source, &snapshot, &CarrierGrammarConfig::Svelte)
         .expect("accept source");
-    let store = CarrierPublicationStore::new(source, grammar);
+    let store = CarrierPublicationStore::new(
+        source,
+        grammar,
+        verter_execution::tasks::TaskRegistry::default(),
+    );
 
     let outcome = store.publish_or_get(&accepted, request(1, &accepted));
     // Unterminated `<!--` is `Error` with `blocks_compile: false`, so it
@@ -213,7 +259,11 @@ fn strict_syntax_defect_does_not_fail_close_ide_compile_for_the_whole_file() {
 fn concurrent_publication_has_one_parser_start_and_one_terminal_arc() {
     let (source, grammar) = authorities();
     let accepted = accepted(&source, &grammar, 1, "<template><p>one</p></template>");
-    let store = Arc::new(CarrierPublicationStore::new(source, grammar));
+    let store = Arc::new(CarrierPublicationStore::new(
+        source,
+        grammar,
+        verter_execution::tasks::TaskRegistry::default(),
+    ));
     let mut workers = Vec::new();
     for id in 1..=8 {
         let store = Arc::clone(&store);
@@ -245,7 +295,11 @@ fn concurrent_publication_has_one_parser_start_and_one_terminal_arc() {
 #[test]
 fn source_generation_a_b_a_never_reuses_an_old_terminal() {
     let (source, grammar) = authorities();
-    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let store = CarrierPublicationStore::new(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     let first = accepted(&source, &grammar, 1, "<template>A</template>");
     let first_envelope = store
         .publish_or_get(&first, request(1, &first))
@@ -269,7 +323,11 @@ fn source_generation_a_b_a_never_reuses_an_old_terminal() {
 #[test]
 fn registered_file_structure_is_the_envelope_owner() {
     let (source, grammar) = authorities();
-    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let store = CarrierPublicationStore::new(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     let accepted = accepted(&source, &grammar, 1, "<script setup>const x = 1</script>");
     let envelope = store
         .publish_or_get(&accepted, request(1, &accepted))
@@ -547,6 +605,7 @@ fn exact_cohort_adopts_across_authority_lifetimes_without_parser_start() {
         first_grammar,
         persistence.clone(),
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     );
     assert!(matches!(
         first_store.publish_or_get(&first, request(1, &first)),
@@ -565,6 +624,7 @@ fn exact_cohort_adopts_across_authority_lifetimes_without_parser_start() {
         second_grammar,
         persistence,
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     );
     let adopted = second_store.publish_or_get(&second, request(2, &second));
     assert!(matches!(adopted, PublicationOutcome::Adopted(_)));
@@ -633,6 +693,7 @@ fn waiter_cancellation_detaches_without_cancelling_authority_owned_leader() {
         grammar,
         persistence,
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     ));
     let leader_store = Arc::clone(&store);
     let leader_accepted = accepted.clone();
@@ -822,7 +883,11 @@ fn external_src_compile_is_typed_and_fail_closed() {
 #[test]
 fn grammar_revision_keys_a_new_publication_lane() {
     let (source, grammar) = authorities();
-    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let store = CarrierPublicationStore::new(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     let first = accepted(&source, &grammar, 1, "<template>{{ value }}</template>");
     let first_envelope = store
         .publish_or_get(&first, request(1, &first))
@@ -928,7 +993,11 @@ fn persisted_payload_with_producer_parse_drift_is_refused_before_adoption() {
         1,
         "<template><p>wrong</p></template>",
     );
-    let wrong_store = CarrierPublicationStore::new(wrong_source, wrong_grammar);
+    let wrong_store = CarrierPublicationStore::new(
+        wrong_source,
+        wrong_grammar,
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     let wrong_artifact = wrong_store
         .publish_or_get(&wrong, request(1, &wrong))
         .into_envelope()
@@ -950,6 +1019,7 @@ fn persisted_payload_with_producer_parse_drift_is_refused_before_adoption() {
         first_grammar,
         persistence.clone(),
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     );
     assert!(matches!(
         first_store.publish_or_get(&first, request(2, &first)),
@@ -964,6 +1034,7 @@ fn persisted_payload_with_producer_parse_drift_is_refused_before_adoption() {
         second_grammar,
         persistence,
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     );
     assert!(matches!(
         second_store.publish_or_get(&second, request(3, &second)),
@@ -1048,6 +1119,7 @@ fn rejected_persistent_candidate_is_discarded_then_parsed_in_the_same_lane() {
         grammar,
         persistence.clone(),
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     );
     assert!(matches!(
         first_store.publish_or_get(&first, request(1, &first)),
@@ -1062,6 +1134,7 @@ fn rejected_persistent_candidate_is_discarded_then_parsed_in_the_same_lane() {
         grammar,
         persistence,
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     );
     assert!(matches!(
         second_store.publish_or_get(&second, request(2, &second)),
@@ -1125,6 +1198,7 @@ fn leader_panic_publishes_one_typed_terminal_and_audit_failure() {
         grammar,
         Arc::new(PanickingPersistence),
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     );
     assert!(matches!(
         store.publish_or_get(&accepted, request(1, &accepted)),
@@ -1159,6 +1233,7 @@ fn cancelled_request_never_enters_a_publication_lane() {
         grammar,
         Arc::new(crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default()),
         Arc::clone(&provenance),
+        verter_execution::tasks::TaskRegistry::default(),
     );
     let cancellation = verter_execution::cancellation::CancellationToken::new();
     cancellation.cancel();
@@ -1194,6 +1269,7 @@ fn elected_publication_parses_once_and_warm_get_does_not_reparse() {
         grammar,
         Arc::new(crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default()),
         Arc::clone(&provenance),
+        verter_execution::tasks::TaskRegistry::default(),
     );
     let first = store.publish_or_get(&accepted, request(1, &accepted));
     let second = store.publish_or_get(&accepted, request(2, &accepted));
@@ -1383,6 +1459,7 @@ fn retained_stable_units_are_bounded_and_counted() {
         Arc::clone(&source),
         Arc::clone(&grammar),
         2,
+        verter_execution::tasks::TaskRegistry::default(),
     );
     let contents: Vec<String> = (1..=5)
         .map(|n| format!("<template><p>a{n}</p></template>"))
@@ -1433,7 +1510,11 @@ fn retained_stable_units_are_bounded_and_counted() {
 #[test]
 fn superseded_lanes_with_expired_artifacts_are_pruned_on_the_next_publication() {
     let (source, grammar) = authorities();
-    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let store = CarrierPublicationStore::new(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     for generation in 1..=5 {
         let bytes = format!("<template><p>v{generation}</p></template>");
         assert!(matches!(
@@ -1536,7 +1617,11 @@ fn audit_events_are_windowed_while_counters_stay_exact() {
 
     const REQUESTS: u64 = 1100;
     let (source, grammar) = authorities();
-    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let store = CarrierPublicationStore::new(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     let accepted = accepted(&source, &grammar, 1, "<template><p>hot</p></template>");
     let envelope = store
         .publish_or_get(&accepted, request(1, &accepted))
@@ -1673,6 +1758,7 @@ fn concurrent_differing_generations_of_one_content_parse_once() {
         Arc::clone(&grammar),
         units.clone(),
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     ));
     for round in 0..ROUNDS {
         let bytes = format!(
@@ -1747,7 +1833,11 @@ fn concurrent_differing_generations_of_one_content_parse_once() {
 #[test]
 fn serialized_generation_adopts_retained_unit_without_reparse() {
     let (source, grammar) = authorities();
-    let store = CarrierPublicationStore::new(Arc::clone(&source), Arc::clone(&grammar));
+    let store = CarrierPublicationStore::new(
+        Arc::clone(&source),
+        Arc::clone(&grammar),
+        verter_execution::tasks::TaskRegistry::default(),
+    );
     let bytes = "<template><p>hello</p></template>";
     let first = accepted(&source, &grammar, 1, bytes);
     match store.publish_or_get(&first, request(1, &first)) {
@@ -1832,6 +1922,7 @@ fn superseded_generation_retains_stable_unit_for_revisit() {
         Arc::clone(&grammar),
         units.clone(),
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     ));
     let bytes = "<template><p>revisit me</p></template>";
     let first = accepted(&source, &grammar, 1, bytes);
@@ -1948,6 +2039,7 @@ fn a_generation_that_loses_currency_while_adopting_is_superseded() {
         Arc::clone(&grammar),
         units.clone(),
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     ));
     let bytes = "<template><p>adopt me</p></template>";
     let first = accepted(&source, &grammar, 1, bytes);
@@ -2053,6 +2145,7 @@ fn a_superseded_stable_leader_is_fenced_on_its_double_checked_adoption() {
         Arc::clone(&grammar),
         units.clone(),
         Arc::new(crate::meta_provenance::MetaProvenance::default()),
+        verter_execution::tasks::TaskRegistry::default(),
     ));
     let bytes = "<template><p>lead then adopt</p></template>";
     // The first generation is CURRENT when it enters, misses the empty

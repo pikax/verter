@@ -110,6 +110,30 @@ inline operation as independent `LoweringWork` and observes the same retained
 reply; parser work never runs in poll. External sync drivers run that token,
 and stop after transfer detaches only the subscriber.
 
+Carrier publication also shares that registry. `CarrierPublicationStore` is a
+cheap cloned handle over its existing publication/stable-parse tables, stable
+unit authority and audit log. Every constructor requires its composition root's
+task registry, and the host supplies the existing shared authority. Standalone
+callers also supply a registry; synchronous reentry follows the same task graph.
+`begin_publication` owns accepted source/context and returns a poll-only
+subscriber; its independent `PublicationProducer` transfers initial retained
+lookup/adoption, nested stable production and envelope finishing as external
+`PublicationWork`. `begin_stable_parse` exposes the child owned protocol.
+Neither poll performs backend work or enters a blocking driver. The synchronous
+`publish_or_get` drives the same continuation externally.
+
+The initiating context's cancellation belongs only to its subscriber. Producer
+P/S task and stop scopes are independent and restore before wakes. Strong
+publication delivery lasts until attached consumers drain, after which the
+existing weak terminal remains. A stable parsed value carries its retirement
+interest into external Finish Work, so dropping the P continuation cannot
+unlist a parse before that work finishes. Retirement checks the exact current
+lane and live interests; all typed terminal/drop paths withdraw their own
+registrations and task pins. Existing source/grammar fences, adoption
+provenance, parser counters and complete answers on retention denial remain
+unchanged. The full result/lifetime contract and caller assignments are in
+[root continuations](../../../docs/arch/root-continuations.md#carrier-publication-and-stable-parse).
+
 The charter boundary names map onto existing owners; there are no Rust types
 called `RequestSession` or `ProjectSession` (the TypeScript `ProjectSession` in
 `@verter/component-meta` is unrelated):
