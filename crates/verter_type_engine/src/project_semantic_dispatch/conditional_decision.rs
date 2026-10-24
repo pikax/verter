@@ -320,6 +320,9 @@ struct ConditionalSelection {
 struct ConditionalDistribution {
     members: Arc<[SemanticNodeId]>,
     per_member: Vec<SemanticNodeId>,
+    /// The final query's canonical operand list, prepared once before its
+    /// claim can suspend. Both drivers use the same family identity.
+    normalization_members: Option<Arc<[SemanticNodeId]>>,
     output: super::walk::QueryBuildOutput,
     positions_complete: bool,
 }
@@ -1745,6 +1748,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some(Box::new(ConditionalDistribution {
             per_member: Vec::with_capacity(members.len()),
             members,
+            normalization_members: None,
             output,
             positions_complete: true,
         }))
@@ -1805,9 +1809,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             }
         }
+        let members = distribution.normalization_members.get_or_insert_with(|| {
+            super::canonicalize_node_list(self.graph().store(), &distribution.per_member)
+        });
         let normalization = self.observe_read(|| {
+            let _children = self.conditional_child_queries();
             self.conditional_query_output(SemanticQueryKey::ReduceUnion {
-                members: Arc::from(distribution.per_member.as_slice()),
+                members: Arc::clone(members),
                 nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
             })
         });

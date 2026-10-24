@@ -729,6 +729,13 @@ unfinished winner retains its own speculative observation scope, so a gap
 does not discard the completed relation's evidence. Selection counters
 assert the authored decisions execute once as well as comparing synchronous
 and polled work; equality alone would hide replay shared by both drivers.
+The final union reduction of distributed members is an owned child demand,
+including when another task already produces that union. Its admission and
+claim are retained by the child, so consuming the delivered result does not
+enter cold-query admission again. The distribution keeps its completed
+members, their evidence and the final query's canonical member order while
+that child waits. A held-reduction control
+compares the exact cold synchronous receipt and checks completed-member work.
 Internal relation/inference stages, winner processing and nested queries
 evaluated inside other synchronous adapters still require continuation conversion.
 

@@ -63,6 +63,8 @@ enum Root {
     Classification,
     /// A conditional whose check reads the constant chain.
     Conditional,
+    /// A distributed conditional whose final union reduction is held.
+    Distribution,
 }
 
 fn key_for<C: ResolverCapabilities>(
@@ -120,6 +122,31 @@ fn key_for<C: ResolverCapabilities>(
                 .graph_arc()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
         },
+        Root::Distribution => {
+            let graph = dispatch.graph_arc();
+            let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            if held {
+                SemanticQueryKey::ReduceUnion {
+                    members: Arc::from([string, number]),
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                }
+            } else {
+                let boolean =
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+                let yes = graph.intern_node(SemanticNodeData::Literal(
+                    verter_type_engine::semantic_query::LiteralValue::Boolean(true),
+                ));
+                SemanticQueryKey::Conditional {
+                    check: boolean,
+                    extends: yes,
+                    true_branch: string,
+                    false_branch: number,
+                    distributive: true,
+                    pending: None,
+                }
+            }
+        }
     }
 }
 
@@ -143,30 +170,45 @@ fn poll_while_another_task_produces(root: Root) -> [(String, String, bool, bool)
     let _builder = dispatch.enter_construction_scope();
     let graph: &SemanticGraphStore = host.project_type_store().semantic_graph();
     let other = graph.task_registry_for_tests().register_task();
-    let mut capture = ReadCapture::default();
-    let Ok(mut attempt) = graph.begin_query_claim(
-        &host,
-        host.request_flags(),
-        key_for(&dispatch, root, true),
-        &mut capture,
-    ) else {
-        panic!("a cold key has no warm answer");
-    };
-    let Claim::Produce(lease) = graph.claim_query(
-        &host,
-        host.request_flags(),
-        &mut attempt,
-        &other,
-        &mut capture,
-    ) else {
-        panic!("the other task produces the cold key");
-    };
+    let held = key_for(&dispatch, root, true);
+    let mut held_keys = vec![held.clone()];
+    if let SemanticQueryKey::ReduceUnion {
+        members,
+        nullability,
+    } = held
+    {
+        held_keys.push(SemanticQueryKey::ReduceUnion {
+            members: members.iter().copied().rev().collect(),
+            nullability,
+        });
+    }
+    let leases: Vec<_> = held_keys
+        .into_iter()
+        .map(|key| {
+            let mut capture = ReadCapture::default();
+            let Ok(mut attempt) =
+                graph.begin_query_claim(&host, host.request_flags(), key, &mut capture)
+            else {
+                panic!("a cold key has no warm answer");
+            };
+            let Claim::Produce(lease) = graph.claim_query(
+                &host,
+                host.request_flags(),
+                &mut attempt,
+                &other,
+                &mut capture,
+            ) else {
+                panic!("the other task produces the cold key");
+            };
+            lease
+        })
+        .collect();
     let counter = Arc::new(CountingWaker::default());
     let waker = Waker::from(Arc::clone(&counter));
     let key = key_for(&dispatch, root, false);
     let mut entry = dispatch.poll_query(key.clone());
     let first = entry.poll(&waker);
-    drop(lease);
+    drop(leases);
     assert!(
         first.is_pending(),
         "the root yields instead of parking the only thread: {:?}",
@@ -213,5 +255,19 @@ fn semantic_poll_contract_a_root_off_the_runtime_yields_on_the_only_thread() {
 fn semantic_poll_contract_a_conditional_dependency_yields_on_the_only_thread() {
     let [polled, synchronous] = poll_while_another_task_produces(Root::Conditional);
     assert!(polled.0.contains("TypeNode"), "the decision answers a type");
+    assert_eq!(polled, synchronous);
+}
+
+#[wasm_bindgen_test]
+fn semantic_poll_contract_a_distributed_reduction_yields_on_the_only_thread() {
+    let [polled, synchronous] = poll_while_another_task_produces(Root::Distribution);
+    assert!(
+        polled.0.contains("TypeNode"),
+        "the distribution answers a type"
+    );
+    assert!(
+        !polled.2 && !polled.3,
+        "the distribution is complete and reusable"
+    );
     assert_eq!(polled, synchronous);
 }

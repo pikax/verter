@@ -2223,10 +2223,8 @@ mod semantic_poll_contract {
         }
     }
 
-    /// The union a distributed decision reduces its members to: a query no
-    /// frame family owns, which the decision reads itself. Held in both
-    /// member orders, so whichever the canonical key is, another task is
-    /// producing it.
+    /// The final reduction of a distributed decision. Hold both member
+    /// orders so the test reaches the producer independently of ordering.
     fn member_unions(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     ) -> [SemanticQueryKey; 2] {
@@ -2239,8 +2237,50 @@ mod semantic_poll_contract {
         })
     }
 
-    /// A decision's own read of a query no frame family owns, which another
-    /// task is producing, makes the decision's frame return `Pending`
+    #[test]
+    fn distributed_reductions_share_one_canonical_union_candidate() {
+        let host = chain_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _builder = dispatch.enter_construction_scope();
+        let key = distributed_union_key(&dispatch);
+        let SemanticQueryKey::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            distributive,
+            pending,
+        } = key.clone()
+        else {
+            unreachable!("the distributed key is a conditional");
+        };
+        let swapped = SemanticQueryKey::Conditional {
+            check,
+            extends,
+            true_branch: false_branch,
+            false_branch: true_branch,
+            distributive,
+            pending,
+        };
+        for key in [key, swapped] {
+            let read = dispatch.execute_via_cold_build_helper(key);
+            assert_eq!(display(&dispatch, read.value()), "Union(number | string)");
+            assert!(!read.result_is_partial());
+        }
+        let graph = host.project_type_store().semantic_graph();
+        assert_eq!(
+            member_unions(&dispatch)
+                .iter()
+                .filter(|key| graph.contains_key(key))
+                .count(),
+            1,
+            "member order must not create another reduction candidate"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    }
+
+    /// A distribution's final reduction, which another task is producing,
+    /// makes the decision's frame return `Pending`
     /// instead of waiting that producer out on the polling thread. The
     /// producer going away wakes the root; the frame then produces the
     /// query itself, and the root delivers exactly what the synchronous
@@ -2254,9 +2294,9 @@ mod semantic_poll_contract {
             let dispatch = ProjectSemanticDispatch::new(&*host);
             let _builder = dispatch.enter_construction_scope();
             let read = dispatch.execute_via_cold_build_helper(distributed_union_key(&dispatch));
-            joined_evidence(&dispatch, &read, |answer| display(&dispatch, answer))
+            read_summary(&dispatch, &read)
         };
-        assert_eq!(synchronous.0 .0, "Union(number | string)");
+        assert_eq!(synchronous.0, "Union(number | string)");
         let host = chain_host();
         let mut dispatch = ProjectSemanticDispatch::new(&*host);
         let _builder = dispatch.enter_construction_scope();
@@ -2266,11 +2306,25 @@ mod semantic_poll_contract {
         let (second_task, second_lease) = hold_producer(&host, graph, second_order);
         let counter = Arc::new(CountingWaker::default());
         let waker = Waker::from(Arc::clone(&counter));
-        let mut entry = dispatch.poll_query(distributed_union_key(&dispatch));
-        let first = while_held((first_lease, second_lease), || entry.poll(&waker));
+        let key = distributed_union_key(&dispatch);
+        let members = || {
+            ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::conditional_distributed_members_for_tests()
+        };
+        let before = members();
+        let mut entry = dispatch.poll_query(key.clone());
+        let (first, again, before_release) = while_held((first_lease, second_lease), || {
+            let first = entry.poll(&waker).is_pending();
+            let completed = members() - before;
+            let again = first && entry.poll(&waker).is_pending();
+            (first, again, completed)
+        });
         assert!(
-            first.is_pending(),
+            first && again,
             "the decision yields while another task produces its union, instead of waiting it out"
+        );
+        assert_eq!(
+            before_release, 2,
+            "both distribution members already completed"
         );
         assert!(
             counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
@@ -2281,10 +2335,18 @@ mod semantic_poll_contract {
             Poll::Pending => panic!("the woken decision produces the union itself"),
         };
         drop(entry);
-        assert_joined_matches(
-            joined_evidence(&dispatch, &read, |answer| display(&dispatch, answer)),
-            &synchronous,
+        assert_eq!(
+            members() - before,
+            2,
+            "completed members are never folded again"
         );
+        let joined = read_summary(&dispatch, &read);
+        assert_eq!(
+            joined, synchronous,
+            "a suspended reduction consumes its delivery without repeating completed work"
+        );
+        let warm = dispatch.execute_via_cold_build_helper(key);
+        assert_eq!(read_summary(&dispatch, &warm), synchronous);
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
         assert!(graph.resident_flight_keys_for_tests().is_empty());
