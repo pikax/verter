@@ -817,6 +817,7 @@
           "crates/verter_session/tests/cases/g_misc2/recursive_substitute_memo.rs",
           "crates/verter_session/tests/cases/g_misc3/slot_binding_graph_matrix_member_presence.rs",
           "crates/verter_session/tests/cases/g_session/flight_rendezvous.rs",
+          "crates/verter_session/tests/cases/g_session/flow_return_close.rs",
           "crates/verter_session/tests/cases/g_session/held_charge_witness.rs",
           "crates/verter_session/tests/cases/g_session/host_close_reuse.rs",
           "crates/verter_session/tests/cases/g_session/in_flight_charge.rs",
