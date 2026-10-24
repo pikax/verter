@@ -10,6 +10,8 @@ mod committed_input_basis;
 mod cooperative_drive_seam;
 #[path = "g_session/flight_rendezvous.rs"]
 mod flight_rendezvous;
+#[path = "g_session/flow_return_close.rs"]
+mod flow_return_close;
 #[path = "g_session/held_charge_witness.rs"]
 mod held_charge_witness;
 mod host_close_reuse;

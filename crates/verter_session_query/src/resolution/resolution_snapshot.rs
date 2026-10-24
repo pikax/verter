@@ -1,39 +1,46 @@
 //! Immutable module-resolution observations shared by every retry of one
 //! top-level resolution.
 
-use std::collections::HashMap;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use crate::resolution::{PathProbe, ResolutionPackageManifest};
 
+/// Paths are held as the shared text of the input keys that loaded them, so
+/// recording an observation copies no spelling.
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionObservationSnapshot {
-    path_probes: HashMap<String, PathProbe>,
-    real_paths: HashMap<String, Option<Arc<str>>>,
-    manifests: HashMap<String, Option<Arc<ResolutionPackageManifest>>>,
+    path_probes: FxHashMap<Arc<str>, PathProbe>,
+    real_paths: FxHashMap<Arc<str>, Option<Arc<str>>>,
+    manifests: FxHashMap<Arc<str>, Option<Arc<ResolutionPackageManifest>>>,
     #[cfg(any(test, feature = "test-support"))]
     stable_absent_defaults: bool,
 }
 
 impl ResolutionObservationSnapshot {
-    pub fn insert_path_probe(&mut self, path: String, probe: PathProbe) -> Option<PathProbe> {
-        self.path_probes.insert(path, probe)
+    pub fn insert_path_probe(
+        &mut self,
+        path: impl Into<Arc<str>>,
+        probe: PathProbe,
+    ) -> Option<PathProbe> {
+        self.path_probes.insert(path.into(), probe)
     }
 
     pub fn insert_real_path(
         &mut self,
-        path: String,
+        path: impl Into<Arc<str>>,
         real_path: Option<Arc<str>>,
     ) -> Option<Option<Arc<str>>> {
-        self.real_paths.insert(path, real_path)
+        self.real_paths.insert(path.into(), real_path)
     }
 
     pub fn insert_package_manifest(
         &mut self,
-        directory: String,
+        directory: impl Into<Arc<str>>,
         manifest: Option<Arc<ResolutionPackageManifest>>,
     ) -> Option<Option<Arc<ResolutionPackageManifest>>> {
-        self.manifests.insert(directory, manifest)
+        self.manifests.insert(directory.into(), manifest)
     }
 
     #[must_use]

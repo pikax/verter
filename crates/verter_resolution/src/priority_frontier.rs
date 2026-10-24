@@ -12,12 +12,28 @@
 //! a rollback mechanism for the discard rules
 //! below (a blocked/terminal candidate must not leave partial writes in
 //! the caller's accumulator) — but [`crate::AttemptOutput`]
-//! deliberately has no public truncate/reset. The evaluator therefore
-//! returns `KernelAttempt<Option<T>>`, reusing the
-//! `CompletedAttempt<T>`/`KernelAttempt<T>` envelope (this file's own
-//! envelope: each candidate's own `Complete`
-//! carries its own fresh output, `NeedInputs`/`Terminal` carry none
-//! (structurally — no rollback needed, discard falls out of the type).
+//! deliberately has no public truncate/reset. Two evaluator shapes keep
+//! the discard rules without one:
+//!
+//! - [`PriorityFrontierState::push`] takes a `KernelAttempt<Option<T>>`,
+//!   reusing the `CompletedAttempt<T>`/`KernelAttempt<T>` envelope: each
+//!   candidate's own `Complete` carries its own fresh output and
+//!   `NeedInputs`/`Terminal` carry none (structurally — no rollback
+//!   needed, discard falls out of the type).
+//! - [`PriorityFrontierState::push_read`] serves an evaluator that
+//!   records straight into the frontier's live output instead of building
+//!   an output per candidate. Nothing is ever rolled back, so the split is
+//!   in the types: the evaluator first settles its observation reads into a
+//!   [`CandidateRead`], and only a settled hit or miss reaches its
+//!   [`CandidateRecorder`], the one holder of the output. A candidate that
+//!   needs an input cannot have recorded anything. That matters even though
+//!   a blocked frontier never publishes its output: witnesses left in the
+//!   live output would stay retained in the operation's ledger, where the
+//!   budget checks of later discarded candidates would count them. A
+//!   recording that fails part-way is terminal: before a block it ends the
+//!   frontier and its output with it (rule 6), and after a block nothing is
+//!   recorded (rules 1 and 5).
+//!
 //! The semantics are the ten rules below.
 //!
 //! ## Rules
@@ -44,9 +60,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::{AttemptOutput, CompletedAttempt, KernelAttempt};
+use crate::{AttemptOutput, CompletedAttempt, InputResolutionRetention, KernelAttempt};
 use verter_session_query::resolution::{
-    AttemptOutcome, InputKey, InputResolutionBudgets, LoadSet, ResolutionBasis,
+    AttemptFailure, AttemptOutcome, InputKey, InputResolutionBudgets, LoadSet, ResolutionBasis,
 };
 
 /// The resumable state of one ordered priority frontier.
@@ -56,8 +72,56 @@ use verter_session_query::resolution::{
 /// and resume without putting that graph depth on the native call stack.
 pub(crate) struct PriorityFrontierState {
     expected_basis: ResolutionBasis,
-    accumulated: AttemptOutput,
+    /// The output kept so far, created on the first output the frontier
+    /// keeps. A frontier that ends blocked never builds one.
+    accumulated: Option<AttemptOutput>,
+    /// The retention scope current when the frontier was created; the
+    /// accumulated output is retained there whenever it is created.
+    retention: InputResolutionRetention,
     blocked: Option<BTreeSet<InputKey>>,
+}
+
+/// What a candidate's observation reads settled, before anything about it
+/// is recorded: a hit or a miss carrying what recording it needs, or why it
+/// cannot complete yet.
+///
+/// A short-lived value moved once per candidate; boxing its one large
+/// variant would allocate for every missing input instead.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum CandidateRead<H, M> {
+    Hit(H),
+    Miss(M),
+    /// One missing input, under the basis of the snapshot that lacked it:
+    /// the one-key `NeedInputs` without building its load set.
+    NeedInput(InputKey, ResolutionBasis),
+    Terminal(AttemptFailure),
+}
+
+/// Records a completed candidate for [`PriorityFrontierState::push_read`].
+/// It is reached only with a [`CandidateRead::Hit`] or
+/// [`CandidateRead::Miss`], so a candidate that needs an input never holds
+/// the frontier's output.
+///
+/// A recorder only records what the read settled: it must not read the
+/// attempt view itself. A read made while holding the output could need an
+/// input after witnesses were recorded, which is exactly what the split
+/// rules out.
+pub(crate) trait CandidateRecorder<H, M> {
+    type Answer;
+
+    /// Records a hit before any block into the frontier's output (rule 2)
+    /// and spells its answer. Recording a witness the output already holds
+    /// changes nothing, exactly as merging a separate output would.
+    fn record_hit(self, hit: H, output: &mut AttemptOutput)
+        -> Result<Self::Answer, AttemptFailure>;
+
+    /// Records a miss before any block into the frontier's output (rule 1).
+    fn record_miss(self, miss: M, output: &mut AttemptOutput) -> Result<(), AttemptFailure>;
+
+    /// Checks that a fresh output could retain a miss after a block, which
+    /// contributes nothing (rule 1); a failure stops the frontier on its
+    /// block (rule 7), as discarding a built output would.
+    fn admit_discarded_miss(self, miss: M) -> Result<(), AttemptFailure>;
 }
 
 impl PriorityFrontierState {
@@ -68,9 +132,52 @@ impl PriorityFrontierState {
     ) -> Self {
         Self {
             expected_basis,
-            accumulated: AttemptOutput::new(),
+            accumulated: None,
+            retention: InputResolutionRetention::current_or_default(),
             blocked: None,
         }
+    }
+
+    /// The frontier's output, created when something first records into it.
+    fn accumulated_mut(&mut self) -> &mut AttemptOutput {
+        let retention = &self.retention;
+        self.accumulated
+            .get_or_insert_with(|| AttemptOutput::new_in(retention.clone()))
+    }
+
+    /// Joins a completed candidate's output to the frontier's, exactly as
+    /// merging it into a new empty output would: an output of the same
+    /// operation is adopted whole.
+    fn keep(&mut self, output: AttemptOutput) -> Result<(), AttemptFailure> {
+        match &mut self.accumulated {
+            Some(accumulated) => accumulated.merge(output),
+            None if output.is_retained_in(&self.retention) => {
+                self.accumulated = Some(output);
+                Ok(())
+            }
+            None => {
+                // Installed only once the merge succeeds: a failed merge
+                // drops the new output and releases what it retained.
+                let mut accumulated = AttemptOutput::new_in(self.retention.clone());
+                accumulated.merge(output)?;
+                self.accumulated = Some(accumulated);
+                Ok(())
+            }
+        }
+    }
+
+    fn take_accumulated(&mut self) -> AttemptOutput {
+        self.accumulated
+            .take()
+            .unwrap_or_else(|| AttemptOutput::new_in(self.retention.clone()))
+    }
+
+    /// The outcome of a frontier ended on its block: the keys it needs.
+    fn blocked_outcome<T>(&self, blocked: BTreeSet<InputKey>) -> KernelAttempt<T> {
+        AttemptOutcome::NeedInputs(LoadSet::new(
+            blocked.into_iter().collect(),
+            self.expected_basis,
+        ))
     }
 
     /// Applies one candidate. `Some` means the frontier has reached a final
@@ -80,39 +187,16 @@ impl PriorityFrontierState {
         candidate: KernelAttempt<Option<T>>,
     ) -> Option<KernelAttempt<Option<T>>> {
         match candidate {
-            AttemptOutcome::Complete(CompletedAttempt {
-                value: Some(hit),
-                output,
-            }) => Some(match self.blocked.take() {
-                // Rule 5: a lower-priority hit after a higher block cannot
-                // win.
-                Some(blocked_set) => AttemptOutcome::NeedInputs(LoadSet::new(
-                    blocked_set.into_iter().collect(),
-                    self.expected_basis,
-                )),
-                // Rule 2: hit before any block — merge and return.
-                None => {
-                    if let Err(failure) = self.accumulated.merge(output) {
-                        return Some(AttemptOutcome::Terminal(failure));
-                    }
-                    AttemptOutcome::Complete(CompletedAttempt::new(
-                        Some(hit),
-                        std::mem::take(&mut self.accumulated),
-                    ))
-                }
-            }),
-            AttemptOutcome::Complete(CompletedAttempt {
-                value: None,
-                output,
-            }) => {
-                // Rule 1: merge completed-miss outputs BEFORE any block. A
-                // miss encountered AFTER a block contributes nothing.
+            AttemptOutcome::Complete(CompletedAttempt { value, output }) => {
+                // Rules 1 and 2: a completed candidate's output joins the
+                // frontier's only before any block.
                 if self.blocked.is_none() {
-                    if let Err(failure) = self.accumulated.merge(output) {
+                    if let Err(failure) = self.keep(output) {
                         return Some(AttemptOutcome::Terminal(failure));
                     }
                 }
-                None
+                // Rule 1: a miss after a block contributes nothing.
+                value.map(|hit| self.hit(hit))
             }
             AttemptOutcome::NeedInputs(load_set) => {
                 if load_set.basis() != self.expected_basis {
@@ -128,29 +212,82 @@ impl PriorityFrontierState {
                 }
                 None
             }
-            AttemptOutcome::Terminal(failure) => Some(match self.blocked.take() {
-                // Rule 6: a terminal before any block propagates.
-                None => AttemptOutcome::Terminal(failure),
-                // Rule 7: a terminal after a block does not outrank it.
-                Some(blocked_set) => AttemptOutcome::NeedInputs(LoadSet::new(
-                    blocked_set.into_iter().collect(),
-                    self.expected_basis,
-                )),
+            AttemptOutcome::Terminal(failure) => Some(self.terminal(failure)),
+        }
+    }
+
+    /// Applies one candidate whose reads are settled, recording it through
+    /// `recorder` straight into the frontier's output instead of building an
+    /// output for it. A hit after a block is never recorded or spelled: it
+    /// cannot win (rule 5). `Some` means the frontier has reached a final
+    /// outcome; `None` means the next candidate may be evaluated.
+    pub(crate) fn push_read<H, M, R: CandidateRecorder<H, M>>(
+        &mut self,
+        read: CandidateRead<H, M>,
+        recorder: R,
+    ) -> Option<KernelAttempt<Option<R::Answer>>> {
+        match read {
+            CandidateRead::Hit(hit) => Some(match self.blocked.take() {
+                // Rule 5: a lower-priority hit after a higher block cannot
+                // win.
+                Some(blocked) => self.blocked_outcome(blocked),
+                None => match recorder.record_hit(hit, self.accumulated_mut()) {
+                    // Rule 2: hit before any block — return it with the
+                    // output.
+                    Ok(answer) => AttemptOutcome::Complete(CompletedAttempt::new(
+                        Some(answer),
+                        self.take_accumulated(),
+                    )),
+                    // Rule 6.
+                    Err(failure) => AttemptOutcome::Terminal(failure),
+                },
             }),
+            CandidateRead::Miss(miss) => {
+                let recorded = if self.blocked.is_some() {
+                    recorder.admit_discarded_miss(miss)
+                } else {
+                    recorder.record_miss(miss, self.accumulated_mut())
+                };
+                recorded.err().map(|failure| self.terminal(failure))
+            }
+            CandidateRead::NeedInput(key, basis) => {
+                if basis != self.expected_basis {
+                    // Rule 8, exactly as for the one-key load set.
+                    return Some(AttemptOutcome::NeedInputs(LoadSet::new(vec![key], basis)));
+                }
+                self.blocked.get_or_insert_with(BTreeSet::new).insert(key);
+                None
+            }
+            CandidateRead::Terminal(failure) => Some(self.terminal(failure)),
+        }
+    }
+
+    /// A hit, whose output is already the frontier's.
+    fn hit<T>(&mut self, hit: T) -> KernelAttempt<Option<T>> {
+        match self.blocked.take() {
+            // Rule 5: a lower-priority hit after a higher block cannot win.
+            Some(blocked) => self.blocked_outcome(blocked),
+            // Rule 2: hit before any block — return it with the output.
+            None => {
+                AttemptOutcome::Complete(CompletedAttempt::new(Some(hit), self.take_accumulated()))
+            }
+        }
+    }
+
+    fn terminal<T>(&mut self, failure: AttemptFailure) -> KernelAttempt<T> {
+        match self.blocked.take() {
+            // Rule 6: a terminal before any block propagates.
+            None => AttemptOutcome::Terminal(failure),
+            // Rule 7: a terminal after a block does not outrank it.
+            Some(blocked) => self.blocked_outcome(blocked),
         }
     }
 
     /// Completes an exhausted frontier (rule 10).
     pub(crate) fn finish<T>(&mut self) -> KernelAttempt<Option<T>> {
         match self.blocked.take() {
-            Some(keys) => AttemptOutcome::NeedInputs(LoadSet::new(
-                keys.into_iter().collect(),
-                self.expected_basis,
-            )),
-            None => AttemptOutcome::Complete(CompletedAttempt::new(
-                None,
-                std::mem::take(&mut self.accumulated),
-            )),
+            Some(blocked) => self.blocked_outcome(blocked),
+            None => AttemptOutcome::Complete(CompletedAttempt::new(None, self.take_accumulated())),
         }
     }
 }

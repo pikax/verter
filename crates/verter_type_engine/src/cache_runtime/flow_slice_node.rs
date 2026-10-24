@@ -122,7 +122,7 @@ pub struct FlowSliceLoweredKey {
 /// parse_key, file_language, toolchain)` and every
 /// subsequent demand only re-plans reachability over the memoized
 /// graph. Memory-side; evicted per canonical through
-/// [`Self::remove_canonical`].
+/// [`Self::remove_canonical`] and wholesale by the host close.
 pub struct FunctionFlowGraphStore {
     entries: DashMap<FlowSliceFunctionKey, GraphEntry>,
     /// Graph builds performed. Test observability only.
@@ -323,6 +323,12 @@ impl FunctionFlowGraphStore {
         self.entries
             .retain(|key, _| key.canonical_id.as_ref() != canonical_id);
     }
+
+    /// Evict every bundle. A reader still holding a bundle keeps it, and
+    /// its own pin on it, until that reader drops.
+    pub(crate) fn clear_all(&self) {
+        self.entries.clear();
+    }
 }
 
 // ── Hash node ─────────────────────────────────────────────────────────
@@ -420,6 +426,11 @@ impl FlowSliceHashNode {
             .retain(|key, _| key.function.canonical_id.as_ref() != canonical_id);
     }
 
+    /// Evict every published entry.
+    pub(crate) fn clear_all(&self) {
+        self.entries.clear();
+    }
+
     /// Number of published entries (retention observability).
     pub fn entry_count(&self) -> usize {
         self.entries.len()
@@ -480,6 +491,11 @@ impl FlowSliceLoweredBodyNode {
     pub(crate) fn remove_canonical(&self, canonical_id: &str) {
         self.entries
             .retain(|key, _| key.hash_key.function.canonical_id.as_ref() != canonical_id);
+    }
+
+    /// Evict every published entry.
+    pub(crate) fn clear_all(&self) {
+        self.entries.clear();
     }
 
     /// Number of published entries (retention observability).
@@ -637,6 +653,16 @@ impl FlowSliceStores {
         self.graphs.remove_canonical(canonical_id);
         self.hash_node.remove_canonical(canonical_id);
         self.lowered_node.remove_canonical(canonical_id);
+    }
+
+    /// Evict every flow-slice artifact of every canonical: the host-close
+    /// teardown. Content-addressed entries stay correct across a close, but
+    /// a closed host retains nothing it no longer serves; a reader holding a
+    /// bundle or lowered slice keeps exactly what it holds.
+    pub fn clear_all(&self) {
+        self.graphs.clear_all();
+        self.hash_node.clear_all();
+        self.lowered_node.clear_all();
     }
 
     /// Replace the shared budget (test-support only): lets a constrained
