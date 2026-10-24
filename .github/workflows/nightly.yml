@@ -196,6 +196,7 @@ jobs:
       # more than a runner's disk. The `%8m` pool merges each binary's
       # processes online into at most eight files.
       - name: Generate coverage
+        id: nextest
         env:
           LANE: ${{ matrix.lane }}
           REQUIRE: ${{ matrix.require }}
@@ -203,16 +204,27 @@ jobs:
           LLVM_PROFILE_FILE_NAME: verter-%8m.profraw
         run: |
           source <(cargo llvm-cov show-env --sh)
+          node scripts/ci-junit-metadata.mjs snapshot-env --out "$RUNNER_TEMP/nextest-env.json"
           cargo llvm-cov clean --workspace
           status=0
           if [ "$LANE" = core ]; then
             node scripts/compile-fixture-artifacts.mjs prepare --workspace || status=1
-            cargo nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)" || status=1
+            nextest_argv=(nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)")
+            echo "argv=$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${nextest_argv[@]}")" >> "$GITHUB_OUTPUT"
+            cargo "${nextest_argv[@]}" || status=1
           else
             env "$REQUIRE=1" node scripts/provider-ci.mjs run "$LANE" || status=1
           fi
           cargo llvm-cov report --lcov --output-path "lcov-$LANE.info" || status=1
           exit "$status"
+      - name: Nextest JUnit evidence
+        if: always() && matrix.lane == 'core'
+        uses: ./.github/actions/nextest-evidence
+        with:
+          name: nextest-evidence-rust-coverage-core
+          env-snapshot: ${{ runner.temp }}/nextest-env.json
+          argv-json: ${{ steps.nextest.outputs.argv }}
+          matrix-json: ${{ toJSON(matrix) }}
       - name: Upload lane coverage
         if: always()
         uses: actions/upload-artifact@v6
