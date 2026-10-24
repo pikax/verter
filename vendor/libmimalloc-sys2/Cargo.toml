@@ -1,0 +1,54 @@
+# Vendored copy of `libmimalloc-sys2` 0.1.63 (the sys crate behind
+# `mimalloc-safe` 0.1.67), patched in through the workspace `[patch.crates-io]`.
+# It differs from the published crate in three ways, and in nothing else:
+#
+# - `c_src/mimalloc3` is upstream microsoft/mimalloc v3.5.3 (tag commit
+#   d4881d338125e1cb7c47ba4cfb398d6f7c0c8d45), trimmed to the files the build
+#   reads: CMakeLists.txt, cmake/, include/, src/, mimalloc.pc.in and LICENSE.
+#   The published crate bundles v3.5.2 plus the process-init fix that v3.5.3
+#   took upstream; v3.5.3 adds the bitmap chunk-count, aligned-free and arena
+#   fixes on top.
+# - The v2 tree is not vendored, so `build.rs` refuses a build without `v3`.
+# - `build.rs` compiles the MSVC path with `MI_DEBUG=0` in every Cargo profile
+#   instead of turning mimalloc's assertion checking on for dev builds.
+#
+# Verify the C tree against upstream with:
+#   git diff --no-index <mimalloc v3.5.3 checkout>/src vendor/libmimalloc-sys2/c_src/mimalloc3/src
+# (and the same for include/, cmake/, CMakeLists.txt). Bump it by replacing
+# those files from a newer upstream tag and updating
+# `verter_alloc::MIMALLOC_VERSION`, whose test pins the linked version.
+[package]
+name = "libmimalloc-sys2"
+version = "0.1.63"
+authors = ["Octavian Oncescu <octavonce@gmail.com>", "Long Yinan <lynweklm@gmail.com>"]
+edition = "2018"
+repository = "https://github.com/napi-rs/mimalloc-safe/tree/master/libmimalloc-sys"
+keywords = ["allocator", "encrypted-heap", "performance"]
+categories = ["memory-management", "api-bindings"]
+description = "Sys crate wrapping the mimalloc allocator"
+license = "MIT"
+links = "mimalloc_sys2"
+publish = false
+
+[dependencies]
+cty = { version = "0.2", optional = true }
+libc = "0.2"
+
+[build-dependencies]
+cc = "1.0"
+cmake = "0.1"
+
+[features]
+# For debug purposes
+etw = []
+asm = []
+secure = []
+override = []
+extended = ["cty"]
+arena = []
+local_dynamic_tls = []
+no_thp = []
+skip_collect_on_exit = []
+# turn off `MI_OPT_ARCH`, default is `ON`
+no_opt_arch = []
+v3 = []

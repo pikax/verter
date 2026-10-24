@@ -28,6 +28,9 @@ generate-host-request-ts = []
 # return, and the counting global allocator behind the memory audit. A
 # default build reports unavailable capture from those methods.
 semantic-observe = ["verter_session/semantic-observe", "dep:backtrace"]
+# Build the addon on the platform heap instead of mimalloc, for hardened
+# builds (crates/verter_alloc documents the trade-off).
+system-allocator = ["verter_alloc/system-allocator"]
 
 # The generator that writes `packages/native/host-compile-request.generated.ts`.
 # Declared explicitly so `required-features` can keep it out of the default
@@ -45,6 +48,7 @@ path = "src/bin/generate_host_compile_request_ts.rs"
 required-features = ["generate-host-request-ts"]
 
 [dependencies]
+verter_alloc = { path = "../verter_alloc" }
 verter_resolution = { workspace = true }
 verter_session_query = { workspace = true }
 verter_audit = { path = "../verter_audit" }
@@ -77,6 +81,12 @@ ts-rs = "12"
 serde_json = { workspace = true }
 oxc_allocator = { workspace = true }
 tokio = { version = "1.54", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
+
+# Node `dlopen`s the addon, so on Linux its mimalloc uses the local-dynamic
+# TLS model: initial-exec TLS in a late-loaded image can fail with "cannot
+# allocate memory in static TLS block" once the static TLS surplus is gone.
+[target.'cfg(target_os = "linux")'.dependencies]
+verter_alloc = { path = "../verter_alloc", features = ["local-dynamic-tls"] }
 
 [dev-dependencies]
 # The test-only Node addon `cases::real_js_host_request_boundary` loads. The
