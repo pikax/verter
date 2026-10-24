@@ -2849,3 +2849,43 @@ fn indexed_expression_endpoint_macro_reuses_parse_and_refuses_broken_pin() {
         "broken lease cannot parse again"
     );
 }
+
+/// The body a type declaration's priming kept serves only that declaration
+/// in that scope: a same-named `declare global` declaration and another
+/// declaration of the file each read their own body, while the primed
+/// declarations read the bodies kept for them.
+#[test]
+fn a_primed_type_body_serves_only_its_own_declaration_and_scope() {
+    let (memo, _) = memo_for(
+        "type K = \"file\";\ntype A = \"a\";\ntype B = \"b\";\ndeclare global {\n  type K = \"global\";\n}\nexport {};\n",
+    );
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let primed: Vec<PrimedTypeBodies> = ["K", "B"]
+        .into_iter()
+        .map(|name| prime_type_body(&memo, owner, name).expect("its facts are not lowered yet"))
+        .collect();
+    assert!(
+        prime_type_body(&memo, owner, "K").is_none(),
+        "K's facts are lowered: there is nothing left to prime"
+    );
+    let read = |locator: AuthoredBodyLocator| {
+        let derefed = memo.deref_locator_body(&locator).expect("the body derefs");
+        format!("{:?}", single(&derefed))
+    };
+    let global = read(aug_type_locator(
+        "K",
+        AuthoredAugmentationScope::Global,
+        Vec::new(),
+    ));
+    assert!(
+        global.contains("global"),
+        "the global K reads its own body: {global}"
+    );
+    let a = read(type_body_locator("A", Vec::new()));
+    assert!(a.contains("\"a\""), "A reads its own body: {a}");
+    let k = read(type_body_locator("K", Vec::new()));
+    assert!(k.contains("file"), "the file's K reads its own body: {k}");
+    let b = read(type_body_locator("B", Vec::new()));
+    assert!(b.contains("\"b\""), "B reads its own body: {b}");
+    drop(primed);
+}

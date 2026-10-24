@@ -1024,6 +1024,19 @@ impl PreparedTypeDeclCache {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<Option<CachedValue<PreparedTypeDecl>>, PreparationFailure> {
+        self.get_in_keeping(owner, symbol_name, None)
+    }
+
+    /// [`Self::get_in`], handing `keep` the transient body parts a cold
+    /// preparation of a file-scope type declaration lowers with its facts
+    /// ([`verter_semantic_source::decl_body_memo::prime_type_body`]), for
+    /// the body read that follows the preparation.
+    fn get_in_keeping(
+        &self,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+        keep: Option<&dyn Fn(verter_semantic_source::decl_body_memo::PrimedTypeBodies)>,
+    ) -> Result<Option<CachedValue<PreparedTypeDecl>>, PreparationFailure> {
         let key = verter_type_expr::DeclBindingKey::new(owner, symbol_name);
         let Some(slot) = self.slots.get(&key) else {
             return Ok(None);
@@ -1039,6 +1052,17 @@ impl PreparedTypeDeclCache {
         let _gate = slot.build_gate.lock();
         if let Some(cached) = slot.committed() {
             return Ok(cached);
+        }
+        if let Some(keep) = keep {
+            if self.state.has_type_symbol_in(owner, symbol_name) {
+                if let Some(primed) = verter_semantic_source::decl_body_memo::prime_type_body(
+                    self.state.decl_bodies(),
+                    owner,
+                    symbol_name,
+                ) {
+                    keep(primed);
+                }
+            }
         }
         // A broken decl-body lease pin surfaces the DISTINCT `LeaseMiss` — fail
         // CLOSED via ReturnOnly: leave `value` VACANT (release the gate without
@@ -1103,12 +1127,23 @@ impl PreparedTypeDeclCache {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> PreparedTypeDeclResolution {
+        self.get_in_for_projection_keeping(owner, symbol_name, None)
+    }
+
+    /// [`Self::get_in_for_projection`], handing `keep` the body parts a
+    /// cold preparation lowers ([`Self::get_in_keeping`]).
+    pub(crate) fn get_in_for_projection_keeping(
+        &self,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+        keep: Option<&dyn Fn(verter_semantic_source::decl_body_memo::PrimedTypeBodies)>,
+    ) -> PreparedTypeDeclResolution {
         let root_identity = ResolvedRootIdentity::new_in_owner(
             self.canonical_id.clone(),
             owner,
             self.interner.intern(symbol_name),
         );
-        match self.get_in(owner, symbol_name) {
+        match self.get_in_keeping(owner, symbol_name, keep) {
             Ok(Some(declaration)) => PreparedTypeDeclResolution::Complete(declaration),
             Ok(None) => PreparedTypeDeclResolution::Missing,
             Err(failure @ PreparationFailure::MissingExternalOwner { .. }) => {

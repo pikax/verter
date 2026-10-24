@@ -525,14 +525,17 @@ fn an_alias_chain_hands_each_declaration_to_the_lowering_workers_once() {
         let matrix = Matrix::new(&source).settings(&[STRICT]);
         let rows = [(Read::Type(&probe), vec!["1"])];
         let host = matrix.host(&rows);
-        let rendezvous = host.decl_lowering.handoff_count();
+        let before = host.decl_lowering.handoff_count();
         let verdict = &matrix.verdicts_on(&host, &rows)[0][0];
         assert!(verdict.matched, "links={links}: {}", verdict.lane);
-        work.push(host.decl_lowering.handoff_count() - rendezvous);
+        let after = host.decl_lowering.handoff_count();
+        assert!(after >= before, "the rendezvous count never falls");
+        work.push(after - before);
     }
     eprintln!("alias chain rendezvous: {work:?}");
+    let (shorter, longer) = (work[0], work[1]);
     assert!(
-        work[1] - work[0] <= 32 + 4,
+        longer <= shorter + 32 + 4,
         "32 more links must add one rendezvous each: {work:?}"
     );
 }

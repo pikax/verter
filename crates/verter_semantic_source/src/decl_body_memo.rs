@@ -506,11 +506,40 @@ pub struct DeclBodyMemo {
     /// [`PrimedTypeBodies`] guard drops any entry left unread, so nothing
     /// here outlives the demand that primed it.
     primed_type_parts: parking_lot::Mutex<Vec<PrimedTypeParts>>,
-    /// Transient body parts the last single type demand kept from the
-    /// lowering that registered its facts, waiting for the body read that
-    /// follows it. A read takes them, and the next single type demand
-    /// replaces them, so at most one declaration's parts wait per file.
-    demanded_type_parts: parking_lot::Mutex<Option<PrimedTypeParts>>,
+}
+
+/// The transient body parts a demanded lowering keeps beside the facts it
+/// registers: none for a demand that reads only facts, or the demanded type
+/// body's, in the file scope or in an augmentation scope.
+#[derive(Clone, Debug)]
+enum KeptParts {
+    Nothing,
+    FileScopeType,
+    AugmentationType(AugmentationScopeKind),
+}
+
+impl KeptParts {
+    /// The demanded type body's parts in `scope` (the file scope when
+    /// `None`).
+    fn type_body(scope: Option<&AugmentationScopeKind>) -> Self {
+        match scope {
+            None => Self::FileScopeType,
+            Some(scope) => Self::AugmentationType(scope.clone()),
+        }
+    }
+
+    fn keeps(&self) -> bool {
+        !matches!(self, Self::Nothing)
+    }
+
+    /// The augmentation scope whose parts are kept; `None` for the file
+    /// scope, and when nothing is kept.
+    fn scope(&self) -> Option<&AugmentationScopeKind> {
+        match self {
+            Self::AugmentationType(scope) => Some(scope),
+            Self::Nothing | Self::FileScopeType => None,
+        }
+    }
 }
 
 /// One primed transient body: the demanded declaration, its scope (`None`
@@ -597,7 +626,6 @@ impl DeclBodyMemo {
             macro_field_addresses: Arc::default(),
             raw_surfaces: crate::per_file_map::per_file_map(),
             primed_type_parts: parking_lot::Mutex::new(Vec::new()),
-            demanded_type_parts: parking_lot::Mutex::new(None),
         }
     }
 
@@ -661,7 +689,6 @@ impl DeclBodyMemo {
             macro_field_addresses: Arc::default(),
             raw_surfaces: crate::per_file_map::per_file_map(),
             primed_type_parts: parking_lot::Mutex::new(Vec::new()),
-            demanded_type_parts: parking_lot::Mutex::new(None),
         };
 
         for (name, group) in &env.type_symbols {
@@ -895,12 +922,12 @@ impl DeclBodyMemo {
         // initializing caller receives the batch and backfills siblings after
         // its own cell is committed; a lease-miss evicts the cell and commits
         // nothing.
-        let (outcome, batch) = self.demand_and_commit(
+        let (outcome, batch, _) = self.demand_and_commit(
             &cell,
             &key,
             &contributors,
             jsdoc_typedef,
-            Some(None),
+            KeptParts::Nothing,
             |batch| {
                 batch
                     .types
@@ -946,12 +973,12 @@ impl DeclBodyMemo {
             return DemandOutcome::Ready(None);
         };
         let cell = self.value_entries.entry(key.clone()).or_default().clone();
-        let (outcome, batch) = self.demand_and_commit(
+        let (outcome, batch, _) = self.demand_and_commit(
             &cell,
             &key,
             contributors,
             None,
-            None,
+            KeptParts::Nothing,
             |batch| {
                 batch
                     .values
@@ -1132,12 +1159,12 @@ impl DeclBodyMemo {
             .entry((scope.clone(), key.clone()))
             .or_default()
             .clone();
-        let (outcome, batch) = self.demand_and_commit(
+        let (outcome, batch, _) = self.demand_and_commit(
             &cell,
             &key,
             &contributors,
             None,
-            Some(Some(scope.clone())),
+            KeptParts::Nothing,
             |batch| {
                 batch
                     .aug_types
@@ -1203,12 +1230,12 @@ impl DeclBodyMemo {
             .entry((scope.clone(), key.clone()))
             .or_default()
             .clone();
-        let (outcome, batch) = self.demand_and_commit(
+        let (outcome, batch, _) = self.demand_and_commit(
             &cell,
             &key,
             &contributors,
             None,
-            None,
+            KeptParts::Nothing,
             |batch| {
                 batch
                     .aug_values
@@ -1742,49 +1769,33 @@ impl DeclBodyMemo {
     /// consulted BEFORE any fallback to the per-symbol prepared-decl
     /// lookup — so the generic is already bound and never reaches this
     /// scratch env.
-    ///
-    /// A type demand names its scope in `transient` (`Some(None)` for the
-    /// file scope): the same lowering keeps the demanded body's transient
-    /// parts for the body read that follows, so that read is served
-    /// without a second worker rendezvous that lowers the statement again.
-    /// A value demand keeps none.
     fn lower_demanded(
         &self,
         key: &DeclBindingKey,
         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
-        transient: Option<Option<AugmentationScopeKind>>,
-    ) -> DemandLower {
+        kept: KeptParts,
+    ) -> (DemandLower, Option<TransientTypeParts>) {
         // A seeded memo has no service: nothing to lower, a genuine (cacheable)
         // body-less miss — NOT a lease-pin break.
         let Some(service) = self.service.as_ref() else {
-            return DemandLower::Ready(None);
+            return (DemandLower::Ready(None), None);
         };
-        let scope = transient.clone();
-        let job = self.demanded_job(key, contributors, jsdoc_typedef, transient);
+        let job = self.demanded_job(key, contributors, jsdoc_typedef, kept);
         let outcome = service.run_leased(&job.key, job.run);
-        let (lowered, parts) = self.finish_demanded(outcome);
-        if let (Some(parts), Some(scope)) = (parts, scope) {
-            *self.demanded_type_parts.lock() = Some(PrimedTypeParts {
-                scope,
-                key: key.clone(),
-                parts: Arc::new(parts),
-            });
-        }
-        lowered
+        self.finish_demanded(outcome)
     }
 
     /// The pure statement-lowering job of one demanded declaration: it
     /// lowers each contributing statement once, registering its facts, and
-    /// — when `transient` names the demanded body's scope — keeps that
-    /// body's transient parts from the SAME lowering, so a body demanded
-    /// right after its facts is not lowered a second time.
+    /// keeps the transient parts `kept` names from the SAME lowering, so a
+    /// body demanded right after its facts is not lowered a second time.
     fn demanded_job(
         &self,
         key: &DeclBindingKey,
         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
-        transient: Option<Option<AugmentationScopeKind>>,
+        kept: KeptParts,
     ) -> crate::decl_lowering::LeasedJob<DemandJobOutput> {
         self.ensure_lease();
         // Several declarations in ONE statement (the overloads of a function
@@ -1800,9 +1811,12 @@ impl DeclBodyMemo {
         // ones included) through the plain statement lowering: keep its
         // parts only when this lowering visits exactly those statements the
         // same way.
-        let transient = transient.filter(|_| {
-            deduplicated.len() == contributors.len() && !self.svelte_component_runes_mode
-        });
+        let kept = if deduplicated.len() == contributors.len() && !self.svelte_component_runes_mode
+        {
+            kept
+        } else {
+            KeptParts::Nothing
+        };
         let contributors = deduplicated;
         let key = key.clone();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
@@ -1816,7 +1830,7 @@ impl DeclBodyMemo {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
-            let mut transient_parts = transient.as_ref().map(|_| TransientTypeParts::default());
+            let mut transient_parts = kept.keeps().then(TransientTypeParts::default);
 
             let mut scratch = EvalEnv::new();
             // TRANSIENT lowered TYPE bodies + type-parameter headers, retained
@@ -1868,8 +1882,8 @@ impl DeclBodyMemo {
                 counters
                     .decl_statements_lowered
                     .fetch_add(1, Ordering::Relaxed);
-                if let (Some(out), Some(scope)) = (transient_parts.as_mut(), transient.as_ref()) {
-                    accumulate_transient_type_parts(&parts, &key, scope.as_ref(), out);
+                if let Some(out) = transient_parts.as_mut() {
+                    accumulate_transient_type_parts(&parts, &key, kept.scope(), out);
                 }
                 for decl in &parts.type_decls {
                     retained_types
@@ -1950,7 +1964,7 @@ impl DeclBodyMemo {
                         .entry(key.clone())
                         .or_default()
                         .extend(typedef.dependencies);
-                    if let (Some(out), Some(None)) = (transient_parts.as_mut(), transient.as_ref())
+                    if let (Some(out), KeptParts::FileScopeType) = (transient_parts.as_mut(), &kept)
                     {
                         out.bodies.push(typedef.body.clone());
                     }
@@ -2117,41 +2131,52 @@ impl DeclBodyMemo {
         key: &DeclBindingKey,
         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
-        transient: Option<Option<AugmentationScopeKind>>,
+        kept: KeptParts,
         extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
         on_lease_miss_evict: impl FnOnce(&Arc<OnceLock<DemandCell<D>>>),
-    ) -> (DemandOutcome<D>, Option<LoweredStatementBatch>) {
+    ) -> (
+        DemandOutcome<D>,
+        Option<LoweredStatementBatch>,
+        Option<TransientTypeParts>,
+    ) {
         // Warm / joiner-visible hit — the cell already carries a committed
         // outcome (this thread lost the init race or re-demands a warm cell).
         if let Some(committed) = cell.get() {
             return match committed {
-                DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), None),
+                DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), None, None),
                 DemandCell::LeaseMiss => {
                     on_lease_miss_evict(cell);
-                    (DemandOutcome::LeaseMiss, None)
+                    (DemandOutcome::LeaseMiss, None, None)
                 }
             };
         }
         let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
+        let kept_parts: std::cell::Cell<Option<TransientTypeParts>> = std::cell::Cell::new(None);
         let committed = cell.get_or_init(|| {
-            match self.lower_demanded(key, contributors, jsdoc_typedef, transient) {
+            let (lowered, parts) = self.lower_demanded(key, contributors, jsdoc_typedef, kept);
+            match lowered {
                 DemandLower::Ready(maybe_batch) => {
                     let decl = maybe_batch.as_ref().and_then(extract);
                     leftover.set(maybe_batch);
+                    kept_parts.set(parts);
                     DemandCell::Ready(decl)
                 }
                 DemandLower::LeaseMiss => DemandCell::LeaseMiss,
             }
         });
         match committed {
-            DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), leftover.take()),
+            DemandCell::Ready(value) => (
+                DemandOutcome::Ready(value.clone()),
+                leftover.take(),
+                kept_parts.take(),
+            ),
             // Surface the DISTINCT `LeaseMiss` outcome (so a caller that must
             // not collapse this transient ReturnOnly into a cacheable genuine
             // miss — the locator-deref path — routes it to a no-warm signal)
             // and evict the poisoned cell so the next demand retries.
             DemandCell::LeaseMiss => {
                 on_lease_miss_evict(cell);
-                (DemandOutcome::LeaseMiss, None)
+                (DemandOutcome::LeaseMiss, None, None)
             }
         }
     }
@@ -2376,7 +2401,7 @@ pub fn prime_type_bodies(demands: &[TypeBodyDemand<'_>]) -> PrimedTypeBodies {
             &key,
             &contributors,
             jsdoc_typedef,
-            Some(demand.scope.cloned()),
+            KeptParts::type_body(demand.scope),
         );
         let pending = Pending {
             memo: demand.memo,
@@ -2459,6 +2484,53 @@ pub fn prime_type_bodies(demands: &[TypeBodyDemand<'_>]) -> PrimedTypeBodies {
     PrimedTypeBodies { kept }
 }
 
+/// Lower the file-scope type declaration `name` of `owner` in `memo` when
+/// its facts are not lowered yet, keeping its body's transient parts for
+/// the body read that follows: the single-demand counterpart of
+/// [`prime_type_bodies`], committed through the declaration's cell as any
+/// demand is. `None` when the file declares no such type or its facts are
+/// already lowered: a body read then lowers its parts as it always does.
+pub fn prime_type_body(
+    memo: &Arc<DeclBodyMemo>,
+    owner: TopLevelOwnerId,
+    name: &str,
+) -> Option<PrimedTypeBodies> {
+    let key = DeclBindingKey::new(owner, name);
+    let (contributors, jsdoc_typedef, cell) = memo.type_demand_target(&key, None)?;
+    if cell.get().is_some() {
+        return None;
+    }
+    let (_, batch, parts) = memo.demand_and_commit(
+        &cell,
+        &key,
+        &contributors,
+        jsdoc_typedef,
+        KeptParts::FileScopeType,
+        |batch| {
+            batch
+                .types
+                .iter()
+                .find(|(candidate, _)| candidate == &key)
+                .map(|(_, decl)| Arc::new(decl.clone()))
+        },
+        |poisoned| {
+            memo.type_entries
+                .remove_if(&key, |_, existing| Arc::ptr_eq(existing, poisoned));
+        },
+    );
+    if let Some(batch) = batch {
+        memo.backfill(batch, &contributors, Some((SymbolSpace::Type, &key)), None);
+    }
+    memo.primed_type_parts.lock().push(PrimedTypeParts {
+        scope: None,
+        key: key.clone(),
+        parts: Arc::new(parts?),
+    });
+    Some(PrimedTypeBodies {
+        kept: vec![(Arc::clone(memo), None, key)],
+    })
+}
+
 /// Union one contributor's header type parameters into the transient list,
 /// first-seen by name — the shared fold the file-scope, augmentation, and
 /// `export default` alias branches all apply so the re-borrowed union can
@@ -2484,19 +2556,6 @@ impl DeclBodyMemo {
             .iter()
             .position(|entry| &entry.key == key && entry.scope.as_ref() == scope)?;
         Some(primed.swap_remove(position).parts)
-    }
-
-    /// Take the transient parts the last single type demand kept, when
-    /// they are `key`'s in `scope`.
-    fn take_demanded_type_parts(
-        &self,
-        key: &DeclBindingKey,
-        scope: Option<&AugmentationScopeKind>,
-    ) -> Option<Arc<TransientTypeParts>> {
-        let mut demanded = self.demanded_type_parts.lock();
-        demanded
-            .take_if(|entry| &entry.key == key && entry.scope.as_ref() == scope)
-            .map(|entry| entry.parts)
     }
 
     /// The header contributors (and JSDoc typedef, file scope only) of the
@@ -2607,10 +2666,7 @@ impl DeclBodyMemo {
             // re-borrow — a genuine, cacheable body-less miss.
             return DemandOutcome::Ready(None);
         };
-        if let Some(parts) = self
-            .take_primed_type_parts(&key, aug_scope)
-            .or_else(|| self.take_demanded_type_parts(&key, aug_scope))
-        {
+        if let Some(parts) = self.take_primed_type_parts(&key, aug_scope) {
             return DemandOutcome::Ready(Some(parts));
         }
         self.ensure_lease();

@@ -935,6 +935,11 @@ pub(crate) struct RequestStoreView<'a> {
     /// The project environment this request read per canonical (see
     /// [`RequestProjectEnv`]).
     project_env: RequestProjectEnv,
+    /// The declaration bodies this request lowered with their facts and
+    /// kept for the body reads that follow; dropped, with every body no
+    /// read took, when the request ends.
+    primed_type_bodies:
+        parking_lot::Mutex<Vec<verter_semantic_source::decl_body_memo::PrimedTypeBodies>>,
     /// The request's ownership of the base's captured content generation in
     /// the workspace freshness history: from the moment the view is built,
     /// retiring history cannot raise the transition floor past the
@@ -1232,6 +1237,14 @@ impl ReceiptVerdicts {
 }
 
 impl<'a> RequestStoreView<'a> {
+    /// Keep `primed` until this request ends.
+    pub(crate) fn keep_primed_type_bodies(
+        &self,
+        primed: verter_semantic_source::decl_body_memo::PrimedTypeBodies,
+    ) {
+        self.primed_type_bodies.lock().push(primed);
+    }
+
     /// Construct a wrapper over `(base, overlay)` rooted on a
     /// proven-CURRENT base view. Every nested warm-cache probe may
     /// validate against it.
@@ -1244,6 +1257,7 @@ impl<'a> RequestStoreView<'a> {
             receipt_verdicts: ReceiptVerdicts::default(),
             signature_verdicts: SignatureVerdicts::default(),
             project_env: RequestProjectEnv::default(),
+            primed_type_bodies: parking_lot::Mutex::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
             validation_step_hook: None,
@@ -1275,6 +1289,7 @@ impl<'a> RequestStoreView<'a> {
             receipt_verdicts: ReceiptVerdicts::default(),
             signature_verdicts: SignatureVerdicts::default(),
             project_env: RequestProjectEnv::default(),
+            primed_type_bodies: parking_lot::Mutex::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
             validation_step_hook: None,

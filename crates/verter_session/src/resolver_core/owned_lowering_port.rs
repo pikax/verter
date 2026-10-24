@@ -980,9 +980,20 @@ macro_rules! owned_lowering_from_source_inputs {
                     missing_source();
                     return verter_session_query::inputs::prepared::PreparedTypeDeclResolution::Missing;
                 };
-                bundle
-                    .prepared_type_decls
-                    .get_in_for_projection(owner, name)
+                // A declaration first lowered here, for its preparation,
+                // keeps its body for the body read the request makes next,
+                // so that read does not lower its statements again.
+                let request = PrimedBodyHolder::primed_body_holder(self);
+                let keep = |primed| {
+                    if let Some(request) = request {
+                        request.keep_primed_type_bodies(primed);
+                    }
+                };
+                bundle.prepared_type_decls.get_in_for_projection_keeping(
+                    owner,
+                    name,
+                    request.is_some().then_some(&keep as &dyn Fn(_)),
+                )
             }
             fn prepare_augmentation_type(
                 &self,
@@ -1129,6 +1140,25 @@ macro_rules! owned_lowering_from_source_inputs {
         }
     };
 }
+/// The request view that holds the declaration bodies a request lowered with
+/// their facts, for the body reads that follow; none outside a request.
+trait PrimedBodyHolder {
+    fn primed_body_holder(&self) -> Option<&crate::resolver_core::RequestStoreView<'_>>;
+}
+
+impl<L: RequestBoundLifecycle> PrimedBodyHolder for RequestBoundAdapter<L> {
+    fn primed_body_holder(&self) -> Option<&crate::resolver_core::RequestStoreView<'_>> {
+        Some(self.0.request_view())
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl PrimedBodyHolder for crate::VerterHost {
+    fn primed_body_holder(&self) -> Option<&crate::resolver_core::RequestStoreView<'_>> {
+        None
+    }
+}
+
 owned_lowering_from_source_inputs!([L: RequestBoundLifecycle] RequestBoundAdapter<L> where [
     Self: verter_type_engine::resolver_core::resolver_context::sealed::Sealed
         + verter_type_engine::resolver_core::resolver_context::sealed::RequestBoundSealed,
