@@ -1438,8 +1438,10 @@ impl<'a> FunctionProgramMatch<'a> {
 /// — the shape a callee-lookup miss actually fell back to — does not
 /// exist to be written, and neither does any spelling that reaches an
 /// entry without naming its function first.
-#[derive(Debug, Clone, Default, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct FunctionProgramIndex {
+    storage: verter_retention::pinned_heap::StoragePin,
     /// Every served function position, in source order.
     entries: Arc<[FunctionProgramEntry]>,
     by_key: Arc<rustc_hash::FxHashMap<FunctionProgramKey, usize>>,
@@ -1455,6 +1457,40 @@ pub struct FunctionProgramIndex {
     /// released with it.
     classes: ClassIndex,
 }
+
+impl verter_retention::pinned_heap::EmbeddedStorage for FunctionProgramIndex {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
+}
+
+impl PartialEq for FunctionProgramIndex {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            storage: _,
+            entries,
+            by_key,
+            value_functions,
+            nested,
+            expressions,
+            expressions_by_point,
+            classes,
+        } = self;
+        entries == &other.entries
+            && by_key == &other.by_key
+            && value_functions == &other.value_functions
+            && nested == &other.nested
+            && expressions == &other.expressions
+            && expressions_by_point == &other.expressions_by_point
+            && classes == &other.classes
+    }
+}
+
+impl Eq for FunctionProgramIndex {}
 
 impl FunctionProgramIndex {
     /// What this file's capture summary holds: the one summary every entry
@@ -1536,6 +1572,7 @@ impl FunctionProgramIndex {
                 .or_insert(ordinal);
         }
         FunctionProgramIndex {
+            storage: Default::default(),
             by_key: Arc::new(by_key),
             value_functions: Arc::new(value_functions),
             nested: Arc::new(nested),
@@ -1674,6 +1711,7 @@ impl FunctionProgramIndex {
     #[must_use]
     pub fn map_stable_hashes(&self, mix: impl Fn(&Hash16) -> Hash16) -> Self {
         Self {
+            storage: Default::default(),
             entries: Arc::from(
                 self.entries
                     .iter()

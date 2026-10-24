@@ -237,7 +237,11 @@ mod tests {
 
     #[test]
     fn replacing_a_value_keeps_the_actual_stored_keys_capacity_charged() {
-        let account = PinContext::default().account().clone();
+        let context = PinContext::new(verter_retention::SemanticRetentionAccount::new(
+            verter_retention::RetentionLimits::defaults(),
+        ));
+        let _scope = context.enter_for_test();
+        let account = context.account();
         let baseline = account.snapshot().pinned_bytes;
         let map = per_file_map();
         let mut key = String::with_capacity(1024 * 1024);
