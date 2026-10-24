@@ -81,7 +81,16 @@ fn key_for<C: ResolverCapabilities>(
             },
             ProjectionReductionContext::published(ProjectionMode::Navigate),
         ),
-        Root::Conditional if held => key_for(dispatch, Root::Chain, true),
+        Root::Conditional if held => dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    CHAIN_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: "x3".into(),
+            },
+            ProjectionReductionContext::structural_transit(),
+        ),
         Root::Conditional => {
             let graph = dispatch.graph_arc();
             let check = graph.intern_node(SemanticNodeData::new_typeof(
@@ -156,11 +165,16 @@ fn poll_while_another_task_produces(root: Root) -> [(String, String, bool, bool)
     let waker = Waker::from(Arc::clone(&counter));
     let key = key_for(&dispatch, root, false);
     let mut entry = dispatch.poll_query(key.clone());
-    assert!(
-        entry.poll(&waker).is_pending(),
-        "the root yields instead of parking the only thread"
-    );
+    let first = entry.poll(&waker);
     drop(lease);
+    assert!(
+        first.is_pending(),
+        "the root yields instead of parking the only thread: {:?}",
+        match &first {
+            Poll::Ready(read) => Some(read.value()),
+            Poll::Pending => None,
+        }
+    );
     assert!(
         counter.0.load(Ordering::SeqCst) >= 1,
         "the producer going away wakes the entry"
