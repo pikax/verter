@@ -1183,21 +1183,28 @@ fn loop_statements_nested_past_the_plan_budget_return() {
 }
 
 /// The source parse identity a content-addressed key names is derived once
-/// per artifact: the derivations a nest's evaluation makes do not grow with
-/// its depth (deriving it per nested function hashed the whole source once
-/// per function, the square of the nesting).
+/// per artifact: the derivations a nest's evaluation makes, on any thread,
+/// do not grow with its depth, and include the module's one source-stage
+/// derivation. Counted across the process, so the test owns its process.
 #[test]
 fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
-    let derivations = |depth: usize| {
-        let before = verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests();
-        assert_eq!(
-            mismatches(&arrows(depth), &[(ARROW_PROBE, "1")]),
-            Vec::<String>::new()
+    in_a_fresh_process(test_path!(), || {
+        let derivations = |depth: usize| {
+            let before = verter_session_query::source::framework_parse::source_parse_identity_derivations_in_process_for_tests();
+            assert_eq!(
+                mismatches(&arrows(depth), &[(ARROW_PROBE, "1")]),
+                Vec::<String>::new()
+            );
+            verter_session_query::source::framework_parse::source_parse_identity_derivations_in_process_for_tests()
+                - before
+        };
+        let shallow = derivations(20);
+        assert!(
+            shallow > 0,
+            "the count must see the module's source-stage derivation"
         );
-        verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests()
-            - before
-    };
-    assert_eq!(derivations(20), derivations(200));
+        assert_eq!(shallow, derivations(200));
+    });
 }
 
 /// Template literal types nested 10,000 deep: a template in a template's
