@@ -502,8 +502,8 @@ does. The entry also implements `Future`, with the full-value read as its
 output.
 
 The entry and the synchronous entry run one implementation. An
-instantiation, a `typeof` or a machinery-root flow return enters as a
-driven root: the root's connected demand, its query level and the
+instantiation, a `typeof`, a machinery-root conditional or call, or a
+callback-typing machinery-root flow return enters as a driven root: the root's connected demand, its query level and the
 dispatcher operation it runs as are opened once and held across polls,
 because the request state they live on moves into the lent task until the
 task gives it back. The thread's execution scopes (audit attribution,
@@ -546,12 +546,17 @@ cold root whose key another task produces yields while held and then reads
 what the synchronous full-value entry reads, receipt included; a released
 waiting cold root leaves nothing open; roots answering outside the type-node
 domain poll their own value; and a single-threaded control polls a chain to
-the synchronous read with no other thread advancing it. The same group runs
+the synchronous read with no other thread advancing it. A distributed
+conditional holds a selected branch's dependency after a sibling completes,
+resumes its task on a different thread, and compares exact evidence and logical
+work with the synchronous boundary. Its production counters also require each
+member fold to execute once. A direct call root holds an argument alias during
+inference and delivers the full call result after resuming. The same group runs
 with optional capture compiled in (`semantic-observe`). The WASM controls
 `semantic_poll_contract_*` in `verter_wasm` drive the production entry on the
-single-threaded `wasm32-unknown-unknown` host: a chain and a cold root each
-yield instead of parking the only thread and deliver what the synchronous
-entry serves.
+single-threaded `wasm32-unknown-unknown` host: a chain, a conditional dependency
+and a cold root each yield instead of parking the only thread and deliver what
+the synchronous entry serves.
 
 The entry is only as non-blocking as the frames below it. A root's own claim
 yields, but a query a frame step or a cold build evaluates in place still
@@ -720,7 +725,7 @@ its higher-level traversals still use the external synchronous compatibility dri
 | Wait | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- |
 | Semantic memo flight join (`SemanticGraphStore::acquire_query` with `AcquireWait::Block` → `Subscription::wait`) | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a frame step or a cold build evaluates in place | `Subscription::poll` in `SemanticTask` frames; `AcquireWait::Yield` for the polled entry's own root claim |
-| Synchronous root drive (`ProjectSemanticDispatch::drive_query` → `block_on`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `execute_read` and every other synchronous dispatch entry, for instantiations, `typeof` and callback-typing flow returns — including those a frame step evaluates in place | `ThreadDispatch::poll_query` → `SemanticQueryPoll`, for a root query outside any drive |
+| Synchronous root drive (`ProjectSemanticDispatch::drive_query` → `block_on`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `execute_read` and every other synchronous dispatch entry, for instantiations, `typeof`, machinery-root conditionals/calls and callback-typing flow returns — including those a cold build evaluates in place | `ThreadDispatch::poll_query` → `SemanticQueryPoll`, for a root query outside any drive |
 | Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | owned artifact admission with producer transfer; dispatch callers still synchronous |
 | Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |
 | Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |

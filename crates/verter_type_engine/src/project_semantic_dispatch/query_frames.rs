@@ -1052,8 +1052,9 @@ impl<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> DrivenRoot<'d, '
 /// its scheduler — drives a query through. It reads, in the query's own
 /// value domain, what the synchronous full-value entry
 /// ([`ProjectSemanticDispatch::execute_via_cold_build_helper`]) reads,
-/// through the same implementation. An instantiation, a `typeof` or a
-/// machinery-root flow return runs as a semantic task whose frames wait on
+/// through the same implementation. An instantiation, a `typeof`, a
+/// machinery-root conditional or call, or a callback-typing machinery-root
+/// flow return runs as a semantic task whose frames wait on
 /// another task's producer by returning `Pending`. Every other query enters
 /// the same cold-query admission and family-memo claim as the synchronous
 /// entry; where that claim meets another task's producer of the query, the
@@ -1801,7 +1802,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Whether `key` runs on the continuation runtime when it is evaluated
     /// outside any drive: an instantiation or a `typeof` read for its value
-    /// alone. A `typeof` whose value's type lowers from its authored value
+    /// alone, or a conditional/call evaluated as a machinery root. A `typeof`
+    /// whose value's type lowers from its authored value
     /// position (its annotation, its inferred initializer, its const-object
     /// shape) builds as a frame, so a chain of values each typed by the one
     /// before is a chain of frames; any other `typeof` completes in the
@@ -1809,6 +1811,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn drives_on_the_runtime(&self, key: &SemanticQueryKey) -> bool {
         let family = match key {
             SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. } => true,
+            SemanticQueryKey::Conditional { .. } | SemanticQueryKey::ResolveCall(_) => {
+                self.dispatch_txn.borrow().obligations.decides_root()
+            }
             // A function's return evaluated as a machinery root, outside
             // every open obligation, whose body types callbacks under a held
             // collector. Any other evaluates synchronously, its reads each

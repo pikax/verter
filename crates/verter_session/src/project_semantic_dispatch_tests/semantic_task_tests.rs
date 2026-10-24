@@ -571,7 +571,7 @@ fn a_conditional_retains_prepared_operands_across_a_dependency_wait() {
 /// poller or revisiting a completed sibling. Resume on another thread and
 /// compare the full read with an independent cold synchronous decision.
 #[test]
-fn a_distributed_conditional_retains_completed_members_across_a_wait() {
+fn semantic_poll_contract_distributed_conditional_retains_completed_members_across_a_wait() {
     use verter_type_engine::semantic_query::{
         CacheRead, DeclIdentity, InstantiateKey, LiteralValue, PayloadArray, SemanticNodeId,
     };
@@ -698,7 +698,7 @@ fn a_distributed_conditional_retains_completed_members_across_a_wait() {
         &view,
         Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
-    let dispatch = ProjectSemanticDispatch::new(&ctx);
+    let mut dispatch = ProjectSemanticDispatch::new(&ctx);
     let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let (key, held) = keys(&host, &dispatch);
@@ -707,36 +707,43 @@ fn a_distributed_conditional_retains_completed_members_across_a_wait() {
     let folds = || {
         ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::conditional_distributed_members_for_tests()
     };
-    let (answer, completed) = dispatch
-        .with_semantic_task_for_tests(key.clone(), |slot| {
-            let task = slot.as_mut().expect("the task is lent");
-            assert_send(task);
-            let (pending, before_release) = std::thread::scope(|scope| {
-                let (tx, rx) = std::sync::mpsc::sync_channel(1);
-                let task = &mut *task;
-                let waker = &waker;
-                let poller = scope.spawn(move || {
-                    let before = folds();
-                    let pending = task.poll_read_for_tests(waker);
-                    let _ = tx.send((pending, folds() - before));
-                });
-                let observed = rx.recv_timeout(std::time::Duration::from_secs(5));
-                // Release and join on timeout or assertion failure as well.
-                drop(lease);
-                poller
-                    .join()
-                    .expect("the initial poll returns after release");
-                observed.expect("a held distributed member must yield before release")
-            });
-            assert!(pending.is_pending(), "the member must suspend: {pending:?}");
-            assert_eq!(before_release, 1, "the first sibling already completed");
-            let before = folds();
-            let Poll::Ready(Ok(answer)) = task.poll_read_for_tests(&waker) else {
-                panic!("the released distributed conditional must answer");
-            };
-            (answer, before_release + folds() - before)
-        })
-        .expect("the cold conditional runs as a task");
+    let mut entry = dispatch.poll_query(key.clone());
+    let (pending, before_release) = std::thread::scope(|scope| {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = scope.spawn(move || {
+            let _ = released.recv_timeout(std::time::Duration::from_secs(5));
+            drop(lease);
+        });
+        let before = folds();
+        let pending = entry.poll(&waker);
+        let completed = folds() - before;
+        let _ = release.send(());
+        holder.join().expect("the held producer releases");
+        (pending, completed)
+    });
+    assert!(
+        pending.is_pending(),
+        "the held member must return Pending before release"
+    );
+    assert_eq!(before_release, 1, "the first sibling already completed");
+    let task = entry.task().expect("the pending decision owns its task");
+    assert_send(task);
+    let completed = std::thread::scope(|scope| {
+        let waker = &waker;
+        scope
+            .spawn(move || {
+                let before_folds = folds();
+                assert!(task.poll(waker).is_ready(), "the released task completes");
+                folds() - before_folds
+            })
+            .join()
+            .expect("the task resumes on another thread")
+    });
+    let Poll::Ready(answer) = entry.poll(&waker) else {
+        panic!("the completed task delivers through the production entry");
+    };
+    drop(entry);
+    let completed = before_release + completed;
     assert_eq!(completed, 2, "each member is folded exactly once");
     assert_eq!(display(&dispatch, answer.value()), expected);
     assert!(
@@ -2106,6 +2113,108 @@ mod semantic_poll_contract {
         assert_eq!(read_summary(&dispatch, &read), synchronous);
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(other);
+    }
+    /// A call root uses the same owned candidate walk as a nested call. A
+    /// parameter's held alias must yield before the relation consumes it.
+    #[test]
+    fn a_call_root_suspends_at_an_operand_dependency_and_delivers_its_call_value() {
+        use verter_type_engine::semantic_query::{
+            CallKind, DeclIdentity, InstantiateKey, LiteralValue, PayloadArray,
+        };
+        let keys = |host: &crate::VerterHost,
+                    dispatch: &ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >| {
+            let callee = dispatch.execute_read(dispatch.typeof_key_for(
+                ValueRootKey {
+                    scope: ScopeId::file(
+                        CALL_FILE,
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    ),
+                    name: "pick".into(),
+                },
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ));
+            let QueryResult::Value(callee) = callee.value() else {
+                panic!("the declared function has a callable type");
+            };
+            let graph = dispatch.graph_arc();
+            let one = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
+            let two = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(2.0)));
+            let boxed = graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: CALL_FILE.into(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: host.shallow_file_state(CALL_FILE).unwrap().whole_hash,
+                    decl_name: "Box".into(),
+                },
+                args: PayloadArray::from(vec![two]),
+            });
+            let call = super::super::call_resolve_tests::call_key_at(
+                dispatch,
+                CALL_FILE,
+                *callee,
+                CallKind::Call,
+                None,
+                vec![
+                    super::super::call_resolve_tests::eager(one),
+                    super::super::call_resolve_tests::eager(boxed),
+                ],
+            );
+            let held = SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(
+                    CALL_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    "Box",
+                ),
+                Arc::from([two]),
+                dispatch.instantiate_context_for(
+                    CALL_FILE,
+                    ProjectionReductionContext::structural_transit(),
+                ),
+            ));
+            (SemanticQueryKey::ResolveCall(Box::new(call)), held)
+        };
+        let synchronous = {
+            let host = call_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let _builder = dispatch.enter_construction_scope();
+            let (key, _) = keys(&host, &dispatch);
+            let read = dispatch.execute_via_cold_build_helper(key);
+            assert!(
+                matches!(
+                    read.value(),
+                    QueryResult::Value(SemanticQueryValue::ResolveCall(result))
+                        if matches!(result.as_ref(), verter_type_engine::semantic_query::ResolvedCallResult::Selected { .. })
+                ),
+                "the declared generic call selects: {:?}",
+                read.value()
+            );
+            read_summary(&dispatch, &read)
+        };
+        let host = call_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _builder = dispatch.enter_construction_scope();
+        let (key, held) = keys(&host, &dispatch);
+        let graph = host.project_type_store().semantic_graph();
+        let (other, lease) = hold_producer(&host, graph, held);
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let mut entry = dispatch.poll_query(key);
+        let first = while_held(lease, || entry.poll(&waker).is_pending());
+        assert!(
+            first,
+            "the call yields while its operand dependency is held"
+        );
+        let Poll::Ready(read) = entry.poll(&waker) else {
+            panic!("the call finishes once its operand is available");
+        };
+        drop(entry);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
         drop(other);
     }
 }

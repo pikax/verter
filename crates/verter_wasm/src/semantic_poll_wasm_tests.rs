@@ -61,6 +61,8 @@ enum Root {
     /// continuation runtime answering outside the type-node domain — while
     /// another task produces that same classification.
     Classification,
+    /// A conditional whose check reads the constant chain.
+    Conditional,
 }
 
 fn key_for<C: ResolverCapabilities>(
@@ -79,6 +81,31 @@ fn key_for<C: ResolverCapabilities>(
             },
             ProjectionReductionContext::published(ProjectionMode::Navigate),
         ),
+        Root::Conditional if held => key_for(dispatch, Root::Chain, true),
+        Root::Conditional => {
+            let graph = dispatch.graph_arc();
+            let check = graph.intern_node(SemanticNodeData::new_typeof(
+                ValueRootKey {
+                    scope: ScopeId::file(
+                        CHAIN_FILE,
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    ),
+                    name: "x3".into(),
+                },
+                Default::default(),
+                Arc::from([]),
+            ));
+            let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            SemanticQueryKey::Conditional {
+                check,
+                extends: string,
+                true_branch: number,
+                false_branch: string,
+                distributive: false,
+                pending: None,
+            }
+        }
         Root::Classification => SemanticQueryKey::ClassifyTruthinessDomain {
             subject: dispatch
                 .graph_arc()
@@ -104,6 +131,7 @@ fn summary(read: &CacheRead<QueryResult<SemanticQueryValue>>) -> (String, String
 fn poll_while_another_task_produces(root: Root) -> [(String, String, bool, bool); 2] {
     let host = chain_host();
     let mut dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph: &SemanticGraphStore = host.project_type_store().semantic_graph();
     let other = graph.task_registry_for_tests().register_task();
     let mut capture = ReadCapture::default();
@@ -164,5 +192,12 @@ fn semantic_poll_contract_a_root_off_the_runtime_yields_on_the_only_thread() {
         polled.0.contains("TruthinessDomain"),
         "the classification answers in its own value domain: {polled:?}"
     );
+    assert_eq!(polled, synchronous);
+}
+
+#[wasm_bindgen_test]
+fn semantic_poll_contract_a_conditional_dependency_yields_on_the_only_thread() {
+    let [polled, synchronous] = poll_while_another_task_produces(Root::Conditional);
+    assert!(polled.0.contains("TypeNode"), "the decision answers a type");
     assert_eq!(polled, synchronous);
 }
