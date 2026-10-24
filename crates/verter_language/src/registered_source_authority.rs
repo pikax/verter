@@ -442,29 +442,24 @@ pub(crate) fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+/// Linux, Android and browser wasm draw from the `getrandom` crate. On Linux
+/// and Android it issues the `getrandom(2)` system call itself (falling back
+/// to `/dev/urandom` on kernels without it), so no libc symbol is involved.
+/// Do not declare libc's `getrandom` here: std declares
+/// that symbol `extern_weak` and null-checks it, fat LTO merges every
+/// declaration of it into one that can stay weak, and a static musl link does
+/// not pull an archive member in for a weak reference. The unchecked call
+/// then jumps to address 0 at host construction.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    all(target_arch = "wasm32", target_os = "unknown")
+))]
 fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
-    unsafe extern "C" {
-        fn getrandom(buffer: *mut u8, length: usize, flags: u32) -> isize;
-    }
-
-    let mut filled = 0;
-    while filled < bytes.len() {
-        // SAFETY: the pointer addresses the unfilled suffix of the writable
-        // output slice, whose remaining length is passed exactly.
-        let read = unsafe { getrandom(bytes[filled..].as_mut_ptr(), bytes.len() - filled, 0) };
-        if read < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "getrandom returned no entropy",
-            ));
-        }
-        filled += read as usize;
-    }
-    Ok(())
+    getrandom::getrandom(bytes).map_err(|error| match error.raw_os_error() {
+        Some(code) => io::Error::from_raw_os_error(code),
+        None => io::Error::other(error.to_string()),
+    })
 }
 
 #[cfg(any(
@@ -530,11 +525,6 @@ fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
             "BCryptGenRandom failed with NTSTATUS {status:#x}"
         )))
     }
-}
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
-    getrandom::getrandom(bytes).map_err(|error| io::Error::other(error.to_string()))
 }
 
 #[cfg(not(any(
@@ -770,6 +760,34 @@ mod tests {
             )
             .expect("registered snapshot");
         (authority, snapshot)
+    }
+
+    /// The OS entropy source fills the whole buffer with output that is
+    /// neither constant nor repeated between calls, so a stubbed source or a
+    /// fill that stops short fails here instead of at host construction. The
+    /// fat-LTO musl link failure this source once had depends on the final
+    /// binary's link, which this test binary does not reproduce.
+    #[test]
+    fn fill_random_yields_non_constant_output() {
+        let mut first = [0_u8; 64];
+        let mut second = [0_u8; 64];
+        fill_random(&mut first).expect("first entropy fill");
+        fill_random(&mut second).expect("second entropy fill");
+        assert!(
+            first.iter().any(|byte| *byte != first[0]),
+            "64 entropy bytes are all {:#04x}",
+            first[0]
+        );
+        assert_ne!(first, second, "two entropy fills returned the same bytes");
+        assert!(
+            first[32..].iter().any(|byte| *byte != 0),
+            "the tail of the entropy buffer was left unfilled"
+        );
+        assert_ne!(
+            random_bytes::<16>().expect("namespace bytes"),
+            random_bytes::<16>().expect("namespace bytes"),
+            "two namespace mints drew the same bytes"
+        );
     }
 
     /// An overlay re-registered under a new view fingerprint retracts the
