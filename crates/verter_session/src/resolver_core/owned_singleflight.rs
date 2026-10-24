@@ -202,7 +202,6 @@ pub(super) enum CoreStep<K: Eq + Hash + Clone, V, E: Clone, F, R> {
     Produce(CoreProducer<K, V, E, F, R>),
     Value(SingleflightRunResult<V>),
 }
-type CorePoll<K, V, E, F, R> = Poll<Result<CoreStep<K, V, E, F, R>, ResolverFlightError<E>>>;
 
 pub(super) type CorePoll<K, V, E, F, R> =
     Poll<Result<CoreStep<K, V, E, F, R>, ResolverFlightError<E>>>;
