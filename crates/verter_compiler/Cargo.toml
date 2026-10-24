@@ -113,7 +113,7 @@ oxc_syntax = { workspace = true }
 oxc_diagnostics = "0.151.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
-oxc_sourcemap = "7.0.0"
+oxc_sourcemap = "9.0.0"
 base64 = "0.22.1"
 sha2 = { workspace = true }
 hex = "0.4.3"

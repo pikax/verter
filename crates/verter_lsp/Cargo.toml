@@ -65,7 +65,7 @@ oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 verter_parser = { path = "../verter_parser" }
 oxc_span = { workspace = true }
-oxc_sourcemap = "7.0.0"
+oxc_sourcemap = "9.0.0"
 blake3 = { workspace = true }
 tower-lsp-server = "0.23"
 # The `Service` trait the owned transport drives `LspService` through.
