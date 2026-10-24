@@ -444,8 +444,6 @@ impl NativeFs {
     }
 }
 
-/// Convert a canonical ID (forward slashes) to an OS path.
-#[cfg(not(target_arch = "wasm32"))]
 /// The probe one attribute query settles, or `None` where only
 /// [`std::fs::metadata`] answers it exactly.
 ///
@@ -455,7 +453,9 @@ impl NativeFs {
 /// module resolution. It answers only what it settles exactly as metadata
 /// would: a path whose final component is a reparse point (a symlink or
 /// junction metadata follows to its target), a path too long for the plain
-/// form, and any failure other than not-found are left to metadata.
+/// form, a path holding a NUL (metadata rejects it as invalid input, while
+/// the query would read only the part before it) and any failure other than
+/// not-found are left to metadata.
 #[cfg(windows)]
 fn attribute_probe(os_path: &str) -> Option<verter_session_query::resolution::PathProbe> {
     use windows_sys::Win32::Foundation::{
@@ -467,7 +467,7 @@ fn attribute_probe(os_path: &str) -> Option<verter_session_query::resolution::Pa
     };
     /// Below `MAX_PATH`, where the plain path form needs no long-path prefix.
     const PLAIN_PATH_LIMIT: usize = 248;
-    if os_path.len() >= PLAIN_PATH_LIMIT {
+    if os_path.len() >= PLAIN_PATH_LIMIT || os_path.contains('\0') {
         return None;
     }
     let wide: Vec<u16> = os_path.encode_utf16().chain(std::iter::once(0)).collect();
@@ -499,6 +499,8 @@ fn attribute_probe(os_path: &str) -> Option<verter_session_query::resolution::Pa
     })
 }
 
+/// Convert a canonical ID (forward slashes) to an OS path.
+#[cfg(not(target_arch = "wasm32"))]
 fn to_os_path(canonical_id: &str) -> String {
     if cfg!(windows) {
         canonical_id.replace('/', "\\")
@@ -594,6 +596,12 @@ mod tests {
         assert_eq!(probe(&target), PathProbe::Directory);
         assert_eq!(probe(&root.join("missing.ts")), PathProbe::Absent);
         assert_eq!(probe(&file.join("index.ts")), PathProbe::Absent);
+        let with_nul = format!("{}\0.d.ts", normalize_path_str(&file.to_string_lossy()));
+        assert_eq!(
+            fs.probe_path_live(&with_nul).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::InvalidInput),
+            "a path holding a NUL is invalid input, never the file before the NUL"
+        );
         assert_eq!(probe(&link), PathProbe::Directory);
         std::fs::remove_dir(&target).unwrap();
         assert_eq!(
