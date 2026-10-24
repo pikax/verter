@@ -1,6 +1,6 @@
 # Vendored copy of `libmimalloc-sys2` 0.1.63 (the sys crate behind
 # `mimalloc-safe` 0.1.67), patched in through the workspace `[patch.crates-io]`.
-# It differs from the published crate in three ways, and in nothing else:
+# It differs from the published crate in four ways, and in nothing else:
 #
 # - `c_src/mimalloc3` is upstream microsoft/mimalloc v3.5.3 (tag commit
 #   d4881d338125e1cb7c47ba4cfb398d6f7c0c8d45), trimmed to the files the build
@@ -9,14 +9,20 @@
 #   took upstream; v3.5.3 adds the bitmap chunk-count, aligned-free and arena
 #   fixes on top.
 # - The v2 tree is not vendored, so `build.rs` refuses a build without `v3`.
-# - `build.rs` compiles the MSVC path with `MI_DEBUG=0` in every Cargo profile
-#   instead of turning mimalloc's assertion checking on for dev builds.
+# - `build.rs` builds the release configuration in every Cargo profile, on
+#   both paths: the MSVC path defines `MI_DEBUG=0`, and the cmake path pins
+#   the Release build type with `MI_DEBUG=OFF`. The published crate turns
+#   assertion checking (MSVC) or error printing (cmake) on for dev builds.
+# - The option constants in `src/extended.rs` are generated from the v3
+#   `mi_option_e` enum; the published ones follow the v2 numbering, which
+#   diverges from v3. `verter_alloc`'s tests compare each against the header.
 #
 # Verify the C tree against upstream with:
 #   git diff --no-index <mimalloc v3.5.3 checkout>/src vendor/libmimalloc-sys2/c_src/mimalloc3/src
 # (and the same for include/, cmake/, CMakeLists.txt). Bump it by replacing
-# those files from a newer upstream tag and updating
-# `verter_alloc::MIMALLOC_VERSION`, whose test pins the linked version.
+# those files from a newer upstream tag, updating the option constants to the
+# new enum, and updating `verter_alloc::MIMALLOC_VERSION`, whose test pins the
+# linked version.
 [package]
 name = "libmimalloc-sys2"
 version = "0.1.63"

@@ -21,7 +21,6 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("target_os not defined!");
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("target_arch not defined!");
     let target_env = env::var("CARGO_CFG_TARGET_ENV").expect("target_env not defined!");
-    let profile = env::var("PROFILE").expect("profile not defined!");
 
     if target_os == "windows" && target_env == "msvc" {
         build_mimalloc_win();
@@ -57,11 +56,11 @@ fn main() {
             .define("MI_NO_OPT_ARCH", "ON");
     }
 
-    if profile == "debug" {
-        cmake_config
-            .define("MI_DEBUG_FULL", "ON")
-            .define("MI_SHOW_ERRORS", "ON");
-    }
+    // Verter: the release configuration in every Cargo profile, matching the
+    // MSVC path below. The CMake build type is pinned rather than derived from
+    // the profile's opt-level, and assertion checking is off, so a dev or test
+    // build runs the allocator a release build ships.
+    cmake_config.profile("Release").define("MI_DEBUG", "OFF");
 
     if target_env == "musl" {
         cmake_config
@@ -191,11 +190,10 @@ fn build_mimalloc_win() {
         build.define("MI_SKIP_COLLECT_ON_EXIT", "1");
     }
 
-    // Verter: the release configuration in every Cargo profile. A dev or test
-    // build then runs the allocator a release build ships instead of one with
-    // mimalloc's assertion checking (`MI_DEBUG=2`, the default when `NDEBUG`
-    // is unset) on every allocation. The cmake path above gets the same from
-    // its optimised CMake build type, which defines `MI_DEBUG=0`.
+    // Verter: the release configuration in every Cargo profile, matching the
+    // cmake path above. A dev or test build then runs the allocator a release
+    // build ships instead of one with mimalloc's assertion checking
+    // (`MI_DEBUG=2`, the default when `NDEBUG` is unset) on every allocation.
     build.define("MI_DEBUG_FULL", "0").define("MI_DEBUG", "0");
 
     // Force the .c source to be compiled as C++ (equivalent to mimalloc upstream's

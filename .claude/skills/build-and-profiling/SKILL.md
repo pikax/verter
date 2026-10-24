@@ -60,7 +60,7 @@ same worker, interleaved; keep receipts in the task report, not this document.
 - Native binary lives in `packages/native/dist/` after `build:native`
 - LSP binary lives in `target/<host-triple>/debug/verter-lsp` (or `.../release/verter-lsp` with `build:lsp:release`) — `pnpm run build:lsp`/`build:lsp:release` and `build-host.mjs` all pass an explicit `--target <host-triple>` (see the "one explicit host target" build-lane rule), so the output is triple-qualified, not the bare `target/debug/`/`target/release/` a plain `cargo build` (no `--target`) would produce
 - Clear Vite cache (`node_modules/.vite`) when rebuilding playground after native changes
-- Native binaries and the NAPI addon run on mimalloc v3 (`crates/verter_alloc`; the sys crate is vendored under `vendor/libmimalloc-sys2`), so their builds need a C compiler, plus CMake on macOS/Linux. `--features system-allocator` on an entry point builds it on the platform heap instead (docs/contributing/rust-setup.md → Allocator). `semantic_perf_probe` and the other bench bins keep the system allocator
+- Native binaries and the NAPI addon run on mimalloc v3 (`crates/verter_alloc`; the sys crate is vendored under `vendor/libmimalloc-sys2`), so their builds need a C compiler, plus CMake on macOS/Linux. `--features system-allocator` on an entry point builds it on the platform heap instead (docs/contributing/rust-setup.md → Allocator). The semantic-perf probes (`semantic_perf_probe`, `semantic_perf_probe_counted`) install the same allocator, the counted one wrapping it; `-p verter_bench --features system-allocator` builds them on the platform heap for an allocator comparison
 
 ### Canonical gate build telemetry
 

@@ -82,12 +82,6 @@ serde_json = { workspace = true }
 oxc_allocator = { workspace = true }
 tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
 
-# Node `dlopen`s the addon, so on Linux its mimalloc uses the local-dynamic
-# TLS model: initial-exec TLS in a late-loaded image can fail with "cannot
-# allocate memory in static TLS block" once the static TLS surplus is gone.
-[target.'cfg(target_os = "linux")'.dependencies]
-verter_alloc = { path = "../verter_alloc", features = ["local-dynamic-tls"] }
-
 [dev-dependencies]
 # The test-only Node addon `cases::real_js_host_request_boundary` loads. The
 # edge is here so cargo builds the addon whenever it builds this crate's

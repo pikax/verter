@@ -141,8 +141,10 @@
 //! cancels every case it had not yet scheduled. Build cost belongs in the
 //! build, not in a test body.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+use super::support::fixture_addon_library;
 
 /// Every case the JS program is expected to report on.
 ///
@@ -203,37 +205,6 @@ const EXPECTED_CASES: &[&str] = &[
     "typed-batch-refuses-an-invalid-priority",
     "typed-batch-ignores-an-inherited-priority",
 ];
-
-/// The fixture addon's shared library, as its platform names it.
-#[cfg(target_os = "windows")]
-const FIXTURE_LIBRARY: &str = "verter_napi_request_fixture.dll";
-#[cfg(target_os = "macos")]
-const FIXTURE_LIBRARY: &str = "libverter_napi_request_fixture.dylib";
-#[cfg(all(unix, not(target_os = "macos")))]
-const FIXTURE_LIBRARY: &str = "libverter_napi_request_fixture.so";
-
-/// Answers the fixture addon built beside this test binary.
-///
-/// An absent addon fails here, loudly and by name. It is never rebuilt:
-/// this suite is the only evidence that discriminates the repair, and a
-/// suite that can quietly produce its own input can also quietly produce
-/// the wrong one.
-fn fixture_addon_library() -> PathBuf {
-    let exe = std::env::current_exe().expect("a running test has a path");
-    let library = exe
-        .parent()
-        .expect("a test binary sits in a directory")
-        .join(FIXTURE_LIBRARY);
-    assert!(
-        library.exists(),
-        "the fixture addon must sit beside this test binary, at {}. \
-         `verter_napi` dev-depends on it so cargo builds it with this \
-         binary; a run from a nextest archive additionally needs the \
-         `archive.include` entry naming it in `.config/nextest.toml`.",
-        library.display()
-    );
-    library
-}
 
 /// The JS program driving the boundary.
 ///

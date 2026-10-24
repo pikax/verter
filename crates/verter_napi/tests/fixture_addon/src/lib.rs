@@ -12,11 +12,13 @@
 //! halves: which payloads are refused, and that two accepted payloads
 //! decoded to the same request.
 //!
-//! Two more entries report the image's allocator, which it inherits from
-//! `verter_napi` exactly as the shipped addon installs it, for
+//! The `fixture_*` entries report the image's allocator, which it inherits
+//! from `verter_napi` exactly as the shipped addon installs it, for
 //! `addon_allocator_coexistence`: whether this image's own mimalloc copy
-//! serves its Rust allocations, and the purge delay the load-time
-//! configuration set on that copy.
+//! serves its Rust allocations, the purge delay the load-time configuration
+//! set on that copy, and the addresses that show two loaded images are two
+//! copies (a static of the image, and a block its allocator holds, which only
+//! that image's mimalloc owns).
 //!
 //! ## Why `addon.VerterHost` works without being named here
 //!
@@ -62,4 +64,30 @@ pub fn fixture_mimalloc_serves_this_image() -> bool {
 #[napi]
 pub fn fixture_mimalloc_purge_delay_ms() -> Option<i64> {
     verter_alloc::purge_delay_ms()
+}
+
+/// The address of a static of this image, in decimal. Two loaded images
+/// report different addresses.
+#[napi]
+pub fn fixture_static_address() -> String {
+    static MARKER: u8 = 0;
+    (std::ptr::from_ref(&MARKER) as usize).to_string()
+}
+
+/// The address, in decimal, of a block this image allocated through its
+/// global allocator and keeps for the process's lifetime.
+#[napi]
+pub fn fixture_held_block_address() -> String {
+    static HELD: std::sync::OnceLock<Box<u64>> = std::sync::OnceLock::new();
+    let block = HELD.get_or_init(|| Box::new(0));
+    (std::ptr::from_ref::<u64>(block) as usize).to_string()
+}
+
+/// Whether this image's mimalloc owns `address` (decimal). Compares the
+/// address only; never dereferences it.
+#[napi]
+pub fn fixture_mimalloc_owns(address: String) -> bool {
+    address
+        .parse::<usize>()
+        .is_ok_and(|address| verter_alloc::mimalloc_owns(std::ptr::without_provenance(address)))
 }

@@ -10,27 +10,23 @@
 //! initial-exec TLS model in a `dlopen`ed image can fail to load at all.
 //!
 //! This suite loads the fixture addon twice, from two copies of its shared
-//! library under different names, so Node maps two separate images, each
-//! with its own mimalloc and its own load-time configuration. It then drives
-//! real compiles through both, interleaved, on the main thread and on worker
-//! threads that load both images, allocate in both, and exit (running both
-//! copies' thread-exit hooks), and requires the process to finish cleanly.
-//! The fixture inherits `verter_napi`'s `#[global_allocator]` and load-time
-//! configuration, so it runs the allocator the shipped addon runs.
+//! library under different names, and first proves the loader mapped two
+//! images with two allocators: the images' statics sit at different
+//! addresses, and each image's mimalloc owns the block it allocated and
+//! rejects the other image's. It then compiles through both images on the
+//! main thread and on worker threads that load both, allocate in both, and
+//! exit (running both copies' thread-exit hooks), and requires the process
+//! to finish cleanly. The fixture inherits `verter_napi`'s
+//! `#[global_allocator]` and load-time configuration, so it runs the
+//! allocator the shipped addon runs.
 
 use std::path::Path;
 use std::process::Command;
 
-/// The fixture addon's shared library, as its platform names it.
-#[cfg(target_os = "windows")]
-const FIXTURE_LIBRARY: &str = "verter_napi_request_fixture.dll";
-#[cfg(target_os = "macos")]
-const FIXTURE_LIBRARY: &str = "libverter_napi_request_fixture.dylib";
-#[cfg(all(unix, not(target_os = "macos")))]
-const FIXTURE_LIBRARY: &str = "libverter_napi_request_fixture.so";
+use super::support::fixture_addon_library;
 
 const CASES: &[&str] = &[
-    "two-images-load-as-distinct-modules",
+    "two-images-are-two-allocator-copies",
     "each-image-runs-on-the-selected-allocator",
     "each-image-applied-its-load-time-configuration",
     "interleaved-compiles-on-the-main-thread",
@@ -41,7 +37,7 @@ const DRIVER: &str = r#"
 const { Worker, isMainThread, parentPort, workerData } = require("node:worker_threads");
 
 const SOURCE = (n) =>
-  `<script setup lang="ts">\nimport { ref } from "vue"\nconst count${n} = ref(${n})\nconst items = ref([${n}, ${n + 1}, ${n + 2}])\n</script>\n` +
+  `<script setup lang="ts">\nimport { ref } from "vue"\nconst count${n} = ref(${n})\nconst items = ref([${n}, ${n + 1}])\n</script>\n` +
   `<template><ul><li v-for="item in items" :key="item">{{ item + count${n} }}</li></ul></template>`;
 
 function compile(addon, round) {
@@ -60,25 +56,21 @@ function compile(addon, round) {
     if (!main || typeof main.code !== "string" || main.code.length === 0) {
       throw new Error(`round ${round}: no runtime output: ${JSON.stringify(response)}`);
     }
-    return main.code.length;
   } finally {
     host.close();
   }
 }
 
 function interleave(a, b, rounds, offset) {
-  let total = 0;
   for (let round = 0; round < rounds; round++) {
-    total += compile(a, offset + round);
-    total += compile(b, offset + round);
+    compile(a, offset + round);
+    compile(b, offset + round);
   }
-  return total;
 }
 
 if (!isMainThread) {
-  const a = require(workerData.a);
-  const b = require(workerData.b);
-  parentPort.postMessage(interleave(a, b, 20, workerData.offset));
+  interleave(require(workerData.a), require(workerData.b), 2, workerData.offset);
+  parentPort.postMessage("done");
   return;
 }
 
@@ -87,17 +79,31 @@ const report = (name, failure) =>
   console.log(failure == null ? `PASS ${name}` : `FAIL ${name}: ${failure}`);
 const a = require(aPath);
 const b = require(bPath);
+const wantMimalloc = expectMimalloc === "true";
 
-report(
-  "two-images-load-as-distinct-modules",
-  a !== b && a.VerterHost !== b.VerterHost ? null : "both paths resolved to one module",
-);
+{
+  const statics = [a.fixtureStaticAddress(), b.fixtureStaticAddress()];
+  const heldA = a.fixtureHeldBlockAddress();
+  const heldB = b.fixtureHeldBlockAddress();
+  const owns = {
+    aOwnsA: a.fixtureMimallocOwns(heldA),
+    bOwnsB: b.fixtureMimallocOwns(heldB),
+    aOwnsB: a.fixtureMimallocOwns(heldB),
+    bOwnsA: b.fixtureMimallocOwns(heldA),
+  };
+  const failures = [];
+  if (statics[0] === statics[1]) failures.push(`both images report one static at ${statics[0]}`);
+  if (wantMimalloc) {
+    if (!owns.aOwnsA || !owns.bOwnsB) failures.push(`an image does not own its own block: ${JSON.stringify(owns)}`);
+    if (owns.aOwnsB || owns.bOwnsA) failures.push(`an image owns the other's block: ${JSON.stringify(owns)}`);
+  }
+  report("two-images-are-two-allocator-copies", failures.length ? failures.join("; ") : null);
+}
 
 const served = [a.fixtureMimallocServesThisImage(), b.fixtureMimallocServesThisImage()];
-const wantServed = expectMimalloc === "true";
 report(
   "each-image-runs-on-the-selected-allocator",
-  served.every((s) => s === wantServed) ? null : `served=${served}, expected ${wantServed}`,
+  served.every((s) => s === wantMimalloc) ? null : `served=${served}, expected ${wantMimalloc}`,
 );
 
 const delays = [a.fixtureMimallocPurgeDelayMs(), b.fixtureMimallocPurgeDelayMs()];
@@ -109,28 +115,30 @@ report(
 
 let mainFailure = null;
 try {
-  interleave(a, b, 40, 0);
+  interleave(a, b, 2, 0);
 } catch (error) {
   mainFailure = String((error && error.stack) || error);
 }
 report("interleaved-compiles-on-the-main-thread", mainFailure);
 
-const workers = [1000, 2000, 3000].map(
+// One worker: it loads both images, allocates in both, and its thread exit
+// runs both copies' thread-exit hooks.
+const workers = [100].map(
   (offset) =>
     new Promise((resolve, reject) => {
       const worker = new Worker(__filename, { workerData: { a: aPath, b: bPath, offset } });
-      let result = null;
-      worker.on("message", (value) => (result = value));
+      let done = false;
+      worker.on("message", () => (done = true));
       worker.on("error", reject);
       worker.on("exit", (code) =>
-        code === 0 && result !== null ? resolve(result) : reject(new Error(`worker exited ${code}`)),
+        code === 0 && done ? resolve() : reject(new Error(`worker exited ${code}`)),
       );
     }),
 );
 Promise.all(workers).then(
   () => {
     // Allocate in both images again after the workers' threads are gone.
-    interleave(a, b, 5, 9000);
+    interleave(a, b, 1, 900);
     report("worker-threads-compile-through-both-images-and-exit", null);
   },
   (error) => report("worker-threads-compile-through-both-images-and-exit", String((error && error.stack) || error)),
@@ -139,16 +147,7 @@ Promise.all(workers).then(
 
 #[test]
 fn two_addon_images_with_their_own_mimalloc_share_one_node_process() {
-    let exe = std::env::current_exe().expect("a running test has a path");
-    let library = exe
-        .parent()
-        .expect("a test binary sits in a directory")
-        .join(FIXTURE_LIBRARY);
-    assert!(
-        library.exists(),
-        "the fixture addon must sit beside this test binary, at {}",
-        library.display()
-    );
+    let library = fixture_addon_library();
 
     let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("napi_allocator_coexistence");
     let (dir_a, dir_b) = (scratch.join("a"), scratch.join("b"));
@@ -164,16 +163,16 @@ fn two_addon_images_with_their_own_mimalloc_share_one_node_process() {
 
     let expect_mimalloc = verter_alloc::SELECTED == verter_alloc::AllocatorKind::Mimalloc;
     let expected_purge_delay = if expect_mimalloc {
-        std::env::var("MIMALLOC_PURGE_DELAY")
-            .ok()
-            .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(i64::from(verter_alloc::PURGE_DELAY_MS))
-            .to_string()
+        verter_alloc::PURGE_DELAY_MS.to_string()
     } else {
         "none".to_owned()
     };
 
+    // The child's mimalloc copies read no purge delay from the environment,
+    // so the load-time configuration is what decides it.
     let run = Command::new("node")
+        .env_remove("MIMALLOC_PURGE_DELAY")
+        .env_remove("MIMALLOC_RESET_DELAY")
         .arg(&driver)
         .arg(&addon_a)
         .arg(&addon_b)

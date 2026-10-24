@@ -385,6 +385,30 @@ test("the sfc-projection verifiers run for their node trees and crates, not for 
   }
 });
 
+test("the vendored allocator sources run every lane that links a native entry point", () => {
+  for (const file of [
+    "vendor/libmimalloc-sys2/c_src/mimalloc3/src/alloc.c",
+    "vendor/libmimalloc-sys2/build.rs",
+  ]) {
+    const { impact, gates } = select([file]);
+    assert.equal(impact.everything, false, file);
+    for (const gate of [
+      "rust",
+      "native",
+      "native_artifact",
+      "vscode",
+      "dx",
+      "editor_lsp",
+      "editors",
+    ]) {
+      assert.equal(gates[gate], "true", `${file} → ${gate}`);
+    }
+    for (const gate of ["wasm", "wasm_artifact", "svelte_oracle"]) {
+      assert.equal(gates[gate], "false", `${file} → ${gate}`);
+    }
+  }
+});
+
 test("a script with no lane consumer runs the scripts' self-tests and nothing else", () => {
   assert.deepEqual(gatesOn(select(["scripts/perf-breakdown.mjs"]).gates), ["js"]);
 });
