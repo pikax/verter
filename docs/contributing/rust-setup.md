@@ -14,7 +14,7 @@ Guide for setting up Rust development for Verter.
   `cargo` in the repo. The pin exists in part because compile-contract `.stderr` fixtures byte-pin
   rustc's own diagnostic text; building on any other version reports failures that are not
   yours.
-- **wasm-bindgen CLI** for WASM glue generation: `cargo install wasm-bindgen-cli --version 0.2.122 --locked`
+- **wasm-bindgen CLI** for WASM glue generation: `cargo install wasm-bindgen-cli --version 0.2.129 --locked`
 
 Verify your installation — `rustc` must report the version in `rust-toolchain.toml`:
 

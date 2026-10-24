@@ -90,8 +90,8 @@ verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 hotpath = { version = "0.23", optional = true }
 blake3 = { workspace = true }
-bitflags = "2.11"
-memchr = "2.8.0"
+bitflags = "2.13"
+memchr = "2.8.3"
 # Arbitrary-precision integers for the Svelte client const-fold evaluator's BigInt
 # values (a faithful port of official `scope.evaluate`, where `NUMBER` includes
 # BigInt). Already a transitive dep via `oxc_ecmascript`; pinned directly here so
@@ -102,7 +102,7 @@ num-bigint = "0.4"
 # transitive dev-dep via criterion; pinned directly so the fold matches official.
 half = "2"
 rustc-hash = { workspace = true }
-smallvec = "1.15"
+smallvec = "1.16"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }

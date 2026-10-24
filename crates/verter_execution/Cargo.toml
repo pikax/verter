@@ -29,4 +29,4 @@ semantic-observe = []
 verter_debug_assert = { workspace = true }
 parking_lot = "0.12.5"
 rustc-hash = { workspace = true }
-smallvec = "1.15"
+smallvec = "1.16"

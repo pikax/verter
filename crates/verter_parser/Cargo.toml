@@ -37,9 +37,9 @@ verter_language = { path = "../verter_language", version = "0.0.1-beta.3" }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 hotpath = { version = "0.23", optional = true }
-memchr = "2.8.0"
+memchr = "2.8.3"
 rustc-hash = { workspace = true }
-smallvec = "1.15"
+smallvec = "1.16"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }

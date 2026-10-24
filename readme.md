@@ -297,7 +297,7 @@ source "$HOME/.cargo/env"
 # 2. Install wasm-bindgen CLI. The compiler version and the
 #    wasm32-unknown-unknown target are pinned in rust-toolchain.toml, so
 #    rustup installs both on the first cargo invocation in the repo.
-cargo install wasm-bindgen-cli --version 0.2.122 --locked
+cargo install wasm-bindgen-cli --version 0.2.129 --locked
 
 # 3. Install pnpm (if not already installed, requires Node.js 26 — see .nvmrc)
 corepack enable
@@ -322,7 +322,7 @@ pnpm package
 - **Rust** (for building native/WASM bindings) — install [rustup](https://rustup.rs/) only;
   `rust-toolchain.toml` pins the compiler version and the `wasm32-unknown-unknown` target,
   and rustup installs both on the first `cargo` invocation in the repo
-- **wasm-bindgen CLI** (for WASM builds) — `cargo install wasm-bindgen-cli --version 0.2.122 --locked`
+- **wasm-bindgen CLI** (for WASM builds) — `cargo install wasm-bindgen-cli --version 0.2.129 --locked`
 
 ### Commands
 

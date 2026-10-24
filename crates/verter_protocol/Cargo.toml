@@ -10,7 +10,7 @@ description = "Protocol Buffer transport schemas and encoders for Verter"
 publish = false
 
 [dependencies]
-prost = "0.14.3"
+prost = "0.14.4"
 serde = { workspace = true }
 serde_json = { workspace = true }
 verter_span = { path = "../verter_span" }
@@ -33,12 +33,12 @@ hashbrown = "0.15"
 ts-rs = "12"
 
 [build-dependencies]
-prost-build = "0.14.3"
-protoc-bin-vendored = "3.2.0"
+prost-build = "0.14.4"
+protoc-bin-vendored = "3.3.0"
 
 [dev-dependencies]
 static_assertions = "1.1.0"
 # Tier 1A — `component_meta_flags_audit.rs` parses the syn-AST of the
 # semantic crate to verify D123's `has_macro_failure` field shape.
 syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"] }
-quote = "1.0.45"
+quote = "1.0.47"

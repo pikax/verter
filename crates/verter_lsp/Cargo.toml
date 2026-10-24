@@ -37,9 +37,9 @@ semantic-observe = ["verter_session/semantic-observe", "verter_diagnostics/seman
 [dependencies]
 verter_resolution = { workspace = true }
 verter_session_query = { workspace = true }
-imbl = "7.0.1"
+imbl = "7.0.2"
 verter_execution = { path = "../verter_execution" }
-futures-util = "0.3.32"
+futures-util = "0.3.34"
 verter_debug_assert = { workspace = true }
 verter_session = { path = "../verter_session" }
 verter_language = { path = "../verter_language" }
@@ -72,7 +72,7 @@ tower-lsp-server = "0.23"
 tower-service = "0.3.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { version = "1.52", features = [
+tokio = { version = "1.54", features = [
   "rt",
   "rt-multi-thread",
   "macros",
@@ -87,7 +87,7 @@ tokio = { version = "1.52", features = [
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 dashmap = "6.2"
-glob = "0.3.3"
+glob = "0.3.4"
 lru = "0.18"
 parking_lot = "0.12.5"
 # Atomic temp-then-rename for the on-disk carrier-snapshot store (the §2.2
@@ -107,7 +107,7 @@ path = "src/main.rs"
 # only, activating `start_paused`/virtual-time control so deterministic tests
 # can prove "resolved via a signal, not a timer" as an exact virtual-clock
 # assertion instead of a wall-clock margin.
-tokio = { version = "1.52", features = ["test-util"] }
+tokio = { version = "1.54", features = ["test-util"] }
 verter_macro_dto = { path = "../verter_macro_dto" }
 # Test builds only: activates the snapshot-publication receipt seam a
 # `cfg(test)` on `verter_workspace` could not expose across crates.

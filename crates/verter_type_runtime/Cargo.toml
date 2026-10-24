@@ -20,14 +20,14 @@ path = "src/bin/verter_type_runtime_fake_engine.rs"
 required-features = ["test-fake-engine"]
 
 [dependencies]
-futures-util = "0.3.32"
+futures-util = "0.3.34"
 # The persistent map behind each query's O(1) delivered-surface snapshot.
-imbl = "7.0.1"
+imbl = "7.0.2"
 verter_debug_assert = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 parking_lot = "0.12.5"
-tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
+tokio = { version = "1.54", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
 tracing = "0.1.44"
 verter_span = { path = "../verter_span" }
 # The provider lifecycle epoch the hub mints for every serving incarnation.
@@ -55,7 +55,7 @@ tempfile = "3.27"
 # `test-util` provides the paused virtual clock (`#[tokio::test(start_paused = true)]`)
 # the resilient restart-interleaving tests use to drive respawn backoff
 # deterministically without any wall-clock sleep.
-tokio = { version = "1.52", features = [
+tokio = { version = "1.54", features = [
     "test-util",
     "macros",
     "rt",

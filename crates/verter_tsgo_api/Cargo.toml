@@ -29,7 +29,7 @@ verter_debug_assert = { workspace = true }
 # named-pipe (Windows) / Unix-domain-socket transport the `--api` ATTACH path
 # connects to (the server-minted pipe). Feature set otherwise matches the
 # workspace's other tokio consumers (verter_type_runtime / verter_napi).
-tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "rt-multi-thread", "macros", "net"] }
+tokio = { version = "1.54", features = ["io-util", "process", "sync", "time", "rt", "rt-multi-thread", "macros", "net"] }
 # Immutable overlay snapshot published lock-free to the sync FS-callback path.
 arc-swap = "1.9"
 # Non-async synchronization for the pending-request table + lane bookkeeping.
@@ -93,7 +93,7 @@ verter_test_support = { path = "../verter_test_support" }
 # tests can prove "fires at exactly its own bound" as an exact virtual-clock
 # assertion instead of a wall-clock margin. The [dependencies] tokio does not
 # include `test-util` (production must not activate it).
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time", "sync", "test-util"] }
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "time", "sync", "test-util"] }
 # Self dev-dependency: enables the `test-fake-engine` feature for THIS crate's
 # test builds only (cargo builds dev-dependencies when compiling tests), so the
 # fake engine bin exists for `cargo test` (CARGO_BIN_EXE_) while a default
