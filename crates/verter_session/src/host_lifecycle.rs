@@ -467,7 +467,16 @@ impl VerterHost {
     /// set, exacts are re-applied via `set_exact_resolutions` from
     /// preserved `cc.import_routes` so the workspace mirrors host
     /// bundler state.
-    pub(crate) fn integrate_scheduler_snapshot(&self, canonical_id: &str) -> bool {
+    ///
+    /// `eviction_epoch` is the file's eviction epoch when the load began.
+    /// If an eviction has landed since, the file stays evicted and this
+    /// returns `false`: the load may have read the content that eviction
+    /// replaced.
+    pub(crate) fn integrate_scheduler_snapshot(
+        &self,
+        canonical_id: &str,
+        eviction_epoch: u64,
+    ) -> bool {
         use crate::host_executor::HostSourceData;
 
         let snap = match self.scheduler.try_get_source(canonical_id) {
@@ -529,14 +538,19 @@ impl VerterHost {
         // set_import_dependencies before source was loaded. Cloning
         // here so we can re-apply to workspace below without holding the
         // entry lock.
-        let preserved_routes = {
+        // A file evicted again while this load ran stays evicted: the load
+        // may have read the content that eviction replaced.
+        let (preserved_routes, unevicted) = {
             let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
             let derived = derived_ref.value_mut();
             let preserved_routes = derived.import_routes.clone();
-            derived.evicted = false;
+            let unevicted = derived.eviction_epoch == eviction_epoch;
+            if unevicted {
+                derived.evicted = false;
+            }
             // derived.import_routes is NOT cleared (preserves bundler
             // pre-load route flow).
-            preserved_routes
+            (preserved_routes, unevicted)
         };
 
         self.update_alias_map(canonical_id, &old_aliases, &aliases);
@@ -568,7 +582,7 @@ impl VerterHost {
                 exact_resolutions,
             );
         }
-        true
+        unevicted
     }
 
     /// Clear compile caches (compile slots, template analysis, type
@@ -1325,7 +1339,7 @@ impl VerterHost {
             let derived = derived_ref.value_mut();
             derived.evicted = true;
             derived.evicted_whole_hash = pre_evict_hash;
-            derived.eviction_reload_started = false;
+            derived.eviction_epoch += 1;
             derived.cached_tsc_extract = None;
             derived.clear_raw_template_analysis();
             derived.cached_resolved_meta.clear();
@@ -1386,41 +1400,42 @@ impl VerterHost {
 
         use verter_scheduler::job::CompletionState;
 
-        // Evicted files must force the scheduler off any stale committed
-        // snapshot before a disk-backed reload is requested — once per
-        // eviction. The reset bumps the file's scheduler generation: a
-        // second reset by a caller racing this reload would supersede the
-        // load request another caller already submitted (that caller then
-        // reports the file unloadable) or retract the source another caller
-        // already integrated (that caller reports it loaded while the host
-        // holds none). The flag check, the reset and the flag write happen
-        // under one lock, so every racing caller submits its request after
-        // the single reset and joins the same load. A file that is not
-        // evicted takes no lock: only a reload races another reload.
-        let evicted_now = self
+        // An evicted file must move the scheduler off the snapshot its
+        // evicted content left behind before a disk-backed reload is
+        // requested, once per eviction. Until then that snapshot keeps the
+        // file addressable. The reset bumps the file's scheduler generation,
+        // so a second reset by a caller racing this reload would supersede
+        // the load another caller submitted, or retract the source it
+        // integrated. The file's reset lock orders racing callers: the first
+        // resets and records the eviction it reset for, and the rest find it
+        // reset and submit after it. An eviction landing after that record
+        // raises the eviction epoch above it, so its reload resets again.
+        let reset_lock = self
             .derived_raw_cache()
             .get(canonical_id)
-            .is_some_and(|d| d.evicted);
-        let (reload_from_workspace, pre_evict_hash) = if !evicted_now {
-            (false, None)
-        } else {
-            let _reset = self.eviction_reload_lock.lock();
-            let evicted = self
-                .derived_raw_cache()
-                .get(canonical_id)
-                .filter(|d| d.evicted)
-                .map(|d| (d.evicted_whole_hash, d.eviction_reload_started));
-            match evicted {
-                Some((pre_evict_hash, reload_started)) => {
-                    if !reload_started {
+            .map(|d| Arc::clone(&d.eviction_reset));
+        let (reload_from_workspace, pre_evict_hash, eviction_epoch) = {
+            let _reset = reset_lock.as_ref().map(|lock| lock.lock());
+            let observed = self.derived_raw_cache().get(canonical_id).map(|d| {
+                (
+                    d.evicted,
+                    d.evicted_whole_hash,
+                    d.eviction_epoch,
+                    d.eviction_reset_epoch,
+                )
+            });
+            match observed {
+                Some((true, pre_evict_hash, epoch, reset_epoch)) => {
+                    if reset_epoch < epoch {
                         self.scheduler.close_file(canonical_id);
                         if let Some(mut derived) = self.derived_raw_cache().get_mut(canonical_id) {
-                            derived.eviction_reload_started = true;
+                            derived.eviction_reset_epoch = derived.eviction_reset_epoch.max(epoch);
                         }
                     }
-                    (true, pre_evict_hash)
+                    (true, pre_evict_hash, epoch)
                 }
-                None => (false, None),
+                Some((false, _, epoch, _)) => (false, None, epoch),
+                None => (false, None, 0),
             }
         };
 
@@ -1483,7 +1498,7 @@ impl VerterHost {
         }
 
         let work_start = Instant::now();
-        let loaded = self.integrate_scheduler_snapshot(canonical_id);
+        let loaded = self.integrate_scheduler_snapshot(canonical_id, eviction_epoch);
         self.provenance
             .ensure_loaded_work_ns
             .fetch_add(work_start.elapsed().as_nanos() as u64, Relaxed);
