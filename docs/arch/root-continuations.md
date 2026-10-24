@@ -476,6 +476,46 @@ the service or host.
   the subscriber. Panic containment requires an unwinding target; the default
   wasm panic-abort target is checked for compilation rather than recovery.
 
+### Polled root queries
+
+`ThreadDispatch::poll_query(key)` begins a root query as a
+`SemanticQueryPoll`, the production entry a consumer that must not block
+drives a query through. It borrows its dispatcher exclusively and stays on
+the dispatcher's thread. `SemanticQueryPoll::poll` returns `Ready` with the
+read `execute_read` returns for the same key, or `Pending` once the query's
+semantic task waits on another task's producer that will wake the poller.
+The entry also implements `Future`.
+
+The entry and the synchronous entry run one implementation. An
+instantiation, a `typeof` or a machinery-root flow return enters as a
+driven root: the root's connected demand, its query level and the
+dispatcher operation it runs as are opened once and held across polls,
+because the request state they live on moves into the lent task until the
+task gives it back. The thread's execution scopes (audit attribution,
+construction scope, validity) are entered for each poll. `drive_query`
+blocks on the same root with the external-boundary driver. Any other query
+answers on its first poll through `execute_read` itself.
+
+While the entry is pending, `SemanticQueryPoll::task` lends its
+`SemanticTask`. The task is `Send` and has one exclusive poller, so it may
+be advanced to readiness on another thread with `SemanticTask::poll`. It
+keeps its root's delivery, and the entry delivers the delivery on its own
+thread at its next poll. Neither value exposes the dispatcher, the resolver
+capabilities or a blocking driver. Dropping a pending entry releases the
+task's frames, flights and waits, gives the request state back within the
+execution's scopes and then closes the root's operation.
+
+Contracts: `semantic_query_poll_consumer` (positive: poll the entry, advance
+its task on another thread), `semantic_task_no_blocking_driver` and
+`semantic_query_poll_no_dispatcher` (negative). Behaviour:
+`a_polled_root_query_suspends_resumes_elsewhere_and_reads_what_the_synchronous_entry_reads`
+and `a_polled_root_query_released_while_pending_leaves_nothing_open` in the
+session's semantic-task tests.
+
+The entry is only as non-blocking as the frames below it. A query a frame
+step evaluates in place still reaches the waits under
+[Boundaries that still block](#boundaries-that-still-block).
+
 ### Cache admission and publication
 
 Both artifact and query-candidate admission use one owned protocol. Artifact
@@ -542,45 +582,6 @@ above. Artifact and query-candidate cache consumers, semantic memo joins and
 semantic task driving belong to DISPATCH. META and COMPILE retain their
 traversal above those shared semantic operations. Host CPU batch coordination
 is the executor boundary; it is not another dependency service.
-
-### Polled root queries
-
-`ThreadDispatch::poll_query(key)` begins a root query as a
-`SemanticQueryPoll`, the production entry a consumer that must not block
-drives a query through. It borrows its dispatcher exclusively and stays on
-the dispatcher's thread. `SemanticQueryPoll::poll` returns `Ready` with the
-read `execute_read` returns for the same key, or `Pending` once the query's
-semantic task waits on another task's producer that will wake the poller.
-The entry also implements `Future`.
-
-The entry and the synchronous entry run one implementation. An
-instantiation, a `typeof` or a machinery-root flow return enters as a
-driven root: the root's connected demand, its query level and the
-dispatcher operation it runs as are opened once and held across polls,
-because the request state they live on moves into the lent task until the
-task gives it back. The thread's execution scopes (audit attribution,
-construction scope, validity) are entered for each poll. `drive_query`
-blocks on the same root with the external-boundary driver. Any other query
-answers on its first poll through `execute_read` itself.
-
-While the entry is pending, `SemanticQueryPoll::task` lends its
-`SemanticTask`. The task is `Send` and has one exclusive poller, so it may
-be advanced to readiness on another thread with `SemanticTask::poll`. It
-keeps its root's delivery, and the entry delivers the delivery on its own
-thread at its next poll. Neither value exposes the dispatcher, the resolver
-capabilities or a blocking driver. Dropping a pending entry releases the
-task's frames, flights and waits, gives the request state back within the
-execution's scopes and then closes the root's operation.
-
-Contracts: `semantic_query_poll_consumer` (positive: poll the entry, advance
-its task on another thread), `semantic_task_no_blocking_driver` and
-`semantic_query_poll_no_dispatcher` (negative). Behaviour:
-`a_polled_root_query_suspends_resumes_elsewhere_and_reads_what_the_synchronous_entry_reads`
-and `a_polled_root_query_released_while_pending_leaves_nothing_open` in the
-session's semantic-task tests.
-
-The entry is only as non-blocking as the frames below it. A query a frame
-step evaluates in place still reaches the waits listed next.
 
 ## Boundaries that still block
 

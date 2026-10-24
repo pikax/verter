@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 
 const PASS_FIXTURES: &[&str] = &[
     "owned_dependency_handoffs_are_send.rs",
-    "semantic_query_poll_consumer.rs",
     "no_typeexpr_good_carrier.rs",
     "no_storedspan_good_carrier.rs",
     "recursive_self_good_recursive_carrier.rs",
@@ -17,6 +16,7 @@ const PASS_FIXTURES: &[&str] = &[
     "public_owned_carriers_borrow_and_own.rs",
     "host_release_completion_in_production_build.rs",
     "work_observation_behavior.rs",
+    "semantic_query_poll_consumer.rs",
 ];
 
 fn workspace_root() -> PathBuf {
