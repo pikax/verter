@@ -13,7 +13,13 @@
 //! without `preserve_order`, so a `Value` map is a `BTreeMap`), an absent
 //! optional child written as `null`, a non-finite number as `null`, and a
 //! non-negative integer as unsigned. The encoder below writes its keys in
-//! that order by hand; the `type_expr_wire_golden` cases pin the bytes.
+//! that order by hand, making the same serializer calls a `Value` would
+//! (maps, `serialize_unit` for `null`, `serialize_u64` for a non-negative
+//! integer), so non-JSON serializers see the same shape too; the
+//! `type_expr_wire_golden` cases pin the bytes and the calls.
+//!
+//! Encoding recurses once per nested node, so it grows its stack on demand
+//! (`stacker`): a deeply nested type encodes on any thread.
 //!
 //! These impls live here so JSON transport remains separate from the core type
 //! definitions in `lib.rs`. The orphan rule permits `impl Serialize`/`impl
@@ -24,9 +30,17 @@ use crate::*;
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use std::sync::Arc;
 
+/// Stack kept free before encoding one more node; one level of the encoder
+/// uses a few KiB in an unoptimised build.
+const ENCODE_RED_ZONE: usize = 64 * 1024;
+/// Size of each stack segment added when the red zone is reached.
+const ENCODE_STACK_SEGMENT: usize = 1024 * 1024;
+
 impl Serialize for TypeExpr {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        encode_type_expr(self, serializer)
+        stacker::maybe_grow(ENCODE_RED_ZONE, ENCODE_STACK_SEGMENT, || {
+            encode_type_expr(self, serializer)
+        })
     }
 }
 
@@ -614,6 +628,15 @@ impl Serialize for Int {
     }
 }
 
+/// An integer written as its decimal string, without building the string.
+struct Decimal(u64);
+
+impl Serialize for Decimal {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&self.0)
+    }
+}
+
 /// A JSON array of the slice's items, each written through the encoder
 /// beside it.
 struct Many<'a, T, W>(&'a [T], fn(&'a T) -> W);
@@ -626,10 +649,6 @@ impl<'a, T, W: Serialize> Serialize for Many<'a, T, W> {
         }
         seq.end()
     }
-}
-
-fn arc_str(value: &Arc<str>) -> &str {
-    value
 }
 
 fn encode_type_expr<S: Serializer>(expr: &TypeExpr, serializer: S) -> Result<S::Ok, S::Error> {
@@ -720,7 +739,7 @@ fn encode_type_expr<S: Serializer>(expr: &TypeExpr, serializer: S) -> Result<S::
             type_arguments,
         } => object!(serializer;
             "kind" => "importType",
-            "qualifier" => &Many(&qualifier[..], arc_str),
+            "qualifier" => &qualifier[..],
             "specifier" => &**specifier,
             "typeArguments" => &type_arguments[..],
             "typeofQuery" => typeof_query,
@@ -826,7 +845,7 @@ fn encode_type_expr<S: Serializer>(expr: &TypeExpr, serializer: S) -> Result<S::
                 SyntheticCarrierSurfaceKind::SlotBinding => "slotBinding",
                 SyntheticCarrierSurfaceKind::Binding => "binding",
             },
-            "valueNode" => &key.value_node.to_string(),
+            "valueNode" => &Decimal(key.value_node),
         ),
         TypeExpr::Unknown(value) => object!(serializer;
             "kind" => "unknown",
@@ -862,21 +881,98 @@ impl Serialize for PropertyKeyJson<'_> {
                 "kind" => "number",
                 "value" => &Int(value.get()),
             ),
-            AuthoredPropertyKey::UniqueSymbol(identity) => {
-                // The identity is a derived struct; going through a `Value`
-                // writes its fields in sorted key order like every other
-                // object here. It holds no `TypeExpr`, so this tree is small.
-                let identity = serde_json::to_value(identity)
-                    .map_err(<S::Error as serde::ser::Error>::custom)?;
-                object!(serializer;
-                    "identity" => &identity,
-                    "kind" => "uniqueSymbol",
-                )
-            }
+            AuthoredPropertyKey::UniqueSymbol(identity) => object!(serializer;
+                "identity" => &ValueIdentityJson(identity),
+                "kind" => "uniqueSymbol",
+            ),
             AuthoredPropertyKey::Computed(expression) => object!(serializer;
                 "expression" => expression,
                 "kind" => "computed",
             ),
+        }
+    }
+}
+
+/// A unique-symbol key's declaration identity, written as the derived
+/// `Serialize` of [`ValueDeclIdentityPart`] lands in a `Value`: its field
+/// names in sorted order, the owner's unit-variant enums as their variant
+/// names, and the owner's `scope` only when it is not lexical.
+struct ValueIdentityJson<'a>(&'a ValueDeclIdentityPart);
+
+impl Serialize for ValueIdentityJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let identity = self.0;
+        object!(serializer;
+            "canonical_id" => identity.canonical_id.as_str(),
+            "member_path" => &identity.member_path[..],
+            "owner" => &OwnerJson(identity.owner),
+            "symbol" => identity.symbol.as_str(),
+        )
+    }
+}
+
+struct OwnerJson(TopLevelOwnerId);
+
+impl Serialize for OwnerJson {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let owner = self.0;
+        let scope = match owner.scope() {
+            OwnerDeclarationScope::Lexical => None,
+            OwnerDeclarationScope::GlobalAugmentation => Some("GlobalAugmentation"),
+        };
+        let mut map = serializer.serialize_map(Some(2 + usize::from(scope.is_some())))?;
+        map.serialize_entry(
+            "kind",
+            match owner.kind() {
+                TopLevelOwnerKind::Module => "Module",
+                TopLevelOwnerKind::Instance => "Instance",
+                TopLevelOwnerKind::Frontmatter => "Frontmatter",
+            },
+        )?;
+        map.serialize_entry("ordinal", &u64::from(owner.ordinal()))?;
+        if let Some(scope) = scope {
+            map.serialize_entry("scope", scope)?;
+        }
+        map.end()
+    }
+}
+
+/// The markers a property or method writes only when they differ from the
+/// default a missing field parses back as: `excessOrigin` unless
+/// `NonLiteral`, and `visibility` unless public (the
+/// marker-only-for-non-public hash scheme), so an all-public, non-literal
+/// surface carries neither key.
+struct MemberMarkers {
+    excess_origin: Option<&'static str>,
+    visibility: Option<&'static str>,
+}
+
+impl MemberMarkers {
+    fn of(visibility: MemberVisibility, excess_origin: ExcessPropertyOrigin) -> Self {
+        Self {
+            excess_origin: (excess_origin != ExcessPropertyOrigin::NonLiteral)
+                .then(|| excess_origin_wire_str(excess_origin)),
+            visibility: (!visibility.is_public()).then(|| visibility.as_wire_str()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        usize::from(self.excess_origin.is_some()) + usize::from(self.visibility.is_some())
+    }
+
+    /// `excessOrigin`, which sorts before every other member key.
+    fn write_leading<M: SerializeMap>(&self, map: &mut M) -> Result<(), M::Error> {
+        match self.excess_origin {
+            Some(excess_origin) => map.serialize_entry("excessOrigin", excess_origin),
+            None => Ok(()),
+        }
+    }
+
+    /// `visibility`, which sorts after every other member key.
+    fn write_trailing<M: SerializeMap>(&self, map: &mut M) -> Result<(), M::Error> {
+        match self.visibility {
+            Some(visibility) => map.serialize_entry("visibility", visibility),
+            None => Ok(()),
         }
     }
 }
@@ -887,28 +983,15 @@ impl Serialize for ObjectMemberJson<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self.0 {
             ObjectMember::Property(p) => {
-                // `visibility` is written ONLY when non-public, so an
-                // all-public surface's JSON carries no such key and a missing
-                // field parses back as `Public` (the marker-only-for-non-public
-                // hash scheme). `excessOrigin` likewise only when not
-                // `NonLiteral`, which a missing field parses back as.
-                let visibility = (!p.visibility.is_public()).then(|| p.visibility.as_wire_str());
-                let excess_origin = (p.excess_origin != ExcessPropertyOrigin::NonLiteral)
-                    .then(|| excess_origin_wire_str(p.excess_origin));
-                let len =
-                    5 + usize::from(visibility.is_some()) + usize::from(excess_origin.is_some());
-                let mut map = serializer.serialize_map(Some(len))?;
-                if let Some(excess_origin) = excess_origin {
-                    map.serialize_entry("excessOrigin", excess_origin)?;
-                }
+                let markers = MemberMarkers::of(p.visibility, p.excess_origin);
+                let mut map = serializer.serialize_map(Some(5 + markers.len()))?;
+                markers.write_leading(&mut map)?;
                 map.serialize_entry("key", &PropertyKeyJson(&p.key))?;
                 map.serialize_entry("memberKind", "property")?;
                 map.serialize_entry("optional", &p.optional)?;
                 map.serialize_entry("readonly", &p.readonly)?;
                 map.serialize_entry("ty", &p.ty)?;
-                if let Some(visibility) = visibility {
-                    map.serialize_entry("visibility", visibility)?;
-                }
+                markers.write_trailing(&mut map)?;
                 map.end()
             }
             ObjectMember::IndexSignature(idx) => object!(serializer;
@@ -927,15 +1010,9 @@ impl Serialize for ObjectMemberJson<'_> {
                 "memberKind" => "constructSignature",
             ),
             ObjectMember::Method(m) => {
-                let visibility = (!m.visibility.is_public()).then(|| m.visibility.as_wire_str());
-                let excess_origin = (m.excess_origin != ExcessPropertyOrigin::NonLiteral)
-                    .then(|| excess_origin_wire_str(m.excess_origin));
-                let len =
-                    4 + usize::from(visibility.is_some()) + usize::from(excess_origin.is_some());
-                let mut map = serializer.serialize_map(Some(len))?;
-                if let Some(excess_origin) = excess_origin {
-                    map.serialize_entry("excessOrigin", excess_origin)?;
-                }
+                let markers = MemberMarkers::of(m.visibility, m.excess_origin);
+                let mut map = serializer.serialize_map(Some(4 + markers.len()))?;
+                markers.write_leading(&mut map)?;
                 map.serialize_entry(
                     "function",
                     &FunctionJson {
@@ -946,9 +1023,7 @@ impl Serialize for ObjectMemberJson<'_> {
                 map.serialize_entry("key", &PropertyKeyJson(&m.key))?;
                 map.serialize_entry("memberKind", "method")?;
                 map.serialize_entry("optional", &m.optional)?;
-                if let Some(visibility) = visibility {
-                    map.serialize_entry("visibility", visibility)?;
-                }
+                markers.write_trailing(&mut map)?;
                 map.end()
             }
             ObjectMember::Spread(spread) => object!(serializer;

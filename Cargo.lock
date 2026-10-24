@@ -4228,6 +4228,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "stacker",
  "static_assertions",
  "verter_ecma",
  "verter_no_storedspan",

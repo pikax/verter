@@ -167,8 +167,10 @@ mod canary_type_expr_json_work_is_linear_in_output {
     use std::sync::Arc;
 
     use verter_type_expr::{
-        FunctionExpr, FunctionParam, MappedModifier, ObjectExpr, ObjectMember, ObjectProperty,
-        PrimitiveName, TupleElement, TypeExpr, TypeParam,
+        AuthoredPropertyKey, FunctionExpr, FunctionParam, MappedModifier, ObjectExpr, ObjectMember,
+        ObjectProperty, OwnedSlice, OwnedStr, PrimitiveName, SyntheticCarrierKey,
+        SyntheticCarrierSurfaceKind, TopLevelOwnerId, TupleElement, TypeExpr, TypeParam,
+        ValueDeclIdentityPart,
     };
 
     use super::{alloc_bytes, alloc_count};
@@ -331,6 +333,54 @@ mod canary_type_expr_json_work_is_linear_in_output {
     #[test]
     fn encoding_a_nested_heritage_shape_into_a_sized_buffer_allocates_nothing() {
         assert_streams("heritage", heritage);
+    }
+
+    /// Unique-symbol keys (a declaration identity with a non-lexical owner
+    /// and a member path) and synthetic slot carriers (a numeric node id
+    /// written as a decimal string) are written without scratch either.
+    #[test]
+    fn encoding_unique_symbol_keys_and_slot_carriers_into_a_sized_buffer_allocates_nothing() {
+        assert_streams("keyed", keyed);
+    }
+
+    fn keyed(depth: usize) -> TypeExpr {
+        let inner = if depth == 0 {
+            string()
+        } else {
+            keyed(depth - 1)
+        };
+        let identity = ValueDeclIdentityPart {
+            canonical_id: OwnedStr::from("/src/keys.ts"),
+            owner: TopLevelOwnerId::module(3).global_augmentation(),
+            symbol: OwnedStr::from(format!("token{depth}").as_str()),
+            member_path: OwnedSlice::from(
+                vec!["a".to_string(), "b".to_string()].into_boxed_slice(),
+            ),
+        };
+        let carrier = SyntheticCarrierKey {
+            scope_canonical_id: OwnedStr::from("/owner.vue"),
+            surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+            slot_name: Some(OwnedStr::from("default")),
+            binding_name: OwnedStr::from("row"),
+            value_node: u64::MAX - depth as u64,
+        };
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
+            properties: vec![
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                    AuthoredPropertyKey::UniqueSymbol(identity),
+                    inner,
+                    false,
+                    false,
+                )),
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                    "slot".into(),
+                    TypeExpr::SyntheticSlotBinding(Arc::new(carrier)),
+                    false,
+                    false,
+                )),
+            ],
+        }))
     }
 
     /// The `serde_json::Value` form builds one node per output node, so the

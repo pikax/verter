@@ -4,12 +4,16 @@
 //! session consumers and stored in the oracle snapshots, so its exact bytes
 //! are a contract: field names, the sorted key order, which optional fields
 //! are written as `null` and which are left out, and how numbers and strings
-//! are written. A corpus covering every variant, every member kind and every
-//! optional-field case is serialized and compared line by line with the
-//! committed golden file.
+//! are written. A corpus covering every variant, every member kind, every
+//! property key and owner kind, and both sides of every null-or-omitted
+//! field is serialized and compared line by line with the committed golden
+//! file. The golden file is the contract: its lines were written by the
+//! `Value`-building encoder this one replaced, and the serializer calls the
+//! encoder makes are checked against the calls each golden line's JSON value
+//! makes, so non-JSON serializers see the same shape.
 //!
-//! The `serde_json::Value` form ([`TypeExpr::to_json_value`]) must write the
-//! same bytes, and must decode back to the node it came from.
+//! The `serde_json::Value` form ([`TypeExpr::to_json_value`]) writing the same
+//! bytes and decoding back to its node is a consistency check only.
 
 use std::sync::Arc;
 
@@ -94,11 +98,24 @@ fn predicate(subject: TypePredicateSubject, asserts: bool, ty: Option<TypeExpr>)
 }
 
 fn unique_symbol_key() -> verter_type_expr::TypeAuthoredPropertyKey {
+    unique_symbol_key_of(TopLevelOwnerId::ordinary_file(), &["inner"])
+}
+
+fn unique_symbol_key_of(
+    owner: TopLevelOwnerId,
+    member_path: &[&str],
+) -> verter_type_expr::TypeAuthoredPropertyKey {
     AuthoredPropertyKey::UniqueSymbol(ValueDeclIdentityPart {
         canonical_id: OwnedStr::from("/src/keys.ts"),
-        owner: TopLevelOwnerId::ordinary_file(),
+        owner,
         symbol: OwnedStr::from("token"),
-        member_path: OwnedSlice::from(vec!["inner".to_string()].into_boxed_slice()),
+        member_path: OwnedSlice::from(
+            member_path
+                .iter()
+                .map(|segment| segment.to_string())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ),
     })
 }
 
@@ -390,6 +407,28 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
         }
     }
     v.push(("object-member-markers", object(false, markers)));
+    v.push((
+        "object-unique-symbol-owners",
+        object(
+            false,
+            [
+                TopLevelOwnerId::module(3).global_augmentation(),
+                TopLevelOwnerId::instance(1),
+                TopLevelOwnerId::frontmatter(0),
+            ]
+            .into_iter()
+            .zip([&[][..], &["a", "b"][..], &["c"][..]])
+            .map(|(owner, path)| {
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                    unique_symbol_key_of(owner, path),
+                    string(),
+                    false,
+                    false,
+                ))
+            })
+            .collect(),
+        ),
+    ));
 
     // Functions: return present and absent, type parameters with every
     // optional part, predicates over a parameter and over `this`, abstract
@@ -461,6 +500,12 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
             predicate(TypePredicateSubject::This, true, None).with_abstract(true),
         )),
     ));
+    v.push((
+        "constructor-type-abstract-no-predicate",
+        TypeExpr::ConstructorType(Arc::new(
+            function(Vec::new(), Some(TypeExpr::named("T"))).with_abstract(true),
+        )),
+    ));
 
     v.push((
         "ref",
@@ -505,6 +550,14 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
             default: Some(arc(string())),
             is_const: true,
         }),
+    ));
+    v.push((
+        "type-parameter-constraint",
+        TypeExpr::TypeParameter(type_param("C", Some(TypeExpr::named("Base")), None)),
+    ));
+    v.push((
+        "type-parameter-default",
+        TypeExpr::TypeParameter(type_param("D", None, Some(number()))),
     ));
     v.push(("keyof", TypeExpr::KeyOf(arc(TypeExpr::named("Foo")))));
     v.push((
@@ -705,6 +758,370 @@ fn every_wire_form_matches_the_golden_bytes() {
     }
 }
 
+/// The serializer calls the encoder makes are the calls the JSON value of
+/// its golden line makes: maps and sequences with their lengths, the same
+/// keys, `serialize_u64` for a non-negative integer and `serialize_i64` for
+/// a negative one, `serialize_unit` for `null` (not `serialize_none`) and
+/// `serialize_str` for strings. JSON writes the same bytes for several of
+/// these, but a non-JSON serializer such as `serde_wasm_bindgen` does not.
+#[test]
+fn every_wire_form_makes_the_serializer_calls_of_its_json_value() {
+    let corpus = corpus();
+    for ((label, expr), line) in corpus.iter().zip(GOLDEN.lines()) {
+        let (_, json) = line
+            .split_once('\t')
+            .expect("a golden line is `label<TAB>json`");
+        let golden: serde_json::Value = serde_json::from_str(json).expect("a golden line is JSON");
+        assert_eq!(
+            record(expr),
+            record(&golden),
+            "{label}: the encoder's serializer calls differ from its JSON value's"
+        );
+    }
+
+    let keyed = object(
+        false,
+        [0, 42, -3]
+            .into_iter()
+            .map(|n| {
+                ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                    number_key(n),
+                    string(),
+                    false,
+                    false,
+                ))
+            })
+            .collect(),
+    );
+    let calls = record(&keyed);
+    for expected in ["u64(0)", "u64(42)", "i64(-3)"] {
+        assert!(
+            calls.iter().any(|call| call == expected),
+            "{expected} in {calls:?}"
+        );
+    }
+    let nan = record(&TypeExpr::Literal(LiteralValue::Number(f64::NAN)));
+    assert!(
+        nan.iter().any(|call| call == "unit"),
+        "NaN is written as unit: {nan:?}"
+    );
+    assert!(
+        !nan.iter().any(|call| call == "f64"),
+        "NaN is never an f64: {nan:?}"
+    );
+    let unlabeled = record(&nested_tuple(0));
+    assert!(
+        !unlabeled.iter().any(|call| call == "none"),
+        "{unlabeled:?}"
+    );
+}
+
+/// A deeply nested type encodes on a thread with a small stack.
+#[test]
+fn a_deeply_nested_type_encodes_on_a_one_mebibyte_stack() {
+    const DEPTH: usize = 2000;
+    let mut tuple = string();
+    let mut conditional = string();
+    for _ in 0..DEPTH {
+        tuple = TypeExpr::Tuple {
+            elements: Arc::from(vec![TupleElement {
+                label: None,
+                ty: tuple,
+                optional: false,
+                rest: false,
+            }]),
+            readonly: false,
+        };
+        conditional = TypeExpr::Conditional {
+            check: arc(conditional),
+            extends: arc(string()),
+            true_type: arc(string()),
+            false_type: arc(number()),
+        };
+    }
+    let encoded = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || [encode(&tuple), encode(&conditional)])
+        .expect("spawn")
+        .join()
+        .expect("encoding a deep type does not overflow the stack");
+    for json in encoded {
+        assert!(json.matches('{').count() > DEPTH, "every level is written");
+    }
+}
+
+fn record<T: serde::Serialize + ?Sized>(value: &T) -> Vec<String> {
+    let mut recorder = Recorder::default();
+    value
+        .serialize(&mut recorder)
+        .expect("recording never fails");
+    recorder.0
+}
+
+/// A serializer that records the name of every call it receives.
+#[derive(Default)]
+struct Recorder(Vec<String>);
+
+#[derive(Debug)]
+struct RecordError(String);
+
+impl std::fmt::Display for RecordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RecordError {}
+
+impl serde::ser::Error for RecordError {
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        Self(msg.to_string())
+    }
+}
+
+impl Recorder {
+    fn push(&mut self, call: String) -> Result<(), RecordError> {
+        self.0.push(call);
+        Ok(())
+    }
+}
+
+impl serde::Serializer for &mut Recorder {
+    type Ok = ();
+    type Error = RecordError;
+    type SerializeSeq = Self;
+    type SerializeTuple = Self;
+    type SerializeTupleStruct = Self;
+    type SerializeTupleVariant = Self;
+    type SerializeMap = Self;
+    type SerializeStruct = Self;
+    type SerializeStructVariant = Self;
+
+    fn serialize_bool(self, v: bool) -> Result<(), RecordError> {
+        self.push(format!("bool({v})"))
+    }
+    fn serialize_i8(self, v: i8) -> Result<(), RecordError> {
+        self.push(format!("i8({v})"))
+    }
+    fn serialize_i16(self, v: i16) -> Result<(), RecordError> {
+        self.push(format!("i16({v})"))
+    }
+    fn serialize_i32(self, v: i32) -> Result<(), RecordError> {
+        self.push(format!("i32({v})"))
+    }
+    fn serialize_i64(self, v: i64) -> Result<(), RecordError> {
+        self.push(format!("i64({v})"))
+    }
+    fn serialize_u8(self, v: u8) -> Result<(), RecordError> {
+        self.push(format!("u8({v})"))
+    }
+    fn serialize_u16(self, v: u16) -> Result<(), RecordError> {
+        self.push(format!("u16({v})"))
+    }
+    fn serialize_u32(self, v: u32) -> Result<(), RecordError> {
+        self.push(format!("u32({v})"))
+    }
+    fn serialize_u64(self, v: u64) -> Result<(), RecordError> {
+        self.push(format!("u64({v})"))
+    }
+    fn serialize_f32(self, _: f32) -> Result<(), RecordError> {
+        self.push("f32".into())
+    }
+    // The value is left out: a golden float parsed back from its decimal
+    // text need not be bit-identical, and the call is what is compared.
+    fn serialize_f64(self, _: f64) -> Result<(), RecordError> {
+        self.push("f64".into())
+    }
+    fn serialize_char(self, v: char) -> Result<(), RecordError> {
+        self.push(format!("char({v:?})"))
+    }
+    fn serialize_str(self, v: &str) -> Result<(), RecordError> {
+        self.push(format!("str({v:?})"))
+    }
+    fn serialize_bytes(self, _: &[u8]) -> Result<(), RecordError> {
+        self.push("bytes".into())
+    }
+    fn serialize_none(self) -> Result<(), RecordError> {
+        self.push("none".into())
+    }
+    fn serialize_some<T: serde::Serialize + ?Sized>(self, value: &T) -> Result<(), RecordError> {
+        self.push("some".into())?;
+        value.serialize(self)
+    }
+    fn serialize_unit(self) -> Result<(), RecordError> {
+        self.push("unit".into())
+    }
+    fn serialize_unit_struct(self, name: &'static str) -> Result<(), RecordError> {
+        self.push(format!("unit_struct({name})"))
+    }
+    fn serialize_unit_variant(
+        self,
+        name: &'static str,
+        _: u32,
+        variant: &'static str,
+    ) -> Result<(), RecordError> {
+        self.push(format!("unit_variant({name}::{variant})"))
+    }
+    fn serialize_newtype_struct<T: serde::Serialize + ?Sized>(
+        self,
+        name: &'static str,
+        value: &T,
+    ) -> Result<(), RecordError> {
+        self.push(format!("newtype_struct({name})"))?;
+        value.serialize(self)
+    }
+    fn serialize_newtype_variant<T: serde::Serialize + ?Sized>(
+        self,
+        name: &'static str,
+        _: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<(), RecordError> {
+        self.push(format!("newtype_variant({name}::{variant})"))?;
+        value.serialize(self)
+    }
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self, RecordError> {
+        self.push(format!("seq({len:?})"))?;
+        Ok(self)
+    }
+    fn serialize_tuple(self, len: usize) -> Result<Self, RecordError> {
+        self.push(format!("tuple({len})"))?;
+        Ok(self)
+    }
+    fn serialize_tuple_struct(self, name: &'static str, len: usize) -> Result<Self, RecordError> {
+        self.push(format!("tuple_struct({name}, {len})"))?;
+        Ok(self)
+    }
+    fn serialize_tuple_variant(
+        self,
+        name: &'static str,
+        _: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self, RecordError> {
+        self.push(format!("tuple_variant({name}::{variant}, {len})"))?;
+        Ok(self)
+    }
+    fn serialize_map(self, len: Option<usize>) -> Result<Self, RecordError> {
+        self.push(format!("map({len:?})"))?;
+        Ok(self)
+    }
+    fn serialize_struct(self, name: &'static str, len: usize) -> Result<Self, RecordError> {
+        self.push(format!("struct({name}, {len})"))?;
+        Ok(self)
+    }
+    fn serialize_struct_variant(
+        self,
+        name: &'static str,
+        _: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self, RecordError> {
+        self.push(format!("struct_variant({name}::{variant}, {len})"))?;
+        Ok(self)
+    }
+}
+
+impl serde::ser::SerializeSeq for &mut Recorder {
+    type Ok = ();
+    type Error = RecordError;
+    fn serialize_element<T: serde::Serialize + ?Sized>(
+        &mut self,
+        v: &T,
+    ) -> Result<(), RecordError> {
+        v.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), RecordError> {
+        self.push("end".into())
+    }
+}
+
+impl serde::ser::SerializeTuple for &mut Recorder {
+    type Ok = ();
+    type Error = RecordError;
+    fn serialize_element<T: serde::Serialize + ?Sized>(
+        &mut self,
+        v: &T,
+    ) -> Result<(), RecordError> {
+        v.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), RecordError> {
+        self.push("end".into())
+    }
+}
+
+impl serde::ser::SerializeTupleStruct for &mut Recorder {
+    type Ok = ();
+    type Error = RecordError;
+    fn serialize_field<T: serde::Serialize + ?Sized>(&mut self, v: &T) -> Result<(), RecordError> {
+        v.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), RecordError> {
+        self.push("end".into())
+    }
+}
+
+impl serde::ser::SerializeTupleVariant for &mut Recorder {
+    type Ok = ();
+    type Error = RecordError;
+    fn serialize_field<T: serde::Serialize + ?Sized>(&mut self, v: &T) -> Result<(), RecordError> {
+        v.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), RecordError> {
+        self.push("end".into())
+    }
+}
+
+impl serde::ser::SerializeMap for &mut Recorder {
+    type Ok = ();
+    type Error = RecordError;
+    fn serialize_key<T: serde::Serialize + ?Sized>(&mut self, key: &T) -> Result<(), RecordError> {
+        self.push("key".into())?;
+        key.serialize(&mut **self)
+    }
+    fn serialize_value<T: serde::Serialize + ?Sized>(&mut self, v: &T) -> Result<(), RecordError> {
+        v.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), RecordError> {
+        self.push("end".into())
+    }
+}
+
+impl serde::ser::SerializeStruct for &mut Recorder {
+    type Ok = ();
+    type Error = RecordError;
+    fn serialize_field<T: serde::Serialize + ?Sized>(
+        &mut self,
+        key: &'static str,
+        v: &T,
+    ) -> Result<(), RecordError> {
+        self.push(format!("field({key})"))?;
+        v.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), RecordError> {
+        self.push("end".into())
+    }
+}
+
+impl serde::ser::SerializeStructVariant for &mut Recorder {
+    type Ok = ();
+    type Error = RecordError;
+    fn serialize_field<T: serde::Serialize + ?Sized>(
+        &mut self,
+        key: &'static str,
+        v: &T,
+    ) -> Result<(), RecordError> {
+        self.push(format!("field({key})"))?;
+        v.serialize(&mut **self)
+    }
+    fn end(self) -> Result<(), RecordError> {
+        self.push("end".into())
+    }
+}
+
+/// A consistency check, not the contract: the `Value` form is the streaming
+/// encoding collected into a tree, so it agrees with the encoder by
+/// construction. The golden file above is what pins the wire form.
 #[test]
 fn the_value_form_writes_the_same_bytes_and_decodes_to_the_same_node() {
     for (label, expr) in corpus() {
