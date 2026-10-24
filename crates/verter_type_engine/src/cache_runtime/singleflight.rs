@@ -942,6 +942,7 @@ where
     let policy = ArtifactAdmissionPolicy {
         map,
         map_key,
+        stale_entry: None,
         validate,
         compute: Some(compute),
         project: Some(project),
@@ -976,6 +977,7 @@ struct ArtifactAdmissionPolicy<
 > {
     map: Map,
     map_key: MapK,
+    stale_entry: Option<Arc<Entry>>,
     validate: Validate,
     compute: Option<Compute>,
     project: Option<Project>,
@@ -1030,6 +1032,17 @@ where
             if let Some(value) = (self.validate)(&entry) {
                 return Some(value);
             }
+            // Cleanup takes the lifecycle fence and belongs to external work.
+            // Keep the exact identity so it cannot evict a later publication.
+            self.stale_entry = Some(entry);
+        }
+        None
+    }
+    fn retry_failure(&self, _: InflightFailureKind) -> bool {
+        false
+    }
+    fn produce(&mut self, slot: &Arc<InflightSlot>) -> Option<V> {
+        if let Some(entry) = self.stale_entry.take() {
             remove_published_entry_with_cleanup(
                 &self.map,
                 &self.map_key,
@@ -1038,12 +1051,6 @@ where
                 self.publish_fence.as_deref(),
             );
         }
-        None
-    }
-    fn retry_failure(&self, _: InflightFailureKind) -> bool {
-        false
-    }
-    fn produce(&mut self, slot: &Arc<InflightSlot>) -> Option<V> {
         let map = &*self.map;
         let map_key = &self.map_key;
         let compute = &mut self.compute;
@@ -1340,6 +1347,7 @@ where
         ArtifactAdmissionPolicy {
             map,
             map_key,
+            stale_entry: None,
             validate,
             compute: Some(compute),
             project: Some(project),

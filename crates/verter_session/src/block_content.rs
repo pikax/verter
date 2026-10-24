@@ -28,7 +28,10 @@ use crate::VerterHost;
 /// admitted artifacts live in [`BlockContentState`].
 pub(crate) struct BlockContentHostLane {
     pub(crate) state: Shared<BlockContentState>,
-    pub(crate) admission_fence: parking_lot::Mutex<()>,
+    // Ingress may synchronously load another ambient contributor. Keep that
+    // nested integration in the same publication turn while excluding writers
+    // on other threads.
+    pub(crate) admission_fence: parking_lot::ReentrantMutex<()>,
     pub(crate) correlation_counter: std::sync::atomic::AtomicU64,
     /// Test-only seam fired after validation and before publication for
     /// deterministic owner-publication races. **Compiled out in
@@ -42,7 +45,7 @@ impl Default for BlockContentHostLane {
     fn default() -> Self {
         Self {
             state: default_shared(BlockContentState::default()),
-            admission_fence: parking_lot::Mutex::new(()),
+            admission_fence: parking_lot::ReentrantMutex::new(()),
             correlation_counter: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             admission_seam_hook: parking_lot::Mutex::new(None),

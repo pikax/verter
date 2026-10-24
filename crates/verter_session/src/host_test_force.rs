@@ -50,6 +50,10 @@ pub(crate) struct TestForceKnobs {
     /// Invoked without a derived-state guard so the hook may evict or upsert.
     #[cfg(test)]
     pub(crate) host_load_publish_seam_hook: SeamHook,
+    /// Observe admission ownership immediately before taking the contributor
+    /// cursor, whose ingestion may synchronously integrate loaded content.
+    #[cfg(test)]
+    pub(crate) ambient_ingestion_cursor_hook: SeamHook,
     /// Deterministic entry/release rendezvous for the once-per-SFC Vue macro
     /// scheduled closure. The first barrier reports that the winner entered;
     /// the second holds it while a sibling joins and the winner is cancelled.

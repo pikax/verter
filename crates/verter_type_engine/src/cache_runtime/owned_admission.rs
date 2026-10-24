@@ -375,6 +375,9 @@ impl<K: Eq + Hash + Clone, V, P: AdmissionPolicy<V>> AdmissionCore<K, V, P> {
 
 impl<K: Eq + Hash + Clone, V, P: AdmissionPolicy<V>> Drop for AdmissionCore<K, V, P> {
     fn drop(&mut self) {
+        self.join = None;
+        self.producer_edge = None;
+        self.stop = None;
         self.withdraw_result();
     }
 }
@@ -413,6 +416,15 @@ pub struct OwnedAdmissionProducer<K: Eq + Hash + Clone, V> {
 impl<K: Eq + Hash + Clone, V> OwnedAdmissionProducer<K, V> {
     /// Run outside polling, under this producer's shared-registry task scope.
     pub fn run(self) {
+        // Shared work must not inherit the executing waiter's stop authority.
+        // A live aggregate owner also takes precedence over request-context
+        // cancellation without discarding request accounting or observation.
+        let cancellation = CancellationToken::aggregate();
+        let _owner = cancellation
+            .register_owner(None)
+            .expect("fresh producer owner");
+        let _cancellation =
+            verter_execution::cancellation::JobCancellationGuard::install(cancellation);
         // The owned producer reports unwind through its result cell. The
         // synchronous driver uses the generic producer directly and retains
         // its historical panic propagation.
