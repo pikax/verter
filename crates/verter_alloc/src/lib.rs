@@ -94,9 +94,21 @@ mod selected {
 
     pub fn purge_delay_ms() -> Option<i64> {
         // SAFETY: plain option read.
-        Some(i64::from(unsafe {
+        Some(widen(unsafe {
             libmimalloc_sys2::mi_option_get(libmimalloc_sys2::mi_option_purge_delay)
         }))
+    }
+
+    /// `c_long` is 32 bits on Windows and on 32-bit targets, 64 bits elsewhere.
+    #[cfg(any(windows, target_pointer_width = "32"))]
+    fn widen(value: c_long) -> i64 {
+        i64::from(value)
+    }
+
+    /// `c_long` is 32 bits on Windows and on 32-bit targets, 64 bits elsewhere.
+    #[cfg(not(any(windows, target_pointer_width = "32")))]
+    fn widen(value: c_long) -> i64 {
+        value
     }
 
     pub fn linked_mimalloc_version() -> Option<i32> {
