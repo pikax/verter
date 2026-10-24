@@ -3491,6 +3491,7 @@ dependencies = [
  "stacker",
  "tempfile",
  "tokio",
+ "verter_alloc",
  "verter_audit",
  "verter_compiler",
  "verter_css_syntax",

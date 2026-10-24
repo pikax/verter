@@ -19,11 +19,6 @@ categories = ["memory-management"]
 # mimalloc's C sources still compile under it (features are additive, so the
 # dependency stays in the graph); they are not linked.
 system-allocator = []
-# Compile mimalloc with the local-dynamic TLS model. Only the Node addon
-# enables it, on Linux: a `dlopen`ed image with initial-exec TLS can fail to
-# load once the process's static TLS surplus is used up. Executables keep the
-# faster initial-exec model.
-local-dynamic-tls = ["mimalloc-safe/local_dynamic_tls"]
 
 # mimalloc v3 through `mimalloc-safe` rather than the plain `mimalloc` crate:
 # on macOS the plain crate's v3 uses a fixed TLS slot that every statically
@@ -40,6 +35,19 @@ local-dynamic-tls = ["mimalloc-safe/local_dynamic_tls"]
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 mimalloc-safe = { version = "=0.1.67", default-features = false, features = ["v3", "skip_collect_on_exit"] }
 libmimalloc-sys2 = { version = "=0.1.63", default-features = false, features = ["v3", "extended"] }
+
+# Linux: the local-dynamic TLS model, for every image. The Node addon needs it:
+# Node `dlopen`s the addon, and initial-exec TLS in a late-loaded image can
+# fail with "cannot allocate memory in static TLS block". Executables pay
+# nothing for it, because the linker relaxes local-dynamic accesses to
+# local-exec when it links an executable (a linked `verter-lsp` carries no
+# `__tls_get_addr` call). Setting it here for every Linux image, rather than
+# as a feature only the addon enables, keeps one configuration in the graph:
+# a feature would unify into every executable built in the same cargo
+# invocation as the addon and change the sys crate's build between
+# invocations.
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc-safe = { version = "=0.1.67", default-features = false, features = ["local_dynamic_tls"] }
 
 # mimalloc's CMake build defaults to `-march=armv8.1-a` on arm64. Keep Linux
 # arm64 at the target's own baseline (ARMv8.0, which Rust's `aarch64-*-linux-*`

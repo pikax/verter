@@ -548,6 +548,12 @@ export const PATH_FILTERS = Object.freeze({
   // playground manifests and the lockfile; STS0 joins the Svelte profile lock
   // to the conformance harness's evidence and fixtures and typechecks against
   // @verter/svelte-jsx; STP1 requires every fixture its inventory selects.
+  // The vendored sys crate behind the native global allocator
+  // (crates/verter_alloc). It sits outside the workspace, so the crate half
+  // never maps it; every lane that builds or links a native entry point
+  // (Rust tests, the N-API addon, the LSP binaries, the editor build) names
+  // this filter in its gate.
+  native_allocator: ["vendor/libmimalloc-sys2/**"],
   sfc_projection: [
     "tests/sfc-projection/**",
     "scripts/sfc-projection/**",
@@ -698,7 +704,7 @@ export const LANE_ROOTS = Object.freeze({
  * `filters` is a pure pass-through of its filters.
  */
 export const LANE_GATES = Object.freeze({
-  rust: { filters: ["rust"] },
+  rust: { filters: ["rust", "native_allocator"] },
   proto: { filters: ["proto"] },
   // js-build-test: the JavaScript workspace and the scripts' self-tests.
   js: { filters: ["js", "scripts"] },
@@ -708,7 +714,7 @@ export const LANE_GATES = Object.freeze({
   jetbrains: { filters: ["jetbrains"] },
   // Subsystem gates.
   wasm: { filters: ["wasm"], impact: ["wasm"] },
-  native: { filters: ["js"], impact: ["native"] },
+  native: { filters: ["js", "native_allocator"], impact: ["native"] },
   playground: { filters: ["playground"], impact: ["playground"] },
   // Transport equivalence compares the two artifacts, so either subsystem
   // moving demands BOTH artifacts (see the artifact gates below).
@@ -716,10 +722,10 @@ export const LANE_GATES = Object.freeze({
   // Artifact gates: a producer runs whenever any consumer of it runs.
   native_artifact: { gates: ["native", "playground", "transport"] },
   wasm_artifact: { gates: ["wasm", "playground", "transport"] },
-  vscode: { filters: ["vscode"], impact: ["lsp"] },
-  dx: { filters: ["dx"], impact: ["lsp"] },
-  editor_lsp: { filters: ["editor_lsp"], impact: ["lsp"] },
-  editors: { filters: ["editors"], impact: ["editors"] },
+  vscode: { filters: ["vscode", "native_allocator"], impact: ["lsp"] },
+  dx: { filters: ["dx", "native_allocator"], impact: ["lsp"] },
+  editor_lsp: { filters: ["editor_lsp", "native_allocator"], impact: ["lsp"] },
+  editors: { filters: ["editors", "native_allocator"], impact: ["editors"] },
   providers: { filters: ["providers"], impact: ["providers"] },
   compiler_contracts: { filters: ["compiler_contracts"], impact: ["compiler_contracts"] },
   bf2: { filters: ["bf2"], impact: ["bf2"] },

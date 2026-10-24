@@ -106,7 +106,8 @@ the `@verter/native` addon — install mimalloc v3 as their global allocator thr
 `crates/verter_alloc`, with a 10 ms purge delay, exit-time collection skipped and secure mode
 off. `crates/verter_alloc/src/lib.rs` records why. The sys crate is vendored under
 `vendor/libmimalloc-sys2` so that it builds a pinned upstream mimalloc release. WASM keeps the
-target's default allocator (dlmalloc).
+target's default allocator (dlmalloc). The semantic-perf probes (`semantic_perf_probe` and its
+counted twin) install the same allocator, so benchmark timings measure the heap that ships.
 
 For a build that keeps the platform heap's hardening (Windows LFH randomisation and encoded
 headers, glibc safe-linking), enable the entry point's `system-allocator` feature:
@@ -119,8 +120,11 @@ cargo build --release -p verter_mcp --bin verter-mcp --features system-allocator
 npx napi build --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --features system-allocator
 ```
 
-mimalloc reads `MIMALLOC_*` environment variables at startup, so `MIMALLOC_PURGE_DELAY`
-overrides the purge delay without a rebuild.
+`cargo build --release -p verter_bench --features system-allocator` builds the probes on the
+platform heap for an allocator comparison.
+
+mimalloc reads `MIMALLOC_*` environment variables at startup, so `MIMALLOC_PURGE_DELAY` (or
+its legacy name `MIMALLOC_RESET_DELAY`) overrides the purge delay without a rebuild.
 
 ### Quick Rebuild for Native Bindings
 

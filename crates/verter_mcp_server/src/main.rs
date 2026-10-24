@@ -27,9 +27,17 @@ use verter_mcp::config::Cli;
 #[global_allocator]
 static GLOBAL: verter_alloc::Allocator = verter_alloc::ALLOCATOR;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Before the runtime starts any worker thread: mimalloc's option store is
+    // plain memory (see `verter_alloc`).
     verter_alloc::configure();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()

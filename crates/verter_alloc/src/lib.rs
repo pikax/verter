@@ -37,8 +37,9 @@
 //!   which in a long editing session keeps about a quarter more memory
 //!   resident than the platform heap. At 10 ms resident memory matches the
 //!   platform heap and long sessions stay faster; 100 ms measured no better
-//!   on either axis. The value is a default: `MIMALLOC_PURGE_DELAY` in the
-//!   environment still overrides it.
+//!   on either axis. The value is a default: a purge delay mimalloc read
+//!   from the environment at startup (`MIMALLOC_PURGE_DELAY`, or its legacy
+//!   name `MIMALLOC_RESET_DELAY`) stays in force.
 //! - **`skip_collect_on_exit`.** Verter's scheduler threads can still be
 //!   running when `main` returns; collecting the heap under them at exit is
 //!   the pattern behind exit-time crashes.
@@ -61,8 +62,15 @@
 //! external buffer's finaliser runs back into the addon). Each image carries
 //! its own static mimalloc copy. On macOS `mimalloc-safe` gives every copy
 //! its own thread-local state, so two v3 copies in one process do not share
-//! a heap; on Linux the addon uses the local-dynamic TLS model
-//! (`local-dynamic-tls`) a `dlopen`ed image needs.
+//! a heap. On Linux every image is compiled with the local-dynamic TLS model
+//! a `dlopen`ed image needs; when the linker links an executable it relaxes
+//! those accesses to local-exec, so the executables pay nothing for it.
+//!
+//! ## Configure before any other thread allocates
+//!
+//! mimalloc's option store is plain memory. [`configure`] must run before the
+//! process starts any thread that allocates: first in a synchronous `main`,
+//! before an async runtime is built, or in the addon's load-time constructor.
 
 #[cfg(all(not(target_family = "wasm"), not(feature = "system-allocator")))]
 mod selected {
@@ -72,19 +80,13 @@ mod selected {
     pub const ALLOCATOR: Allocator = mimalloc_safe::MiMalloc;
     pub const KIND: super::AllocatorKind = super::AllocatorKind::Mimalloc;
 
-    /// `mi_option_purge_delay` in the vendored v3 `mimalloc.h`. The sys
-    /// crate's option constants were written against v2 and diverge from the
-    /// v3 enum, so the index is pinned here and checked against the header by
-    /// a test.
-    pub const MI_OPTION_PURGE_DELAY: libmimalloc_sys2::mi_option_t = 15;
-
     pub fn configure() {
-        // SAFETY: plain option store; mimalloc initialises itself on first
-        // use and accepts option writes at any time. `set_default` leaves a
-        // value read from the environment in place.
+        // SAFETY: a plain option store, made before any other thread
+        // allocates (see the crate docs); mimalloc initialises itself on first
+        // use. `set_default` leaves a value read from the environment in place.
         unsafe {
             libmimalloc_sys2::mi_option_set_default(
-                MI_OPTION_PURGE_DELAY,
+                libmimalloc_sys2::mi_option_purge_delay,
                 c_long::from(super::PURGE_DELAY_MS),
             );
         }
@@ -93,7 +95,7 @@ mod selected {
     pub fn purge_delay_ms() -> Option<i64> {
         // SAFETY: plain option read.
         Some(i64::from(unsafe {
-            libmimalloc_sys2::mi_option_get(MI_OPTION_PURGE_DELAY)
+            libmimalloc_sys2::mi_option_get(libmimalloc_sys2::mi_option_purge_delay)
         }))
     }
 
@@ -173,6 +175,13 @@ pub fn purge_delay_ms() -> Option<i64> {
 #[must_use]
 pub fn linked_mimalloc_version() -> Option<i32> {
     selected::linked_mimalloc_version()
+}
+
+/// Whether `ptr` lies in this image's own mimalloc heap. Always `false` when
+/// mimalloc is not linked. Only compares the address; never dereferences it.
+#[must_use]
+pub fn mimalloc_owns(ptr: *const u8) -> bool {
+    selected::owns(ptr)
 }
 
 /// Whether this image's mimalloc served a fresh global allocation: `true`
