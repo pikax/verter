@@ -89,7 +89,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 dashmap = "6.2"
 glob = "0.3.4"
 lru = "0.19"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 # Atomic temp-then-rename for the on-disk carrier-snapshot store (the §2.2
 # content-addressed blobs + atomic manifest swap). `NamedTempFile::persist`
 # atomically replaces an existing target on every platform (ReplaceFile/

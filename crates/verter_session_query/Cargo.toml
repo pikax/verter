@@ -46,7 +46,7 @@ verter_type_expr = { workspace = true }
 bitflags = "2.13"
 glob = "0.3.4"
 imbl = "7.0.2"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 rustc-hash = { workspace = true }
 smallvec = "1.16"
 serde = { workspace = true }

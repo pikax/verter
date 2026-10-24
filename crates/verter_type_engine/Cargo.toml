@@ -58,7 +58,7 @@ hashbrown = { version = "0.17.1", default-features = false, features = ["inline-
 hotpath = { version = "0.23", optional = true }
 imbl = "7.0.2"
 indexmap = "2.14"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

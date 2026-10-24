@@ -54,7 +54,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 glob = "0.3.4"
 imbl = "7.0.2"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 smallvec = "1.16"
 thiserror = "2.0"
 verter_audit = { path = "../verter_audit" }

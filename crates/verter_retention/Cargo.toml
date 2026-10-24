@@ -32,7 +32,7 @@ verter_retention_derive = { workspace = true }
 verter_span = { path = "../verter_span" }
 verter_no_storedspan = { workspace = true }
 verter_no_typeexpr = { workspace = true }
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 smallvec = "1.16"

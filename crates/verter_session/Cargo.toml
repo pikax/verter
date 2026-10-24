@@ -215,7 +215,7 @@ serde_json = { workspace = true }
 oxc_sourcemap = "9.0.0"
 thiserror = "2.0"
 arc-swap = "1.9"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 crossbeam-channel = "0.5.17"
 indexmap = "2.14"
 similar = "3"

@@ -27,6 +27,7 @@ semantic-observe = [
   "verter_execution/semantic-observe",
   "dep:hotpath",
   "hotpath/parking_lot",
+  "dep:hotpath_parking_lot",
 ]
 # Exposes this crate's test-only instrumentation to cross-crate test code:
 # the HostCpuPool internals (per-pool identity token TLS,
@@ -54,7 +55,11 @@ verter_execution = { path = "../verter_execution" }
 verter_debug_assert = { workspace = true }
 arc-swap = "1.9"
 hotpath = { version = "0.23", optional = true }
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
+# The parking_lot major hotpath's instrumented wrapper accepts. Only the
+# observed DAG lock is built from it, and only under `semantic-observe`,
+# where `hotpath/parking_lot` already compiles it.
+hotpath_parking_lot = { package = "parking_lot", version = "0.12.5", optional = true }
 rustc-hash = { workspace = true }
 smallvec = "1.16"
 dashmap = "6.2"

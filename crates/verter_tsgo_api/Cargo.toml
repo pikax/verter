@@ -33,7 +33,7 @@ tokio = { version = "1.54", features = ["io-util", "process", "sync", "time", "r
 # Immutable overlay snapshot published lock-free to the sync FS-callback path.
 arc-swap = "1.9"
 # Non-async synchronization for the pending-request table + lane bookkeeping.
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 # JSON payloads ride inside the MessagePack `bin` frame fields (the tsgo `--api`
 # high-level ops encode params/results as `JSON.stringify(...)` UTF-8 bytes).
 serde = { workspace = true }
