@@ -33,8 +33,12 @@ test-support = []
 # observation build of this root captures the same layers as the
 # measurement harness. No production edge or default feature enables it.
 semantic-observe = ["verter_session/semantic-observe", "verter_diagnostics/semantic-observe"]
+# Build on the platform heap instead of mimalloc, for hardened builds
+# (crates/verter_alloc documents the trade-off).
+system-allocator = ["verter_alloc/system-allocator"]
 
 [dependencies]
+verter_alloc = { path = "../verter_alloc" }
 verter_resolution = { workspace = true }
 verter_session_query = { workspace = true }
 imbl = "7.0.1"

@@ -3,16 +3,17 @@
 //! Allocator attribution is optional observation state
 //! (`docs/arch/semantic-observe.md`): the counting
 //! [`std::alloc::GlobalAlloc`] wrapper, its counters and its sampler
-//! compile only with `semantic-observe`. A default binding keeps the
-//! system allocator untouched and the four NAPI functions report the audit
-//! as unavailable — `memoryAuditEnable()` returns `false`, the readers
-//! return `null` / `false` — never fabricated zero counters.
+//! compile only with `semantic-observe`. A default binding installs the
+//! process allocator (`verter_alloc`) unwrapped, and the four NAPI functions
+//! report the audit as unavailable — `memoryAuditEnable()` returns `false`,
+//! the readers return `null` / `false` — never fabricated zero counters.
 //!
 //! In an instrumented binding a runtime gate decides the cost:
 //!
-//! - **Disabled (the default):** every allocator call is a delegate to
-//!   `System` plus exactly ONE cached relaxed atomic load + branch — no
-//!   counter updates, no thread-local access, no locks, no env reads.
+//! - **Disabled (the default):** every allocator call is a delegate to the
+//!   process allocator (`verter_alloc`) plus exactly ONE cached relaxed
+//!   atomic load + branch — no counter updates, no thread-local access, no
+//!   locks, no env reads.
 //! - **Enabled:** allocation/deallocation counts, total allocated bytes,
 //!   live bytes, and a resettable live-bytes high-water mark are tracked
 //!   with lock-free atomics. Live bytes and the high-water mark are two
@@ -157,7 +158,7 @@ mod runtime {
 
 #[cfg(feature = "semantic-observe")]
 mod counting {
-    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::alloc::{GlobalAlloc, Layout};
     use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
     pub(super) static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -168,7 +169,10 @@ mod counting {
     pub(super) static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
     pub(super) static PEAK_LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
 
-    /// Always-installed wrapper over the system allocator. Runtime
+    /// The process allocator every call delegates to.
+    const INNER: verter_alloc::Allocator = verter_alloc::ALLOCATOR;
+
+    /// Always-installed wrapper over the process allocator. Runtime
     /// disabled (the default): delegate + one relaxed load + branch —
     /// nothing else. Enabled: successful allocating calls bump the
     /// counters and advance the high-water mark via `fetch_max`; failed
@@ -199,7 +203,7 @@ mod counting {
 
     unsafe impl GlobalAlloc for CountingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let ptr = unsafe { System.alloc(layout) };
+            let ptr = unsafe { INNER.alloc(layout) };
             if super::runtime::enabled() && !ptr.is_null() {
                 record_alloc(layout.size());
             }
@@ -207,7 +211,7 @@ mod counting {
         }
 
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            let ptr = unsafe { System.alloc_zeroed(layout) };
+            let ptr = unsafe { INNER.alloc_zeroed(layout) };
             if super::runtime::enabled() && !ptr.is_null() {
                 record_alloc(layout.size());
             }
@@ -218,11 +222,11 @@ mod counting {
             if super::runtime::enabled() {
                 record_dealloc(layout.size());
             }
-            unsafe { System.dealloc(ptr, layout) }
+            unsafe { INNER.dealloc(ptr, layout) }
         }
 
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+            let new_ptr = unsafe { INNER.realloc(ptr, layout, new_size) };
             if super::runtime::enabled() && !new_ptr.is_null() {
                 // Model a successful realloc as one alloc of the new size
                 // plus one dealloc of the old size so `LIVE_BYTES` stays

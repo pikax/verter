@@ -26,8 +26,12 @@ test-fake-engine = ["verter_tsgo_api/test-fake-engine"]
 # Default-off measurement opt-in: forwards the session's optional provenance
 # counters so the instrumentation lane runs this crate's counter assertions.
 semantic-observe = ["verter_session/semantic-observe"]
+# Build on the platform heap instead of mimalloc, for hardened builds
+# (crates/verter_alloc documents the trade-off).
+system-allocator = ["verter_alloc/system-allocator"]
 
 [dependencies]
+verter_alloc = { path = "../verter_alloc" }
 verter_session_query = { workspace = true }
 verter_debug_assert = { workspace = true }
 verter_compiler = { path = "../verter_compiler" }
