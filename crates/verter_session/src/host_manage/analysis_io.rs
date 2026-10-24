@@ -13,7 +13,6 @@
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 
-use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
 use verter_type_engine::resolver_core::request_ports::IndexedInputs;
@@ -1069,6 +1068,19 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
         use crate::host_executor::HostSourceData;
+        let snap = self.authoritative_current_source(canonical)?;
+        let hd = snap.downcast_data::<HostSourceData>()?;
+        Some(hd.parse.whole_hash)
+    }
+
+    /// The scheduler's current source snapshot of `canonical`, behind the
+    /// same eviction gate as [`Self::authoritative_current_content_hash`]:
+    /// a reader that needs the content hash together with other facts of
+    /// the same revision takes them all from this one snapshot.
+    pub(crate) fn authoritative_current_source(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_scheduler::node::SourceSnapshot>> {
         // Eviction gate — mirrors `get_whole_hash`'s scheduler branch.
         // An EXPLICITLY evicted entry means the canonical is no longer
         // live; any artifact still in `FileArtifactStore` is stale and
@@ -1084,9 +1096,7 @@ impl VerterHost {
         if entry_evicted {
             return None;
         }
-        let snap = self.scheduler.try_get_source(canonical)?;
-        let hd = snap.downcast_data::<HostSourceData>()?;
-        Some(hd.parse.whole_hash)
+        self.scheduler.try_get_source(canonical)
     }
 
     /// Exact base artifact key for the scheduler-authoritative source stage.
@@ -1109,27 +1119,10 @@ impl VerterHost {
         // carrier meta and analysis handles this hot read never uses).
         let snap = self.scheduler.try_get_source(analysis_canonical)?;
         let hd = snap.downcast_data::<HostSourceData>()?;
-        // A plain script's parse identity was derived once with its source
-        // snapshot: reuse it rather than hashing the source bytes again on
-        // every artifact read.
-        if let (None, Some(parse_key)) = (hd.framework_parse.as_ref(), hd.script_parse_key.as_ref())
-        {
-            return Some(
-                verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
-                    Arc::from(analysis_canonical),
-                    hd.parse.whole_hash,
-                    parse_key.clone(),
-                    hd.file_language.clone(),
-                    verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
-                ),
-            );
-        }
-        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+        // The snapshot already holds its parse identity: reuse it rather
+        // than hashing the source bytes again on every artifact read.
+        hd.artifact_key(
             Arc::from(analysis_canonical),
-            hd.parse.whole_hash,
-            snap.source.as_ref(),
-            hd.file_language.clone(),
-            hd.framework_parse.as_deref(),
             verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         )
     }

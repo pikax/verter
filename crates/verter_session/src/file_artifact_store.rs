@@ -4071,7 +4071,10 @@ pub(crate) trait FileArtifactKeySource: Sized {
     /// Builds the exact key for an already-materialized artifact.
     fn for_indexed(canonical: Arc<str>, indexed: &IndexedReady, parse_env_hash: Hash16) -> Self;
 
-    /// Builds an exact key from the source-stage identity that produced an artifact.
+    /// Builds an exact key from the source-stage identity that produced an
+    /// artifact, deriving the parse identity from its bytes: the reference
+    /// derivation tests compare snapshot-held keys against.
+    #[cfg(test)]
     fn for_source_identity(
         canonical: Arc<str>,
         content_hash: Hash16,
@@ -4085,18 +4088,24 @@ pub(crate) trait FileArtifactKeySource: Sized {
 impl FileArtifactKeySource for FileArtifactKey {
     /// Builds the exact key for an already-materialized artifact.
     fn for_indexed(canonical: Arc<str>, indexed: &IndexedReady, parse_env_hash: Hash16) -> Self {
-        Self::for_source_identity(
+        // The artifact's own parse identity: seeded from the source it was
+        // built from, or derived once per artifact.
+        let parse_key = indexed
+            .source_parse_key()
+            .expect("IndexedReady retains a compatible runtime language and parse artifact");
+        Self::for_parse_identity(
             canonical,
             indexed.whole_hash,
-            indexed.raw_source.as_ref(),
+            parse_key,
             indexed.file_language.clone(),
-            indexed.framework_parse.as_deref(),
             parse_env_hash,
         )
-        .expect("IndexedReady retains a compatible runtime language and parse artifact")
     }
 
-    /// Builds an exact key from the source-stage identity that produced an artifact.
+    /// Builds an exact key from the source-stage identity that produced an
+    /// artifact, deriving the parse identity from its bytes: the reference
+    /// derivation tests compare snapshot-held keys against.
+    #[cfg(test)]
     fn for_source_identity(
         canonical: Arc<str>,
         content_hash: Hash16,
@@ -4108,13 +4117,7 @@ impl FileArtifactKeySource for FileArtifactKey {
         let parse_key = verter_session_query::source::framework_parse::exact_source_parse_key(
             source,
             &file_language_id,
-            framework_parse.map(|artifact| {
-                verter_session_query::source::framework_parse::CarrierParseKey {
-                    adapter_id: artifact.adapter_id(),
-                    language_id: artifact.language_id(),
-                    parse_key: artifact.parse_key(),
-                }
-            }),
+            framework_parse.map(crate::parse::carrier_parse_key),
         )?;
         Some(Self {
             canonical,
