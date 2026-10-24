@@ -44,6 +44,12 @@ impl Canonical {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// The one allocation every clone of this identity shares, for a
+    /// measurement that counts each distinct allocation once.
+    pub fn shared_bytes(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
 }
 
 impl PartialEq for Canonical {

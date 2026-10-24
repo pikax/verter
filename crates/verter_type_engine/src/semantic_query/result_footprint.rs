@@ -119,9 +119,11 @@ impl OwnedHeap for FlowReturnKey {
             + context.owned_heap_bytes(aliases)
             + demand.owned_heap_bytes(aliases)
             + input.owned_heap_bytes(aliases)
-            // The canonical bytes' shared `Arc` block, counted in full.
-            + verter_session_query::retention::allocation::arc_block_bytes(
-                result_contract.canonical_bytes().len(),
+            // The canonical bytes: one `Arc` block every clone of the
+            // contract shares, counted once per `aliases`.
+            + verter_session_query::retention::allocation::shared_encoding_bytes(
+                result_contract.canonical_shared_bytes(),
+                aliases,
             )
     }
 }

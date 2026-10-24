@@ -168,20 +168,31 @@ impl CanonicalEncoder {
     /// that will be cloned.
     pub fn finish_shared(&self) -> std::sync::Arc<[u8]> {
         let domain_bytes = self.domain_tag.as_bytes();
-        // Every link has an exact length, so the slice is allocated once at
-        // its final size and filled in order.
-        (domain_bytes.len() as u32)
-            .to_le_bytes()
-            .into_iter()
-            .chain(domain_bytes.iter().copied())
-            .chain(self.field_count.to_le_bytes())
-            .chain(self.body.iter().copied())
-            .collect()
+        let header = (domain_bytes.len() as u32).to_le_bytes();
+        let count = self.field_count.to_le_bytes();
+        let len = header.len() + domain_bytes.len() + count.len() + self.body.len();
+        // One allocation at the final length, then each part copied whole.
+        let mut shared: std::sync::Arc<[u8]> = std::iter::repeat_n(0, len).collect();
+        let out = std::sync::Arc::get_mut(&mut shared).expect("a fresh slice has one handle");
+        let mut at = 0;
+        for part in [&header[..], domain_bytes, &count[..], &self.body] {
+            out[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+        }
+        shared
     }
 
-    /// Finalizes and hashes the canonical bytes into a [`CanonicalDigest`].
+    /// Finalizes and hashes the canonical bytes into a [`CanonicalDigest`],
+    /// hashing the header and the fields in place rather than a finished
+    /// copy of them.
     pub fn digest(&self) -> CanonicalDigest {
-        CanonicalDigest::of_bytes(&self.finish())
+        let domain_bytes = self.domain_tag.as_bytes();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&(domain_bytes.len() as u32).to_le_bytes());
+        hasher.update(domain_bytes);
+        hasher.update(&self.field_count.to_le_bytes());
+        hasher.update(&self.body);
+        CanonicalDigest(*hasher.finalize().as_bytes())
     }
 }
 

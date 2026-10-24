@@ -2169,12 +2169,22 @@ fn graph_publication_charges_independently_allocated_equal_key_backing() {
         drop(key);
         assert_eq!(account.snapshot().total_bytes(), 0);
     }
+    // Independently built keys also hold separate parse-identity encodings;
+    // a cloned key shares its one encoding, counted once.
+    let parse_key = verter_session_query::retention::allocation::arc_block_bytes(
+        function_key(&canonical, "myType", 4, source)
+            .parse_key
+            .canonical_bytes()
+            .len(),
+    );
     assert_eq!(
         charges[1] - charges[0],
-        OwnedStr::charge_for_len(canonical.len()) + OwnedStr::charge_for_len("myType".len())
+        OwnedStr::charge_for_len(canonical.len())
+            + OwnedStr::charge_for_len("myType".len())
+            + parse_key
     );
     assert_eq!(
         charges[2] - charges[0],
-        OwnedStr::charge_for_len(canonical.len())
+        OwnedStr::charge_for_len(canonical.len()) + parse_key
     );
 }

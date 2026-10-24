@@ -4,10 +4,15 @@
 use verter_retention::allocation::arc_block_bytes;
 use verter_retention::heap_size::HeapMeter;
 
-/// A parse identity's retained canonical encoding: one shared `Arc` block
-/// its clones name, counted in full by each holder.
-pub fn parse_key<'t>(key: &'t verter_language::ParseKey, _meter: &mut HeapMeter<'_, 't>) -> usize {
-    arc_block_bytes(key.canonical_bytes().len())
+/// A parse identity's retained canonical encoding: one `Arc` block every
+/// clone of the key shares, counted once per measurement.
+pub fn parse_key<'t>(key: &'t verter_language::ParseKey, meter: &mut HeapMeter<'_, 't>) -> usize {
+    let bytes = key.canonical_shared_bytes();
+    if meter.first_shared_encoding(bytes) {
+        arc_block_bytes(bytes.len())
+    } else {
+        0
+    }
 }
 
 /// A file language row. Adapter and language ids are interned process-wide
