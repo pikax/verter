@@ -58,7 +58,7 @@ mod namespace_walk;
 mod script_shallow_index_tests;
 pub use macros::lower_macro_type_argument_at_span;
 pub use macros::{
-    lower_macro_field_payload_at, lower_macro_field_payload_at_with_owners,
+    lower_macro_field_payload_at, lower_macro_field_payload_at_with_owners, MacroFieldAddressTable,
     MacroFieldPayloadLowering,
 };
 pub mod macro_usage;

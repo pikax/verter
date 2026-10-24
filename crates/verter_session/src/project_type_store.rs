@@ -1367,7 +1367,7 @@ impl ProjectTypeStore {
                 provenance.map(|provenance| Arc::clone(&provenance.engine)),
                 store_account,
                 &counters.component_meta_cache_live,
-                task_registry,
+                task_registry.clone(),
                 memo_family_bound,
             );
         // The production semantic context is a process-permanent record.
@@ -1398,7 +1398,7 @@ impl ProjectTypeStore {
             indexed,
             analysis,
             routes: Arc::new(RouteDb::new()),
-            imported_roots: Arc::new(ImportedRootDb::new()),
+            imported_roots: Arc::new(ImportedRootDb::with_task_registry(task_registry)),
             semantic_graph,
             construction,
             owner_import_surfaces,

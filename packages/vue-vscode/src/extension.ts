@@ -903,10 +903,15 @@ async function startVueLanguageServer(
       statistics: getStatisticsInitialization(rootPath),
       // The server sends recurring notifications only to a client that asks:
       // the heartbeat feeds this extension's restart watchdog, and the
-      // carrier-store ping refreshes VS Code's own TypeScript service.
+      // carrier-store ping refreshes VS Code's own TypeScript service. The
+      // store-fill demand is the negotiated way to ask the server to keep the
+      // carrier store that service reads populated (the server fulfils it
+      // only on tiers that actually publish into the store), replacing the
+      // former warm-up project-overview request.
       subscriptions: {
         heartbeat: true,
         carrierStoreChanged: true,
+        carrierStoreFill: true,
       },
       analysis: {
         enabled: workspace.getConfiguration("verter.analysis").get<boolean>("enabled", false),
@@ -1536,8 +1541,14 @@ async function startVueLanguageServer(
     lc.onNotification(NotificationType.CarrierStoreReady, (params: { carrierStoreDir: string }) => {
       if (!lifecycle.isCurrent(epoch)) return;
       log.info(`Carrier store dir reported by LSP: ${params.carrierStoreDir}`);
-      // Forward to VS Code's own TS server plugin so a plain `.ts` served by
-      // VS Code's TS service reads the same store the LSP publishes into.
+      // This extension wires VS Code's own TypeScript service over that store.
+      // The store's fill is demanded at initialize time through the
+      // `carrierStoreFill` subscription, so this report carries no request:
+      // the server keeps the store populated on the tiers that publish into
+      // it and pings `carrierStoreChanged` after every publication.
+      // Forward the dir to VS Code's own TS server plugin so a plain `.ts`
+      // served by VS Code's TS service reads the same store the LSP publishes
+      // into.
       options.onCarrierStoreReady?.(params.carrierStoreDir);
     });
   }

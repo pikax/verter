@@ -5555,6 +5555,16 @@ async fn post_scan_completion_refreshes_healthy_documents_while_another_carrier_
             source: None,
         }]);
 
+    // Keep background pulls from satisfying the receipt before the test
+    // observes the drain's invalidation and requests its post-scan refresh.
+    let dispatch = server.sync_coordinator.pause_dispatch_for_test().await;
+    server
+        .sync_coordinator
+        .await_until(
+            || server.sync_coordinator.diag_tasks_live() == 0,
+            || panic!("the previously dispatched diagnostics must finish"),
+        )
+        .await;
     assert!(server.documents.diagnostics_ready(&healthy_uri));
     server.queue_snapshot_provider_sync(healthy.clone());
     server.queue_snapshot_provider_sync(broken.clone());
@@ -5581,6 +5591,7 @@ async fn post_scan_completion_refreshes_healthy_documents_while_another_carrier_
         !server.complete_post_scan(generation).await,
         "level 2 must stay unannounced while provider work is pending"
     );
+    drop(dispatch);
     server
         .sync_coordinator
         .await_until(

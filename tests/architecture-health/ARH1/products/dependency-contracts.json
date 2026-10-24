@@ -146,7 +146,12 @@
         "verter_type_runtime",
         "verter_workspace"
       ],
-      "mustNotImport": ["verter_lsp", "verter_napi", "verter_ffi", "verter_wasm"],
+      "mustNotImport": [
+        "verter_lsp",
+        "verter_napi",
+        "verter_ffi",
+        "verter_wasm"
+      ],
       "evidence": "crates/verter_session/Cargo.toml [dependencies] contains no editor/transport crate",
       "nonHotspotRationale": "verter_session owns no ARH1 hotspot: the semantic type engine (semantic_query, the project semantic dispatch and its flow-return and build modules) lives in verter_type_engine; the session is the host orchestration layer above that engine, and its layer rule is ratified so the editor/transport/FFI leaves stay out of its dependencies",
       "heir": {
@@ -158,7 +163,12 @@
       "id": "ARH1-LAYER-4",
       "crate": "crates/verter_resolution",
       "rule": "module-resolution implementation consumes query-boundary inputs and parser-free leaves, never host orchestration or syntax frontends",
-      "mayImport": ["verter_audit", "verter_language", "verter_session_query", "verter_type_expr"],
+      "mayImport": [
+        "verter_audit",
+        "verter_language",
+        "verter_session_query",
+        "verter_type_expr"
+      ],
       "mustNotImport": [
         "verter_semantic",
         "verter_parser",
@@ -284,8 +294,18 @@
         }
       ],
       "allowedImportDirection": {
-        "verter": ["verter_audit", "verter_execution", "verter_language"],
-        "external": ["crossbeam_channel", "dashmap", "hotpath", "parking_lot", "web_time"],
+        "verter": [
+          "verter_audit",
+          "verter_execution",
+          "verter_language"
+        ],
+        "external": [
+          "crossbeam_channel",
+          "dashmap",
+          "hotpath",
+          "parking_lot",
+          "web_time"
+        ],
         "crateInternal": [
           "audit_publish",
           "cache_id",
@@ -339,12 +359,15 @@
           "crates/verter_session/src/materialized_structure_equivalence_tests.rs",
           "crates/verter_session/src/meta_batch_fixed_view_tests.rs",
           "crates/verter_session/src/prepared_surface_intersection_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs",
           "crates/verter_session/src/public_api_batch_fixed_view_tests.rs",
+          "crates/verter_session/src/root_continuation.rs",
           "crates/verter_session/src/test_worker_pools.rs",
           "crates/verter_session/src/tests/meta/mod.rs",
           "crates/verter_session/src/typeinfo/vue_macro_codegen.rs",
           "crates/verter_session/src/u6_flow_expect_tests.rs",
           "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
+          "crates/verter_session/tests/cases/compile-fail/root_poll_no_blocking_driver.rs",
           "crates/verter_session/tests/cases/compile-fail/scoped_handoff_no_blocking_scheduler.rs",
           "crates/verter_session/tests/cases/component_meta_audit_corpus/chunk_harness.rs",
           "crates/verter_session/tests/cases/corpus_audit_layout.rs",
@@ -364,13 +387,17 @@
           "crates/verter_session/tests/cases/relation_nominal_authority.rs",
           "crates/verter_session/tests/cases/runtime_constructor_matrix.rs"
         ],
-        "ownerCratePopulation": "the importers array is the complete cross-crate population (48 files: 26 verter_session src files, 17 verter_session integration tests, three verter_lsp audit test cases, verter_dx_baseline materialize and verter_napi lib), enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_execution::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
+        "ownerCratePopulation": "the importers array is the complete cross-crate population, enforced by the verifier in both directions on comment-stripped syntax; crates/verter_lsp/src/external_ts_sync.rs references verter_execution::cancellation, not the scheduler module, and is deliberately absent; population re-derivation on a moving candidate is ARH2's recorded obligation",
         "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and BOTH use statements and inline crate paths in code position (verter_audit::attribute! macros, crossbeam_channel::Sender parameter types, the feature-gated hotpath::wrap alias, and crate::module::Item paths like crate::cache_id::SchedulerCacheId fields, crate::execution::pool::SchedulerCpuPool constructor parameters, crate::request_context::RequestContext, crate::audit_publish, crate::dedupe_hook, crate::execution::owner_command and crate::source_root references) are measured, so the declared sets equal the production direction both ways; verter_audit is measured through the module root's production re-export and its inline attribute! paths; cache_id and request_context are production crate-internal roots measured through inline paths (their use-statement imports are test configuration), and execution is the declared crate-internal root for the moved execution adapters (pool, owner_command, executor, host_cpu_pool, cpu_concurrency), measured through both its production use statements and its inline crate::execution:: paths"
       },
       "constructorCapabilities": [
         {
           "constructor": "new",
-          "signatureAnchors": ["Arc<dyn SourceLoader>", "SchedulerCpuPool", "SchedulerIoPool"],
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "SchedulerCpuPool",
+            "SchedulerIoPool"
+          ],
           "rules": [
             "pools and the source loader are host-injected Arc handles: the scheduler constructs no pool and performs no file I/O in the constructor",
             "spawns exactly one driver thread on native targets and none on wasm32",
@@ -387,12 +414,31 @@
           ],
           "rules": [
             "the stage executor is injected: DefaultExecutor is chosen by the caller, never constructed here to reach semantic crates",
-            "same pool-injection and single-driver-thread capability as new"
+            "same pool-injection and single-driver-thread capability as new",
+            "creates a standalone task registry; hosts sharing semantic producers use with_executor_and_task_registry"
+          ]
+        },
+        {
+          "constructor": "with_executor_and_task_registry",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool",
+            "SchedulerIoPool",
+            "TaskRegistry"
+          ],
+          "rules": [
+            "source loader, executor and pools remain host-injected with one native driver thread",
+            "the host injects the same task registry it supplies to semantic producers; construction creates no second cycle authority",
+            "scoped handoffs retain execution tasks and follower wait edges from this shared registry"
           ]
         },
         {
           "constructor": "new_sync",
-          "signatureAnchors": ["Arc<dyn SourceLoader>", "SchedulerCpuPool"],
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "SchedulerCpuPool"
+          ],
           "rules": [
             "synchronous-driver variant of new with the same injected-pool capability; wasm32 target carries no native pool parameter"
           ]
@@ -405,11 +451,32 @@
             "SchedulerCpuPool"
           ],
           "rules": [
-            "synchronous-driver variant of with_executor with the same injected-executor capability"
+            "synchronous-driver variant of with_executor with the same injected-executor capability and standalone task registry"
+          ]
+        },
+        {
+          "constructor": "new_sync_with_executor_and_task_registry",
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "Arc<dyn StageExecutor>",
+            "SchedulerCpuPool",
+            "SchedulerIoPool",
+            "TaskRegistry"
+          ],
+          "rules": [
+            "inline-driver variant with the same injected executor and shared task registry as with_executor_and_task_registry",
+            "no driver thread is created; native pools are injected and wasm32 carries no pool parameter"
           ]
         }
       ],
       "stateLifetimes": [
+        {
+          "state": "Scheduler.task_registry",
+          "owner": "host composition root; Scheduler retains a shared registry handle",
+          "lifetime": "session",
+          "evidence": "one wait-cycle authority shared with semantic producers; scoped handoffs retain their tasks and own their follower wait edges",
+          "soleOwner": "crates/verter_scheduler/src/scheduler.rs"
+        },
         {
           "state": "Scheduler.nodes",
           "owner": "Scheduler (Arc<FileNode> per canonical file)",
@@ -496,10 +563,14 @@
           "into_handles",
           "new",
           "with_executor",
+          "with_executor_and_task_registry",
           "new_sync",
           "new_sync_with_executor",
+          "new_sync_with_executor_and_task_registry",
           "execute_scoped_cache_node",
           "begin_scoped_cache_node",
+          "run_transferred_producer",
+          "dispatch_for_pending_dependency",
           "submit_request",
           "begin_submit_request",
           "submit_batch_atomic",
@@ -559,9 +630,14 @@
             "item": "test_worker_pool_ids",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/host_construction.rs"],
+            "consumersAffected": [
+              "crates/verter_session/src/host_construction.rs"
+            ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_worker_pool_ids", "scheduler.test_worker_pool_ids("]
+            "referenceForms": [
+              "Scheduler::test_worker_pool_ids",
+              "scheduler.test_worker_pool_ids("
+            ]
           },
           {
             "item": "test_new",
@@ -572,7 +648,10 @@
               "crates/verter_session/src/host_batch_coordinator.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_new", ".test_new("]
+            "referenceForms": [
+              "Scheduler::test_new",
+              ".test_new("
+            ]
           },
           {
             "item": "test_with_executor",
@@ -585,15 +664,23 @@
               "crates/verter_session/tests/cases/g_session/inline_execute_clears_all_install_tls_slots.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_with_executor", ".test_with_executor("]
+            "referenceForms": [
+              "Scheduler::test_with_executor",
+              ".test_with_executor("
+            ]
           },
           {
             "item": "test_new_sync",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/cooperative_scheduler_tests.rs"],
+            "consumersAffected": [
+              "crates/verter_session/src/cooperative_scheduler_tests.rs"
+            ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_new_sync", ".test_new_sync("]
+            "referenceForms": [
+              "Scheduler::test_new_sync",
+              ".test_new_sync("
+            ]
           },
           {
             "item": "test_new_sync_with_executor",
@@ -627,7 +714,10 @@
               "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_arm_dispatch_pause", ".test_arm_dispatch_pause("]
+            "referenceForms": [
+              "Scheduler::test_arm_dispatch_pause",
+              ".test_arm_dispatch_pause("
+            ]
           },
           {
             "item": "test_wait_until_dispatch_paused",
@@ -652,7 +742,10 @@
               "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_job_queue_depth", ".test_job_queue_depth("]
+            "referenceForms": [
+              "Scheduler::test_job_queue_depth",
+              ".test_job_queue_depth("
+            ]
           },
           {
             "item": "test_release_dispatch_pause",
@@ -684,7 +777,9 @@
             "item": "test_install_batch_admit_epoch_trace",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/host_compile_atomic_upsert_tests.rs"],
+            "consumersAffected": [
+              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs"
+            ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": [
               "Scheduler::test_install_batch_admit_epoch_trace",
@@ -706,7 +801,9 @@
             "item": "test_take_batch_admit_epochs",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/host_compile_atomic_upsert_tests.rs"],
+            "consumersAffected": [
+              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs"
+            ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": [
               "Scheduler::test_take_batch_admit_epochs",
@@ -721,7 +818,10 @@
               "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_clear_analysis", ".test_clear_analysis("]
+            "referenceForms": [
+              "Scheduler::test_clear_analysis",
+              ".test_clear_analysis("
+            ]
           },
           {
             "item": "test_reset_wake_posts",
@@ -729,7 +829,10 @@
             "to": "test-configuration",
             "consumersAffected": [],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification; observes reset()'s teardown-wake post count so a teardown test can release its rendezvous exactly once the wake is posted",
-            "referenceForms": ["Scheduler::test_reset_wake_posts", ".test_reset_wake_posts("]
+            "referenceForms": [
+              "Scheduler::test_reset_wake_posts",
+              ".test_reset_wake_posts("
+            ]
           }
         ],
         "crossCrateRetainedVerifiedByConsumers": false,
@@ -834,7 +937,12 @@
           "verter_span",
           "verter_type_expr"
         ],
-        "external": ["flow_admission_fault_injection", "rustc_hash", "smallvec", "tracing"],
+        "external": [
+          "flow_admission_fault_injection",
+          "rustc_hash",
+          "smallvec",
+          "tracing"
+        ],
         "crateInternal": [
           "cache_runtime",
           "fact_signature_helpers",
@@ -1011,12 +1119,17 @@
       "allowedImportDirection": {
         "verter": [
           "verter_audit",
+          "verter_execution",
           "verter_retention",
           "verter_session_query",
           "verter_span",
           "verter_type_expr"
         ],
-        "external": ["indexmap", "rustc_hash", "tracing"],
+        "external": [
+          "indexmap",
+          "rustc_hash",
+          "tracing"
+        ],
         "crateInternal": [
           "cache_runtime",
           "component_meta_trace_structured",
@@ -1165,7 +1278,12 @@
           "verter_span",
           "verter_type_expr"
         ],
-        "external": ["serde", "smallvec", "static_assertions", "xxhash_rust"],
+        "external": [
+          "serde",
+          "smallvec",
+          "static_assertions",
+          "xxhash_rust"
+        ],
         "crateInternal": [
           "locator_identity",
           "project_semantic_dispatch",
@@ -1221,7 +1339,6 @@
           "crates/verter_session/src/component_meta_pick_omit_tests.rs",
           "crates/verter_session/src/component_meta_publication_demand_tests.rs",
           "crates/verter_session/src/component_meta_repo_first_pass_diagnosis_tests.rs",
-          "crates/verter_session/src/component_meta_result_db.rs",
           "crates/verter_session/src/component_meta_resolution_policy/core.rs",
           "crates/verter_session/src/component_meta_resolution_policy/cycle_guard.rs",
           "crates/verter_session/src/component_meta_resolution_policy/mod.rs",
@@ -1229,6 +1346,7 @@
           "crates/verter_session/src/component_meta_resolution_policy_cycle_tests.rs",
           "crates/verter_session/src/component_meta_resolution_policy_tests.rs",
           "crates/verter_session/src/component_meta_resolve_owner_route_strip_tests.rs",
+          "crates/verter_session/src/component_meta_result_db.rs",
           "crates/verter_session/src/component_meta_slot_binding_skip_tests.rs",
           "crates/verter_session/src/component_meta_terminal_mode_tests.rs",
           "crates/verter_session/src/cross_file_augmentation_merge_equivalence_tests.rs",
@@ -1306,6 +1424,7 @@
           "crates/verter_session/src/project_semantic_dispatch_invariants_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/apparent_type_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/augmentation_scale_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/base_signature_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/broad_runtime_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/call_resolve_tests.rs",
@@ -1314,32 +1433,28 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/carrier_materialize_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/carrier_reduction_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/carrier_type_param_descent_tests.rs",
-          "crates/verter_session/src/project_semantic_dispatch_tests/class_member_evidence_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/checker_probe_lane_tests.rs",
-          "crates/verter_session/src/project_semantic_dispatch_tests/module_export_table_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/class_evaluation_flow_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/class_member_evidence_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/closedness_evaluator_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/closure_narrowing_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_decision_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_operand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_tail_tests.rs",
-          "crates/verter_session/src/project_semantic_dispatch_tests/homomorphic_mapped_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/connected_demand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/const_literal_widening_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/continuation_depth_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/cost_receipt_tests.rs",
-          "crates/verter_session/src/project_semantic_dispatch_tests/wide_union_relation_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/cycle_gate_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/deep_input_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/differential_class_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/differential_harness_tests.rs",
-          "crates/verter_session/src/project_semantic_dispatch_tests/divergence_certificate_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/dispatch_txn_flow_demand_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/divergence_certificate_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/equality_value_narrowing_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_accessor_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_class_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_construct_tests.rs",
-          "crates/verter_session/src/project_semantic_dispatch_tests/augmentation_scale_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_frame_seal_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_global_tests.rs",
@@ -1356,15 +1471,17 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/freshness_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/helper_depth_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/heritage_signature_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/homomorphic_mapped_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/infer_scope_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/intersection_complexity_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/lib_global_tests.rs",
-          "crates/verter_session/src/project_semantic_dispatch_tests/merged_declaration_signature_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/local_declaration_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/mapped_domain_parity_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/mapped_expand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/mapped_key_domain_carrier_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/member_accessibility_relation_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/merged_declaration_signature_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/module_export_table_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/narrowing_ledger_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/nested_reference_reduction_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/node_domain_tests.rs",
@@ -1398,6 +1515,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/undecided_conditional_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/unique_symbol_key_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/unread_marker_relation_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/wide_union_relation_tests.rs",
           "crates/verter_session/src/project_type_store.rs",
           "crates/verter_session/src/query_db_self_root_tests.rs",
           "crates/verter_session/src/request_bundle_memo_tests.rs",
@@ -1424,11 +1542,13 @@
           "crates/verter_session/src/resolver_core/shallow_file_state.rs",
           "crates/verter_session/src/resolver_core/surface_projector_tests.rs",
           "crates/verter_session/src/resolver_core_tests/bare_name_resolve_namespace_tests.rs",
+          "crates/verter_session/src/root_continuations_tests.rs",
           "crates/verter_session/src/semantic_graph_self_root_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/allocation_ownership_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/cancellation_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/flow_return_root_tests.rs",
+          "crates/verter_session/src/semantic_query_memo_tests/in_flight_charge_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/object_spread_projection_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/producer_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/public_carrier_tests.rs",
@@ -1517,15 +1637,16 @@
           "crates/verter_session/tests/cases/compile-fail/flight_rendezvous_absent_without_support.rs",
           "crates/verter_session/tests/cases/compile-fail/flight_rendezvous_opt_in_through_soak_support.rs",
           "crates/verter_session/tests/cases/compile-fail/flow_return_root_positive_through_soak_support.rs",
+          "crates/verter_session/tests/cases/compile-fail/flow_return_root_rejects_raw_ordinal.rs",
           "crates/verter_session/tests/cases/compile-fail/held_charge_witness_absent_without_support.rs",
           "crates/verter_session/tests/cases/compile-fail/held_charge_witness_through_soak_support.rs",
-          "crates/verter_session/tests/cases/g_session/held_charge_witness.rs",
-          "crates/verter_session/tests/cases/compile-fail/flow_return_root_rejects_raw_ordinal.rs",
           "crates/verter_session/tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
           "crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs",
           "crates/verter_session/tests/cases/compile-fail/instantiate_key_seal_no_features.rs",
           "crates/verter_session/tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs",
           "crates/verter_session/tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs",
+          "crates/verter_session/tests/cases/compile-fail/narrow_work_agreement_under_semantic_observe.rs",
+          "crates/verter_session/tests/cases/compile-fail/narrow_work_observations.rs",
           "crates/verter_session/tests/cases/compile-fail/object_projection_witness_not_forgeable.rs",
           "crates/verter_session/tests/cases/compile-fail/object_projection_witness_only.rs",
           "crates/verter_session/tests/cases/compile-fail/public_construction_copy_is_store_only.rs",
@@ -1550,6 +1671,7 @@
           "crates/verter_session/tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs",
           "crates/verter_session/tests/cases/compile-fail/surface_resolution_incomplete_claim_not_forgeable.rs",
           "crates/verter_session/tests/cases/compile-fail/surface_resolution_reason_mint_is_sealed.rs",
+          "crates/verter_session/tests/cases/compile-fail/work_observation_behavior.rs",
           "crates/verter_session/tests/cases/family_warm_read_releases_mutex_before_validate.rs",
           "crates/verter_session/tests/cases/flow_product_lattice.rs",
           "crates/verter_session/tests/cases/flow_solve_completeness.rs",
@@ -1598,7 +1720,10 @@
           "crates/verter_session/tests/cases/compile-fail/narrow_work_observations.rs",
           "crates/verter_session/tests/cases/compile-fail/work_observation_behavior.rs",
           "crates/verter_session/tests/cases/g_session/flight_rendezvous.rs",
+          "crates/verter_session/tests/cases/g_session/flow_return_close.rs",
+          "crates/verter_session/tests/cases/g_session/held_charge_witness.rs",
           "crates/verter_session/tests/cases/g_session/host_close_reuse.rs",
+          "crates/verter_session/tests/cases/g_session/in_flight_charge.rs",
           "crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs",
           "crates/verter_session/tests/cases/g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs",
           "crates/verter_session/tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs",
@@ -1700,13 +1825,13 @@
               "crates/verter_session/src/component_meta_pick_omit_tests.rs",
               "crates/verter_session/src/component_meta_publication_demand_tests.rs",
               "crates/verter_session/src/component_meta_repo_first_pass_diagnosis_tests.rs",
-              "crates/verter_session/src/component_meta_result_db.rs",
               "crates/verter_session/src/component_meta_resolution_policy/core.rs",
               "crates/verter_session/src/component_meta_resolution_policy/cycle_guard.rs",
               "crates/verter_session/src/component_meta_resolution_policy/mod.rs",
               "crates/verter_session/src/component_meta_resolution_policy/type_publication.rs",
               "crates/verter_session/src/component_meta_resolution_policy_cycle_tests.rs",
               "crates/verter_session/src/component_meta_resolution_policy_tests.rs",
+              "crates/verter_session/src/component_meta_result_db.rs",
               "crates/verter_session/src/component_meta_terminal_mode_tests.rs",
               "crates/verter_session/src/cross_file_augmentation_merge_equivalence_tests.rs",
               "crates/verter_session/src/decl_body_dispatch_equivalence_tests.rs",
@@ -1772,6 +1897,7 @@
               "crates/verter_session/src/project_semantic_dispatch_invariants_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/apparent_type_tests.rs",
+              "crates/verter_session/src/project_semantic_dispatch_tests/augmentation_scale_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/base_signature_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/broad_runtime_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/call_resolve_tests.rs",
@@ -1780,31 +1906,27 @@
               "crates/verter_session/src/project_semantic_dispatch_tests/carrier_materialize_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/carrier_reduction_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/carrier_type_param_descent_tests.rs",
-              "crates/verter_session/src/project_semantic_dispatch_tests/class_member_evidence_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/checker_probe_lane_tests.rs",
-              "crates/verter_session/src/project_semantic_dispatch_tests/module_export_table_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/class_evaluation_flow_tests.rs",
+              "crates/verter_session/src/project_semantic_dispatch_tests/class_member_evidence_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/closedness_evaluator_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/closure_narrowing_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/conditional_decision_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/conditional_operand_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/conditional_tail_tests.rs",
-              "crates/verter_session/src/project_semantic_dispatch_tests/homomorphic_mapped_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/const_literal_widening_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/continuation_depth_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/cost_receipt_tests.rs",
-              "crates/verter_session/src/project_semantic_dispatch_tests/wide_union_relation_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/cycle_gate_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/deep_input_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/differential_class_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/differential_harness_tests.rs",
-              "crates/verter_session/src/project_semantic_dispatch_tests/divergence_certificate_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/dispatch_txn_flow_demand_tests.rs",
+              "crates/verter_session/src/project_semantic_dispatch_tests/divergence_certificate_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/equality_value_narrowing_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_accessor_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_class_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_construct_tests.rs",
-              "crates/verter_session/src/project_semantic_dispatch_tests/augmentation_scale_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_frame_seal_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_global_tests.rs",
@@ -1821,14 +1943,16 @@
               "crates/verter_session/src/project_semantic_dispatch_tests/freshness_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/helper_depth_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/heritage_signature_tests.rs",
+              "crates/verter_session/src/project_semantic_dispatch_tests/homomorphic_mapped_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/infer_scope_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/intersection_complexity_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/lib_global_tests.rs",
-              "crates/verter_session/src/project_semantic_dispatch_tests/merged_declaration_signature_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/local_declaration_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/mapped_domain_parity_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/mapped_key_domain_carrier_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/member_accessibility_relation_tests.rs",
+              "crates/verter_session/src/project_semantic_dispatch_tests/merged_declaration_signature_tests.rs",
+              "crates/verter_session/src/project_semantic_dispatch_tests/module_export_table_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/node_domain_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/object_literal_key_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/object_literal_union_tests.rs",
@@ -1859,6 +1983,7 @@
               "crates/verter_session/src/project_semantic_dispatch_tests/tuple_splice_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/unique_symbol_key_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/unread_marker_relation_tests.rs",
+              "crates/verter_session/src/project_semantic_dispatch_tests/wide_union_relation_tests.rs",
               "crates/verter_session/src/project_type_store.rs",
               "crates/verter_session/src/query_db_self_root_tests.rs",
               "crates/verter_session/src/resolver_core/component_meta/native_props.rs",
@@ -1868,8 +1993,8 @@
               "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/node_materialize.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_decl.rs",
-              "crates/verter_session/src/resolver_core/component_meta_query_engine/route_admission.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_route_scoped.rs",
+              "crates/verter_session/src/resolver_core/component_meta_query_engine/route_admission.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve_depth_tests.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/surface.rs",
@@ -1883,6 +2008,7 @@
               "crates/verter_session/src/semantic_query_memo_tests/allocation_ownership_tests.rs",
               "crates/verter_session/src/semantic_query_memo_tests/cancellation_tests.rs",
               "crates/verter_session/src/semantic_query_memo_tests/flow_return_root_tests.rs",
+              "crates/verter_session/src/semantic_query_memo_tests/in_flight_charge_tests.rs",
               "crates/verter_session/src/semantic_query_memo_tests/object_spread_projection_tests.rs",
               "crates/verter_session/src/semantic_query_memo_tests/producer_tests.rs",
               "crates/verter_session/src/semantic_query_memo_tests/public_carrier_tests.rs",
@@ -1948,15 +2074,16 @@
               "crates/verter_session/tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs",
               "crates/verter_session/tests/cases/compile-fail/dto_names_session_hot_handle.rs",
               "crates/verter_session/tests/cases/compile-fail/flow_return_root_positive_through_soak_support.rs",
+              "crates/verter_session/tests/cases/compile-fail/flow_return_root_rejects_raw_ordinal.rs",
               "crates/verter_session/tests/cases/compile-fail/held_charge_witness_absent_without_support.rs",
               "crates/verter_session/tests/cases/compile-fail/held_charge_witness_through_soak_support.rs",
-              "crates/verter_session/tests/cases/g_session/held_charge_witness.rs",
-              "crates/verter_session/tests/cases/compile-fail/flow_return_root_rejects_raw_ordinal.rs",
               "crates/verter_session/tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
               "crates/verter_session/tests/cases/compile-fail/instantiate_key_context_not_extractable.rs",
               "crates/verter_session/tests/cases/compile-fail/instantiate_key_seal_no_features.rs",
               "crates/verter_session/tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs",
               "crates/verter_session/tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs",
+              "crates/verter_session/tests/cases/compile-fail/narrow_work_agreement_under_semantic_observe.rs",
+              "crates/verter_session/tests/cases/compile-fail/narrow_work_observations.rs",
               "crates/verter_session/tests/cases/compile-fail/object_projection_witness_not_forgeable.rs",
               "crates/verter_session/tests/cases/compile-fail/object_projection_witness_only.rs",
               "crates/verter_session/tests/cases/compile-fail/public_construction_copy_is_store_only.rs",
@@ -1977,6 +2104,7 @@
               "crates/verter_session/tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs",
               "crates/verter_session/tests/cases/compile-fail/surface_resolution_incomplete_claim_not_forgeable.rs",
               "crates/verter_session/tests/cases/compile-fail/surface_resolution_reason_mint_is_sealed.rs",
+              "crates/verter_session/tests/cases/compile-fail/work_observation_behavior.rs",
               "crates/verter_session/tests/cases/family_warm_read_releases_mutex_before_validate.rs",
               "crates/verter_session/tests/cases/flow_product_lattice.rs",
               "crates/verter_session/tests/cases/flow_solve_completeness.rs",
@@ -2016,11 +2144,11 @@
               "crates/verter_session/tests/cases/g_misc2/per_macro_projector_decomposition_tests.rs",
               "crates/verter_session/tests/cases/g_misc2/recursive_substitute_memo.rs",
               "crates/verter_session/tests/cases/g_misc3/slot_binding_graph_matrix_member_presence.rs",
-              "crates/verter_session/tests/cases/compile-fail/narrow_work_agreement_under_semantic_observe.rs",
-              "crates/verter_session/tests/cases/compile-fail/narrow_work_observations.rs",
-              "crates/verter_session/tests/cases/compile-fail/work_observation_behavior.rs",
               "crates/verter_session/tests/cases/g_session/flight_rendezvous.rs",
+              "crates/verter_session/tests/cases/g_session/flow_return_close.rs",
+              "crates/verter_session/tests/cases/g_session/held_charge_witness.rs",
               "crates/verter_session/tests/cases/g_session/host_close_reuse.rs",
+              "crates/verter_session/tests/cases/g_session/in_flight_charge.rs",
               "crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs",
               "crates/verter_session/tests/cases/g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs",
               "crates/verter_session/tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs",
@@ -2163,7 +2291,9 @@
           "verter_ffi",
           "verter_wasm"
         ],
-        "importers": ["crates/verter_session/src/flow_slice_content_tests.rs"],
+        "importers": [
+          "crates/verter_session/src/flow_slice_content_tests.rs"
+        ],
         "ownerCratePopulation": "the module lives in verter_semantic_source and is pub; the session reaches it through the declaration-body memo, and its one direct cross-crate importer is the session-resident slice content suite",
         "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (oxc-qualified items and crate::module::Item paths like crate::semantic_query:: and crate::decl_lowering:: references in lowering helpers) are measured, so the declared sets equal the production direction both ways"
       },
@@ -2186,8 +2316,13 @@
         }
       ],
       "minimalPublicSurface": {
-        "retainedFns": ["selected_span_child"],
-        "retainedTypes": ["ObjectMemberPolicy", "LoweringWork"],
+        "retainedFns": [
+          "selected_span_child"
+        ],
+        "retainedTypes": [
+          "ObjectMemberPolicy",
+          "LoweringWork"
+        ],
         "narrow": [],
         "rationale": "pub module of the source crate: the session consumes slice content through the declaration-body memo; the retained items are the object-member policy the memo's lowering entry takes, the sibling-selection helper the session-resident slice suite pins, and the test-support lowering work probe"
       },

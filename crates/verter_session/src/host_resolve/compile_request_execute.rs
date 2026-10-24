@@ -21,8 +21,6 @@
 
 use rustc_hash::FxHashMap;
 
-use oxc_allocator::Allocator;
-
 use super::compile_request_build::{
     execute_supplied_host_request, no_carrier_artifact_diagnostics, HostProductsFailure,
     SuppliedRequestFailure,
@@ -73,7 +71,22 @@ impl VerterHost {
     pub fn compile_request(
         &self,
         canonical_id: &str,
+        request: verter_compiler::compile_request::CompileRequest,
+    ) -> Result<CompileRequestResponse, CompileRequestFailure> {
+        // The synchronous entry drives the request's pollable root
+        // ([`Self::begin_compile_request`]) to its answer.
+        self.begin_compile_request(canonical_id, request)
+            .drive(self.scheduler())
+    }
+
+    /// [`Self::compile_request`] as a pollable computation: the body of the
+    /// request's root, which hands its driver the dependency work it needs
+    /// through `work`.
+    pub(crate) async fn compile_request_pollable<'h>(
+        &'h self,
+        canonical_id: &str,
         mut request: verter_compiler::compile_request::CompileRequest,
+        work: &crate::root_continuation::RootWorkSlot<'h>,
     ) -> Result<CompileRequestResponse, CompileRequestFailure> {
         use crate::block_content::SuppliedBlockScope;
 
@@ -216,9 +229,14 @@ impl VerterHost {
         // The compile is one operation: a parse or walk-stack lease refused
         // its stack anywhere inside it fails the request with the fatal
         // `HOST_STACK_UNAVAILABLE` diagnostic, and no product publishes.
-        match verter_parser::oxc_parse::refusals_within(|| {
-            self.compile_request_entry(&compile_input, request, binding)
-        }) {
+        match verter_parser::oxc_parse::refusals_within_pollable(self.compile_request_entry(
+            &compile_input,
+            request,
+            binding,
+            work,
+        ))
+        .await
+        {
             (compiled, None) => compiled,
             (_, Some(unavailable)) => Err(CompileRequestFailure::Refused {
                 canonical_id: canonical.clone(),
@@ -243,11 +261,12 @@ impl VerterHost {
     /// virtual nodes, the IDE product publishes the IDE projection, and
     /// the analysis product publishes the host analysis payload — each row
     /// one-to-one with a requested kind, in request order.
-    fn compile_request_entry(
-        &self,
+    async fn compile_request_entry<'h>(
+        &'h self,
         snapshot: &CompileInput,
         request: verter_compiler::compile_request::CompileRequest,
         binding: Option<BoundNativeHostRequest>,
+        work: &crate::root_continuation::RootWorkSlot<'h>,
     ) -> Result<CompileRequestResponse, CompileRequestFailure> {
         use verter_compiler::compile_request::{CompileProduct, ProductKind};
 
@@ -292,9 +311,9 @@ impl VerterHost {
                 .and_then(|vue| vue.runtime_module_name.clone()),
         };
 
-        let alloc = Allocator::new();
         let products =
-            match execute_supplied_host_request(self, binding, artifact, request, snapshot, &alloc)
+            match execute_supplied_host_request(self, binding, artifact, request, snapshot, work)
+                .await
             {
                 Ok(products) => products,
                 Err(SuppliedRequestFailure::FrameworkMismatch {

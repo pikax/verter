@@ -3,7 +3,6 @@
 //! subscriber detaches without stopping the flight; an abandoned flight
 //! sends its subscribers back to resolve for themselves.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -349,10 +348,10 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
     let leader = resolution_test_hooks::with_hook(
         ResolutionPhase::PreAdmissionValidation,
         move || {
-            let cancel = Arc::new(AtomicBool::new(false));
+            let cancel = verter_execution::cancellation::CancellationToken::new();
             {
                 let workspace = Arc::clone(&hook_workspace);
-                let cancel = Arc::clone(&cancel);
+                let cancel = cancel.clone();
                 let outcome = Arc::clone(&hook_cancelled);
                 hook_threads
                     .lock()
@@ -361,7 +360,6 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
                         let mut ledger = crate::resolver::InputResolutionLedger::new(
                             workspace.engine.input_resolution_budgets,
                         );
-                        let is_cancelled = || cancel.load(Ordering::SeqCst);
                         let result = workspace
                             .engine
                             .resolve_import_outcome_for_published_in_operation(
@@ -371,7 +369,7 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
                                 "./dep",
                                 CONTEXT,
                                 ResolutionOperation::unpinned(&mut ledger, &|| true)
-                                    .cancelled_by(&is_cancelled),
+                                    .cancelled_by(&cancel),
                             );
                         *outcome.lock().unwrap() = Some(result.non_admission_reason());
                     }));
@@ -391,7 +389,7 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
                     }));
             }
             await_subscribers(&hook_workspace, false, 2);
-            cancel.store(true, Ordering::SeqCst);
+            cancel.cancel();
             // The cancelled subscriber detaches while the flight still runs.
             await_detached(&hook_cancelled);
         },

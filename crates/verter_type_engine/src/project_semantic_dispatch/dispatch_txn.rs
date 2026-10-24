@@ -2323,7 +2323,7 @@ pub struct CompletedRelations {
     members: Vec<CompletedSccMember>,
     /// Positions in `members` of the indexed cold answers, hashed by key.
     settled: hashbrown::HashTable<u32>,
-    /// The file roots of the queued members' operands, one per canonical
+    /// The file roots of the queued members' operands, one per (canonical, hash)
     /// in the order the members completed ([`super::call_resolve::union_self_roots`]):
     /// every root close of the transaction publishes them, so they are
     /// folded once, as each member queues, rather than re-read from every
@@ -2390,7 +2390,7 @@ impl CompletedRelations {
         std::mem::take(&mut self.members)
     }
 
-    /// The queued members' operand file roots, one per canonical, in the
+    /// The queued members' operand file roots, one per (canonical, hash), in the
     /// order the members completed.
     pub(crate) fn self_roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
         &self.self_roots
@@ -2743,7 +2743,7 @@ impl CompletedMemberRoots for CompletedResolveCallMember {
 
 /// The flow or call members a transaction queued for its root's batched
 /// publish, in the order they completed, with the union of their file
-/// roots (one per canonical, first queued first). Every root close of the
+/// roots (one per (canonical, hash), first queued first). Every root close of the
 /// transaction publishes that union, so it grows as members queue instead
 /// of being re-read from every queued member at every close — a chain of
 /// `n` closes would otherwise re-read `n²` members.
@@ -2784,7 +2784,7 @@ impl<T> CompletedMembers<T> {
         std::mem::take(&mut self.members)
     }
 
-    /// The queued members' file roots, one per canonical, in the order the
+    /// The queued members' file roots, one per (canonical, hash), in the order the
     /// members completed.
     pub(crate) fn self_roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
         &self.self_roots

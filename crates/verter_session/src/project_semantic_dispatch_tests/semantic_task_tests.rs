@@ -87,6 +87,146 @@ impl std::task::Wake for CountingWaker {
 
 fn assert_send<T: Send>(_: &T) {}
 
+/// A semantic producer and a scoped cache producer must use the same cycle
+/// authority, whichever dependency is registered first. Neither wait leaves
+/// a native stack active: the test holds both owned producers explicitly.
+#[test]
+fn scoped_cache_handoffs_share_the_semantic_wait_graph() {
+    use verter_execution::tasks::ExecutionScope;
+    use verter_scheduler::scheduler::{
+        ScopedCacheNodeError, ScopedCacheNodeRequest, ScopedCacheNodeStep,
+    };
+    use verter_type_engine::semantic_query_memo::{Joined, Recursion};
+
+    for semantic_waits_first in [false, true] {
+        let host = chain_host();
+        let graph = host.project_type_store().semantic_graph();
+        let registry = graph.task_registry_for_tests();
+        let cache_task = registry.register_task();
+        let semantic_task = registry.register_task();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let key = typeof_key(&dispatch, "x2");
+        let mut capture = ReadCapture::default();
+        let mut semantic_claim = graph
+            .begin_query_claim(&*host, host.request_flags(), key.clone(), &mut capture)
+            .unwrap_or_else(|_| panic!("the semantic producer is cold"));
+        let Claim::Produce(semantic_producer) = graph.claim_query(
+            &*host,
+            host.request_flags(),
+            &mut semantic_claim,
+            &semantic_task,
+            &mut capture,
+        ) else {
+            panic!("one task owns the semantic producer");
+        };
+        let request = ScopedCacheNodeRequest {
+            cache_id: verter_scheduler::cache_id::SchedulerCacheId(0xC1C1E),
+            key_hash: [7; 16],
+            view_epoch: 0,
+            snapshot_pin_id: verter_scheduler::dag::PinId(1),
+            priority: verter_scheduler::stage::Priority::Interactive,
+            request_context: None,
+        };
+        let mut cache_root = {
+            let _task = ExecutionScope::install(registry, &cache_task);
+            host.scheduler
+                .begin_scoped_cache_node::<u64>(request.clone())
+                .unwrap()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let granted = verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::ScopedCacheNode,
+            Some(std::time::Duration::from_millis(1)),
+            |waker| {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cache dispatch stalled"
+                );
+                cache_root.poll(waker)
+            },
+        );
+        let Ok(ScopedCacheNodeStep::Produce(cache_producer)) = granted else {
+            panic!("the cache task receives the sole owned producer");
+        };
+        assert_send(&cache_producer);
+        let mut cache_follower = {
+            let _task = ExecutionScope::install(registry, &semantic_task);
+            host.scheduler
+                .begin_scoped_cache_node::<u64>(request)
+                .unwrap()
+        };
+        let mut dependent_claim = graph
+            .begin_query_claim(&*host, host.request_flags(), key, &mut capture)
+            .unwrap_or_else(|_| panic!("the semantic producer is still held"));
+
+        let Claim::Subscribed(mut semantic_follower) = graph.claim_query(
+            &*host,
+            host.request_flags(),
+            &mut dependent_claim,
+            &cache_task,
+            &mut capture,
+        ) else {
+            panic!("the cache task subscribes to the held semantic producer");
+        };
+        if semantic_waits_first {
+            assert!(semantic_follower
+                .poll(
+                    &*host,
+                    host.request_flags(),
+                    &mut dependent_claim,
+                    &mut capture,
+                    Waker::noop(),
+                )
+                .is_pending());
+            assert_eq!(registry.wait_count_for_tests(), 1);
+            assert!(matches!(
+                cache_follower.poll(Waker::noop()),
+                Poll::Ready(Err(ScopedCacheNodeError::Reentrant))
+            ));
+        } else {
+            assert!(cache_follower.poll(Waker::noop()).is_pending());
+            assert_eq!(registry.wait_count_for_tests(), 1);
+            assert!(matches!(
+                semantic_follower.poll(
+                    &*host,
+                    host.request_flags(),
+                    &mut dependent_claim,
+                    &mut capture,
+                    Waker::noop(),
+                ),
+                Poll::Ready(Joined::Recursive(Recursion::WaitCycle))
+            ));
+        }
+        drop(semantic_follower);
+        drop(cache_follower);
+        assert_eq!(registry.wait_count_for_tests(), 0);
+        // Resolving either cycle affects only its dependent subscriber. The
+        // surviving cache owner still receives its producer's actual value.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    cache_producer.run(|_| {
+                        let current = ExecutionScope::current(registry).expect("producer task");
+                        assert_eq!(current.id(), cache_task.id());
+                        41
+                    });
+                    assert!(ExecutionScope::current(registry).is_none());
+                })
+                .join()
+                .unwrap();
+        });
+        assert!(matches!(
+            cache_root.poll(Waker::noop()),
+            Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 41
+        ));
+        drop(semantic_producer);
+        drop(cache_root);
+        drop(cache_task);
+        drop(semantic_task);
+        assert_eq!(graph.wait_graph_counts_for_tests(), (0, 0));
+    }
+}
+
 #[test]
 fn semantic_task_partiality_returns_to_its_lender_without_tainting_the_poller() {
     use verter_type_engine::request_context::{
@@ -666,6 +806,66 @@ fn a_pending_semantic_task_keeps_its_jobs_cancellation_on_another_thread() {
     drop(other);
 }
 
+/// A task pending on another task's held producer is woken by the
+/// cancellation that stops it — its request's, or its job's once the last
+/// requester cancels — with no timer and the producer still held. Its next
+/// poll stops it, leaving nothing open and no wait behind; a requester
+/// cancelling while a sibling keeps the job live wakes nothing. The held
+/// producer is untouched and still finishes for its own owner.
+#[test]
+fn a_pending_semantic_task_is_woken_by_the_cancellation_that_stops_it() {
+    for under_job in [false, true] {
+        let host = chain_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (other, lease) = hold_producer(&host, graph, typeof_key(&dispatch, "x2"));
+        let first = budgeted_request(1);
+        let second = budgeted_request(2);
+        let job = verter_execution::cancellation::CancellationToken::aggregate();
+        let owners = under_job.then(|| {
+            (
+                job.register_owner(Some(first.cancellation_token()))
+                    .unwrap(),
+                job.register_owner(Some(second.cancellation_token()))
+                    .unwrap(),
+            )
+        });
+        let _job = under_job
+            .then(|| verter_execution::cancellation::JobCancellationGuard::install(job.clone()));
+        let _request =
+            verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&first));
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        dispatch
+            .with_semantic_task_for_tests(typeof_key(&dispatch, "x5"), |slot| {
+                let task = slot.as_mut().expect("the task is lent");
+                assert!(task.poll_for_tests(&waker).is_pending());
+                let before = wakes();
+                first.cancel();
+                if under_job {
+                    assert_eq!(wakes(), before, "the second requester keeps the job live");
+                    assert!(task.poll_for_tests(&waker).is_pending());
+                    second.cancel();
+                }
+                assert!(
+                    wakes() > before,
+                    "the stopping cancellation wakes the pending task (under_job={under_job})"
+                );
+                assert!(matches!(
+                    task.poll_for_tests(&waker),
+                    Poll::Ready(TaskOutcomeForTests::Stopped)
+                ));
+            })
+            .expect("the cold root runs as a task");
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "no wait is left");
+        drop(lease);
+        drop(owners);
+        drop(other);
+    }
+}
+
 /// The work, spend and paid computations a task's frames charge on
 /// another thread land in the component-meta compute that lent it the
 /// request, exactly as when the task finishes on its own thread.
@@ -1206,4 +1406,140 @@ fn a_contextual_call_released_while_suspended_leaves_nothing_open() {
             "[number, Box<3>]"
         );
     }
+}
+
+/// How the subscriber to a held semantic flight is driven through the
+/// root-continuation harness.
+#[derive(Clone, Copy)]
+enum FollowerDrive {
+    /// The pollable subscription.
+    Poll,
+    /// The synchronous wait: the planted blocking wait the probe refuses.
+    SynchronousWait,
+    /// A park the probe cannot see: the planted blocking wait only the
+    /// deadline catches.
+    UnannouncedPark,
+}
+
+/// Hold another task's semantic flight and drive a second task's
+/// subscription to it as `drive` says, through the root-continuation
+/// harness. Whatever the verdict, no wait edge or task is left behind.
+fn drive_semantic_follower(
+    drive: FollowerDrive,
+    deadline: std::time::Duration,
+) -> Result<bool, crate::root_continuations_tests::NotSuspended> {
+    use verter_type_engine::semantic_query_memo::Joined;
+
+    let host = chain_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = typeof_key(&dispatch, "x0");
+    let graph = host.project_type_store().semantic_graph();
+    let (producer_task, lease) = hold_producer(&host, graph, key.clone());
+    let follower_task = graph.task_registry_for_tests().register_task();
+    let mut capture = ReadCapture::default();
+    let mut claim = graph
+        .begin_query_claim(&*host, host.request_flags(), key, &mut capture)
+        .unwrap_or_else(|_| panic!("the flight is held"));
+    let Claim::Subscribed(subscription) = graph.claim_query(
+        &*host,
+        host.request_flags(),
+        &mut claim,
+        &follower_task,
+        &mut capture,
+    ) else {
+        panic!("the follower subscribes to the held flight");
+    };
+    let parked = Arc::new((parking_lot::Mutex::new(false), parking_lot::Condvar::new()));
+    let release_park = Arc::clone(&parked);
+    let host_ref = &*host;
+    let verdict = crate::root_continuations_tests::pending_before_release(
+        deadline,
+        (Some(subscription), claim, capture),
+        move |(subscription, claim, capture), waker| match drive {
+            FollowerDrive::Poll => subscription
+                .as_mut()
+                .expect("polled until its answer")
+                .poll(host_ref, host_ref.request_flags(), claim, capture, waker)
+                .map(|joined| matches!(joined, Joined::Retry | Joined::Read(_))),
+            FollowerDrive::SynchronousWait => {
+                let joined = subscription.take().expect("waited once").wait(
+                    host_ref,
+                    host_ref.request_flags(),
+                    claim,
+                    capture,
+                );
+                Poll::Ready(matches!(joined, Joined::Retry | Joined::Read(_)))
+            }
+            FollowerDrive::UnannouncedPark => {
+                let (released, changed) = &*parked;
+                let mut released = released.lock();
+                while !*released {
+                    changed.wait(&mut released);
+                }
+                Poll::Ready(true)
+            }
+        },
+        move || {
+            let (released, changed) = &*release_park;
+            *released.lock() = true;
+            changed.notify_all();
+            drop(lease);
+        },
+    );
+    drop((producer_task, follower_task));
+    assert_eq!(
+        graph.wait_graph_counts_for_tests(),
+        (0, 0),
+        "the harness leaves no wait edge or task open",
+    );
+    verdict
+}
+
+/// The pollable subscriber of a held semantic flight returns `Pending`
+/// before the producer releases it, is woken by the release, and answers.
+#[test]
+fn root_continuations_harness_passes_a_suspending_flight_subscriber() {
+    assert_eq!(
+        drive_semantic_follower(
+            FollowerDrive::Poll,
+            crate::root_continuations_tests::POLL_DEADLINE
+        ),
+        Ok(true)
+    );
+}
+
+/// Planted blocking wait, announced: the synchronous form of the same
+/// subscription fails the harness at once, naming its family, and the
+/// harness still releases the producer and joins its thread.
+#[test]
+fn root_continuations_harness_fails_a_planted_synchronous_wait() {
+    match drive_semantic_follower(
+        FollowerDrive::SynchronousWait,
+        crate::root_continuations_tests::POLL_DEADLINE,
+    ) {
+        Err(crate::root_continuations_tests::NotSuspended::EnteredWait(message)) => assert!(
+            message.contains("SemanticFlight"),
+            "the refusal names the family: {message}",
+        ),
+        other => panic!("a synchronous wait cannot pass for a suspension: {other:?}"),
+    }
+}
+
+/// Planted blocking wait, unannounced: a park the probe cannot see fails
+/// the harness at its injected deadline, and releasing the hold lets the
+/// parked thread finish, so the harness joins it and returns.
+#[test]
+fn root_continuations_harness_fails_a_planted_unannounced_park_at_the_deadline() {
+    let started = std::time::Instant::now();
+    assert_eq!(
+        drive_semantic_follower(
+            FollowerDrive::UnannouncedPark,
+            crate::root_continuations_tests::PLANTED_DEADLINE
+        ),
+        Err(crate::root_continuations_tests::NotSuspended::Blocked),
+    );
+    assert!(
+        started.elapsed() < crate::root_continuations_tests::POLL_DEADLINE,
+        "the harness returns soon after its injected deadline",
+    );
 }

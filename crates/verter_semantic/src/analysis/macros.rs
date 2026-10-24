@@ -766,22 +766,348 @@ pub enum MacroFieldPayloadLowering {
     OwnerMismatch,
 }
 
+/// The analyzer's macro / field ADDRESS table for one retained program: each
+/// macro's ordinal, owner, kind and call span, and, per field ordinal, where
+/// its authored payload node sits. Built ONCE per retained parse snapshot by
+/// replaying the analyzer's OWN macro assembly
+/// ([`analyze_macros_from_program_with_owners`], no binding index —
+/// constructor outcomes are not recomputed), so the mint side and the deref
+/// side cannot drift; every per-field payload demand then reads its address
+/// here instead of replaying the whole assembly again. A component with `N`
+/// fields therefore costs one assembly plus `N` constant-work lowerings, not
+/// `N` assemblies of `N` fields each.
+///
+/// Content-free: spans, ordinals and kinds only — no names, no type text, no
+/// AST borrows — so a host may keep it beside the retained snapshot it was
+/// built from (the table is valid exactly as long as that program is).
+#[derive(Debug, Default)]
+pub struct MacroFieldAddressTable {
+    macros: Vec<MacroAddress>,
+    #[cfg(feature = "semantic-observe")]
+    work: verter_audit::observe::ObservedU64,
+}
+
+impl verter_retention::heap_size::HeapSize for MacroFieldAddressTable {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            macros,
+            #[cfg(feature = "semantic-observe")]
+                work: _,
+        } = self;
+        macros.heap_size(meter)
+    }
+}
+
+#[derive(Debug, verter_retention::heap_size::HeapSize)]
+struct MacroAddress {
+    owner: TopLevelOwnerId,
+    kind: AnalyzedMacroKind,
+    span: verter_span::Span,
+    fields: Vec<FieldAddress>,
+}
+
+/// Where one field's authored payload node sits in the retained program.
+#[derive(Debug, Clone, Copy, verter_retention::heap_size::HeapSize)]
+enum FieldAddress {
+    /// The analyzer recorded no authored payload for the field.
+    Unauthored,
+    /// The analyzer recorded an authored payload, but no node of the
+    /// field's family sits at the recorded span.
+    Unlocated,
+    /// A `defineModel` field: the payload is the macro's type argument.
+    ModelTypeArgument,
+    /// The `member`-th signature of the `list`-th member list
+    /// ([`field_payload_member_lists`]) whose family span is `span`.
+    Member {
+        list: u32,
+        member: u32,
+        span: verter_span::Span,
+    },
+    /// The `property`-th property of the macro's runtime object argument,
+    /// keyed at `span`.
+    RuntimeProperty {
+        property: u32,
+        span: verter_span::Span,
+    },
+}
+
+/// The member families a field payload can live in: a prop's key, an emit's
+/// key or call-signature event name, a slot's key or method name.
+#[derive(Debug, Clone, Copy)]
+enum MemberFamily {
+    Prop,
+    Emit,
+    Slot,
+}
+
+impl MemberFamily {
+    /// The span the analyzer records for a field authored by `member`, or
+    /// `None` when `member` cannot author a field of this family.
+    fn address_span(self, member: &TSSignature<'_>) -> Option<verter_span::Span> {
+        let span = |s: oxc_span::Span| verter_span::Span::new(s.start, s.end);
+        match (self, member) {
+            (_, TSSignature::TSPropertySignature(prop)) => Some(span(prop.key.span())),
+            (Self::Emit, TSSignature::TSCallSignatureDeclaration(call_sig)) => {
+                let ta = call_sig.params.items.first()?.type_annotation.as_ref()?;
+                let TSType::TSLiteralType(lit) = &ta.type_annotation else {
+                    return None;
+                };
+                let TSLiteral::StringLiteral(s) = &lit.literal else {
+                    return None;
+                };
+                Some(span(s.span))
+            }
+            (Self::Slot, TSSignature::TSMethodSignature(method)) => Some(span(method.key.span())),
+            _ => None,
+        }
+    }
+
+    /// Lower the authored payload of `member`, the node a field of this
+    /// family addresses.
+    fn lower(self, member: &TSSignature<'_>, source: &str) -> MacroFieldPayloadLowering {
+        match (self, member) {
+            (Self::Prop | Self::Emit, TSSignature::TSPropertySignature(prop)) => {
+                match prop.type_annotation.as_ref() {
+                    Some(ta) => MacroFieldPayloadLowering::Payload(
+                        verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source),
+                    ),
+                    None => MacroFieldPayloadLowering::Unauthored,
+                }
+            }
+            (Self::Emit, TSSignature::TSCallSignatureDeclaration(call_sig)) => {
+                let elements: Vec<verter_type_expr::TupleElement> = call_sig
+                    .params
+                    .items
+                    .iter()
+                    .skip(1)
+                    .map(|param| verter_type_expr::TupleElement {
+                        label: match &param.pattern {
+                            BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
+                            _ => None,
+                        },
+                        ty: param
+                            .type_annotation
+                            .as_ref()
+                            .map(|ta| {
+                                verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source)
+                            })
+                            .unwrap_or(TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)),
+                        optional: param.optional,
+                        rest: false,
+                    })
+                    .collect();
+                MacroFieldPayloadLowering::Payload(TypeExpr::Tuple {
+                    elements: std::sync::Arc::from(elements),
+                    readonly: false,
+                })
+            }
+            (Self::Slot, TSSignature::TSPropertySignature(prop)) => {
+                let Some(ta) = prop.type_annotation.as_ref() else {
+                    return MacroFieldPayloadLowering::Unauthored;
+                };
+                let TSType::TSFunctionType(fn_type) = &ta.type_annotation else {
+                    return MacroFieldPayloadLowering::Unauthored;
+                };
+                MacroFieldPayloadLowering::Payload(verter_type_expr_oxc::lower_ts_type(
+                    &fn_type.return_type.type_annotation,
+                    source,
+                ))
+            }
+            (Self::Slot, TSSignature::TSMethodSignature(method)) => {
+                match method.return_type.as_ref() {
+                    Some(rt) => MacroFieldPayloadLowering::Payload(
+                        verter_type_expr_oxc::lower_ts_type(&rt.type_annotation, source),
+                    ),
+                    None => MacroFieldPayloadLowering::Unauthored,
+                }
+            }
+            _ => MacroFieldPayloadLowering::NoField,
+        }
+    }
+}
+
+impl MacroFieldAddressTable {
+    /// Replay the analyzer's macro assembly over `program` once and record
+    /// every macro's and field's address.
+    #[must_use]
+    pub fn build(program: &Program<'_>, source: &str, owners: &TopLevelOwnerTable) -> Self {
+        let macros = analyze_macros_from_program_with_owners(program, source, owners, None);
+        let work = verter_audit::observe::ObservedU64::default();
+        let macros = macros
+            .iter()
+            .map(|mac| MacroAddress::of(program, owners, mac, &work))
+            .collect();
+        Self {
+            macros,
+            #[cfg(feature = "semantic-observe")]
+            work,
+        }
+    }
+
+    /// Units of address work the build performed: one per field addressed
+    /// and one per member or runtime property indexed. Linear in the
+    /// program's macro surface; a measurement of the build, never a
+    /// semantic input.
+    #[must_use]
+    #[cfg(feature = "semantic-observe")]
+    pub fn work(&self) -> u64 {
+        self.work.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl MacroAddress {
+    fn of(
+        program: &Program<'_>,
+        owners: &TopLevelOwnerTable,
+        mac: &AnalyzedMacro,
+        work: &verter_audit::observe::ObservedU64,
+    ) -> Self {
+        let (family, authored): (Option<MemberFamily>, Vec<bool>) = match mac.kind {
+            AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => (
+                Some(MemberFamily::Prop),
+                mac.prop_fields
+                    .iter()
+                    .map(|f| f.type_expr_scope.is_some())
+                    .collect(),
+            ),
+            AnalyzedMacroKind::DefineModel => (
+                None,
+                mac.prop_fields
+                    .iter()
+                    .map(|f| f.type_expr_scope.is_some())
+                    .collect(),
+            ),
+            AnalyzedMacroKind::DefineEmits => (
+                Some(MemberFamily::Emit),
+                mac.emit_fields
+                    .iter()
+                    .map(|f| f.payload_expr_scope.is_some())
+                    .collect(),
+            ),
+            AnalyzedMacroKind::DefineSlots => (
+                Some(MemberFamily::Slot),
+                mac.slot_fields
+                    .iter()
+                    .map(|f| f.return_expr_scope.is_some())
+                    .collect(),
+            ),
+            // `defineExpose` / `defineOptions` fields never stamp a payload
+            // position (their inventories are runtime object forms).
+            AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {
+                (None, Vec::new())
+            }
+        };
+        let spans: Vec<verter_span::Span> = match mac.kind {
+            AnalyzedMacroKind::DefineEmits => mac.emit_fields.iter().map(|f| f.span).collect(),
+            AnalyzedMacroKind::DefineSlots => mac.slot_fields.iter().map(|f| f.span).collect(),
+            _ => mac.prop_fields.iter().map(|f| f.span).collect(),
+        };
+        // Index the family's member positions once, first occurrence wins
+        // (the order a span search over the same lists would meet them).
+        let mut members: FxHashMap<verter_span::Span, (u32, u32)> = FxHashMap::default();
+        let mut runtime: FxHashMap<verter_span::Span, u32> = FxHashMap::default();
+        if let Some(family) = family.filter(|_| authored.iter().any(|a| *a)) {
+            for (list_index, list) in
+                field_payload_member_lists(program, owners, mac.span, mac.owner)
+                    .into_iter()
+                    .enumerate()
+            {
+                for (member_index, member) in list.iter().enumerate() {
+                    work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(span) = family.address_span(member) {
+                        members
+                            .entry(span)
+                            .or_insert((list_index as u32, member_index as u32));
+                    }
+                }
+            }
+            // Runtime object argument: `name: { type: X as PropType<T> }`.
+            if matches!(family, MemberFamily::Prop) {
+                if let Some(obj) = runtime_props_object(program, mac.span) {
+                    for (property_index, prop) in obj.properties.iter().enumerate() {
+                        work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                            let key = verter_span::Span::new(p.key.span().start, p.key.span().end);
+                            runtime.entry(key).or_insert(property_index as u32);
+                        }
+                    }
+                }
+            }
+        }
+        let fields = authored
+            .iter()
+            .zip(&spans)
+            .map(|(authored, span)| {
+                work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if !authored {
+                    return FieldAddress::Unauthored;
+                }
+                if family.is_none() {
+                    return FieldAddress::ModelTypeArgument;
+                }
+                if let Some(&(list, member)) = members.get(span) {
+                    return FieldAddress::Member {
+                        list,
+                        member,
+                        span: *span,
+                    };
+                }
+                match runtime.get(span) {
+                    Some(&property) => FieldAddress::RuntimeProperty {
+                        property,
+                        span: *span,
+                    },
+                    None => FieldAddress::Unlocated,
+                }
+            })
+            .collect();
+        Self {
+            owner: mac.owner,
+            kind: mac.kind,
+            span: mac.span,
+            fields,
+        }
+    }
+
+    fn family(&self) -> Option<MemberFamily> {
+        match self.kind {
+            AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+                Some(MemberFamily::Prop)
+            }
+            AnalyzedMacroKind::DefineEmits => Some(MemberFamily::Emit),
+            AnalyzedMacroKind::DefineSlots => Some(MemberFamily::Slot),
+            _ => None,
+        }
+    }
+}
+
+/// The runtime object argument of the macro call at `macro_span`, if any.
+fn runtime_props_object<'a>(
+    program: &'a Program<'a>,
+    macro_span: verter_span::Span,
+) -> Option<&'a ObjectExpression<'a>> {
+    let call = find_macro_call_at_span(program, macro_span)?;
+    match call.arguments.first()?.as_expression()? {
+        Expression::ObjectExpression(obj) => Some(obj),
+        _ => None,
+    }
+}
+
 /// The lowered authored PER-FIELD payload of the macro at ordinal
 /// `macro_index`, field ordinal `field_index` — the deref-side re-derivation
 /// of the position a [`MacroPayloadPosition::Field`] payload locator
-/// addresses.
+/// addresses — for a one-shot caller that holds no address table. Builds the
+/// table and reads one field: a caller lowering several fields of one
+/// program builds a [`MacroFieldAddressTable`] once and calls
+/// [`lower_macro_field_payload_at_with_owners`] per field.
 ///
-/// Replays the analyzer's OWN locator assembly ([`analyze_macros_from_program_with_owners`]
-/// with no binding index — constructor outcomes are not recomputed) so the
-/// mint side and the deref side cannot drift. Selects the field family by the
-/// macro's kind (props for `defineProps` / `defineModel`, emits, slots), and
-/// lowers the field's authored node through the same `lower_ts_type`
-/// producer the analyzer fingerprints. The authored node is re-located by
-/// the field's recorded byte span — the exact span the assembly just
-/// recorded from THIS program, so the match is byte-precise:
-///
-/// - a PROP field's annotation lives on a `TSPropertySignature` (the macro
-///   type-argument literal, an intersection arm, or a local interface /
+/// The field family follows the macro's kind (props for `defineProps` /
+/// `defineModel`, emits, slots):
+/// - a PROP field's span is the property KEY span — on a `TSPropertySignature`
+///   (the macro type-argument literal or intersection arm, an interface /
 ///   alias body the analyzer resolved through its local registry) or on the
 ///   runtime object argument's authored `as PropType<T>` / function-type
 ///   assertion;
@@ -801,98 +1127,73 @@ pub fn lower_macro_field_payload_at(
     field_index: u32,
 ) -> MacroFieldPayloadLowering {
     let owners = TopLevelOwnerTable::ordinary_file(program.body.len());
+    let addresses = MacroFieldAddressTable::build(program, source, &owners);
     lower_macro_field_payload_at_with_owners(
         program,
         source,
         &owners,
+        &addresses,
         TopLevelOwnerId::ordinary_file(),
         macro_index,
         field_index,
     )
 }
 
+/// [`lower_macro_field_payload_at`] against `addresses`, the address table
+/// built once from the SAME `program` and `owners`: constant work per field
+/// beyond re-locating the field's member list.
 #[must_use]
 pub fn lower_macro_field_payload_at_with_owners(
     program: &Program<'_>,
     source: &str,
     owners: &TopLevelOwnerTable,
+    addresses: &MacroFieldAddressTable,
     expected_owner: TopLevelOwnerId,
     macro_index: u32,
     field_index: u32,
 ) -> MacroFieldPayloadLowering {
-    let macros = analyze_macros_from_program_with_owners(program, source, owners, None);
-    let Some(mac) = macros.get(macro_index as usize) else {
+    let Some(mac) = addresses.macros.get(macro_index as usize) else {
         return MacroFieldPayloadLowering::NoField;
     };
     if mac.owner != expected_owner {
         return MacroFieldPayloadLowering::OwnerMismatch;
     }
-    enum FieldTarget {
-        Prop { span: verter_span::Span },
-        ModelTypeArgument { macro_span: verter_span::Span },
-        Emit { span: verter_span::Span },
-        SlotReturn { span: verter_span::Span },
-    }
-    let target = match mac.kind {
-        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
-            let Some(field) = mac.prop_fields.get(field_index as usize) else {
-                return MacroFieldPayloadLowering::NoField;
-            };
-            if field.type_expr_scope.is_none() {
-                return MacroFieldPayloadLowering::Unauthored;
-            }
-            FieldTarget::Prop { span: field.span }
-        }
-        AnalyzedMacroKind::DefineModel => {
-            let Some(field) = mac.prop_fields.get(field_index as usize) else {
-                return MacroFieldPayloadLowering::NoField;
-            };
-            if field.type_expr_scope.is_none() {
-                return MacroFieldPayloadLowering::Unauthored;
-            }
-            FieldTarget::ModelTypeArgument {
-                macro_span: mac.span,
-            }
-        }
-        AnalyzedMacroKind::DefineEmits => {
-            let Some(field) = mac.emit_fields.get(field_index as usize) else {
-                return MacroFieldPayloadLowering::NoField;
-            };
-            if field.payload_expr_scope.is_none() {
-                return MacroFieldPayloadLowering::Unauthored;
-            }
-            FieldTarget::Emit { span: field.span }
-        }
-        AnalyzedMacroKind::DefineSlots => {
-            let Some(field) = mac.slot_fields.get(field_index as usize) else {
-                return MacroFieldPayloadLowering::NoField;
-            };
-            if field.return_expr_scope.is_none() {
-                return MacroFieldPayloadLowering::Unauthored;
-            }
-            FieldTarget::SlotReturn { span: field.span }
-        }
-        // `defineExpose` / `defineOptions` fields never stamp a payload
-        // position (their inventories are runtime object forms).
-        AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {
-            return MacroFieldPayloadLowering::NoField;
-        }
+    let Some(address) = mac.fields.get(field_index as usize) else {
+        return MacroFieldPayloadLowering::NoField;
     };
-    match target {
-        FieldTarget::ModelTypeArgument { macro_span } => {
-            match lower_macro_type_argument_at_span(program, source, macro_span) {
+    match *address {
+        FieldAddress::Unauthored => MacroFieldPayloadLowering::Unauthored,
+        FieldAddress::Unlocated => MacroFieldPayloadLowering::NoField,
+        FieldAddress::ModelTypeArgument => {
+            match lower_macro_type_argument_at_span(program, source, mac.span) {
                 Some(expr) => MacroFieldPayloadLowering::Payload(expr),
                 None => MacroFieldPayloadLowering::NoField,
             }
         }
-        FieldTarget::Prop { span } => {
-            lower_prop_field_payload_at_span(program, source, owners, mac, span)
+        FieldAddress::Member { list, member, span } => {
+            let Some(family) = mac.family() else {
+                return MacroFieldPayloadLowering::NoField;
+            };
+            match field_payload_member_list(program, owners, mac.span, mac.owner, list as usize)
+                .and_then(|members| members.get(member as usize))
+            {
+                // The member must still author the recorded span: a table
+                // built from another program fails closed.
+                Some(node) if family.address_span(node) == Some(span) => family.lower(node, source),
+                _ => MacroFieldPayloadLowering::NoField,
+            }
         }
-        FieldTarget::Emit { span } => {
-            lower_emit_field_payload_at_span(program, source, owners, mac, span)
-        }
-        FieldTarget::SlotReturn { span } => {
-            lower_slot_return_payload_at_span(program, source, owners, mac, span)
+        FieldAddress::RuntimeProperty { property, span } => {
+            let Some(ObjectPropertyKind::ObjectProperty(p)) =
+                runtime_props_object(program, mac.span)
+                    .and_then(|obj| obj.properties.get(property as usize))
+            else {
+                return MacroFieldPayloadLowering::NoField;
+            };
+            if verter_span::Span::new(p.key.span().start, p.key.span().end) != span {
+                return MacroFieldPayloadLowering::NoField;
+            }
+            lower_runtime_prop_assertion(&p.value, source)
         }
     }
 }
@@ -904,35 +1205,74 @@ pub fn lower_macro_field_payload_at_with_owners(
 fn field_payload_member_lists<'a>(
     program: &'a Program<'a>,
     owners: &TopLevelOwnerTable,
-    mac: &AnalyzedMacro,
+    macro_span: verter_span::Span,
+    macro_owner: TopLevelOwnerId,
 ) -> Vec<&'a [TSSignature<'a>]> {
-    fn collect_from_type<'a>(ts_type: &'a TSType<'a>, out: &mut Vec<&'a [TSSignature<'a>]>) {
+    let mut lists = macro_type_argument_member_lists(program, macro_span);
+    let registries = build_local_type_registries(program, owners);
+    let registry = LocalTypeRegistryView::new(&registries, owners, macro_owner);
+    registry.for_each_visible(|decl| match decl {
+        LocalTypeDecl::Interface { body, .. } => lists.push(&body.body),
+        LocalTypeDecl::Alias(ts_type) => collect_member_lists_from_type(ts_type, &mut lists),
+        LocalTypeDecl::Class => {}
+    });
+    lists
+}
+
+/// The `list`-th member list of [`field_payload_member_lists`]. The macro's
+/// own type-argument lists come first, so a field authored there is found
+/// without building the local type registries.
+fn field_payload_member_list<'a>(
+    program: &'a Program<'a>,
+    owners: &TopLevelOwnerTable,
+    macro_span: verter_span::Span,
+    macro_owner: TopLevelOwnerId,
+    list: usize,
+) -> Option<&'a [TSSignature<'a>]> {
+    let own = macro_type_argument_member_lists(program, macro_span);
+    if let Some(members) = own.get(list) {
+        return Some(members);
+    }
+    field_payload_member_lists(program, owners, macro_span, macro_owner)
+        .get(list)
+        .copied()
+}
+
+/// The member lists of the macro call's type argument at `macro_span` (a
+/// type literal, or the literal arms of an intersection).
+fn macro_type_argument_member_lists<'a>(
+    program: &'a Program<'a>,
+    macro_span: verter_span::Span,
+) -> Vec<&'a [TSSignature<'a>]> {
+    let mut lists: Vec<&'a [TSSignature<'a>]> = Vec::new();
+    if let Some(call) = find_macro_call_at_span(program, macro_span) {
+        if let Some(type_args) = call.type_arguments.as_ref() {
+            if let Some(first) = type_args.params.first() {
+                collect_member_lists_from_type(first, &mut lists);
+            }
+        }
+    }
+    lists
+}
+
+/// The member lists of `ts_type` (a type literal, or the literal arms of an
+/// intersection, nested intersections included) in source order, walked
+/// from an explicit stack.
+fn collect_member_lists_from_type<'a>(
+    ts_type: &'a TSType<'a>,
+    out: &mut Vec<&'a [TSSignature<'a>]>,
+) {
+    let mut pending = vec![ts_type];
+    while let Some(ts_type) = pending.pop() {
         match ts_type {
             TSType::TSTypeLiteral(literal) => out.push(&literal.members),
+            // Arms are pushed in reverse, so they pop in source order.
             TSType::TSIntersectionType(intersection) => {
-                for arm in &intersection.types {
-                    collect_from_type(arm, out);
-                }
+                pending.extend(intersection.types.iter().rev());
             }
             _ => {}
         }
     }
-    let mut lists: Vec<&'a [TSSignature<'a>]> = Vec::new();
-    if let Some(call) = find_macro_call_at_span(program, mac.span) {
-        if let Some(type_args) = call.type_arguments.as_ref() {
-            if let Some(first) = type_args.params.first() {
-                collect_from_type(first, &mut lists);
-            }
-        }
-    }
-    let registries = build_local_type_registries(program, owners);
-    let registry = LocalTypeRegistryView::new(&registries, owners, mac.owner);
-    registry.for_each_visible(|decl| match decl {
-        LocalTypeDecl::Interface { body, .. } => lists.push(&body.body),
-        LocalTypeDecl::Alias(ts_type) => collect_from_type(ts_type, &mut lists),
-        LocalTypeDecl::Class => {}
-    });
-    lists
 }
 
 /// Find the macro CALL node at `macro_span`, replaying the analyzer's own
@@ -990,55 +1330,6 @@ fn find_macro_call_at_span<'a>(
     None
 }
 
-/// Lower a PROP field's authored payload node at its recorded key span: a
-/// `TSPropertySignature` annotation (type-argument literal / local decl
-/// body) or the runtime object argument's authored `as PropType<T>` /
-/// function-type assertion.
-fn lower_prop_field_payload_at_span(
-    program: &Program<'_>,
-    source: &str,
-    owners: &TopLevelOwnerTable,
-    mac: &AnalyzedMacro,
-    span: verter_span::Span,
-) -> MacroFieldPayloadLowering {
-    for members in field_payload_member_lists(program, owners, mac) {
-        for member in members {
-            if let TSSignature::TSPropertySignature(prop) = member {
-                let key_span: verter_span::Span =
-                    verter_span::Span::new(prop.key.span().start, prop.key.span().end);
-                if key_span == span {
-                    return match prop.type_annotation.as_ref() {
-                        Some(ta) => MacroFieldPayloadLowering::Payload(
-                            verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source),
-                        ),
-                        None => MacroFieldPayloadLowering::Unauthored,
-                    };
-                }
-            }
-        }
-    }
-    // Runtime object argument: `name: { type: X as PropType<T> }` — the
-    // authored assertion node the mint's scope pairing recorded.
-    if let Some(call) = find_macro_call_at_span(program, mac.span) {
-        if let Some(first_arg) = call.arguments.first() {
-            if let Some(Expression::ObjectExpression(obj)) = first_arg.as_expression() {
-                for prop in &obj.properties {
-                    let ObjectPropertyKind::ObjectProperty(p) = prop else {
-                        continue;
-                    };
-                    let key_span: verter_span::Span =
-                        verter_span::Span::new(p.key.span().start, p.key.span().end);
-                    if key_span != span {
-                        continue;
-                    }
-                    return lower_runtime_prop_assertion(&p.value, source);
-                }
-            }
-        }
-    }
-    MacroFieldPayloadLowering::NoField
-}
-
 /// Lower the authored type of one runtime prop VALUE (the expanded object
 /// form's `type:` sub-property carrying an `as PropType<T>` / `as () => T` /
 /// `as new () => T` assertion — the exact shapes the mint stamps a payload
@@ -1080,136 +1371,6 @@ fn lower_runtime_prop_assertion(value: &Expression<'_>, source: &str) -> MacroFi
         };
     }
     MacroFieldPayloadLowering::Unauthored
-}
-
-/// Lower an EMIT field's authored payload at its recorded span: a
-/// property-signature member VALUE (`change: [id: number]` — span = the key)
-/// or the call-signature payload TUPLE (`(e: 'change', id: number): void` —
-/// span = the event-name string literal; the tuple synthesises from the
-/// parameters after the event name, the same shape the analyzer displays).
-fn lower_emit_field_payload_at_span(
-    program: &Program<'_>,
-    source: &str,
-    owners: &TopLevelOwnerTable,
-    mac: &AnalyzedMacro,
-    span: verter_span::Span,
-) -> MacroFieldPayloadLowering {
-    for members in field_payload_member_lists(program, owners, mac) {
-        for member in members {
-            match member {
-                TSSignature::TSPropertySignature(prop) => {
-                    let key_span: verter_span::Span =
-                        verter_span::Span::new(prop.key.span().start, prop.key.span().end);
-                    if key_span == span {
-                        return match prop.type_annotation.as_ref() {
-                            Some(ta) => MacroFieldPayloadLowering::Payload(
-                                verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source),
-                            ),
-                            None => MacroFieldPayloadLowering::Unauthored,
-                        };
-                    }
-                }
-                TSSignature::TSCallSignatureDeclaration(call_sig) => {
-                    let Some(first_param) = call_sig.params.items.first() else {
-                        continue;
-                    };
-                    let Some(ta) = first_param.type_annotation.as_ref() else {
-                        continue;
-                    };
-                    let TSType::TSLiteralType(lit) = &ta.type_annotation else {
-                        continue;
-                    };
-                    let TSLiteral::StringLiteral(s) = &lit.literal else {
-                        continue;
-                    };
-                    let name_span: verter_span::Span =
-                        verter_span::Span::new(s.span.start, s.span.end);
-                    if name_span != span {
-                        continue;
-                    }
-                    let elements: Vec<verter_type_expr::TupleElement> = call_sig
-                        .params
-                        .items
-                        .iter()
-                        .skip(1)
-                        .map(|param| verter_type_expr::TupleElement {
-                            label: match &param.pattern {
-                                BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
-                                _ => None,
-                            },
-                            ty: param
-                                .type_annotation
-                                .as_ref()
-                                .map(|ta| {
-                                    verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source)
-                                })
-                                .unwrap_or(TypeExpr::Primitive(
-                                    verter_type_expr::PrimitiveName::Any,
-                                )),
-                            optional: param.optional,
-                            rest: false,
-                        })
-                        .collect();
-                    return MacroFieldPayloadLowering::Payload(TypeExpr::Tuple {
-                        elements: std::sync::Arc::from(elements),
-                        readonly: false,
-                    });
-                }
-                _ => {}
-            }
-        }
-    }
-    MacroFieldPayloadLowering::NoField
-}
-
-/// Lower a SLOT field's authored RETURN payload at its recorded key span
-/// (property-signature function-type return or method-signature return —
-/// the exact positions the mint's `return_expr_scope` pairing records).
-fn lower_slot_return_payload_at_span(
-    program: &Program<'_>,
-    source: &str,
-    owners: &TopLevelOwnerTable,
-    mac: &AnalyzedMacro,
-    span: verter_span::Span,
-) -> MacroFieldPayloadLowering {
-    for members in field_payload_member_lists(program, owners, mac) {
-        for member in members {
-            match member {
-                TSSignature::TSPropertySignature(prop) => {
-                    let key_span: verter_span::Span =
-                        verter_span::Span::new(prop.key.span().start, prop.key.span().end);
-                    if key_span == span {
-                        let Some(ta) = prop.type_annotation.as_ref() else {
-                            return MacroFieldPayloadLowering::Unauthored;
-                        };
-                        let TSType::TSFunctionType(fn_type) = &ta.type_annotation else {
-                            return MacroFieldPayloadLowering::Unauthored;
-                        };
-                        return MacroFieldPayloadLowering::Payload(
-                            verter_type_expr_oxc::lower_ts_type(
-                                &fn_type.return_type.type_annotation,
-                                source,
-                            ),
-                        );
-                    }
-                }
-                TSSignature::TSMethodSignature(method) => {
-                    let key_span: verter_span::Span =
-                        verter_span::Span::new(method.key.span().start, method.key.span().end);
-                    if key_span == span {
-                        return match method.return_type.as_ref() {
-                            Some(rt) => MacroFieldPayloadLowering::Payload(
-                                verter_type_expr_oxc::lower_ts_type(&rt.type_annotation, source),
-                            ),
-                            None => MacroFieldPayloadLowering::Unauthored,
-                        };
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    MacroFieldPayloadLowering::NoField
 }
 
 /// Stamp the content-free authored payload locators onto a fully-assembled

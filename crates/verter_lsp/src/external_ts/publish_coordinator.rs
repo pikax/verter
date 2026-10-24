@@ -26,6 +26,7 @@
 //! [`BoundProject`](verter_session::external_ts::BoundProject) witness every
 //! publish requires.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use verter_session::external_ts::{
@@ -203,6 +204,15 @@ pub struct CarrierPublishCoordinator {
     /// (useless) registry and concurrent same-source transitions would not serialize.
     /// Shared across coordinator clones.
     source_gates: Arc<SourceGates>,
+    /// Monotonic count of durable store publications THIS coordinator committed
+    /// (the sealed [`Self::publish_owned_resolved`] path only — publish + stale-owner
+    /// prune both succeeded). Every publisher routes through it: the scanner's direct
+    /// pass AND the recovery writes the carrier-phase / completion drains commit after
+    /// a transient first failure. Consumers that must notice ANY store fill (the scan
+    /// settle's editor refresh ping) diff this counter across their window instead of
+    /// tracking one publisher's outcome, which cannot see the others. Shared across
+    /// coordinator clones.
+    store_publications: Arc<AtomicU64>,
 }
 
 impl CarrierPublishCoordinator {
@@ -218,6 +228,7 @@ impl CarrierPublishCoordinator {
             provider: Some(provider),
             ts_version: ts_version.into(),
             source_gates: Arc::new(SourceGates::new()),
+            store_publications: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -233,6 +244,7 @@ impl CarrierPublishCoordinator {
             provider: None,
             ts_version: ts_version.into(),
             source_gates: Arc::new(SourceGates::new()),
+            store_publications: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -247,6 +259,15 @@ impl CarrierPublishCoordinator {
     #[must_use]
     pub fn source_gates(&self) -> &Arc<SourceGates> {
         &self.source_gates
+    }
+
+    /// How many durable store publications this coordinator has committed so far
+    /// (see [`Self::store_publications`]). Monotonic within the session; consumers
+    /// diff it across a window to decide whether the store filled, so a publication
+    /// recovered by a retry drain counts exactly like a direct one.
+    #[must_use]
+    pub fn store_publication_count(&self) -> u64 {
+        self.store_publications.load(Ordering::Acquire)
     }
 
     /// Retract a carrier source from the publish store — the delete / owner-lost /
@@ -524,6 +545,9 @@ impl CarrierPublishCoordinator {
                  {prune_err:?}"
             )));
         }
+        // Both durable halves committed: count the publication AFTER the prune so a
+        // rolled-back publish is never announced as a store fill.
+        self.store_publications.fetch_add(1, Ordering::Release);
         Ok(())
     }
 }

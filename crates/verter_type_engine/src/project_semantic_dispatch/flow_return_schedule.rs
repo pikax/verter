@@ -92,7 +92,6 @@
 //! made, and the probes in progress. The session is cleared when the
 //! outermost frame finishes.
 
-use std::cell::RefCell;
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
@@ -151,7 +150,7 @@ pub(super) enum UnscheduledDemand {
 /// Keeps a frame's schedule session open for the frame's whole evaluation;
 /// the outermost frame's release clears the session.
 pub(super) struct FlowScheduleScope<'g> {
-    txn: &'g RefCell<CheckerDispatchTransaction>,
+    txn: &'g verter_execution::sync_cell::SyncRefCell<CheckerDispatchTransaction>,
 }
 
 impl Drop for FlowScheduleScope<'_> {

@@ -88,6 +88,11 @@ pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
 pub use component_meta_delivery::ComponentMetaDelivery;
+mod root_continuation;
+pub use root_continuation::{
+    CompileRequestAnswer, CompileRequestRoot, ComponentMetaOutputAnswer, ComponentMetaOutputRoot,
+    RootWork,
+};
 #[cfg(test)]
 mod compile_blockers_snapshot_generation_tests;
 #[cfg(test)]
@@ -197,6 +202,9 @@ mod cross_file_augmentation_merge_equivalence_tests;
 mod decl_body_dispatch_equivalence_tests;
 #[cfg(test)]
 mod decl_body_memo_tests;
+// Reads the optional decl-lowering counters: runs in the instrumentation lane.
+#[cfg(all(test, feature = "semantic-observe"))]
+mod component_meta_wide_props_tests;
 pub mod fact_emission;
 pub mod framework;
 pub mod global_contributors;
@@ -206,6 +214,8 @@ mod materialized_structure_equivalence_tests;
 #[cfg(test)]
 mod mutation_stability_tests;
 mod program_order;
+#[cfg(test)]
+mod root_continuations_tests;
 #[cfg(test)]
 mod value_symbol_depth_equivalence_tests;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
@@ -515,6 +525,10 @@ pub struct VerterHost {
 
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
+    /// The host's one execution-task registry: the cycle authority the
+    /// scheduler and the semantic store share, and under which each host
+    /// root runs as its own task.
+    pub(crate) task_registry: verter_execution::tasks::TaskRegistry,
     pub(crate) carrier_publication: carrier_publication_store::CarrierPublicationHostHandles,
     pub(crate) block_content: crate::block_content::BlockContentHostLane,
     /// The single host-level language classification authority:

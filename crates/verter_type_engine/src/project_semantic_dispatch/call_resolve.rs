@@ -5573,14 +5573,15 @@ fn tuple_suffix_target<M: verter_audit::observe::ObserveExec>(
     }
 }
 
-/// Union `source`'s self-roots into `target`, one root per canonical.
+/// Union `source`'s distinct (canonical, hash) observations into `target`.
+/// Conflicting versions must reach carrier admission, which rejects torn roots.
 pub(crate) fn union_self_roots(
     target: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     source: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
 ) {
     note_root_union_work(source.len());
     for root in source {
-        if !target.iter().any(|(canonical, _)| canonical == &root.0) {
+        if !target.contains(root) {
             target.push(root.clone());
         }
     }
