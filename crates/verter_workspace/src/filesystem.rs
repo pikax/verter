@@ -478,9 +478,7 @@ impl FilesystemWorkspace {
                     published,
                     overlay,
                     project,
-                    importer_id,
-                    specifier,
-                    ctx,
+                    crate::resolution_handoff::ImportRequest::new(importer_id, specifier, ctx),
                     task,
                     progress,
                 ))
@@ -493,15 +491,18 @@ impl FilesystemWorkspace {
         published: &Arc<crate::published_state::PublishedRoot>,
         overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
         project: Option<&verter_session_query::resolution::ProjectOwnership>,
-        importer_id: &str,
-        specifier: &str,
-        ctx: verter_session_query::resolution::ResolutionContext,
+        request: crate::resolution_handoff::ImportRequest<'_>,
         task: verter_execution::tasks::ExecutionTask,
         progress: crate::resolution_handoff::Progress,
     ) -> Result<
         crate::resolution_currency::ResolutionOutcome,
         crate::resolution_handoff::ResolutionError,
     > {
+        let crate::resolution_handoff::ImportRequest {
+            importer: importer_id,
+            specifier,
+            context: ctx,
+        } = request;
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
 
@@ -515,9 +516,7 @@ impl FilesystemWorkspace {
                 .resolve_import_continuation(
                     &recorder,
                     self.resolution_evidence_source(),
-                    importer_id,
-                    specifier,
-                    ctx,
+                    crate::resolution_handoff::ImportRequest::new(importer_id, specifier, ctx),
                     crate::engine::ResolutionOperation::pinned(
                         published,
                         &mut input_ledger,
@@ -559,9 +558,7 @@ impl FilesystemWorkspace {
                 .resolve_import_continuation(
                     &frozen,
                     self.resolution_evidence_source(),
-                    importer_id,
-                    specifier,
-                    ctx,
+                    crate::resolution_handoff::ImportRequest::new(importer_id, specifier, ctx),
                     crate::engine::ResolutionOperation::pinned(
                         published,
                         &mut input_ledger,
@@ -2160,9 +2157,11 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                         &published,
                         request.overlay.as_ref(),
                         request.project.as_ref(),
-                        &request.importer,
-                        &request.specifier,
-                        request.context,
+                        crate::resolution_handoff::ImportRequest::new(
+                            &request.importer,
+                            &request.specifier,
+                            request.context,
+                        ),
                         task,
                         progress,
                     )

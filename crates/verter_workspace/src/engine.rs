@@ -3956,9 +3956,7 @@ impl Engine {
             Box::pin(self.resolve_import_continuation(
                 reader,
                 evidence,
-                importer_id,
-                specifier,
-                ctx,
+                crate::resolution_handoff::ImportRequest::new(importer_id, specifier, ctx),
                 operation,
                 task,
                 progress,
@@ -3970,13 +3968,16 @@ impl Engine {
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
-        importer_id: &str,
-        specifier: &str,
-        ctx: verter_session_query::resolution::ResolutionContext,
+        request: crate::resolution_handoff::ImportRequest<'_>,
         operation: ResolutionOperation<'_>,
         task: verter_execution::tasks::ExecutionTask,
         progress: crate::resolution_handoff::Progress,
     ) -> Result<ResolutionOutcome, crate::resolution_handoff::ResolutionError> {
+        let crate::resolution_handoff::ImportRequest {
+            importer: importer_id,
+            specifier,
+            context: ctx,
+        } = request;
         let ResolutionOperation {
             expected_published,
             input_ledger,
@@ -4987,9 +4988,11 @@ impl Engine {
                     &capability,
                     &tracked,
                     &mut input_ledger,
-                    owner,
-                    specifier,
-                    ctx,
+                    crate::resolver::ProjectRequest {
+                        owner,
+                        specifier,
+                        context: ctx,
+                    },
                     Some(&progress),
                 )
                 .await

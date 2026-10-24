@@ -357,7 +357,7 @@ mod tests {
                 // The producer leads and settles on its own thread, so the
                 // lease it owes never belongs to the subscribing thread.
                 let producer = scope.spawn(move || {
-                    let FlightClaim::Lead(lease) = flights.claim(&round, &task) else {
+                    let FlightClaim::Lead(lease) = flights.claim(&round, task) else {
                         panic!("the first demand leads");
                     };
                     led.send(()).expect("the subscriber is listening");

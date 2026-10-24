@@ -965,3 +965,64 @@ fn cancellation_observed_before_parking_on_the_driver_is_a_before_drive_stop() {
     scheduler.test_release_dispatch_pause();
     drop(handle);
 }
+
+#[test]
+fn workspace_resolution_shares_scheduler_authority_on_attach_and_replacement() {
+    use std::task::{Poll, Waker};
+    use verter_execution::cancellation::CancellationToken;
+    use verter_workspace::resolution_handoff::{ResolutionRequest, ResolutionStep};
+    let make_workspace = || {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+        workspace.inject_file("/p/main.ts".into(), Arc::from("export {}"));
+        workspace.inject_file("/p/dep.ts".into(), Arc::from("export const n = 1"));
+        workspace
+    };
+    let host = VerterHost::new(HostConfig::default(), make_workspace());
+    for replace in [false, true] {
+        if replace {
+            host.set_workspace(make_workspace());
+        }
+        let scope = host.scheduler.enter_execution_scope();
+        let mut resolution = host.workspace().begin_resolution(
+            ResolutionRequest {
+                importer: "/p/main.ts".into(),
+                specifier: "./dep".into(),
+                context: verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
+                },
+                published: None,
+                overlay: None,
+                project: None,
+            },
+            scope.task().clone(),
+            CancellationToken::default(),
+        );
+        let mut producer = None;
+        let mut completed = false;
+        for _ in 0..256 {
+            match resolution.poll(Waker::noop()) {
+                Poll::Ready(Ok(ResolutionStep::Produce(owner))) => producer = Some(owner),
+                Poll::Ready(Ok(ResolutionStep::Value(value))) => {
+                    assert_eq!(
+                        value.result().map(|r| r.source_id.as_str()),
+                        Some("/p/dep.ts")
+                    );
+                    completed = true;
+                    break;
+                }
+                Poll::Ready(Err(error)) => panic!("workspace shares host authority: {error:?}"),
+                Poll::Pending => {}
+            }
+            if let Some(owner) = producer.as_mut() {
+                match owner.poll(Waker::noop()) {
+                    Poll::Ready(Some(work)) => work.run(),
+                    Poll::Ready(None) => {}
+                    Poll::Pending => panic!("in-memory dependency needs no external writer"),
+                }
+            }
+        }
+        assert!(completed, "bounded workspace continuation completes");
+        assert_eq!(scope.task().registry().wait_graph_occupancy().edges, 0);
+    }
+}

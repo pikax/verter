@@ -79,8 +79,8 @@ back into the host for a service it was not given.
   engine grants, the `OutputLease` and the `SurfaceClaimAuthority`, and keeps
   neither. The root hands both to `SessionAttachment` alone. The scheduler and
   resolver request flights share the same registry.
-- `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
-  is the only route by which a workspace receives it, both at construction and on
+- `WorkspaceServices` holds the resolve-extension policy and shared TaskRegistry.
+  `WorkspaceServices::attach` injects both at construction and on
   `set_workspace`. Resident resolution state needs no service: every workspace
   Engine binds the process-local `ResolutionRetention` account at its own
   construction, and replacing it is a `test-support` seam only.
@@ -142,7 +142,7 @@ called `RequestSession` or `ProjectSession` (the TypeScript `ProjectSession` in
 | --- | --- | --- |
 | `VerterHost` | `VerterHost` (`host_construction.rs`, `host_lifecycle.rs`) | One host; the composition root |
 | `HostServices` | `framework::HostServices` (`framework/registry.rs`): capability catalog, adapter registry, framework options | One host; composed once at construction |
-| `WorkspaceServices` | `host_construction::WorkspaceServices`: resolve-extension policy | One host; attached to each workspace through `WorkspaceServices::attach` |
+| `WorkspaceServices` | `host_construction::WorkspaceServices`: resolve-extension policy and shared TaskRegistry | One host; attached to each workspace through `WorkspaceServices::attach` |
 | `RequestSession` | `resolver_core::request_bound::RequestBoundAdapter<L>` over a `RequestBoundLifecycle` — `SessionRequestLifecycle<'a>` (`SessionResolverContext<'a>`) or `HostRequestLifecycle<'a>` (`HostResolverContext<'a>`) | One request; host, session view and request view are borrowed for `'a` |
 | `ProjectSession` | `meta::MetaProject` (project lifetime; terminal `shutdown`) plus `meta::MetaSession` (session lifetime; `close`, and close on drop) | Project until shutdown; session until close or drop |
 

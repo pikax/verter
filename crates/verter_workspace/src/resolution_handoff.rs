@@ -59,6 +59,28 @@ pub struct ProjectResolutionRequest {
     pub context: verter_session_query::resolution::ResolutionContext,
 }
 
+/// Borrowed coordinates of one immutable importer request. Keeping them
+/// together leaves the continuation's execution and admission owners explicit.
+#[derive(Clone, Copy)]
+pub(crate) struct ImportRequest<'a> {
+    pub(crate) importer: &'a str,
+    pub(crate) specifier: &'a str,
+    pub(crate) context: verter_session_query::resolution::ResolutionContext,
+}
+impl<'a> ImportRequest<'a> {
+    pub(crate) fn new(
+        importer: &'a str,
+        specifier: &'a str,
+        context: verter_session_query::resolution::ResolutionContext,
+    ) -> Self {
+        Self {
+            importer,
+            specifier,
+            context,
+        }
+    }
+}
+
 /// Exclusive poll-only subscriber. Dropping or cancelling it leaves transferred
 /// producer work and other demands alive.
 pub struct WorkspaceResolution {
@@ -374,9 +396,7 @@ impl<F: Future<Output = Answer> + Unpin> Work<F> {
             let _scope = ExecutionScope::install(self.task.registry(), &self.task);
             // The subscriber's cancellation is deliberately not installed on
             // an independent producer serving other demands.
-            let _stop = verter_execution::cancellation::JobCancellationGuard::install(
-                CancellationToken::default(),
-            );
+            let _stop = verter_execution::cancellation::JobCancellationGuard::replace(None);
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 Pin::new(self.future.as_mut().expect("owned continuation"))
                     .poll(&mut Context::from_waker(&waker))
@@ -393,12 +413,23 @@ impl<F: Future<Output = Answer> + Unpin> Work<F> {
                 settle(&self.state, Err(ResolutionError::ProducerPanicked));
             }
             Ok(Poll::Pending) => {
-                let mut state = self.state.lock();
-                if !state.terminal {
-                    state.future = self.future.take();
-                    state.running = false;
-                    let mut signal = state.signal.lock();
-                    signal.runnable = signal.wakes != self.generation;
+                let wakes = {
+                    let mut state = self.state.lock();
+                    if state.terminal {
+                        None
+                    } else {
+                        state.future = self.future.take();
+                        state.running = false;
+                        let mut signal = state.signal.lock();
+                        signal.runnable = signal.wakes != self.generation;
+                        // A scheduled poll may have re-registered while this
+                        // slice still owned the future. Publish readiness and
+                        // notify that poller together, then wake after unlock.
+                        signal.runnable.then(|| signal.wakers.take())
+                    }
+                };
+                if let Some(wakes) = wakes {
+                    wakes.wake();
                 }
             }
         }

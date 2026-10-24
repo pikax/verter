@@ -327,10 +327,10 @@ fn nested_same_path_resolution_reports_cycle_and_leaves_parent_live() {
                 hook_ws
                     .clone()
                     .begin_resolution(request(), current, CancellationToken::default());
-            let mut nested_owner = producer(&mut nested, &waker);
-            finish(&mut nested_owner, &waker);
+            let mut nested_owner = producer(&mut nested, waker);
+            finish(&mut nested_owner, waker);
             assert!(matches!(
-                nested.poll(&waker),
+                nested.poll(waker),
                 Poll::Ready(Err(ResolutionError::Cycle))
             ));
         },
@@ -407,4 +407,81 @@ fn workspace_dependency_uses_its_composed_registry_and_rejects_foreign_waiters()
         Some("/p/dep.ts")
     );
     assert_eq!(registry.active_task_count_for_tests(), 0);
+}
+
+#[test]
+fn abandoning_a_publication_wait_withdraws_its_edge_before_the_writer_releases() {
+    let (ws, registry) = fixture();
+    let (_, waker) = waker();
+    let mut root = begin(&ws, &registry, CancellationToken::default());
+    let mut owner = producer(&mut root, &waker);
+    let held = hold(&mut owner, ResolutionPhase::Publish, &waker);
+    let gate = ws.engine.hold_publication_for_test();
+    held.run();
+    assert!(owner.poll(&waker).is_pending());
+    assert!(root.poll(&waker).is_pending());
+    assert_eq!(registry.wait_graph_occupancy().edges, 2);
+    drop(owner);
+    assert!(matches!(
+        root.poll(&waker),
+        Poll::Ready(Err(ResolutionError::ProducerDropped))
+    ));
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    drop(gate);
+    assert_eq!(ws.resource_snapshot().resolution_flights, 0);
+    drop(root);
+    assert_eq!(registry.active_task_count_for_tests(), 0);
+}
+
+#[test]
+fn wake_repolling_before_a_running_slice_returns_is_not_lost() {
+    struct EagerWake {
+        owner: std::sync::Weak<parking_lot::Mutex<ResolutionProducer>>,
+        queued: std::sync::Weak<parking_lot::Mutex<Vec<ResolutionWork>>>,
+        pending: AtomicUsize,
+    }
+    impl Wake for EagerWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            let owner = self.owner.upgrade().expect("external owner stays live");
+            let result = owner.lock().poll(&Waker::from(self.clone()));
+            match result {
+                Poll::Pending => {
+                    self.pending.fetch_add(1, Ordering::SeqCst);
+                }
+                Poll::Ready(Some(work)) => self.queued.upgrade().unwrap().lock().push(work),
+                Poll::Ready(None) => {}
+            }
+        }
+    }
+    let (ws, registry) = fixture();
+    let mut root = begin(&ws, &registry, CancellationToken::default());
+    let owner = Arc::new(parking_lot::Mutex::new(producer(&mut root, Waker::noop())));
+    let queued = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let eager = Arc::new(EagerWake {
+        owner: Arc::downgrade(&owner),
+        queued: Arc::downgrade(&queued),
+        pending: AtomicUsize::new(0),
+    });
+    let waker = Waker::from(eager.clone());
+    let Poll::Ready(Some(work)) = owner.lock().poll(&waker) else {
+        panic!("initial runnable slice")
+    };
+    work.run();
+    assert_eq!(
+        eager.pending.load(Ordering::SeqCst),
+        1,
+        "the executor re-polled before the slice returned"
+    );
+    let slices = std::mem::take(&mut *queued.lock());
+    let resumed = slices.len();
+    drop(slices);
+    drop((root, owner));
+    assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    assert_eq!(
+        resumed, 1,
+        "publishing the suspended future must wake the re-registered producer poller"
+    );
 }

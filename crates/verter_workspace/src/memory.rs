@@ -565,16 +565,12 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
                     .over(request.overlay.as_ref())
                     .in_project(request.project.as_ref());
                     self.engine
-                    .resolve_import_continuation(
-                        self.as_ref(),
-                        crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
-                        &request.importer,
-                        &request.specifier,
-                        request.context,
-                        operation,
-                        task,
-                        progress,
-                    )
+                    .resolve_import_continuation(self.as_ref(),
+crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+crate::resolution_handoff::ImportRequest::new(&request.importer, &request.specifier, request.context),
+operation,
+task,
+progress)
                     .await
                 })
             },

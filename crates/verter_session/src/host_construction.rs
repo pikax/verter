@@ -140,7 +140,7 @@ impl HostResolverState {
 }
 
 /// The workspace-scoped services every workspace attached to a host
-/// receives: the host's resolve-extension policy.
+/// receives: the host's resolve-extension policy and shared execution registry.
 ///
 /// Built once by the composition root. [`Self::attach`] is the single
 /// route through which a workspace receives them — at construction and on

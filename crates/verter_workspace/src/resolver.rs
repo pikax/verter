@@ -776,6 +776,7 @@ fn canonical_manifest_path(directory: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn drive_attempt<T>(
     reader: &dyn crate::traits::WorkspaceRead,
     ledger: &mut InputResolutionLedger,
@@ -943,6 +944,7 @@ impl Default for InputResolutionLedger {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn drive_attempt_with_bounded_io<T>(
     reader: &dyn crate::traits::WorkspaceRead,
     ledger: &mut InputResolutionLedger,
@@ -1498,9 +1500,11 @@ pub(crate) fn resolve_for_project_tracked(
         _capability,
         reader,
         ledger,
-        owner,
-        specifier,
-        context,
+        ProjectRequest {
+            owner,
+            specifier,
+            context,
+        },
         None,
     ));
     verter_execution::blocking::block_on(None, |waker| {
@@ -1508,16 +1512,25 @@ pub(crate) fn resolve_for_project_tracked(
     })
 }
 
+pub(crate) struct ProjectRequest<'a> {
+    pub(crate) owner: &'a verter_session_query::resolution::ProjectOwnership,
+    pub(crate) specifier: &'a str,
+    pub(crate) context: ResolutionContext,
+}
+
 pub(crate) async fn resolve_for_project_tracked_async(
     resolver: &ModuleResolverCore,
     _capability: &crate::engine::TrackedResolutionCapability,
     reader: &crate::resolution_currency::TransactionReader<'_>,
     ledger: &mut InputResolutionLedger,
-    owner: &verter_session_query::resolution::ProjectOwnership,
-    specifier: &str,
-    context: ResolutionContext,
+    request: ProjectRequest<'_>,
     progress: Option<&crate::resolution_handoff::Progress>,
 ) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
+    let ProjectRequest {
+        owner,
+        specifier,
+        context,
+    } = request;
     let frame = resolver.resolve_for_project_frame(owner, specifier, context);
     let result = drive_attempt_with_bounded_io_async(
         reader,
