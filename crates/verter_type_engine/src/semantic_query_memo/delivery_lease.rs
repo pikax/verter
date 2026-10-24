@@ -180,23 +180,6 @@ impl SemanticDeliveryLease {
             .transpose()
     }
 
-    /// A cache's holds on the root owners this delivery's metadata names,
-    /// retained beside [`Self::adopt_metadata`]'s hold for as long as the
-    /// cache keeps the delivery.
-    ///
-    /// # Errors
-    ///
-    /// The account's refusal: nothing is held.
-    pub(super) fn hold_metadata_handles(
-        &self,
-        ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
-    ) -> Result<
-        verter_session_query::retention::owned::HeldHandles,
-        verter_session_query::retention::RetentionRefusal,
-    > {
-        self.metadata_handles().hold(ctx)
-    }
-
     /// Settle this delivery's still-in-flight charges at its caller
     /// handoff: the delivery is complete and its callers hold it, so the
     /// owner's own hold and the root-owner cells its metadata names
@@ -220,21 +203,6 @@ impl SemanticDeliveryLease {
             .as_ref()
             .map(|owner| owner.own_footprint().handles)
             .unwrap_or_default()
-    }
-
-    /// A delivery rooting `roots` and holding no shared allocation, its own
-    /// metadata pinned against `account`.
-    pub(crate) fn from_roots(
-        roots: NodeRootSet,
-        account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
-    ) -> Self {
-        Self(Some(
-            DeliveryOwner {
-                roots,
-                ..Default::default()
-            }
-            .charged(account, DeliveryPhase::Settled),
-        ))
     }
 }
 

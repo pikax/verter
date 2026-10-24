@@ -119,14 +119,15 @@ fn fence_block_bytes() -> usize {
 /// Bytes one edge bucket keeps: its edge and identity lists' backing and
 /// every edge's source list.
 fn bucket_bytes(bucket: &EdgeBucket) -> usize {
-    use verter_session_query::retention::allocation::{arc_block_bytes, vec_bytes};
-    vec_bytes(&bucket.edges)
-        + vec_bytes(&bucket.identities)
-        + bucket
-            .edges
-            .iter()
-            .map(|edge| arc_block_bytes(std::mem::size_of_val::<[SemanticNodeId]>(&edge.sources)))
-            .sum::<usize>()
+    use verter_session_query::retention::allocation::vec_bytes;
+    vec_bytes(&bucket.edges) + vec_bytes(&bucket.identities) + bucket.source_bytes
+}
+
+/// The block one edge's source list keeps.
+fn edge_source_bytes(edge: &OriginEdge) -> usize {
+    verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of_val::<
+        [SemanticNodeId],
+    >(&edge.sources))
 }
 
 /// Bytes one pool bucket keeps: its `Weak` list's backing and every pooled
@@ -589,18 +590,24 @@ impl DerivationStore {
 pub(super) struct EdgeBucket {
     edges: Vec<OriginEdge>,
     identities: Vec<u64>,
+    /// The blocks the edges' source lists keep, summed as edges enter and
+    /// leave: every record settles the bucket's bytes, and re-summing them
+    /// would walk the whole bucket each time.
+    source_bytes: usize,
 }
 
 impl EdgeBucket {
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn push(&mut self, identity: u64, edge: OriginEdge) {
+        self.source_bytes += edge_source_bytes(&edge);
         self.edges.push(edge);
         self.identities.push(identity);
     }
 
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn evict_oldest(&mut self) {
-        self.edges.remove(0);
+        let evicted = self.edges.remove(0);
+        self.source_bytes -= edge_source_bytes(&evicted);
         self.identities.remove(0);
     }
 
@@ -618,7 +625,8 @@ impl EdgeBucket {
             if keep(&self.edges[index]) {
                 index += 1;
             } else {
-                self.edges.remove(index);
+                let removed = self.edges.remove(index);
+                self.source_bytes -= edge_source_bytes(&removed);
                 self.identities.remove(index);
             }
         }

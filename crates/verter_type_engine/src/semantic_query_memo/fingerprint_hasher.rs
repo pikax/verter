@@ -61,22 +61,29 @@ impl FingerprintHasher {
         }
     }
 
+    /// One `SipRound`. Every interned payload's fingerprint runs it per
+    /// word, so its rotations are written as shifts, which a debug build
+    /// emits in place rather than as a call per rotation.
     #[inline]
+    #[expect(
+        clippy::manual_rotate,
+        reason = "a debug build calls out for every `rotate_left`; the shifts are emitted in place"
+    )]
     fn round(&mut self) {
         self.v0 = self.v0.wrapping_add(self.v1);
-        self.v1 = self.v1.rotate_left(13);
+        self.v1 = (self.v1 << 13) | (self.v1 >> 51);
         self.v1 ^= self.v0;
-        self.v0 = self.v0.rotate_left(32);
+        self.v0 = (self.v0 << 32) | (self.v0 >> 32);
         self.v2 = self.v2.wrapping_add(self.v3);
-        self.v3 = self.v3.rotate_left(16);
+        self.v3 = (self.v3 << 16) | (self.v3 >> 48);
         self.v3 ^= self.v2;
         self.v0 = self.v0.wrapping_add(self.v3);
-        self.v3 = self.v3.rotate_left(21);
+        self.v3 = (self.v3 << 21) | (self.v3 >> 43);
         self.v3 ^= self.v0;
         self.v2 = self.v2.wrapping_add(self.v1);
-        self.v1 = self.v1.rotate_left(17);
+        self.v1 = (self.v1 << 17) | (self.v1 >> 47);
         self.v1 ^= self.v2;
-        self.v2 = self.v2.rotate_left(32);
+        self.v2 = (self.v2 << 32) | (self.v2 >> 32);
     }
 
     /// Compress one message word: one compression round.

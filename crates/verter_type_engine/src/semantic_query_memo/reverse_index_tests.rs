@@ -512,6 +512,38 @@ fn candidates_sharing_a_dispatch_fence_register_its_canonicals_once() {
     assert_eq!(ops.linked, ops.unlinked);
 }
 
+/// A wide dispatch fence names each of its files once, and the index reads
+/// it in linear work: linking and unlinking a fence of `k` distinct files
+/// makes `O(k)` membership probes, so eight times the files costs at most a
+/// small multiple of the probes, where a pairwise scan would cost
+/// `k(k - 1) / 2` and grow sixty-fold.
+#[test]
+fn a_wide_distinct_file_fence_links_and_unlinks_in_linear_work() {
+    use crate::semantic_query::{DepEntry, DepSignature, DepVersion};
+
+    let probes = |files: usize| {
+        let index = Index::default();
+        let fence = DepSignature::new(
+            (0..files)
+                .map(|j| DepEntry::new(&canonical(j), DepVersion::WholeHash([7; 16])))
+                .collect::<Vec<_>>(),
+        );
+        let carrier: Arc<[FactVersionRef]> = Arc::from(vec![file("/w/carrier.ts")]);
+        let before = super::canonical_probes_for_tests();
+        index.register_fenced(0, (), &carrier, &fence, []);
+        assert_eq!(reached(&index, &canonical(files - 1)), vec![0]);
+        index.unregister(&0);
+        assert_eq!(index.occupancy(), ReverseIndexOccupancy::default());
+        super::canonical_probes_for_tests() - before
+    };
+    let small = probes(64);
+    let large = probes(512);
+    assert!(
+        large <= 3 * small,
+        "fence canonical dedup must stay linear: {small} probes at 64 files, {large} at 512"
+    );
+}
+
 /// A payload whose destructor reports whether its index's lock was held:
 /// a candidate's final owner may take other locks as it drops (an interned
 /// family key's interner, a root owner's arena), so the index releases

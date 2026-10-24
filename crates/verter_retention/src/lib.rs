@@ -401,16 +401,11 @@ impl RetentionAccountSnapshot {
 #[derive(Debug)]
 pub struct SemanticRetentionAccount {
     limits: RetentionLimits,
-    /// Serializes every aggregate occupancy transition. Acquiring it is
-    /// the admission linearization point: refusable reservations and pins
-    /// therefore cannot validate against different aggregate states.
-    admission_lock: parking_lot::Mutex<()>,
-    /// `active + retained` — the refusable occupancy. Kept as ONE cell
-    /// so the two refusable classes share one aggregate state.
-    refusable_bytes: AtomicUsize,
-    active_bytes: AtomicUsize,
-    pinned_bytes: AtomicUsize,
-    peak_total_bytes: AtomicUsize,
+    /// The aggregate occupancy, which every transition changes under this
+    /// lock. Acquiring it is the admission linearization point: refusable
+    /// reservations and pins therefore cannot validate against different
+    /// aggregate states.
+    admission_lock: parking_lot::Mutex<Occupancy>,
     admissions: AtomicUsize,
     refusals_oversized: AtomicUsize,
     refusals_pressure: AtomicUsize,
@@ -420,6 +415,29 @@ pub struct SemanticRetentionAccount {
     /// span. Optional test/tooling state: absent from production builds.
     #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
     active_windows: active_window::ActiveWindows,
+}
+
+/// The account's byte occupancy, read and written only under its
+/// admission lock.
+#[derive(Debug, Default)]
+struct Occupancy {
+    /// `active + retained` — the refusable occupancy. Kept as ONE figure
+    /// so the two refusable classes share one aggregate state.
+    refusable_bytes: usize,
+    active_bytes: usize,
+    pinned_bytes: usize,
+    peak_total_bytes: usize,
+}
+
+impl Occupancy {
+    /// Raise the peak to the current total.
+    fn note_peak(&mut self) {
+        let total = self.refusable_bytes + self.pinned_bytes;
+        if total > self.peak_total_bytes {
+            self.peak_total_bytes = total;
+        }
+        verter_audit::attribute_max!(StoreRetainedBytes, total);
+    }
 }
 
 /// Whether this build carries the ACTIVE-occupancy measurement window
@@ -449,11 +467,7 @@ impl SemanticRetentionAccount {
     fn build(limits: RetentionLimits) -> Arc<Self> {
         Arc::new(Self {
             limits,
-            admission_lock: parking_lot::Mutex::new(()),
-            refusable_bytes: AtomicUsize::new(0),
-            active_bytes: AtomicUsize::new(0),
-            pinned_bytes: AtomicUsize::new(0),
-            peak_total_bytes: AtomicUsize::new(0),
+            admission_lock: parking_lot::Mutex::new(Occupancy::default()),
             admissions: AtomicUsize::new(0),
             refusals_oversized: AtomicUsize::new(0),
             refusals_pressure: AtomicUsize::new(0),
@@ -521,16 +535,12 @@ impl SemanticRetentionAccount {
             self.admissions.fetch_add(1, Ordering::Relaxed);
             return self.mint_charge(ChargeClass::Active, 0, provenance);
         }
-        let _admission_lock = self.lock_aggregate_state();
-        let active = self.active_bytes.load(Ordering::Relaxed);
-        self.active_bytes.store(active + bytes, Ordering::Relaxed);
-        self.refusable_bytes.store(
-            self.refusable_bytes.load(Ordering::Relaxed) + bytes,
-            Ordering::Relaxed,
-        );
+        let mut state = self.lock_aggregate_state();
+        state.active_bytes += bytes;
+        state.refusable_bytes += bytes;
         self.admissions.fetch_add(1, Ordering::Relaxed);
         self.note_active_locked(provenance, bytes, 0);
-        self.note_peak_locked();
+        state.note_peak();
         self.mint_charge(ChargeClass::Active, bytes, provenance)
     }
 
@@ -561,14 +571,14 @@ impl SemanticRetentionAccount {
             self.admissions.fetch_add(1, Ordering::Relaxed);
             return RetentionAdmission::Admitted(self.mint_charge(class, 0, provenance));
         }
-        let _admission_lock = self.lock_aggregate_state();
-        let current = self.refusable_bytes.load(Ordering::Relaxed);
-        let pinned = self.pinned_bytes.load(Ordering::Relaxed);
-        let headroom = self
+        let this: &Self = self;
+        let mut state = this.lock_aggregate_state();
+        let current = state.refusable_bytes;
+        let headroom = this
             .limits
             .aggregate_ceiling_bytes
             .saturating_sub(current)
-            .saturating_sub(pinned);
+            .saturating_sub(state.pinned_bytes);
         if bytes > headroom {
             self.refusals_pressure.fetch_add(1, Ordering::Relaxed);
             verter_audit::attribute!(RetentionAdmitRefused);
@@ -577,10 +587,10 @@ impl SemanticRetentionAccount {
                 headroom,
             });
         }
-        self.refusable_bytes
-            .store(current + bytes, Ordering::Relaxed);
-        self.admissions.fetch_add(1, Ordering::Relaxed);
-        self.note_peak_locked();
+        state.refusable_bytes = current + bytes;
+        this.admissions.fetch_add(1, Ordering::Relaxed);
+        state.note_peak();
+        drop(state);
         RetentionAdmission::Admitted(self.mint_charge(class, bytes, provenance))
     }
 
@@ -588,13 +598,12 @@ impl SemanticRetentionAccount {
     /// charged. The single legitimate way to account a pin.
     #[must_use]
     pub fn pin(self: &Arc<Self>, bytes: usize) -> RetentionCharge {
-        let _admission_lock = self.lock_aggregate_state();
-        if bytes > 0 {
-            let pinned = self.pinned_bytes.load(Ordering::Relaxed);
-            self.pinned_bytes.store(pinned + bytes, Ordering::Relaxed);
-        }
-        self.admissions.fetch_add(1, Ordering::Relaxed);
-        self.note_peak_locked();
+        let this: &Self = self;
+        let mut state = this.lock_aggregate_state();
+        state.pinned_bytes += bytes;
+        this.admissions.fetch_add(1, Ordering::Relaxed);
+        state.note_peak();
+        drop(state);
         self.mint_charge(ChargeClass::Pinned, bytes, Provenance::UNKNOWN)
     }
 
@@ -607,8 +616,7 @@ impl SemanticRetentionAccount {
     /// recover the headroom.
     #[must_use]
     pub fn under_pin_pressure(&self) -> bool {
-        let _admission_lock = self.lock_aggregate_state();
-        self.pinned_bytes.load(Ordering::Relaxed) > self.limits.pin_threshold_bytes
+        self.lock_aggregate_state().pinned_bytes > self.limits.pin_threshold_bytes
     }
 
     /// Headroom a refusable reservation would see right now. Advisory
@@ -617,24 +625,24 @@ impl SemanticRetentionAccount {
     /// check-then-reserve.
     #[must_use]
     pub fn refusable_headroom_bytes(&self) -> usize {
-        let _admission_lock = self.lock_aggregate_state();
+        let state = self.lock_aggregate_state();
         self.limits
             .aggregate_ceiling_bytes
-            .saturating_sub(self.refusable_bytes.load(Ordering::Relaxed))
-            .saturating_sub(self.pinned_bytes.load(Ordering::Relaxed))
+            .saturating_sub(state.refusable_bytes)
+            .saturating_sub(state.pinned_bytes)
     }
 
     /// Snapshot occupancy and decision counters.
     #[must_use]
     pub fn snapshot(&self) -> RetentionAccountSnapshot {
-        let _admission_lock = self.lock_aggregate_state();
-        let active = self.active_bytes.load(Ordering::Relaxed);
-        let refusable = self.refusable_bytes.load(Ordering::Relaxed);
+        let state = self.lock_aggregate_state();
+        let active = state.active_bytes;
+        let refusable = state.refusable_bytes;
         RetentionAccountSnapshot {
             active_bytes: active,
             retained_bytes: refusable.saturating_sub(active),
-            pinned_bytes: self.pinned_bytes.load(Ordering::Relaxed),
-            peak_total_bytes: self.peak_total_bytes.load(Ordering::Relaxed),
+            pinned_bytes: state.pinned_bytes,
+            peak_total_bytes: state.peak_total_bytes,
             admissions: self.admissions.load(Ordering::Relaxed) as u64,
             refusals_oversized: self.refusals_oversized.load(Ordering::Relaxed) as u64,
             refusals_pressure: self.refusals_pressure.load(Ordering::Relaxed) as u64,
@@ -663,32 +671,19 @@ impl SemanticRetentionAccount {
     /// `Drop`, which is why exactly-once release is structural rather
     /// than a discipline callers must remember.
     fn release(&self, class: ChargeClass, bytes: usize, provenance: Provenance) {
-        let _admission_lock = self.lock_aggregate_state();
+        let mut state = self.lock_aggregate_state();
         match class {
-            ChargeClass::Pinned => {
-                if bytes > 0 {
-                    let pinned = self.pinned_bytes.load(Ordering::Relaxed);
-                    self.pinned_bytes.store(pinned - bytes, Ordering::Relaxed);
-                }
-            }
+            ChargeClass::Pinned => state.pinned_bytes -= bytes,
             ChargeClass::Active => {
                 if bytes > 0 {
-                    let active = self.active_bytes.load(Ordering::Relaxed);
-                    let refusable = self.refusable_bytes.load(Ordering::Relaxed);
-                    self.active_bytes.store(active - bytes, Ordering::Relaxed);
-                    self.refusable_bytes
-                        .store(refusable - bytes, Ordering::Relaxed);
+                    state.active_bytes -= bytes;
+                    state.refusable_bytes -= bytes;
                     self.note_active_locked(provenance, 0, bytes);
                 }
             }
-            ChargeClass::Retained => {
-                if bytes > 0 {
-                    let refusable = self.refusable_bytes.load(Ordering::Relaxed);
-                    self.refusable_bytes
-                        .store(refusable - bytes, Ordering::Relaxed);
-                }
-            }
+            ChargeClass::Retained => state.refusable_bytes -= bytes,
         }
+        drop(state);
         self.releases.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -696,13 +691,14 @@ impl SemanticRetentionAccount {
     /// transition both classes observe at once. Reached only from
     /// [`RetentionCharge::transfer_to_pinned`], whose target never refuses.
     fn reclassify(&self, from: ChargeClass, to: ChargeClass, bytes: usize, provenance: Provenance) {
-        let _admission_lock = self.lock_aggregate_state();
-        self.reclassify_locked(from, to, bytes, provenance);
+        let mut state = self.lock_aggregate_state();
+        self.reclassify_locked(&mut state, from, to, bytes, provenance);
     }
 
     /// [`Self::reclassify`] with the admission lock already held.
     fn reclassify_locked(
         &self,
+        state: &mut Occupancy,
         from: ChargeClass,
         to: ChargeClass,
         bytes: usize,
@@ -711,9 +707,9 @@ impl SemanticRetentionAccount {
         if bytes == 0 || from == to {
             return;
         }
-        let refusable = self.refusable_bytes.load(Ordering::Relaxed);
-        let pinned = self.pinned_bytes.load(Ordering::Relaxed);
-        let active = self.active_bytes.load(Ordering::Relaxed);
+        let refusable = state.refusable_bytes;
+        let pinned = state.pinned_bytes;
+        let active = state.active_bytes;
         let (refusable, pinned, active) = match (from, to) {
             (ChargeClass::Active, ChargeClass::Pinned) => {
                 (refusable - bytes, pinned + bytes, active - bytes)
@@ -726,9 +722,9 @@ impl SemanticRetentionAccount {
             (ChargeClass::Retained, ChargeClass::Active) => (refusable, pinned, active + bytes),
             _ => unreachable!("only refusable charges are handed to callers"),
         };
-        self.refusable_bytes.store(refusable, Ordering::Relaxed);
-        self.pinned_bytes.store(pinned, Ordering::Relaxed);
-        let before = self.active_bytes.swap(active, Ordering::Relaxed);
+        state.refusable_bytes = refusable;
+        state.pinned_bytes = pinned;
+        let before = std::mem::replace(&mut state.active_bytes, active);
         self.note_active_locked(
             provenance,
             active.saturating_sub(before),
@@ -749,9 +745,9 @@ impl SemanticRetentionAccount {
                 max_entry_bytes: self.limits.max_entry_bytes,
             });
         }
-        let _admission_lock = self.lock_aggregate_state();
-        let refusable = self.refusable_bytes.load(Ordering::Relaxed);
-        let pinned = self.pinned_bytes.load(Ordering::Relaxed);
+        let mut state = self.lock_aggregate_state();
+        let refusable = state.refusable_bytes;
+        let pinned = state.pinned_bytes;
         let headroom = self
             .limits
             .aggregate_ceiling_bytes
@@ -765,9 +761,8 @@ impl SemanticRetentionAccount {
                 headroom,
             });
         }
-        self.pinned_bytes.store(pinned - bytes, Ordering::Relaxed);
-        self.refusable_bytes
-            .store(refusable + bytes, Ordering::Relaxed);
+        state.pinned_bytes = pinned - bytes;
+        state.refusable_bytes = refusable + bytes;
         self.admissions.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -788,9 +783,9 @@ impl SemanticRetentionAccount {
                 max_entry_bytes: self.limits.max_entry_bytes,
             });
         }
-        let _admission_lock = self.lock_aggregate_state();
-        let refusable = self.refusable_bytes.load(Ordering::Relaxed);
-        let pinned = self.pinned_bytes.load(Ordering::Relaxed);
+        let mut state = self.lock_aggregate_state();
+        let refusable = state.refusable_bytes;
+        let pinned = state.pinned_bytes;
         let headroom = self
             .limits
             .aggregate_ceiling_bytes
@@ -804,22 +799,13 @@ impl SemanticRetentionAccount {
                 headroom,
             });
         }
-        let active = self.active_bytes.load(Ordering::Relaxed);
-        self.active_bytes.store(active - bytes, Ordering::Relaxed);
+        state.active_bytes -= bytes;
         self.note_active_locked(provenance, 0, bytes);
         Ok(())
     }
 
-    fn lock_aggregate_state(&self) -> parking_lot::MutexGuard<'_, ()> {
+    fn lock_aggregate_state(&self) -> parking_lot::MutexGuard<'_, Occupancy> {
         self.admission_lock.lock()
-    }
-
-    /// Called only while [`Self::lock_aggregate_state`] is held.
-    fn note_peak_locked(&self) {
-        let total = self.refusable_bytes.load(Ordering::Relaxed)
-            + self.pinned_bytes.load(Ordering::Relaxed);
-        self.peak_total_bytes.fetch_max(total, Ordering::Relaxed);
-        verter_audit::attribute_max!(StoreRetainedBytes, total);
     }
 }
 
@@ -888,11 +874,12 @@ impl SemanticRetentionAccount {
     /// total unchanged) and the backing's class change, so no window or
     /// admission observes the adoption half-applied.
     fn adopt_backing(&self, adoption: BackingAdoption) {
-        let _admission_lock = self.lock_aggregate_state();
+        let mut state = self.lock_aggregate_state();
         if adoption.class == ChargeClass::Active {
             self.rehome_active_locked(adoption.from, adoption.to, adoption.held_bytes);
         }
         self.reclassify_locked(
+            &mut state,
             adoption.backing_class,
             adoption.class,
             adoption.backing_bytes,

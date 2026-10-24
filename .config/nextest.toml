@@ -80,6 +80,13 @@ test-group = 'progressive-child-contract-completion'
 # The speed gate (see [profile.default]): flagged at 10s, failed at 20s.
 slow-timeout = { period = "10s", terminate-after = 2 }
 
+# Known slow test with the ordinary CI deadline:
+# verter_session::typeinfo::typeinfo_tests::mapped_template::recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities
+# The exact 300-entity, five-module debug workload is temporarily accepted
+# above the 10s warning. It stays in the normal surface with the unchanged
+# 20s termination and no timeout override. Remove this note once shared-engine
+# improvements bring it below 10s under load.
+
 # Every generated corpus chunk retains the 20-second speed deadline.
 [[profile.ci.overrides]]
 filter = 'package(verter_session) & test(/^cases::corpus_audit_tests::chunk_[0-9]{3}::/)'

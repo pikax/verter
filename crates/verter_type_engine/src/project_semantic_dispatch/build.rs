@@ -722,6 +722,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Few distinct roots: compared linearly until a set pays.
         let mut seen: Option<FxHashSet<crate::semantic_query_memo::ObservedGraphSelfRoot>> = None;
         for node in nodes {
+            super::call_resolve::note_root_union_work(1);
             if let Some(NodeScopeId::File {
                 canonical_id,
                 whole_hash,
@@ -1579,10 +1580,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // `indexed.whole_hash`; its `shallow_state` is the shallow
         // inventory this builder reads — value basis and self-root
         // descend from one observation.
-        let indexed = match self
-            .ctx
-            .ensure_indexed_ready_serve(value_root.scope.canonical_id.as_ref())
-            .map(|serve| serve.indexed)
+        let indexed = match self.transaction_indexed_record(value_root.scope.canonical_id.as_ref())
         {
             Some(indexed) => indexed,
             None => {
@@ -2693,10 +2691,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .exported_name
             .as_deref()
             .unwrap_or(prepared.root_identity.symbol_name.as_ref());
-        let indexed = self
-            .ctx
-            .ensure_indexed_ready_serve(canonical.as_ref())?
-            .indexed;
+        let indexed = self.transaction_indexed_record(canonical.as_ref())?;
         let exports_this_declaration = matches!(
             indexed.shallow_state.export_target(exported),
             Some(verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name })
@@ -2713,11 +2708,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// script's top-level declarations are globals, merged with every other
     /// script's same-name declarations.
     pub(super) fn canonical_is_module(&self, canonical: &str) -> bool {
-        self.ctx
-            .ensure_indexed_ready_serve(canonical)
-            .is_some_and(|serve| {
+        self.transaction_indexed_record(canonical)
+            .is_some_and(|indexed| {
                 verter_session_query::inputs::contributors::classify_shallow_module_kind(
-                    &serve.indexed.shallow_state,
+                    &indexed.shallow_state,
                 ) == verter_session_query::inputs::contributors::FileModuleKind::Module
             })
     }
@@ -2772,11 +2766,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let identity = &prepared.root_identity;
         let by_block = identity.symbol_name.contains('.')
             || self
-                .ctx
-                .ensure_indexed_ready_serve(identity.canonical_id.as_ref())
-                .is_some_and(|serve| {
-                    serve
-                        .indexed
+                .transaction_indexed_record(identity.canonical_id.as_ref())
+                .is_some_and(|indexed| {
+                    indexed
                         .shallow_state
                         .headers
                         .value_header_in(identity.owner, identity.symbol_name.as_ref())

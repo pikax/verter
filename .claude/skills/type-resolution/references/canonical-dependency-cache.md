@@ -210,10 +210,20 @@ refusals propagate to enclosing tracers; retention pressure stays local.
 
 Deferred evaluation of a declaration or operator observes export routes too.
 The shared deferred-evaluation memo retains a complete fact signature and
-strict self roots alongside its cost receipt and node leases. Each heap
-continuation traces its steps; completed operands replay their proof into the
-parent. A warm read validates and bubbles that exact candidate's proof against
-the request view. Interned node identity alone cannot validate an evaluated
+strict self roots alongside its cost receipt and counted node roots. The memo
+entry owns those roots directly; an internal serve captures the same root
+owner into the consuming construction scope before releasing the map hold.
+Root-only and full deliveries share the same task/carrier capture, deduplication
+and nested-scope promotion protocol.
+Eviction cannot revoke that scope's nodes, and the root owner's charge stays
+pinned until its last reader releases it. No public delivery wrapper is
+constructed for an internal evaluation serve.
+
+Each cold heap continuation traces its steps. A warm operand validates and
+replays its existing proof directly into the parent tracer, without starting
+a continuation or sealing another copy of the proof. Both cold and served
+operands pay their first step to the parent and retain their own cost identity
+and receipt admission. Interned node identity alone cannot validate an evaluated
 `typeof` answer when the declaring source is unchanged and a barrel changes.
 All consumed whole-file facts, including paged augmentation contributors,
 join the node roots as strict self roots. A stale read retires only the exact
