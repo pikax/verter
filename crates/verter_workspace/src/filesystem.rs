@@ -475,9 +475,9 @@ impl FilesystemWorkspace {
 
             // The freeze just read every observation live, so the replay
             // starts as soon as nothing it was sealed against moved. The
-            // evidence is read live again exactly once more, when the replay
-            // settles: at admission through the operation's final validation,
-            // or below when the replay settled without reaching admission.
+            // evidence is read live once more only if the replay reaches
+            // admission, through the operation's final validation; a replay
+            // that settles before admission returns its outcome as it is.
             let frozen = recorder.freeze();
             if !frozen.sealed_current() {
                 if input_ledger.charge_outer_restart(self).is_err() {
@@ -488,7 +488,7 @@ impl FilesystemWorkspace {
                 }
                 continue;
             }
-            let final_valid = std::cell::Cell::new(None);
+            let final_valid = std::cell::Cell::new(true);
             let outcome = self
                 .engine
                 .resolve_import_outcome_for_published_in_operation(
@@ -502,14 +502,14 @@ impl FilesystemWorkspace {
                         &mut input_ledger,
                         &|| {
                             let valid = frozen.revalidate();
-                            final_valid.set(Some(valid));
+                            final_valid.set(valid);
                             valid
                         },
                     )
                     .over(overlay)
                     .in_project(project),
                 );
-            if final_valid.get().unwrap_or_else(|| frozen.revalidate()) {
+            if final_valid.get() {
                 return outcome;
             }
             if input_ledger.charge_outer_restart(self).is_err() {
