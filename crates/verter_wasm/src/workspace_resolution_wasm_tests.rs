@@ -11,14 +11,15 @@ fn workspace_resolution_drains_owned_slices_without_native_parking() {
         ("/p/dep.ts", "export const n = 1"),
         ("/p/main.ts", "export { n } from './dep'"),
     ] {
-        host.upsert(host::UpsertRequest {
-            canonical_id: Some(path.into()),
-            input_id: path.into(),
-            source: Arc::from(source),
-            file_language: host::FileLanguage::script_ts(),
-            aliases: Vec::new(),
-        })
-        .expect("the in-memory source is accepted");
+        let _ = host
+            .upsert(host::UpsertRequest {
+                canonical_id: Some(path.into()),
+                input_id: path.into(),
+                source: Arc::from(source),
+                file_language: host::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("the in-memory source is accepted");
     }
     for _ in 0..2 {
         assert_eq!(
