@@ -101,7 +101,8 @@ pub use arena::{NodeData, UNALLOCATABLE_ID_FLOOR};
 pub(crate) use inflight::InlineMemberFlight;
 pub use intern_table::{IdentityIndexSnapshot, InternIndexOccupancy};
 pub use producer::{
-    Acquired, Claim, ClaimAttempt, Joined, ProducerLease, ReadCapture, Recursion, Subscription,
+    AcquireWait, Acquired, Claim, ClaimAttempt, Joined, PendingAcquire, ProducerLease, ReadCapture,
+    Recursion, Subscription,
 };
 pub use release::{ClosedContent, DrainedStorageReport, SemanticCloseReport};
 pub use scc_publish::{

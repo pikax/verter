@@ -482,9 +482,14 @@ the service or host.
 `SemanticQueryPoll`, the production entry a consumer that must not block
 drives a query through. It borrows its dispatcher exclusively and stays on
 the dispatcher's thread. `SemanticQueryPoll::poll` returns `Ready` with the
-read `execute_read` returns for the same key, or `Pending` once the query's
-semantic task waits on another task's producer that will wake the poller.
-The entry also implements `Future`.
+full-value read the synchronous `execute_via_cold_build_helper` returns for
+the same key, in the query's own value domain (a flow return, a call
+resolution, a relation or a classification is delivered as itself, never
+narrowed to a type node), or `Pending` once the query waits on another
+task's producer that will wake the poller. `SemanticQueryPoll::poll_node`
+is the explicit type-node adapter; it narrows exactly as `execute_read`
+does. The entry also implements `Future`, with the full-value read as its
+output.
 
 The entry and the synchronous entry run one implementation. An
 instantiation, a `typeof` or a machinery-root flow return enters as a
@@ -493,8 +498,24 @@ dispatcher operation it runs as are opened once and held across polls,
 because the request state they live on moves into the lent task until the
 task gives it back. The thread's execution scopes (audit attribution,
 construction scope, validity) are entered for each poll. `drive_query`
-blocks on the same root with the external-boundary driver. Any other query
-answers on its first poll through `execute_read` itself.
+blocks on the same root with the external-boundary driver.
+
+Every other query enters as a cold root through the synchronous entry's own
+cold-query admission (`begin_cold_query`: canonical key, sealed isolated-root
+refusal, carrier-subject normalization, entry charge) and family-memo claim
+(`claim_cold_query`), under the same dispatcher operation, entered once and
+held across polls. The claim's acquisition (`SemanticGraphStore::acquire_query`)
+takes an `AcquireWait`: the synchronous entry passes `Block` and waits another
+task's producer out, the polled entry passes `Yield`, which leaves the claim
+and its subscription in a `PendingAcquire` slot with the poll's waker
+registered on the producer's flight and returns `Pending`. The claim keeps the
+execution task it waits as across polls and installs it for each; the next poll
+continues the same claim — its lookup is not repeated — and either reads the
+producer's result or claims again and produces. A produced read is finished by
+the same `finish_cold_query` tail, then re-rooted where it is delivered; a
+flow return off the runtime drains or aborts its completed members as its
+synchronous executor does. Dropping a waiting cold root withdraws its wait and
+closes its entry, then its operation.
 
 While the entry is pending, `SemanticQueryPoll::task` lends its
 `SemanticTask`. The task is `Send` and has one exclusive poller, so it may
@@ -510,10 +531,21 @@ its task on another thread), `semantic_task_no_blocking_driver` and
 `semantic_query_poll_no_dispatcher` (negative). Behaviour:
 `a_polled_root_query_suspends_resumes_elsewhere_and_reads_what_the_synchronous_entry_reads`
 and `a_polled_root_query_released_while_pending_leaves_nothing_open` in the
-session's semantic-task tests.
+session's semantic-task tests, and its `semantic_poll_contract` group: a
+cold root whose key another task produces yields while held and then reads
+what the synchronous full-value entry reads, receipt included; a released
+waiting cold root leaves nothing open; roots answering outside the type-node
+domain poll their own value; and a single-threaded control polls a chain to
+the synchronous read with no other thread advancing it. The same group runs
+with optional capture compiled in (`semantic-observe`). The WASM controls
+`semantic_poll_contract_*` in `verter_wasm` drive the production entry on the
+single-threaded `wasm32-unknown-unknown` host: a chain and a cold root each
+yield instead of parking the only thread and deliver what the synchronous
+entry serves.
 
-The entry is only as non-blocking as the frames below it. A query a frame
-step evaluates in place still reaches the waits under
+The entry is only as non-blocking as the frames below it. A root's own claim
+yields, but a query a frame step or a cold build evaluates in place still
+reaches the waits under
 [Boundaries that still block](#boundaries-that-still-block).
 
 ### Cache admission and publication
@@ -677,7 +709,7 @@ its higher-level traversals still use the external synchronous compatibility dri
 
 | Wait | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- |
-| Semantic memo flight join (`SemanticGraphStore::acquire_query` → `Subscription::wait`) | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a step evaluates in place | `Subscription::poll`, used only by `SemanticTask` frames |
+| Semantic memo flight join (`SemanticGraphStore::acquire_query` with `AcquireWait::Block` → `Subscription::wait`) | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a frame step or a cold build evaluates in place | `Subscription::poll` in `SemanticTask` frames; `AcquireWait::Yield` for the polled entry's own root claim |
 | Synchronous root drive (`ProjectSemanticDispatch::drive_query` → `block_on`) | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `execute_read` and every other synchronous dispatch entry, for instantiations, `typeof` and callback-typing flow returns — including those a frame step evaluates in place | `ThreadDispatch::poll_query` → `SemanticQueryPoll`, for a root query outside any drive |
 | Artifact cache singleflight joiner (`cooperative_admit_impl`) | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | owned artifact admission with producer transfer; dispatch callers still synchronous |
 | Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |

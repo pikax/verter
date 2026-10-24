@@ -242,8 +242,9 @@ pub enum Claim<'s> {
     Produce(ProducerLease<'s>),
 }
 
-/// The outcome of a synchronous acquisition: a claim whose subscriptions
-/// were all waited out.
+/// The outcome of an acquisition: a claim whose subscriptions were waited
+/// out, or — when the acquisition yields ([`AcquireWait::Yield`]) — one
+/// left waiting on another task's producer.
 pub enum Acquired<'s> {
     Read(ValueRead),
     /// The caller's own source answered the warm miss before any claim,
@@ -251,6 +252,30 @@ pub enum Acquired<'s> {
     Served(ValueRead),
     Recursive(Recursion),
     Produce(ProducerLease<'s>),
+    /// Another task produces the key: the claim waits in the caller's slot,
+    /// its waker registered on the producer's flight, and the next
+    /// acquisition through that slot continues it.
+    Pending,
+}
+
+/// A claim an acquisition left waiting on another task's producer: its
+/// attempt and its subscription, owned by the caller between its polls.
+pub struct PendingAcquire<'s> {
+    attempt: ClaimAttempt,
+    subscription: Subscription<'s>,
+}
+
+/// How an acquisition that meets another task's producer waits for it.
+pub enum AcquireWait<'w, 's> {
+    /// Wait it out on this thread: the synchronous entry.
+    Block,
+    /// Leave the claim in `slot` with `waker` registered and answer
+    /// [`Acquired::Pending`]; an acquisition whose `slot` holds a claim
+    /// continues that claim instead of beginning another.
+    Yield {
+        slot: &'w mut Option<PendingAcquire<'s>>,
+        waker: &'w std::task::Waker,
+    },
 }
 
 /// A subscription to the producer another task owns for a key.
@@ -439,19 +464,24 @@ impl SemanticGraphStore {
     }
 
     construction_ordinal_seam! {
-        /// Lookup, claim and wait: the synchronous acquisition of `key`. Never
-        /// returns a subscription — it waits each one out. With `recompute` the
-        /// claim computes the key rather than reads it warm: the claimant was
-        /// refused the stored result's receipt.
+        /// Lookup, claim and wait: the acquisition of `key`. With `recompute`
+        /// the claim computes the key rather than reads it warm: the claimant
+        /// was refused the stored result's receipt.
         ///
-        /// A claim needs the synchronous entry's task: `execution` is entered
-        /// only once the warm lookup misses, so a warm read takes no task, and
-        /// the caller keeps the scope for as long as the producer it may be
+        /// A claim needs the entry's task: `execution` is entered only once
+        /// the warm lookup misses, so a warm read takes no task, and the
+        /// caller keeps the scope for as long as the producer it may be
         /// handed runs, so every query nested in that build joins the task.
         ///
         /// unclaimed is consulted once the warm lookup misses and before the
         /// first claim: a read it answers with ([Acquired::Served]) installs
         /// no flight, so no other task can join one that is never produced.
+        ///
+        /// `wait` decides what meeting another task's producer does: the
+        /// synchronous entry waits it out, a polled entry yields with the
+        /// claim in its slot and continues that claim on its next poll — the
+        /// same claim, so its lookup and the caller's own source are not
+        /// consulted again.
         fn acquire_query<'s, C: crate::resolver_core::ResolverCapabilities>(
             &'s self,
             ctx: &dyn crate::resolver_core::ResolverContext<C>,
@@ -461,20 +491,40 @@ impl SemanticGraphStore {
             capture: &mut ReadCapture<'_>,
             recompute: bool,
             unclaimed: &mut dyn FnMut() -> Option<ValueRead>,
+            mut wait: AcquireWait<'_, 's>,
         ) -> Acquired<'s> {
-            let begun = if recompute {
-                self.begin_query_recompute(flags, key)
-            } else {
-                self.begin_query_claim(ctx, flags, key, capture)
+            let resumed = match &mut wait {
+                AcquireWait::Yield { slot, .. } => slot.take(),
+                AcquireWait::Block => None,
             };
-            let mut attempt = match begun {
-                Ok(attempt) => attempt,
-                Err(read) => return Acquired::Read(read),
+            let mut attempt = match resumed {
+                // The claim a yielded acquisition left continues where it
+                // waited: its producer answers it, or it claims again.
+                Some(PendingAcquire {
+                    attempt,
+                    subscription,
+                }) => match self.join_acquired(ctx, flags, attempt, subscription, capture, &mut wait)
+                {
+                    Ok(acquired) => return acquired,
+                    Err(attempt) => attempt,
+                },
+                None => {
+                    let begun = if recompute {
+                        self.begin_query_recompute(flags, key)
+                    } else {
+                        self.begin_query_claim(ctx, flags, key, capture)
+                    };
+                    let mut attempt = match begun {
+                        Ok(attempt) => attempt,
+                        Err(read) => return Acquired::Read(read),
+                    };
+                    attempt.site = capture.site;
+                    if let Some(read) = unclaimed() {
+                        return Acquired::Served(read);
+                    }
+                    attempt
+                }
             };
-            attempt.site = capture.site;
-            if let Some(read) = unclaimed() {
-                return Acquired::Served(read);
-            }
             let task = execution
                 .get_or_insert_with(|| self.enter_execution())
                 .task();
@@ -484,14 +534,50 @@ impl SemanticGraphStore {
                     Claim::Recursive(recursion) => return Acquired::Recursive(recursion),
                     Claim::Produce(lease) => return Acquired::Produce(lease),
                     Claim::Subscribed(subscription) => {
-                        match subscription.wait(ctx, flags, &mut attempt, capture) {
-                            Joined::Read(read) => return Acquired::Read(read),
-                            Joined::Recursive(recursion) => return Acquired::Recursive(recursion),
-                            Joined::Retry => {}
+                        match self.join_acquired(ctx, flags, attempt, subscription, capture, &mut wait)
+                        {
+                            Ok(acquired) => return acquired,
+                            Err(again) => attempt = again,
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Wait out, or poll, `subscription` for the claim `attempt` continues:
+    /// `Ok` with the acquisition's outcome once the producer answered, or
+    /// with [`Acquired::Pending`] and the claim left in a yielding
+    /// acquisition's slot; `Err` with the claim to make again when the
+    /// producer went away.
+    fn join_acquired<'s, C: crate::resolver_core::ResolverCapabilities>(
+        &'s self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+        mut attempt: ClaimAttempt,
+        mut subscription: Subscription<'s>,
+        capture: &mut ReadCapture<'_>,
+        wait: &mut AcquireWait<'_, 's>,
+    ) -> Result<Acquired<'s>, ClaimAttempt> {
+        let joined = match wait {
+            AcquireWait::Block => subscription.wait(ctx, flags, &mut attempt, capture),
+            AcquireWait::Yield { slot, waker } => {
+                match subscription.poll(ctx, flags, &mut attempt, capture, waker) {
+                    std::task::Poll::Ready(joined) => joined,
+                    std::task::Poll::Pending => {
+                        **slot = Some(PendingAcquire {
+                            attempt,
+                            subscription,
+                        });
+                        return Ok(Acquired::Pending);
+                    }
+                }
+            }
+        };
+        match joined {
+            Joined::Read(read) => Ok(Acquired::Read(read)),
+            Joined::Recursive(recursion) => Ok(Acquired::Recursive(recursion)),
+            Joined::Retry => Err(attempt),
         }
     }
 
@@ -1802,9 +1888,17 @@ impl SemanticGraphStore {
         // fields exactly as the production dispatch path does.
         let flags = crate::resolver_core::fact_validation_port::FactValidation::request_flags(ctx);
         let mut execution = None;
-        match self.acquire_query(ctx, flags, key, &mut execution, capture, false, &mut || {
-            None
-        }) {
+        match self.acquire_query(
+            ctx,
+            flags,
+            key,
+            &mut execution,
+            capture,
+            false,
+            &mut || None,
+            AcquireWait::Block,
+        ) {
+            Acquired::Pending => unreachable!("a blocking acquisition waits its subscriptions out"),
             Acquired::Read(read) | Acquired::Served(read) => read,
             Acquired::Recursive(recursion) => self.recursion_read(recursion, recursion_sentinel()),
             Acquired::Produce(lease) => {

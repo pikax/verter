@@ -66,7 +66,7 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
     SemanticQueryValueTag, SignatureRef,
 };
-use crate::semantic_query_memo::{Acquired, ReadCapture, SemanticGraphStore};
+use crate::semantic_query_memo::{AcquireWait, Acquired, ReadCapture, SemanticGraphStore};
 use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 use verter_type_expr::PrimitiveName;
@@ -4723,27 +4723,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // construction scope is the operation's owner.
         let _operation = self.enter_operation(false);
         execution_thread_scopes!(self, key.tag());
-        if let SemanticQueryKey::Relate { .. } = &key {
-            let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
-            if !self.relation_raw_key_has_exact_inference_context(&relate) {
-                // The rejection supplies no relation: report the same
-                // Unavailable fact `CacheRead::into_fact` adopts for it.
-                let error = QueryError::Miss;
-                let fact_status = crate::semantic_query::FactStatus::Unavailable(
-                    crate::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(
-                        &error,
-                    ),
-                );
-                return CacheRead {
-                    lease: Default::default(),
-                    value: QueryResult::Error(error),
-                    dep_signature: empty_signature(),
-                    walker_diagnostics: crate::semantic_query_memo::empty_diagnostics(),
-                    cache_suppress: true,
-                    fact_status,
-                    receipt: crate::semantic_query::ReadReceipt::Unpriced,
-                };
-            }
+        if let Some(read) = self.refuse_relation_without_inference_context(&key) {
+            return read;
         }
         // An instantiation or a `typeof` a running conditional decision
         // reads is answered by its frame's deliveries, or becomes the
@@ -4769,6 +4750,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.execute_cold_query_owned(key, publication, operand_evidence)
     }
 
+    /// A relation read whose raw key carries no exact inference context:
+    /// the rejection supplies no relation, and reports the same Unavailable
+    /// fact `CacheRead::into_fact` adopts for it. `None` for any other key.
+    pub(super) fn refuse_relation_without_inference_context(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
+        let SemanticQueryKey::Relate { .. } = key else {
+            return None;
+        };
+        let relate = crate::semantic_query::RelateMemoKey::from_query_key(key);
+        if self.relation_raw_key_has_exact_inference_context(&relate) {
+            return None;
+        }
+        let error = QueryError::Miss;
+        let fact_status = crate::semantic_query::FactStatus::Unavailable(
+            crate::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&error),
+        );
+        Some(CacheRead {
+            lease: Default::default(),
+            value: QueryResult::Error(error),
+            dep_signature: empty_signature(),
+            walker_diagnostics: crate::semantic_query_memo::empty_diagnostics(),
+            cache_suppress: true,
+            fact_status,
+            receipt: crate::semantic_query::ReadReceipt::Unpriced,
+        })
+    }
+
     // Keep cold-only construction state off the stack while the continuation
     // runtime drives a query. All entry scopes above still cover its delivery.
     #[inline(never)]
@@ -4780,6 +4790,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        let plain_read = publication.is_none() && operand_evidence.is_none();
+        let entry = match self.begin_cold_query(key, plain_read) {
+            ColdBegin::Answered(read) => return read,
+            ColdBegin::Entered(entry) => entry,
+        };
+        let mut claim = ColdClaim::default();
+        let std::task::Poll::Ready(claimed) =
+            self.claim_cold_query(&entry, &mut claim, publication, operand_evidence, None)
+        else {
+            unreachable!("a blocking claim waits its subscriptions out")
+        };
+        self.finish_cold_query(entry, claimed)
+    }
+
+    /// The admission of one cold-query entry, before its family-memo claim:
+    /// its connected demand, its canonical key, a sealed refusal answering
+    /// an isolated root, the carrier-subject normalization and the entry's
+    /// charge. `Answered` when the entry is answered without a claim.
+    pub(super) fn begin_cold_query(
+        &self,
+        key: SemanticQueryKey,
+        plain_read: bool,
+    ) -> ColdBegin<'_> {
         // Install or join the connected state before carrier normalisation,
         // whose resolver can itself dispatch. Query-depth/work charging waits
         // until the canonical memo identity is known so an exact same-path key
@@ -4875,7 +4908,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         // An isolated root whose refusal is sealed answers from it: the
         // failed evaluation is never run again under the same allowances.
-        let plain_read = publication.is_none() && operand_evidence.is_none();
         let isolated_root = plain_read
             .then(|| self.isolated_root_identity(&connected_guard, &key))
             .flatten();
@@ -4883,7 +4915,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .as_ref()
             .and_then(|root| self.answer_from_sealed_refusal(root))
         {
-            return read;
+            return ColdBegin::Answered(read);
         }
 
         // Carrier-subject normalization: when the query SUBJECT is a `BareRef`
@@ -4909,20 +4941,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // suppresses caching (the value still flows, the memo refuses).
         let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
 
-        let query_depth_guard = match self.charge_query_entry(&key, preexisting_trip, true) {
+        let query_depth = match self.charge_query_entry(&key, preexisting_trip, true) {
             Ok(guard) => guard,
-            Err(read) => return read,
+            Err(read) => return ColdBegin::Answered(read),
         };
-        let (cache_read, is_cold, refusal_carrier) = self.claim_cold_query(
-            &key,
-            publication,
-            operand_evidence,
-            &carrier_prelude,
-            isolated_root.is_some(),
-            connected_guard.is_root(),
-        );
+        ColdBegin::Entered(ColdEntry {
+            query_depth,
+            key,
+            carrier_prelude,
+            isolated_root,
+            connected: connected_guard,
+        })
+    }
+
+    /// Deliver a cold-query entry's claimed read: attributed to its key,
+    /// with the connected limit a root tripped, a sealed refusal of an
+    /// isolated root, and its rails folded into the reader. The entry's
+    /// query level closes, then its connected demand.
+    pub(super) fn finish_cold_query(
+        &self,
+        entry: ColdEntry<'_>,
+        claimed: ClaimedCold,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        let ColdEntry {
+            query_depth,
+            key,
+            carrier_prelude,
+            isolated_root,
+            connected,
+        } = entry;
+        let ClaimedCold {
+            read: cache_read,
+            is_cold,
+            refusal_carrier,
+        } = claimed;
         let mut cache_read = self.attribute_query_read(&key, is_cold, cache_read, &carrier_prelude);
-        if connected_guard.is_root() {
+        if connected.is_root() {
             if let Some(reasons) = self.connected_demand_trip() {
                 self.append_connected_limit_diagnostics(&key, reasons, &mut cache_read);
             }
@@ -4938,7 +4992,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             suppress = cache_read.cache_suppress,
             "execute_via_cold_build_helper"
         );
-        drop(query_depth_guard);
+        drop(query_depth);
+        drop(connected);
         cache_read
     }
 
@@ -4946,25 +5001,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// then a claim for this execution's task — the recursion carrier,
     /// another task's result, or this key's producer, which runs the traced
     /// build, settles, is admitted and completes — or a request-local
-    /// completion ([`completes_request_locally`]). Returns the read, whether
-    /// a cold build ran, and the facts a sealed refusal of an isolated root
-    /// keeps.
+    /// completion ([`completes_request_locally`]). Ready with the read,
+    /// whether a cold build ran, and the facts a sealed refusal of an
+    /// isolated root keeps.
+    ///
+    /// Without a waker the claim waits out another task's producer here:
+    /// the synchronous entry. With one it yields instead — `Pending`, the
+    /// claim kept in `claim` with the waker registered on the producer's
+    /// flight — and the next call with the same `claim` continues it: a
+    /// polled root entry. Either way it is this one protocol.
     #[inline(never)]
-    fn claim_cold_query(
-        &self,
-        key: &SemanticQueryKey,
+    pub(super) fn claim_cold_query<'s>(
+        &'s self,
+        entry: &ColdEntry<'_>,
+        claim: &mut ColdClaim<'s>,
         publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
         operand_evidence: Option<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
-        carrier_prelude: &CarrierNormalizationPrelude,
-        isolated_root: bool,
-        connected_root: bool,
-    ) -> (
-        CacheRead<QueryResult<SemanticQueryValue>>,
-        bool,
-        Option<TracedFacts>,
-    ) {
+        wait: Option<&std::task::Waker>,
+    ) -> std::task::Poll<ClaimedCold> {
+        let key = &entry.key;
+        let carrier_prelude = &entry.carrier_prelude;
+        let isolated_root = entry.isolated_root.is_some();
+        let connected_root = entry.connected.is_root();
         let plain_read = publication.is_none() && operand_evidence.is_none();
         // A relation decided as the root of its checker transaction captures
         // its publication for the members of its component; completed for
@@ -5365,24 +5425,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // (waited out here, at the synchronous entry), or this key's
         // producer, which runs the traced build and then settles, is
         // admitted and completes.
-        let mut execution = None;
+        // A claim that yields keeps the task it claims, waits and produces
+        // as across its polls, installed for each.
+        let mut execution = claim
+            .task
+            .as_ref()
+            .filter(|_| wait.is_some())
+            .map(|task| graph.install_execution(task));
         let flags = self.snapshot.flags();
         let mut refusal_carrier = None;
         let mut traced_build = Some(traced_build);
         let mut sentinel = Some(sentinel);
-        // A stored result this demand cannot pay for is computed here
-        // instead, once; a recomputation answered by another unpayable
-        // result is the demand's trip.
-        let mut refused = None;
         // An intermediate nested in another computation completes for this
         // request alone ([`completes_request_locally`]). A key whose
         // family-memo producer is open on this task re-enters through the
-        // memo, which answers it as every same-path re-entry.
-        let request_local = (plain_read || relation_root)
+        // memo, which answers it as every same-path re-entry. Decided once:
+        // a claim continued by a later poll is already the family memo's.
+        let entering = !std::mem::replace(&mut claim.claiming, true);
+        let request_local = entering
+            && (plain_read || relation_root)
             && !isolated_root
             && !connected_root
             && self.completes_nested_request_locally(key);
-        let local_read = if self.request_local_is_open(key) {
+        let local_read = if entering && self.request_local_is_open(key) {
             // The key's own request-local completion is open: the same-path
             // re-entry a family-memo claim answers with its recursion carrier.
             Some(graph.recursion_read(
@@ -5455,8 +5520,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let cache_read = if let Some(read) = local_read {
             read
         } else {
+            // The claim a yielding acquisition keeps borrows the store for
+            // as long as the dispatcher it belongs to.
+            let graph: &'s SemanticGraphStore = graph.store();
             loop {
-                let recompute = refused.is_some();
+                // A stored result this demand cannot pay for is computed
+                // here instead, once; a recomputation answered by another
+                // unpayable result is the demand's trip.
+                let recompute = claim.recompute;
                 // A result the request already completed answers a memo miss
                 // before any claim: a claim installs a flight other
                 // tasks may join, so it is taken only to produce.
@@ -5479,13 +5550,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &mut capture,
                     recompute,
                     &mut own_published,
+                    match wait {
+                        Some(waker) => AcquireWait::Yield {
+                            slot: &mut claim.waiting,
+                            waker,
+                        },
+                        None => AcquireWait::Block,
+                    },
                 ) {
+                    Acquired::Pending => {
+                        // The claim waits on another task's producer in
+                        // `claim`, as the task it keeps for its next poll.
+                        if claim.task.is_none() {
+                            claim.task = execution.as_ref().map(|scope| scope.task().clone());
+                        }
+                        return std::task::Poll::Pending;
+                    }
                     Acquired::Served(read) => read,
                     Acquired::Read(read) => {
                         match self.served_read(key, read, cost_receipt::Nesting::Entered) {
                             Ok(read) => read,
-                            Err(refusal) if !recompute => {
-                                refused = Some(refusal);
+                            Err(_) if !recompute => {
+                                claim.recompute = true;
                                 continue;
                             }
                             Err(refusal) => self.refused_replay_read(key, refusal),
@@ -5544,8 +5630,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
         drop(execution);
-        let is_cold = cold_build_ran.get();
-        (cache_read, is_cold, refusal_carrier)
+        std::task::Poll::Ready(ClaimedCold {
+            read: cache_read,
+            is_cold: cold_build_ran.get(),
+            refusal_carrier,
+        })
     }
 }
 
@@ -5681,6 +5770,61 @@ pub fn finalised_build_certifies_refusal_for_tests<
     let (output, rooting) =
         finalise_rooted_build_output(ctx, output, finalise, &CarrierNormalizationPrelude::none());
     TracedFacts::of_output(&output, rooting).is_some()
+}
+
+/// One cold-query entry between its admission and its delivery
+/// ([`ProjectSemanticDispatch::begin_cold_query`]): its canonical key, its
+/// carrier-normalization prelude, its isolated-root identity, the query
+/// level its charge holds and its connected demand. Its fields drop in
+/// order: the query level closes before the connected demand does.
+pub(super) struct ColdEntry<'d> {
+    query_depth: Option<connected_demand::ConnectedDemandGuard<'d>>,
+    key: SemanticQueryKey,
+    carrier_prelude: CarrierNormalizationPrelude,
+    isolated_root: Option<IsolatedRoot>,
+    connected: connected_demand::ConnectedDemandGuard<'d>,
+}
+
+impl ColdEntry<'_> {
+    /// The canonical key the entry claims.
+    pub(super) fn key(&self) -> &SemanticQueryKey {
+        &self.key
+    }
+}
+
+/// How a cold-query entry begins: answered at its admission, or entered
+/// for its family-memo claim.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "returned once to the entry that claims it, which keeps the entered state where it keeps the claim"
+)]
+pub(super) enum ColdBegin<'d> {
+    Answered(CacheRead<QueryResult<SemanticQueryValue>>),
+    Entered(ColdEntry<'d>),
+}
+
+/// A cold-query entry's family-memo claim between the calls that advance it
+/// ([`ProjectSemanticDispatch::claim_cold_query`]): a synchronous entry's
+/// lives for one call; a polled entry's is kept across its polls.
+#[derive(Default)]
+pub(super) struct ColdClaim<'s> {
+    /// The request-local completion has been decided: what remains is the
+    /// family memo's claim.
+    claiming: bool,
+    /// The demand could not pay for a stored result: the claim computes.
+    recompute: bool,
+    /// The claim waiting on another task's producer.
+    waiting: Option<crate::semantic_query_memo::PendingAcquire<'s>>,
+    /// The task a yielding claim waits and produces as.
+    task: Option<crate::semantic_query_memo::ExecutionTask>,
+}
+
+/// What a cold-query entry's claim read: the read, whether a cold build
+/// ran, and the facts a sealed refusal of an isolated root keeps.
+pub(super) struct ClaimedCold {
+    read: CacheRead<QueryResult<SemanticQueryValue>>,
+    is_cold: bool,
+    refusal_carrier: Option<TracedFacts>,
 }
 
 /// The refusal identity of an isolated root entry

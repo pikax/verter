@@ -42,6 +42,8 @@ mod feasibility_probe_tests;
 #[cfg(test)]
 mod host_compile_request_tests;
 mod input_snapshot;
+#[cfg(all(test, target_arch = "wasm32"))]
+mod semantic_poll_wasm_tests;
 mod typeinfo;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod workspace_resolution_wasm_tests;
