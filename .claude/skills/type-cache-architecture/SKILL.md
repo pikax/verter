@@ -39,8 +39,11 @@ End-state rule:
 Parse-artifact publication uses embedded `StoragePin` owners and charged
 `PinnedOnce` lazy cells. Any Arc record handed out independently of its
 publication cell must carry its own pin; the cell's adjacent pin cannot follow
-a raw Arc clone. Indexed/shallow input records, lowered declarations, function
-program indexes and registered carrier envelopes follow this rule. Index
+a raw Arc clone. Indexed/shallow input records, lowered declarations, whole-file
+environments, shallow/route lenses, function program indexes and registered
+carrier envelopes follow this rule. Environment clones reset their fact pin
+before assembly and are measured at Arc publication; their content-free
+witness remains enforced by `FactStoragePin`. Index
 clones and stable-hash refolds reset their root pin; shared child tables keep
 one charge when the new index is published. Accounting state does not
 participate in index equality. `FactStoragePin` restricts its

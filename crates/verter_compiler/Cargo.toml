@@ -127,6 +127,7 @@ static_assertions = "1.1.0"
 web-time = "1.1"
 
 [dev-dependencies]
+verter_retention = { path = "../verter_retention", features = ["test-support"] }
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }

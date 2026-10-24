@@ -3,38 +3,146 @@ use verter_semantic::analysis::MacroFieldAddressTable;
 use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
 
 #[test]
+fn shallow_lens_readers_keep_storage_charged_across_memo_teardown() {
+    lens_reader_keeps_storage_charged(DeclBodyMemo::shallow_lens);
+}
+
+#[test]
+fn route_lens_readers_keep_storage_charged_across_memo_teardown() {
+    lens_reader_keeps_storage_charged(DeclBodyMemo::route_fact_lens);
+}
+
+fn lens_reader_keeps_storage_charged<T: HeapSize + Send + Sync + 'static>(
+    read: impl Fn(&DeclBodyMemo) -> Arc<T>,
+) {
+    let context = PinContext::new(verter_retention::SemanticRetentionAccount::new(
+        verter_retention::RetentionLimits::defaults(),
+    ));
+    let _scope = context.enter_for_test();
+    let memo = DeclBodyMemo::seeded_from_env(
+        SnapshotKey {
+            canonical: Arc::from("/retained-lenses.ts"),
+            whole_hash: [34; 16],
+            parse_env_hash: [0; 16],
+        },
+        &EvalEnv::default(),
+        Arc::new(DeclHeaderIndex::default()),
+    );
+    let symbols = (0..128)
+        .map(|n| DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), format!("name{n}")))
+        .collect::<FxHashSet<_>>();
+    memo.install_shallow_lens(Arc::new(ShallowLens::new(
+        symbols.clone(),
+        symbols.clone(),
+        symbols.clone(),
+        FxHashMap::default(),
+        FxHashMap::default(),
+    )));
+    memo.install_route_fact_lens(Arc::new(RouteLens::new(
+        Arc::from("/retained-lenses.ts"),
+        symbols,
+        FxHashMap::default(),
+    )));
+    let reader = read(&memo);
+    let charged = context.account().snapshot().pinned_bytes;
+    assert!(Arc::ptr_eq(&reader, &read(&memo)));
+    assert_eq!(context.account().snapshot().pinned_bytes, charged);
+    drop(memo);
+    let mut handles = verter_retention::allocation::AliasSet::estimating();
+    let bytes = reader.heap_size(&mut verter_retention::heap_size::HeapMeter::new(
+        &mut handles,
+    ));
+    assert!(bytes > 128 * std::mem::size_of::<DeclBindingKey>());
+    assert!(
+        context.account().snapshot().pinned_bytes >= bytes,
+        "the escaping lens remains fully charged after memo teardown"
+    );
+    drop(handles);
+    drop(reader);
+    assert_eq!(context.account().snapshot().pinned_bytes, 0);
+}
+
+fn function_memo(context: &PinContext) -> (DeclBodyMemo, Arc<DeclLoweringService>) {
+    let source: Arc<str> = Arc::from(
+        (0..128)
+            .map(|n| format!("export function f{n}(value: number) {{ return value + {n}; }}\n"))
+            .collect::<String>(),
+    );
+    let service = Arc::new(DeclLoweringService::new_with_account(
+        false,
+        1,
+        Arc::clone(context.account()),
+    ));
+    let memo = DeclBodyMemo::new(
+        SnapshotKey {
+            canonical: Arc::from("/retained-functions.ts"),
+            whole_hash: [32; 16],
+            parse_env_hash: [0; 16],
+        },
+        source,
+        None,
+        oxc_span::SourceType::ts(),
+        Arc::new(TopLevelOwnerTable::ordinary_file(128)),
+        false,
+        Arc::clone(&service),
+        Arc::new(DeclHeaderIndex::default()),
+        Arc::default(),
+        None,
+    );
+    (memo, service)
+}
+
+#[test]
+fn whole_env_readers_keep_storage_charged_across_memo_teardown() {
+    for memo_first in [true, false] {
+        let context = PinContext::new(verter_retention::SemanticRetentionAccount::new(
+            verter_retention::RetentionLimits::defaults(),
+        ));
+        let _scope = context.enter_for_test();
+        let (memo, service) = function_memo(&context);
+        let reader = memo.whole_env();
+        assert_eq!(reader.total_decl_count(), 128);
+        let mut handles = verter_retention::allocation::AliasSet::estimating();
+        let bytes = reader.heap_size(&mut verter_retention::heap_size::HeapMeter::new(
+            &mut handles,
+        ));
+        drop(handles);
+        assert!(
+            bytes > 128 * 1024,
+            "fixture retains nonempty declaration tables"
+        );
+        let charged = context.account().snapshot().pinned_bytes;
+        let second = memo.whole_env();
+        assert!(Arc::ptr_eq(&reader, &second));
+        assert_eq!(context.account().snapshot().pinned_bytes, charged);
+        drop(second);
+        if memo_first {
+            drop(memo);
+            drop(service);
+            assert_eq!(reader.total_decl_count(), 128);
+            assert!(
+                context.account().snapshot().pinned_bytes >= bytes,
+                "the escaping environment remains fully charged after memo teardown"
+            );
+            drop(reader);
+        } else {
+            drop(reader);
+            assert_eq!(context.account().snapshot().pinned_bytes, charged);
+            drop(memo);
+            drop(service);
+        }
+        assert_eq!(context.account().snapshot().pinned_bytes, 0);
+    }
+}
+
+#[test]
 fn function_index_readers_keep_storage_charged_across_memo_teardown() {
     for memo_first in [true, false] {
         let context = PinContext::new(verter_retention::SemanticRetentionAccount::new(
             verter_retention::RetentionLimits::defaults(),
         ));
         let _scope = context.enter_for_test();
-        let source: Arc<str> = Arc::from(
-            (0..128)
-                .map(|n| format!("export function f{n}(value: number) {{ return value + {n}; }}\n"))
-                .collect::<String>(),
-        );
-        let service = Arc::new(DeclLoweringService::new_with_account(
-            false,
-            1,
-            Arc::clone(context.account()),
-        ));
-        let memo = DeclBodyMemo::new(
-            SnapshotKey {
-                canonical: Arc::from("/retained-functions.ts"),
-                whole_hash: [32; 16],
-                parse_env_hash: [0; 16],
-            },
-            source,
-            None,
-            oxc_span::SourceType::ts(),
-            Arc::new(TopLevelOwnerTable::ordinary_file(128)),
-            false,
-            Arc::clone(&service),
-            Arc::new(DeclHeaderIndex::default()),
-            Arc::default(),
-            None,
-        );
+        let (memo, service) = function_memo(&context);
         let reader = memo.function_program_index().value;
         assert_eq!(reader.len(), 128);
         let mut handles = verter_retention::allocation::AliasSet::estimating();

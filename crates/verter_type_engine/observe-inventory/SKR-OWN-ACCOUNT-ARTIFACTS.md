@@ -23,8 +23,9 @@ holder references its charge. An owner's hold list pays for its own backing.
 Nested `Owned` cells pin themselves, so their bytes are excluded from parent
 measurements. A shared allocation has one charge until the last registered
 owner releases it. Raw Arcs are artifact-internal data. Records cloned out of
-publication cells (indexed/shallow inputs, lowered declarations, function
-program indexes and registered carrier envelopes) embed their own pin, so an escaping reader retains the
+publication cells (indexed/shallow inputs, lowered declarations, whole-file
+environments, shallow/route lenses, function program indexes and registered
+carrier envelopes) embed their own pin, so an escaping reader retains the
 charge until its last release. The cell's adjacent pin covers only backing
 that cannot escape independently.
 
@@ -55,7 +56,8 @@ and measures the clone's independently allocated backing when published.
 | `ShallowFileState.type_deps_cache`, `input_projection` | Charged per-file entries and shard capacities; charged write-once shallow-input projection | Lazy growth and last-owner teardown; digest cells contain inline hashes only |
 | `PreparedDeclBundle` and `Prepared*DeclCache.state` | Inline handle only; the state owns the complete charge | Either release order retains exactly one state charge until the last holder drops |
 | `DeclBodyMemo.storage`, `key`, `framework_parse`, `owner_table`, `snapshot`, `header_index`, `function_index` | Complete memo root; snapshot-key text, owned framework facts, shared owner/header tables, snapshot-demand and function-index-demand blocks | Registry aliases share headers/owners/source with the shallow state; retained parser leases keep their existing separate charge |
-| `DeclBodyMemo.lens`, `route_lens`, `whole_env`, `macro_field_addresses` | `PinnedOnce` publication of every map, vector, locator and macro/field address vector capacity; shared cell blocks measured by the memo | Demand-only; initialized once, released with the last owning cell; macro address entries include their owner identity and nested field vectors |
+| `DeclBodyMemo.lens`, `route_lens`, `whole_env`, `macro_field_addresses` | `PinnedOnce` publication of every map, vector, locator and macro/field address vector capacity; shared cell blocks measured by the memo | Demand-only; initialized once. Macro address entries include their owner identity and nested field vectors and release with their last owning cell; environments and lenses carry the embedded pins below |
+| `EvalEnv.storage`, `ShallowLens.storage`, `RouteLens.storage` | Complete Arc root and every declaration, identity, locator, symbol-set and import/export-map field through exhaustive derives | REQUIRED embedded pins follow independently escaping readers until their last release; warm readers share one charge. Environment clones reset the fact pin before assembly and publication, preserving `NoTypeExpr` |
 | `FunctionIndexDemand.function_program_index`, `FunctionProgramIndex.storage` | Demand cell publication seals the index's complete Arc root and every entry, keyed table, capture summary, expression and class-index field through its exhaustive derive | REQUIRED embedded pin follows escaping index readers until the last release; warm readers share one charge. Clone and stable-hash refold reset the root pin and share child-table registrations when published; equality ignores accounting state |
 | `DeclBodyMemo.type_entries`, `value_entries`, `aug_type_entries`, `aug_value_entries`, `raw_surfaces` | Key and committed-value footprints; lower-declaration facts, raw-surface fields, allocation capacity | A `PinnedOnce` body adds storage on publication; a warm read adds no charge |
 | `LoweredTypeDecl.storage`, `LoweredValueDecl.storage` | Complete Arc root and every fact field through exhaustive derives | Embedded `FactStoragePin` accepts only transitive `NoTypeExpr` carriers; a declaration reader outliving the memo keeps exactly one payload charge |

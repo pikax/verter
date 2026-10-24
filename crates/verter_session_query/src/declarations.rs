@@ -687,7 +687,9 @@ pub enum AugmentationScopeKind {
 /// The per-file shallow symbol-table inventory: content-free facts + locators
 /// per declared symbol, grouped by name in source/binder order.
 #[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct EvalEnv {
+    storage: verter_retention::pinned_heap::FactStoragePin,
     /// Type declarations: interfaces, type aliases. Each name maps to an
     /// ordered group of contributors (append-only, source/binder order).
     pub type_symbols: DeclMap<TypeDeclGroup>,
@@ -722,6 +724,16 @@ pub struct EvalEnv {
     /// Preserve canonical vue `VNode` slot return types symbolically while
     /// still normalizing other slot return types during defineSlots expansion.
     pub preserve_canonical_vue_vnode_slot_returns: bool,
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for EvalEnv {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
 }
 
 /// Traversal budgets for inventory consumers.
@@ -792,6 +804,7 @@ impl EvalEnv {
     /// Create a new inventory environment with default limits.
     pub fn new() -> Self {
         Self {
+            storage: Default::default(),
             type_symbols: DeclMap::default(),
             value_symbols: DeclMap::default(),
             augmentation_scopes: FxHashMap::default(),
