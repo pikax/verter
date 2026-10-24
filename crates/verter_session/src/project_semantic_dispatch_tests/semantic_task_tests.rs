@@ -668,7 +668,10 @@ fn semantic_poll_contract_distributed_conditional_retains_completed_members_acro
                 .exclusive(),
         )
     };
-    let (expected, expected_proof) = {
+    let selections = || {
+        ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::conditional_branch_selections_for_tests()
+    };
+    let (expected, expected_proof, expected_selections) = {
         let host = fixture();
         let view = host.resolver_store_view_read().into_owned_view();
         let ctx = crate::resolver_core::HostResolverContext::new(
@@ -678,6 +681,7 @@ fn semantic_poll_contract_distributed_conditional_retains_completed_members_acro
         );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let _builder = dispatch.enter_construction_scope();
+        let before = selections();
         let read = dispatch.execute_read(keys(&host, &dispatch).0);
         let QueryResult::Value(node) = read.value() else {
             panic!("the cold synchronous conditional must answer: {read:?}");
@@ -688,9 +692,14 @@ fn semantic_poll_contract_distributed_conditional_retains_completed_members_acro
                 &QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
             ),
             proof(&read),
+            selections() - before,
         )
     };
     assert_eq!(expected, "Union(number | string)");
+    assert_eq!(
+        expected_selections, 4,
+        "each boolean member selects its inferred branch and its nested branch once"
+    );
     let host = fixture();
     let view = host.resolver_store_view_read().into_owned_view();
     let ctx = crate::resolver_core::HostResolverContext::new(
@@ -708,18 +717,20 @@ fn semantic_poll_contract_distributed_conditional_retains_completed_members_acro
         ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::conditional_distributed_members_for_tests()
     };
     let mut entry = dispatch.poll_query(key.clone());
-    let (pending, before_release) = std::thread::scope(|scope| {
+    let (pending, before_release, selections_before_release) = std::thread::scope(|scope| {
         let (release, released) = std::sync::mpsc::channel::<()>();
         let holder = scope.spawn(move || {
             let _ = released.recv_timeout(std::time::Duration::from_secs(5));
             drop(lease);
         });
         let before = folds();
+        let before_selections = selections();
         let pending = entry.poll(&waker);
         let completed = folds() - before;
+        let completed_selections = selections() - before_selections;
         let _ = release.send(());
         holder.join().expect("the held producer releases");
-        (pending, completed)
+        (pending, completed, completed_selections)
     });
     assert!(
         pending.is_pending(),
@@ -728,13 +739,14 @@ fn semantic_poll_contract_distributed_conditional_retains_completed_members_acro
     assert_eq!(before_release, 1, "the first sibling already completed");
     let task = entry.task().expect("the pending decision owns its task");
     assert_send(task);
-    let completed = std::thread::scope(|scope| {
+    let (completed, resumed_selections) = std::thread::scope(|scope| {
         let waker = &waker;
         scope
             .spawn(move || {
                 let before_folds = folds();
+                let before_selections = selections();
                 assert!(task.poll(waker).is_ready(), "the released task completes");
-                folds() - before_folds
+                (folds() - before_folds, selections() - before_selections)
             })
             .join()
             .expect("the task resumes on another thread")
@@ -745,6 +757,11 @@ fn semantic_poll_contract_distributed_conditional_retains_completed_members_acro
     drop(entry);
     let completed = before_release + completed;
     assert_eq!(completed, 2, "each member is folded exactly once");
+    assert_eq!(
+        selections_before_release + resumed_selections,
+        expected_selections,
+        "completed relation/inference selection is retained while its winner waits"
+    );
     assert_eq!(display(&dispatch, answer.value()), expected);
     assert!(
         !answer.result_is_partial(),
@@ -2125,6 +2142,11 @@ mod semantic_poll_contract {
         drop(other);
     }
 
+    type JoinedEvidence = (
+        (String, String, bool, bool, Vec<String>, Option<String>),
+        Option<u64>,
+    );
+
     /// What a root that joined another task's producer through its frame
     /// reads, beside the work its receipt records: everything
     /// [`read_summary`] compares, the receipt's footprint, depth and
@@ -2136,10 +2158,7 @@ mod semantic_poll_contract {
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         read: &verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>,
         answer: impl FnOnce(&QueryResult<SemanticQueryValue>) -> String,
-    ) -> (
-        (String, String, bool, bool, Vec<String>, Option<String>),
-        Option<u64>,
-    ) {
+    ) -> JoinedEvidence {
         let (_, facts, suppress, partial, diagnostics, _) = read_summary(dispatch, read);
         let receipt = read.receipt().priced();
         (
@@ -2166,16 +2185,7 @@ mod semantic_poll_contract {
 
     /// Assert a joined read against its synchronous read
     /// ([`joined_evidence`]).
-    fn assert_joined_matches(
-        joined: (
-            (String, String, bool, bool, Vec<String>, Option<String>),
-            Option<u64>,
-        ),
-        synchronous: &(
-            (String, String, bool, bool, Vec<String>, Option<String>),
-            Option<u64>,
-        ),
-    ) {
+    fn assert_joined_matches(joined: JoinedEvidence, synchronous: &JoinedEvidence) {
         assert_eq!(joined.0, synchronous.0);
         let (Some(joined), Some(synchronous)) = (joined.1, synchronous.1) else {
             panic!("both complete reads carry a receipt");

@@ -722,8 +722,15 @@ completed member's observations join the parent before its result is
 retained. An unanswered member neither advances the cursor nor contributes
 a partial value to the accumulated union. Resumption continues at that
 member, and the final union uses the same reduction as an uninterrupted
-decision. The relation and winner stages, and nested queries evaluated
-inside other synchronous adapters, still require continuation conversion.
+decision. A completed relation/inference selection also joins the owning
+frame before its winner is evaluated: its verdict, inferred bindings and
+false-recovery classification survive a winner's dependency wait. The
+unfinished winner retains its own speculative observation scope, so a gap
+does not discard the completed relation's evidence. Selection counters
+assert the authored decisions execute once as well as comparing synchronous
+and polled work; equality alone would hide replay shared by both drivers.
+Internal relation/inference stages, winner processing and nested queries
+evaluated inside other synchronous adapters still require continuation conversion.
 
 These are the production waits a component-meta or compile root can reach
 in the current tree. Each one parks the polling thread inside whatever poll

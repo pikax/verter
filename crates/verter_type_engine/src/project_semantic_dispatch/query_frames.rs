@@ -25,7 +25,7 @@
 //! well. The decision runs as a frame whose reads of instantiations,
 //! `typeof`s and nested conditionals are answered by the deliveries it received; one it has no
 //! answer for becomes its need. The unfinished stage runs again once that
-//! need is delivered; completed operand preparation, distribution members
+//! need is delivered; completed operand preparation, relation selection, distribution members
 //! and their observations stay on the frame. A chain of conditionals each
 //! deciding over the one before is therefore a chain of frames too.
 //!
