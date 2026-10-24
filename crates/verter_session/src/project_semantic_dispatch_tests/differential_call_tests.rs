@@ -55,7 +55,8 @@ fn repeated_contravariant_callbacks_charge_linear_work() {
 /// reads the tuple's shape once per literal, not once per element: the
 /// contextual tuple elements read grow with the element count, and
 /// doubling it doubles them, for a call argument and for a literal a
-/// `satisfies` types alike.
+/// `satisfies` types alike, by its fixed prefix, by its fixed suffix after
+/// a rest element, or, after a spread, by its middle.
 #[test]
 fn tuple_element_contexts_charge_linear_work() {
     /// A call argument literal against a tuple parameter, and its answer.
@@ -78,8 +79,37 @@ fn tuple_element_contexts_charge_linear_work() {
             format!("[{literal}]"),
         )
     }
+    /// A literal a tuple with a rest element and a fixed suffix types: every
+    /// element is typed by the suffix element at its distance from the end.
+    fn suffixed(elements: usize) -> (String, String) {
+        let suffix = vec!["1 | 2"; elements].join(", ");
+        let literal = vec!["1"; elements].join(", ");
+        (
+            format!(
+                "export function result() {{ return [{literal}] satisfies [...(1 | 2)[], {suffix}]; }}"
+            ),
+            format!("[{literal}]"),
+        )
+    }
+    /// A literal led by a spread that a tuple with a fixed prefix types:
+    /// every element after the spread is typed by the tuple's middle.
+    fn spread_led(elements: usize) -> (String, String) {
+        let prefix = vec!["1 | 2"; elements].join(", ");
+        let literal = vec!["1"; elements].join(", ");
+        (
+            format!(
+                "declare const ys: (1 | 2)[];\nexport function result() {{ return [...ys, {literal}] satisfies [{prefix}, ...(1 | 2)[]]; }}"
+            ),
+            format!("[...(1 | 2)[], {literal}]"),
+        )
+    }
     type Fixture = fn(usize) -> (String, String);
-    let fixtures: [(&str, Fixture); 2] = [("argument", argument), ("satisfied", satisfied)];
+    let fixtures: [(&str, Fixture); 4] = [
+        ("argument", argument),
+        ("satisfied", satisfied),
+        ("suffixed", suffixed),
+        ("spread-led", spread_led),
+    ];
     for (label, fixture) in fixtures {
         let mut counts = Vec::new();
         for elements in [64, 128, 256] {

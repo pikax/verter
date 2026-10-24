@@ -29,9 +29,7 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SignatureKind, SignatureRef,
     SignatureReturnCarrier, VariancePhase,
 };
-pub(super) use context::{
-    tuple_element_contexts, ArgumentReadLiterals, ArrayLiteralShape, TupleContextShapes,
-};
+pub(super) use context::{ArgumentReadLiterals, ArrayLiteralShape};
 pub(super) use contextual::ContextualCallState;
 
 #[cfg(any(test, feature = "test-support"))]

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::super::contextual_tuple::{ContextualTuple, TupleElementContext};
 use super::super::dispatch_txn::ContextKeptLiteral;
 use super::super::inference::session::InferenceInfoSetup;
 use super::super::ProjectSemanticDispatch;
@@ -175,160 +176,26 @@ impl ArrayLiteralShape {
     }
 }
 
-/// The shape of a contextual tuple, which every element of an array
-/// literal it types reads (the checker keeps it on the tuple target): the
-/// count of its leading fixed elements, and the count of its trailing
-/// fixed elements after its last rest element (none without a rest
-/// element).
-#[derive(Clone, Copy, Debug)]
-pub(in crate::project_semantic_dispatch) struct TupleContextShape {
-    fixed: usize,
-    fixed_end: usize,
-}
-
-impl TupleContextShape {
-    /// The shape of a tuple whose elements are `elements`.
-    pub(in crate::project_semantic_dispatch) fn of(
-        elements: &[crate::semantic_query::TupleElement],
-    ) -> Self {
-        super::record_tuple_context_work(elements.len());
-        let fixed = elements.iter().take_while(|element| !element.rest).count();
-        let fixed_end = if fixed < elements.len() {
-            elements
-                .iter()
-                .rev()
-                .take_while(|element| !element.rest)
-                .count()
-        } else {
-            0
-        };
-        Self { fixed, fixed_end }
-    }
-}
-
-/// The shapes of the contextual tuples one array literal's elements read,
-/// each computed once for the literal.
-#[derive(Default)]
-pub(in crate::project_semantic_dispatch) struct TupleContextShapes(
-    FxHashMap<SemanticNodeId, TupleContextShape>,
-);
-
-impl TupleContextShapes {
-    /// The shape of the contextual tuple `tuple`, whose elements are
-    /// `elements`.
-    pub(in crate::project_semantic_dispatch) fn of(
-        &mut self,
-        tuple: SemanticNodeId,
-        elements: &[crate::semantic_query::TupleElement],
-    ) -> TupleContextShape {
-        *self
-            .0
-            .entry(tuple)
-            .or_insert_with(|| TupleContextShape::of(elements))
-    }
-}
-
-/// The contextual types a tuple whose elements are `elements`, shaped
-/// `tuple`, gives the array literal element at `index` of a literal
-/// shaped `shape` (the tuple arm of
-/// `getContextualTypeForElementExpression`), pushed to `out`: the
-/// tuple's own fixed element while no spread came before it; counted
-/// from the end, the tuple's trailing fixed element at the same
-/// distance when the literal's length is known and no spread follows
-/// the element; otherwise the element types of the tuple's middle — its
-/// rest element's, and its trailing fixed elements' unless the
-/// literal's length places the element before them. Nothing when no
-/// element types the position. `rest_element` reads a rest element's
-/// element type off its array type.
-pub(in crate::project_semantic_dispatch) fn tuple_element_contexts(
-    elements: &[crate::semantic_query::TupleElement],
-    tuple: TupleContextShape,
-    index: usize,
-    shape: ArrayLiteralShape,
-    rest_element: impl Fn(SemanticNodeId) -> Option<SemanticNodeId>,
-    out: &mut Vec<SemanticNodeId>,
-) {
-    super::record_tuple_context_work(1);
-    if shape.first_spread.is_none_or(|spread| index < spread) && index < tuple.fixed {
-        out.push(elements[index].value);
-        return;
-    }
-    let offset = match shape.length {
-        Some(length) if shape.last_spread.is_none_or(|spread| index > spread) => {
-            length.saturating_sub(index)
-        }
-        _ => 0,
-    };
-    let fixed_end = if offset > 0 { tuple.fixed_end } else { 0 };
-    if offset > 0 && offset <= fixed_end {
-        out.push(elements[elements.len() - offset].value);
-        return;
-    }
-    let start = shape
-        .first_spread
-        .map_or(tuple.fixed, |spread| spread.min(tuple.fixed));
-    let end = elements.len() - if shape.length.is_some() { fixed_end } else { 0 };
-    let middle = elements.get(start..end).unwrap_or_default();
-    super::record_tuple_context_work(middle.len());
-    out.extend(middle.iter().filter_map(|element| {
-        if element.rest {
-            rest_element(element.value)
-        } else {
-            Some(element.value)
-        }
-    }));
-}
-
 /// One contextual type an array literal's elements take their own
 /// contextual types from: an array's element type, which types every
-/// element, or a tuple with its shape, which types each by position.
+/// element, or a tuple, which types each by position.
 enum ElementContextSource {
     Array(SemanticNodeId),
-    Tuple(crate::semantic_query_memo::NodeData, TupleContextShape),
+    Tuple(ContextualTuple),
 }
 
 /// The contextual types of one array literal position's elements, read
 /// once for the literal: the arrays and tuples its combined contextual
 /// type resolves to, and the type parameters that read crossed, which
-/// every element position is read through.
+/// every element position is read through. The last element's answers
+/// and combined contextual types are kept, so the elements a tuple's
+/// middle types alike share one combined value.
 struct ElementContexts {
     sources: Vec<ElementContextSource>,
     through: Arc<[SemanticNodeId]>,
+    answers: Vec<TupleElementContext>,
+    last: Option<(Vec<TupleElementContext>, Arc<[SemanticNodeId]>)>,
     scratch: Vec<SemanticNodeId>,
-}
-
-impl ElementContexts {
-    /// The combined contextual type of the element at `index` of a
-    /// literal shaped `shape`, in one canonical order. `rest_element`
-    /// reads a rest element's element type off its array type.
-    fn at(
-        &mut self,
-        index: usize,
-        shape: ArrayLiteralShape,
-        rest_element: impl Fn(SemanticNodeId) -> Option<SemanticNodeId>,
-    ) -> Arc<[SemanticNodeId]> {
-        self.scratch.clear();
-        for source in &self.sources {
-            match source {
-                ElementContextSource::Array(element) => self.scratch.push(*element),
-                ElementContextSource::Tuple(data, tuple) => {
-                    if let SemanticNodeData::Tuple { elements, .. } = &**data {
-                        tuple_element_contexts(
-                            elements,
-                            *tuple,
-                            index,
-                            shape,
-                            &rest_element,
-                            &mut self.scratch,
-                        );
-                    }
-                }
-            }
-        }
-        self.scratch.sort_unstable();
-        self.scratch.dedup();
-        Arc::from(self.scratch.as_slice())
-    }
 }
 
 /// The constraint a nested position reads the type parameter `param`
@@ -350,9 +217,14 @@ fn contextual_constraint(
 
 /// The contextual types of one position, in one canonical order.
 fn combined_contexts(mut contexts: Vec<SemanticNodeId>) -> Arc<[SemanticNodeId]> {
+    combined_contexts_in(&mut contexts)
+}
+
+/// [`combined_contexts`] over a reused buffer, which it leaves sorted.
+fn combined_contexts_in(contexts: &mut Vec<SemanticNodeId>) -> Arc<[SemanticNodeId]> {
     contexts.sort_unstable();
     contexts.dedup();
-    Arc::from(contexts)
+    Arc::from(contexts.as_slice())
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
@@ -535,10 +407,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 .collect();
                             let shape = ArrayLiteralShape::of_tuple(elements);
                             drop(data);
-                            let mut element_contexts = self.element_contexts(&position, declared);
+                            let mut element_contexts = None;
                             for (index, value) in values.into_iter().enumerate() {
-                                let contexts = element_contexts
-                                    .at(index, shape, |rest| self.rest_element_type(rest));
+                                let element_contexts = element_contexts.get_or_insert_with(|| {
+                                    self.element_contexts(&position, declared)
+                                });
+                                let contexts =
+                                    self.element_contexts_at(element_contexts, index, shape);
                                 let through = Arc::clone(&element_contexts.through);
                                 let step = u32::try_from(index).ok().map(ArgumentPathStep::Element);
                                 children.push((
@@ -560,7 +435,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             };
                             let mut element_contexts = self.element_contexts(&position, declared);
                             let contexts =
-                                element_contexts.at(0, shape, |rest| self.rest_element_type(rest));
+                                self.element_contexts_at(&mut element_contexts, 0, shape);
                             let through = Arc::clone(&element_contexts.through);
                             children.push((
                                 0,
@@ -1296,8 +1171,53 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         ElementContexts {
             sources,
             through: position.child_through(crossed),
+            answers: Vec::new(),
+            last: None,
             scratch: Vec::new(),
         }
+    }
+
+    /// The combined contextual type `contexts` give the element at
+    /// `index` of a literal shaped `shape`, in one canonical order.
+    fn element_contexts_at(
+        &self,
+        contexts: &mut ElementContexts,
+        index: usize,
+        shape: ArrayLiteralShape,
+    ) -> Arc<[SemanticNodeId]> {
+        contexts.answers.clear();
+        for source in &contexts.sources {
+            contexts.answers.push(match source {
+                ElementContextSource::Array(element) => TupleElementContext::Element(*element),
+                ElementContextSource::Tuple(tuple) => {
+                    self.tuple_element_context(tuple, index, shape)
+                }
+            });
+        }
+        if let Some((answers, combined)) = &contexts.last {
+            if answers.len() == contexts.answers.len()
+                && answers
+                    .iter()
+                    .zip(&contexts.answers)
+                    .all(|(last, answer)| last.same_as(answer))
+            {
+                return Arc::clone(combined);
+            }
+        }
+        contexts.scratch.clear();
+        for answer in &contexts.answers {
+            match answer {
+                TupleElementContext::None => {}
+                TupleElementContext::Element(element) => contexts.scratch.push(*element),
+                TupleElementContext::Middle(middle) => {
+                    contexts.scratch.extend_from_slice(middle.contexts());
+                }
+            }
+        }
+        let combined = combined_contexts_in(&mut contexts.scratch);
+        let answers = std::mem::take(&mut contexts.answers);
+        contexts.last = Some((answers, Arc::clone(&combined)));
+        combined
     }
 
     /// Push the arrays and tuples `contextual` gives array literal
@@ -1341,19 +1261,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 sources.push(ElementContextSource::Array(*element));
             }
             SemanticNodeData::Tuple { elements, .. } => {
-                let tuple = TupleContextShape::of(elements);
-                sources.push(ElementContextSource::Tuple(data.clone(), tuple));
+                sources.push(ElementContextSource::Tuple(
+                    self.contextual_tuple(contextual, elements),
+                ));
             }
             _ => {}
-        }
-    }
-
-    /// The element type of a tuple's rest element, read off its array
-    /// type.
-    fn rest_element_type(&self, rest: SemanticNodeId) -> Option<SemanticNodeId> {
-        match self.graph().node_data(rest).as_deref() {
-            Some(SemanticNodeData::Array { element, .. }) => Some(*element),
-            _ => None,
         }
     }
 
