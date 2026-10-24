@@ -709,6 +709,7 @@ impl Drop for EpochReservation<'_> {
 /// released once, when the last `Arc` drops.
 pub struct FileArtifactRoot {
     epoch: u64,
+    settled: bool,
     registry: Arc<LiveRootRegistry>,
 }
 
@@ -728,6 +729,20 @@ impl FileArtifactRoot {
     #[must_use]
     pub fn is_exhausted(&self) -> bool {
         self.epoch == EXHAUSTED_EPOCH
+    }
+
+    /// Was this root captured with no membership mutation in flight?
+    ///
+    /// A mutation in flight holds a capture back to the epoch before it,
+    /// and a newer mutation may already have finished above it. Such a
+    /// root omits that finished mutation even though a generation read
+    /// before the capture already counts it, so a view pairing the two
+    /// would describe a world no generation names. A settled root
+    /// addresses the newest epoch: every mutation reserved before the
+    /// capture is in it.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.settled
     }
 }
 
@@ -1259,18 +1274,34 @@ impl FileArtifactStore {
     /// the capture back to its predecessor, so no root can observe a
     /// half-applied transition (and then observe the other half through
     /// the same, supposedly immutable, root).
+    ///
+    /// Held back that way, a root can predate a NEWER mutation that has
+    /// already finished — and that has already advanced
+    /// [`Self::artifact_generation`]. The root records whether it was
+    /// captured with no mutation in flight
+    /// ([`FileArtifactRoot::is_settled`]); only a settled root is known to
+    /// hold every mutation an earlier generation read accounts for.
     #[must_use]
     pub fn capture_root(&self) -> Arc<FileArtifactRoot> {
-        let epoch = {
+        let (epoch, settled) = {
             let mut state = self.live_roots.state.lock();
-            let epoch = state.stable_epoch(self.membership_epoch.load(Ordering::Acquire));
+            let current = self.membership_epoch.load(Ordering::Acquire);
+            let epoch = state.stable_epoch(current);
             *state.roots.entry(epoch).or_insert(0) += 1;
-            epoch
+            (epoch, epoch == current)
         };
         Arc::new(FileArtifactRoot {
             epoch,
+            settled,
             registry: Arc::clone(&self.live_roots),
         })
+    }
+
+    /// Reserve a membership epoch and hold it until the returned guard
+    /// drops, as a mutation that has not finished applying does.
+    #[cfg(test)]
+    pub(crate) fn hold_membership_epoch_for_test(&self) -> impl Drop + '_ {
+        self.reserve_membership_epoch()
     }
 
     /// Does `root` address THIS store's membership?
