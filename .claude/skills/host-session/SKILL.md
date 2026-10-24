@@ -152,6 +152,20 @@ the host. Session views likewise expose no host accessor. LSP background
 admission waits on the owning server's `HandlerActivity`, held per server, not
 on process-global handler counters.
 
+Workspace resolution exposes `WorkspaceRead::begin_resolution` and
+`begin_project_resolution`. The owned subscriber transfers an independent
+producer; producer polling transfers external `ResolutionWork` slices without
+executing resolver or IO work. Flights and publication gates register readiness
+and task edges in the host's existing TaskRegistry, injected through
+`WorkspaceServices::attach`. Captured worlds, overlay input, input-budget ledger
+and filesystem discovery/frozen replay survive suspension. Directory receipts
+follow the continuation across worker migration. A replaced pinned publication
+is refused at the final fence. Synchronous importer/project entries drive the
+same continuations externally. Adapter workspaces lacking this ownership protocol
+return typed `Unsupported` from the owned entry. Full result, cancellation,
+lifetime, backpressure and caller-assignment inventory:
+[`root-continuations.md`](../../../docs/arch/root-continuations.md#workspace-resolution).
+
 ## Vue Macro Codegen Producer
 
 `typeinfo/vue_macro_codegen.rs` is the sole semantic producer for compiler-facing

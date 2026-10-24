@@ -515,6 +515,70 @@ semantic task driving belong to DISPATCH. META and COMPILE retain their
 traversal above those shared semantic operations. Host CPU batch coordination
 is the executor boundary; it is not another dependency service.
 
+### Workspace resolution
+
+`WorkspaceRead::begin_resolution(Arc<Self>, ResolutionRequest, waiter, stop)`
+returns `WorkspaceResolution`. Importer, specifier, context, optional published
+root, immutable overlay and explicit project are owned inputs. The separate
+`begin_project_resolution` accepts a project-only request without inventing an
+importer. Engine-backed memory and filesystem workspaces implement both;
+adapters without that ownership protocol return `ResolutionError::Unsupported`.
+
+The subscriber polls `ResolutionStep::{Produce,Value}`. The independent
+`ResolutionProducer` only transfers `ResolutionWork` or registers readiness;
+only external `ResolutionWork::run` advances the retained continuation. Work
+uses the caller's existing execution service, creates no pool or CPU authority,
+and installs its producer task for that slice. Parser state remains in the
+existing resolver owner; only owned resolution records cross this interface.
+
+Phases include stable-world capture, candidate validation, bounded input
+preflight and loading, filesystem discovery, freezing, replay and publication.
+Flight and publication-gate contention register wakes and shared-registry wait
+edges instead of parking the owner execution. Input loading transfers external
+work before performing IO. An incomplete input load, gate or flight can be held
+while other already-admitted work continues; resuming never admits a new root
+or discards the captured attempt. Discovery and replay share the same
+`InputResolutionLedger`, including attempts, bytes, churn, staged inputs and
+completed-output ownership. Directory evidence is owned by that continuation
+and installed only for external slices, so migration cannot lose it in worker
+TLS. Frozen-reader completeness and independent live validation still govern
+filesystem admission.
+
+The host injects its TaskRegistry through `WorkspaceServices::attach`, including
+workspace replacement. Standalone workspace compatibility calls use their own
+composition authority. Flights own producer leases across threads; every joining
+task has its own subscription and wait edge. Same-path and mixed scheduler/flight
+cycles return `Cycle`, including a nested request on the same OS thread. A shared
+candidate is adopted only after validation in the subscriber's captured world;
+retention refusal still delivers the complete unretained answer. The final fence
+also rejects a replaced pinned published root.
+
+Cancellation wakes and detaches only the subscriber. Transferred producer work
+continues for other demands. Its external owner must finish it or drop it; dropping
+a producer or transferred slice publishes `ProducerDropped`, and an unwind
+publishes `ProducerPanicked`. An abandoned inner candidate flight wakes followers
+for their own bounded retry. Explicit request cancellation (including a host
+reset/shutdown stop token) returns `Cancelled`; a changed pinned world returns
+the existing noncacheable `ResolutionViewSuperseded` outcome. No stop admits a
+partial answer. Terminal observation/drop releases exactly that subscriber's
+registrations, wait edges and task pins. Flight retirement removes only its exact
+lane; all notifications run after the table/slot/publication locks release.
+
+The synchronous importer and project entries externally drive these same
+continuations. Legacy boolean cancellation is sampled only at that external
+compatibility driver; token-owned production entries register stop wakes. Polling
+capabilities expose neither that driver nor the underlying engine/reader.
+Completion/flight replies exert no bounded-queue backpressure; input reservations
+retain their existing explicit budget and integrity outcomes. Observation remains
+the existing optional VFS/audit capture, with no new history or enabled checks.
+
+Above this handoff, host loading and index dependency extraction
+(`host_lifecycle::resolve_import_outcome_in`, `host_executor::extract_deps`),
+resolver import/route demands, explicit-project intrinsics and program ordering
+belong to DISPATCH; metadata import traversal belongs to META; hydration and
+compile traversal above program ordering belong to COMPILE. Those caller
+conversions consume these APIs separately from the dependency owner.
+
 ## Boundaries that still block
 
 These are the production waits a component-meta or compile root can reach
@@ -523,9 +587,8 @@ reaches it, so a root that reaches one is not yet pollable. Semantic memo
 flights and scoped cache-node handoffs register shared-registry wait edges.
 Completion, cache admission and declaration-lowering subscriptions offer
 explicit task-owned adapters; their synchronous callers still require
-conversion. Workspace flight leases still lack shared task ownership and an
-owned production entry. Their thread-scoped direct-resolution escape and
-synchronous driver remain to be converted at the dependency owner.
+conversion. Workspace resolution now offers the owned dependency entry above;
+its higher-level traversals still use the external synchronous compatibility driver.
 
 | Wait | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- |
@@ -540,7 +603,7 @@ synchronous driver remain to be converted at the dependency owner.
 | Batch upsert completion (`Scheduler::wait_batch`) | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
 | Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
 | Scheduler inbox submission (`send_submission`) | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
-| Workspace import-resolution flight (`FlightSubscription::wait`) | `verter_workspace/src/resolution_flights.rs` | DISPATCH: host loading, analysis-stage dependencies and shared resolver import/route demands; META: metadata's import traversal; COMPILE: hydration and compile traversal | `FlightSubscription::poll` registers a waker; borrowed thread-scoped producer leases and cancellation sampling still need an owned dependency entry |
+| Workspace resolution (synchronous compatibility entries) | `verter_workspace/src/resolution_flights.rs` | DISPATCH: host loading, analysis-stage dependencies and shared resolver import/route demands; META: metadata's import traversal; COMPILE: hydration and compile traversal | `WorkspaceRead::begin_resolution` / `begin_project_resolution` transfer retained phase work and register owned flight/publication readiness; traversal callers still synchronous |
 | Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) | `verter_session/src/host_batch_coordinator.rs` | `compile_many`, `get_component_meta_batch` | none; the batch topology itself is the executor's to replace |
 
 The declaration-lowering waits that used to be on this list are now the

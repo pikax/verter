@@ -79,6 +79,7 @@ walkdir = "2.5"
 verter_tsgo_api = { path = "../verter_tsgo_api" }
 
 [dev-dependencies]
+verter_execution = { path = "../verter_execution", features = ["test-support"] }
 # An isolated retention account with size-controlled limits for the
 # retention-refusal tests.
 verter_session_query = { workspace = true, features = ["test-support"] }

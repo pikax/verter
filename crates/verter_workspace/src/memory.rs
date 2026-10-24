@@ -512,6 +512,75 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         }
     }
 
+    fn begin_project_resolution(
+        self: Arc<Self>,
+        request: crate::resolution_handoff::ProjectResolutionRequest,
+        waiter: verter_execution::tasks::ExecutionTask,
+        stop: verter_execution::cancellation::CancellationToken,
+    ) -> crate::resolution_handoff::WorkspaceResolution {
+        crate::resolution_handoff::WorkspaceResolution::new(
+            self.engine.authority.registry(),
+            waiter,
+            stop,
+            move |task, progress| {
+                Box::pin(async move {
+                    self.engine
+                        .resolve_project_continuation(
+                            self.as_ref(),
+                            &request.project,
+                            &request.specifier,
+                            request.context,
+                            task,
+                            progress,
+                        )
+                        .await
+                })
+            },
+        )
+    }
+
+    fn begin_resolution(
+        self: Arc<Self>,
+        request: crate::resolution_handoff::ResolutionRequest,
+        waiter: verter_execution::tasks::ExecutionTask,
+        stop: verter_execution::cancellation::CancellationToken,
+    ) -> crate::resolution_handoff::WorkspaceResolution {
+        crate::resolution_handoff::WorkspaceResolution::new(
+            self.engine.authority.registry(),
+            waiter,
+            stop,
+            move |task, progress| {
+                Box::pin(async move {
+                    let mut ledger = crate::resolver::InputResolutionLedger::new(
+                        self.engine.input_resolution_budgets,
+                    );
+                    let operation = match request.published.as_ref() {
+                        Some(published) => crate::engine::ResolutionOperation::pinned(
+                            published,
+                            &mut ledger,
+                            &|| true,
+                        ),
+                        None => crate::engine::ResolutionOperation::unpinned(&mut ledger, &|| true),
+                    }
+                    .over(request.overlay.as_ref())
+                    .in_project(request.project.as_ref());
+                    self.engine
+                    .resolve_import_continuation(
+                        self.as_ref(),
+                        crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+                        &request.importer,
+                        &request.specifier,
+                        request.context,
+                        operation,
+                        task,
+                        progress,
+                    )
+                    .await
+                })
+            },
+        )
+    }
+
     fn resolve_import(
         &self,
         importer_id: &str,
@@ -912,6 +981,10 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         deps: std::collections::BTreeSet<String>,
     ) {
         self.engine.replace_semantic_transitive(canonical_id, deps);
+    }
+
+    fn bind_execution_registry(&self, registry: verter_execution::tasks::TaskRegistry) {
+        self.engine.authority.bind(registry);
     }
 
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {

@@ -164,7 +164,7 @@ impl LazyResolutionCacheEntry {
 pub(crate) struct ResolutionOperation<'a> {
     expected_published: Option<&'a Arc<crate::published_state::PublishedRoot>>,
     input_ledger: &'a mut crate::resolver::InputResolutionLedger,
-    final_validate: &'a dyn Fn() -> bool,
+    final_validate: &'a (dyn Fn() -> bool + Sync),
     /// The request overlay this operation resolves through, if any. A
     /// required part of the operation rather than a reader hook: the Engine
     /// composes the overlay reader itself, so no wrapper around a reader
@@ -175,7 +175,7 @@ pub(crate) struct ResolutionOperation<'a> {
     /// concurrent identical query's flight: a cancelled caller detaches
     /// from the flight (the producer runs on for its other subscribers)
     /// and returns a typed `Cancelled` refusal.
-    cancelled: Option<&'a dyn Fn() -> bool>,
+    cancelled: Option<&'a (dyn Fn() -> bool + Sync)>,
     project: Option<&'a verter_session_query::resolution::ProjectOwnership>,
 }
 
@@ -183,7 +183,7 @@ impl<'a> ResolutionOperation<'a> {
     pub(crate) fn pinned(
         expected_published: &'a Arc<crate::published_state::PublishedRoot>,
         input_ledger: &'a mut crate::resolver::InputResolutionLedger,
-        final_validate: &'a dyn Fn() -> bool,
+        final_validate: &'a (dyn Fn() -> bool + Sync),
     ) -> Self {
         Self {
             expected_published: Some(expected_published),
@@ -197,7 +197,7 @@ impl<'a> ResolutionOperation<'a> {
 
     pub(crate) fn unpinned(
         input_ledger: &'a mut crate::resolver::InputResolutionLedger,
-        final_validate: &'a dyn Fn() -> bool,
+        final_validate: &'a (dyn Fn() -> bool + Sync),
     ) -> Self {
         Self {
             expected_published: None,
@@ -232,7 +232,7 @@ impl<'a> ResolutionOperation<'a> {
     /// Let the caller's cancellation detach this operation from a flight it
     /// waits on.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn cancelled_by(mut self, cancelled: &'a dyn Fn() -> bool) -> Self {
+    pub(crate) fn cancelled_by(mut self, cancelled: &'a (dyn Fn() -> bool + Sync)) -> Self {
         self.cancelled = Some(cancelled);
         self
     }
@@ -509,6 +509,7 @@ pub(crate) struct Engine {
     /// from its claim to its producer's settlement, so the registry holds
     /// at most one entry per concurrently resolving query. Its lock is a
     /// leaf; no wait happens under any Engine lock.
+    pub(crate) authority: crate::resolution_gate::Authority,
     flights: crate::resolution_flights::ResolutionFlights<ResolutionFlightKey, FlightDelivery>,
     /// Per-canonical pending-evidence ledger: canonicals whose content
     /// transitioned through [`Self::bump_content_generation_for`] and whose
@@ -553,7 +554,7 @@ pub(crate) struct Engine {
     /// Immutable resolution-visible composition and its four-step publisher.
     resolution_world: ArcSwap<ResolutionWorldRoot>,
     resolution_epoch: AtomicU64,
-    resolution_world_write: Mutex<()>,
+    resolution_world_write: crate::resolution_gate::PublicationGate,
     resolution_sessions: RwLock<FxHashMap<SessionFingerprint, Arc<SessionResolutionDomain>>>,
     default_resolution_session: SessionFingerprint,
     next_resolution_world_id: AtomicU64,
@@ -686,7 +687,9 @@ impl Engine {
         let mut resolution_sessions = FxHashMap::default();
         resolution_sessions.insert(default_resolution_session, default_session_domain);
         let retention = Arc::new(crate::overlay_residency::RetentionHook::default());
+        let authority = crate::resolution_gate::Authority::default();
         let engine = Self {
+            authority: authority.clone(),
             input_resolution_budgets,
             overlay: RwLock::new(OverlayStore::new()),
             snapshot: RwLock::new(MemorySnapshot::new()),
@@ -717,7 +720,7 @@ impl Engine {
             source_env_generation: AtomicU64::new(1),
             resolution_world: ArcSwap::from(initial_resolution_world),
             resolution_epoch: AtomicU64::new(0),
-            resolution_world_write: Mutex::new(()),
+            resolution_world_write: crate::resolution_gate::PublicationGate::new(authority),
             resolution_sessions: RwLock::new(resolution_sessions),
             default_resolution_session,
             next_resolution_world_id: AtomicU64::new(3),
@@ -2642,6 +2645,33 @@ impl Engine {
             .expect("no world writer is inside its window while the publication gate is held")
     }
 
+    async fn capture_resolution_continuation(
+        &self,
+        population: ResolutionPopulation,
+        task: &verter_execution::tasks::ExecutionTask,
+    ) -> Result<CapturedResolutionFence, crate::resolution_handoff::ResolutionError> {
+        if let Some(captured) = self.capture_resolution_world(population) {
+            return Ok(captured);
+        }
+        #[cfg(test)]
+        resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::PublicationGateWait);
+        let gate = self
+            .resolution_world_write
+            .subscribe(task.clone())
+            .acquire()
+            .await?;
+        let captured = self
+            .capture_resolution_world(population)
+            .expect("the publication gate pins a stable world");
+        drop(gate);
+        Ok(captured)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_publication_for_test(&self) -> crate::resolution_gate::PublicationGuard {
+        self.resolution_world_write.lock()
+    }
+
     /// The fence an attempt admits under, decided while the caller holds the
     /// publication gate (every writer is out of its window): the captured
     /// fence while its world is still current, else the latest coherent
@@ -3572,19 +3602,20 @@ impl Engine {
             && signature.resolution_evidence_is_unenumerable()
     }
 
-    fn refresh_resolution_evidence(
+    async fn refresh_resolution_evidence(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         request_overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
         signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
-    ) -> bool {
+        task: &verter_execution::tasks::ExecutionTask,
+    ) -> Result<bool, crate::resolution_handoff::ResolutionError> {
         use crate::resolution_currency::ResolutionEvidenceSource;
         // Fail closed: a caller that declared no live source re-observes
         // nothing and stamps nothing. It can only ever fail to heal — it can
         // never certify stale state as freshly verified.
         let reobserve_reused = match evidence {
-            ResolutionEvidenceSource::Inert => return false,
+            ResolutionEvidenceSource::Inert => return Ok(false),
             ResolutionEvidenceSource::ReaderAuthoritative => false,
             ResolutionEvidenceSource::Uncovered(_) => true,
         };
@@ -3608,7 +3639,7 @@ impl Engine {
         let mut targets: Vec<Arc<str>> = {
             let pending = self.pending_resolution_refresh.read();
             if pending.is_empty() && !reobserve_reused {
-                return false;
+                return Ok(false);
             }
             if unenumerable_resolution {
                 pending
@@ -3635,7 +3666,7 @@ impl Engine {
             }
         }
         if targets.is_empty() {
-            return false;
+            return Ok(false);
         }
 
         // Re-observe OUTSIDE the resolution-world write gate. The gate clones
@@ -3687,7 +3718,7 @@ impl Engine {
             });
         }
         if observations.is_empty() {
-            return false;
+            return Ok(false);
         }
 
         // These canonicals — and only these — were read live at `generation`,
@@ -3728,10 +3759,15 @@ impl Engine {
             })
         });
         if !needs_write {
-            return false;
+            return Ok(false);
         }
 
-        self.mutate_resolution_world(|world| {
+        let _publication = self
+            .resolution_world_write
+            .subscribe(task.clone())
+            .acquire()
+            .await?;
+        Ok(self.mutate_resolution_world_locked(|world| {
             let mut fold = BaselineFold::Unchanged;
             for observation in &observations {
                 for value in Self::observed_families(observation) {
@@ -3742,7 +3778,7 @@ impl Engine {
             // captured root is superseded and the in-flight attempt does not
             // retry. Only a conflict is a reason to retry.
             (fold == BaselineFold::Conflicted, fold.write())
-        })
+        }))
     }
 
     /// The content generation at which `canonical`'s base resolution evidence
@@ -3914,12 +3950,39 @@ impl Engine {
         ctx: verter_session_query::resolution::ResolutionContext,
         operation: ResolutionOperation<'_>,
     ) -> ResolutionOutcome {
+        let cancelled = operation.cancelled;
+        let waiter = self.authority.current();
+        crate::resolution_handoff::drive_compat(waiter, cancelled, |task, progress| {
+            Box::pin(self.resolve_import_continuation(
+                reader,
+                evidence,
+                importer_id,
+                specifier,
+                ctx,
+                operation,
+                task,
+                progress,
+            ))
+        })
+    }
+
+    pub(crate) async fn resolve_import_continuation(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+        operation: ResolutionOperation<'_>,
+        task: verter_execution::tasks::ExecutionTask,
+        progress: crate::resolution_handoff::Progress,
+    ) -> Result<ResolutionOutcome, crate::resolution_handoff::ResolutionError> {
         let ResolutionOperation {
             expected_published,
             input_ledger,
             final_validate,
             overlay: request_overlay,
-            cancelled,
+            cancelled: _,
             project,
         } = operation;
         verter_session_query::probe_scope!(RESOLVE_IN_PUBLISHED);
@@ -3949,7 +4012,8 @@ impl Engine {
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::AttemptStart);
             let mut captured = {
                 verter_session_query::probe_scope!(RESOLVE_CAPTURE_WORLD);
-                self.capture_stable_resolution_world(population)
+                self.capture_resolution_continuation(population, &task)
+                    .await?
             };
             // A request overlay answers from its own effective world: every
             // fact it changes is versioned in the overlay's version space, so
@@ -3972,7 +4036,7 @@ impl Engine {
                     .as_ref()
                     .is_some_and(|actual| Arc::ptr_eq(actual, expected))
             }) {
-                return ResolutionOutcome::new(
+                return Ok(ResolutionOutcome::new(
                     None,
                     SignatureAdmission::NonCacheable(
                         verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
@@ -3981,7 +4045,7 @@ impl Engine {
                     false,
                     false,
                     false,
-                );
+                ));
             }
             #[cfg(test)]
             resolution_test_hooks::capture_attempt_world();
@@ -4096,29 +4160,35 @@ impl Engine {
             // Reader-driven evidence refresh for the retained candidates' own
             // recorded canonicals; a refreshed (changed) world means the
             // captured root is superseded — retry against the new world.
+            progress
+                .at(crate::resolution_handoff::ResolutionPhase::Validate)
+                .await;
             let mut refreshed = false;
             {
                 verter_session_query::probe_scope!(RESOLVE_REFRESH_EVID);
                 for (_, entry) in candidates.iter() {
-                    refreshed |= self.refresh_resolution_evidence(
-                        reader,
-                        evidence,
-                        request_overlay,
-                        &entry.signature,
-                    );
+                    refreshed |= self
+                        .refresh_resolution_evidence(
+                            reader,
+                            evidence,
+                            request_overlay,
+                            &entry.signature,
+                            &task,
+                        )
+                        .await?;
                 }
             }
             if refreshed {
                 let tracked = TransactionReader::new(reader, &transaction);
                 if input_ledger.charge_outer_restart(&tracked).is_err() {
-                    return ResolutionOutcome::new(
+                    return Ok(ResolutionOutcome::new(
                         None,
                         transaction.into_inner().finish(),
                         rejected_exact_targets,
                         true,
                         false,
                         false,
-                    );
+                    ));
                 }
                 continue;
             }
@@ -4182,25 +4252,21 @@ impl Engine {
                 && flight_lease.is_none()
                 && reader.resolution_event_bridge_complete()
             {
-                match self.flights.claim(&(cache_key.clone(), overlay_lane)) {
+                match self
+                    .flights
+                    .claim(&(cache_key.clone(), overlay_lane), &task)
+                {
                     crate::resolution_flights::FlightClaim::Lead(lease) => {
                         flight_lease = Some(lease);
                     }
-                    crate::resolution_flights::FlightClaim::Direct => {}
-                    crate::resolution_flights::FlightClaim::Join(subscription) => {
-                        match subscription.wait(cancelled) {
+                    crate::resolution_flights::FlightClaim::Join(mut subscription) => {
+                        match std::future::poll_fn(|cx| subscription.poll(cx.waker())).await? {
                             crate::resolution_flights::FlightOutcome::Delivered(delivery) => {
                                 if reusable_for_this_view(&delivery.entry) {
                                     reusable = Some((delivery.lane, delivery.entry.clone()));
                                 }
                             }
                             crate::resolution_flights::FlightOutcome::Abandoned => continue,
-                            crate::resolution_flights::FlightOutcome::Detached => {
-                                return ResolutionOutcome::refused(
-                                    None,
-                                    verter_audit::NonAdmissionReason::Cancelled,
-                                );
-                            }
                         }
                     }
                 }
@@ -4277,41 +4343,40 @@ impl Engine {
                     verter_session_query::probe_scope!(RESOLVE_TRACKED);
                     let tracked = TransactionReader::new(reader, &transaction);
                     let capability = TrackedResolutionCapability::new();
-                    let driven = captured
-                        .world
-                        .base
-                        .published
-                        .as_ref()
-                        .map_or(Ok(None), |root| {
-                            let request = verter_session_query::resolution::ResolveRequest {
-                                importer_id: importer_id.to_string(),
-                                specifier: specifier.to_string(),
-                                kind: ctx.kind,
-                                phase: ctx.phase,
-                            };
-                            crate::resolver::resolve_tracked_in_project(
-                                &root.snapshot.resolver,
-                                &capability,
-                                &tracked,
-                                input_ledger,
-                                &request,
-                                project,
-                            )
-                        });
+                    let driven = if let Some(root) = captured.world.base.published.as_ref() {
+                        let request = verter_session_query::resolution::ResolveRequest {
+                            importer_id: importer_id.to_string(),
+                            specifier: specifier.to_string(),
+                            kind: ctx.kind,
+                            phase: ctx.phase,
+                        };
+                        crate::resolver::resolve_tracked_in_project_async(
+                            &root.snapshot.resolver,
+                            &capability,
+                            &tracked,
+                            input_ledger,
+                            &request,
+                            project,
+                            Some(&progress),
+                        )
+                        .await
+                    } else {
+                        Ok(None)
+                    };
                     match driven {
                         Ok(result) => result,
                         Err(_) => {
                             transaction.lock().mark_incomplete_provenance();
                             #[cfg(test)]
                             resolution_test_hooks::record_return_only();
-                            return ResolutionOutcome::new(
+                            return Ok(ResolutionOutcome::new(
                                 None,
                                 transaction.into_inner().finish(),
                                 rejected_exact_targets,
                                 true,
                                 false,
                                 false,
-                            );
+                            ));
                         }
                     }
                 }
@@ -4321,14 +4386,14 @@ impl Engine {
                 #[cfg(test)]
                 resolution_test_hooks::record_return_only();
                 input_ledger.release_applied_outputs();
-                return ResolutionOutcome::new(
+                return Ok(ResolutionOutcome::new(
                     result,
                     admission,
                     rejected_exact_targets,
                     true,
                     false,
                     false,
-                );
+                ));
             }
             if !reused {
                 let complete_context = Self::complete_provider_context(
@@ -4364,6 +4429,9 @@ impl Engine {
 
             // The final fence and publication are serialized against all world
             // writers. No mutation can land between validation and insertion.
+            progress
+                .at(crate::resolution_handoff::ResolutionPhase::Publish)
+                .await;
             let session_domain = captured.session_domain.clone();
             #[cfg(test)]
             resolution_test_hooks::fire(
@@ -4372,8 +4440,16 @@ impl Engine {
             let (_publication, _session_publication) = {
                 verter_session_query::probe_scope!(RESOLVE_PUBLISH_LOCK);
                 (
-                    self.resolution_world_write.lock(),
-                    session_domain.as_ref().map(|domain| domain.write.lock()),
+                    self.resolution_world_write
+                        .subscribe(task.clone())
+                        .acquire()
+                        .await?,
+                    session_domain.as_ref().map(|domain| {
+                        domain
+                            .write
+                            .try_lock()
+                            .expect("base gate serializes all session writers")
+                    }),
                 )
             };
             let admission_fence = self
@@ -4383,6 +4459,16 @@ impl Engine {
                     request_overlay,
                     &transaction.lock(),
                 )
+                .filter(|latest| {
+                    expected_published.is_none_or(|expected| {
+                        latest
+                            .world
+                            .base
+                            .published
+                            .as_ref()
+                            .is_some_and(|actual| Arc::ptr_eq(actual, expected))
+                    })
+                })
                 .filter(|latest| {
                     // A reuse rooted on its decision is stamped with the
                     // decision's version in the fenced world, which its
@@ -4407,21 +4493,21 @@ impl Engine {
                 None => {
                     let tracked = TransactionReader::new(reader, &transaction);
                     if input_ledger.charge_outer_restart(&tracked).is_err() {
-                        return ResolutionOutcome::new(
+                        return Ok(ResolutionOutcome::new(
                             None,
                             transaction.into_inner().finish(),
                             rejected_exact_targets,
                             true,
                             false,
                             false,
-                        );
+                        ));
                     }
                     continue;
                 }
             }
             if !final_validate() {
                 input_ledger.release_applied_outputs();
-                return ResolutionOutcome::new(
+                return Ok(ResolutionOutcome::new(
                     None,
                     SignatureAdmission::NonCacheable(
                         verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
@@ -4430,7 +4516,7 @@ impl Engine {
                     true,
                     false,
                     false,
-                );
+                ));
             }
             if !reader.resolution_event_bridge_complete() {
                 transaction.lock().mark_untracked_backend();
@@ -4511,7 +4597,7 @@ impl Engine {
                 // state newer than the captured root entered through the
                 // mutation protocol. Retry against the new world.
                 if input_ledger.charge_outer_restart(reader).is_err() {
-                    return ResolutionOutcome::new(
+                    return Ok(ResolutionOutcome::new(
                         None,
                         SignatureAdmission::NonCacheable(
                             verter_audit::NonAdmissionReason::BudgetExceeded,
@@ -4520,7 +4606,7 @@ impl Engine {
                         true,
                         false,
                         false,
-                    );
+                    ));
                 }
                 continue;
             }
@@ -4680,14 +4766,6 @@ impl Engine {
                     }
                 }
             }
-            // Settle the flight this demand leads: deliver its candidate,
-            // or — with none admitted — abandon it so every subscriber
-            // retries for itself.
-            if let Some(lease) = flight_lease.take() {
-                if let Some(delivery) = delivery {
-                    lease.complete(delivery);
-                }
-            }
             // **The DAG's consumer-facing product.** A cacheable outcome
             // whose decision node is in the graph roots on THAT node —
             // one typed derived fact — instead of on the attempt's own
@@ -4767,23 +4845,33 @@ impl Engine {
             );
             input_ledger.release_applied_outputs();
 
+            drop(_session_publication);
+            drop(_publication);
+            // Settle the flight this demand leads: deliver its candidate,
+            // or — with none admitted — abandon it so every subscriber
+            // retries for itself.
+            if let Some(lease) = flight_lease.take() {
+                if let Some(delivery) = delivery {
+                    lease.complete(delivery);
+                }
+            }
             if let Some(witness) = unretained_witness {
-                return ResolutionOutcome::unretained(
+                return Ok(ResolutionOutcome::unretained(
                     result,
                     witness,
                     rejected_exact_targets,
                     !reused,
                     reused,
-                );
+                ));
             }
-            return ResolutionOutcome::new(
+            return Ok(ResolutionOutcome::new(
                 result,
                 admission,
                 rejected_exact_targets,
                 !reused,
                 published,
                 reused,
-            );
+            ));
         }
     }
 
@@ -4839,11 +4927,29 @@ impl Engine {
         specifier: &str,
         ctx: verter_session_query::resolution::ResolutionContext,
     ) -> ResolutionOutcome {
+        crate::resolution_handoff::drive_compat(self.authority.current(), None, |task, progress| {
+            Box::pin(
+                self.resolve_project_continuation(reader, owner, specifier, ctx, task, progress),
+            )
+        })
+    }
+
+    pub(crate) async fn resolve_project_continuation(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        owner: &verter_session_query::resolution::ProjectOwnership,
+        specifier: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+        task: verter_execution::tasks::ExecutionTask,
+        progress: crate::resolution_handoff::Progress,
+    ) -> Result<ResolutionOutcome, crate::resolution_handoff::ResolutionError> {
         let population = reader.resolution_population();
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
         loop {
-            let mut captured = self.capture_stable_resolution_world(population);
+            let mut captured = self
+                .capture_resolution_continuation(population, &task)
+                .await?;
             #[cfg(test)]
             resolution_test_hooks::capture_attempt_world();
 
@@ -4875,36 +4981,35 @@ impl Engine {
 
             let tracked = TransactionReader::new(reader, &transaction);
             let capability = TrackedResolutionCapability::new();
-            let driven = captured
-                .world
-                .base
-                .published
-                .as_ref()
-                .map_or(Ok(None), |root| {
-                    crate::resolver::resolve_for_project_tracked(
-                        &root.snapshot.resolver,
-                        &capability,
-                        &tracked,
-                        &mut input_ledger,
-                        owner,
-                        specifier,
-                        ctx,
-                    )
-                });
+            let driven = if let Some(root) = captured.world.base.published.as_ref() {
+                crate::resolver::resolve_for_project_tracked_async(
+                    &root.snapshot.resolver,
+                    &capability,
+                    &tracked,
+                    &mut input_ledger,
+                    owner,
+                    specifier,
+                    ctx,
+                    Some(&progress),
+                )
+                .await
+            } else {
+                Ok(None)
+            };
             let result = match driven {
                 Ok(result) => result,
                 Err(_) => {
                     transaction.lock().mark_incomplete_provenance();
                     #[cfg(test)]
                     resolution_test_hooks::record_return_only();
-                    return ResolutionOutcome::new(
+                    return Ok(ResolutionOutcome::new(
                         None,
                         transaction.into_inner().finish(),
                         Vec::new(),
                         true,
                         false,
                         false,
-                    );
+                    ));
                 }
             };
             let terminal_admission = transaction.lock().input_resolution_terminal_admission();
@@ -4912,7 +5017,14 @@ impl Engine {
                 #[cfg(test)]
                 resolution_test_hooks::record_return_only();
                 input_ledger.release_applied_outputs();
-                return ResolutionOutcome::new(result, admission, Vec::new(), true, false, false);
+                return Ok(ResolutionOutcome::new(
+                    result,
+                    admission,
+                    Vec::new(),
+                    true,
+                    false,
+                    false,
+                ));
             }
             let complete_context = Self::complete_provider_context(
                 captured.world.base.as_ref(),
@@ -4939,9 +5051,21 @@ impl Engine {
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::RequestCompletion);
 
-            let _publication = self.resolution_world_write.lock();
+            progress
+                .at(crate::resolution_handoff::ResolutionPhase::Publish)
+                .await;
+            let _publication = self
+                .resolution_world_write
+                .subscribe(task.clone())
+                .acquire()
+                .await?;
             let session_domain = captured.session_domain.clone();
-            let _session_publication = session_domain.as_ref().map(|domain| domain.write.lock());
+            let _session_publication = session_domain.as_ref().map(|domain| {
+                domain
+                    .write
+                    .try_lock()
+                    .expect("base gate serializes all session writers")
+            });
             let admission_fence =
                 self.admission_fence_under_gate(&captured, population, None, &transaction.lock());
             if let Some(latest) = admission_fence {
@@ -4950,14 +5074,14 @@ impl Engine {
             } else {
                 let tracked = TransactionReader::new(reader, &transaction);
                 if input_ledger.charge_outer_restart(&tracked).is_err() {
-                    return ResolutionOutcome::new(
+                    return Ok(ResolutionOutcome::new(
                         None,
                         transaction.into_inner().finish(),
                         Vec::new(),
                         true,
                         false,
                         false,
-                    );
+                    ));
                 }
                 continue;
             }
@@ -4989,7 +5113,14 @@ impl Engine {
                 input_ledger.commit_loaded_inputs(reader);
             }
             input_ledger.release_applied_outputs();
-            return ResolutionOutcome::new(result, admission, Vec::new(), true, false, false);
+            return Ok(ResolutionOutcome::new(
+                result,
+                admission,
+                Vec::new(),
+                true,
+                false,
+                false,
+            ));
         }
     }
 
