@@ -164,7 +164,7 @@ fn graph_builder_encodes_recursive_ref_not_unknown() {
 ///   non-function node) fails the `GraphNode::Function` assertion, and the
 ///   byte-equal check fails if the constructor type ever diverged from the
 ///   same-payload function wire shape.
-/// * The memo layer stays distinct: `ExprMemoKey::from_expr` of a
+/// * The memo layer stays distinct: the `AddressIdentity` of a
 ///   constructor type must NOT equal that of a function carrying the same
 ///   `Arc<FunctionExpr>` — if the `ConstructorType` memo arm were ever
 ///   collapsed into `Self::Function`, this assertion fails. (The final wire
@@ -222,15 +222,15 @@ fn constructor_type_serialises_to_function_wire_node() {
     );
 
     // (3) The MEMO key stays distinct so a constructor type and a function
-    // carrying the same `Arc<FunctionExpr>` never share an `expr_ids` entry.
-    // This is the invariant the dedicated `ExprMemoKey::ConstructorType`
+    // carrying the same `Arc<FunctionExpr>` never share a memo entry.
+    // This is the invariant the dedicated `AddressIdentity::ConstructorType`
     // variant exists to enforce: collapsing it into `Self::Function` would
     // make these equal and is a cache-collision bug.
     assert_ne!(
-        ExprMemoKey::from_expr(&ctor),
-        ExprMemoKey::from_expr(&plain),
-        "ExprMemoKey::ConstructorType must stay distinct from \
-         ExprMemoKey::Function for the same Arc<FunctionExpr>",
+        AddressIdentity::of(&ctor),
+        AddressIdentity::of(&plain),
+        "AddressIdentity::ConstructorType must stay distinct from \
+         AddressIdentity::Function for the same Arc<FunctionExpr>",
     );
 
     // (4) The final wire NODE id legitimately dedups: because the two wire
@@ -252,7 +252,7 @@ fn constructor_type_serialises_to_function_wire_node() {
 fn ptr_cache_fast_path_avoids_memo_key_on_pointer_based_variants() {
     // Build an expression tree with pointer-based variants (Union, Object,
     // Function, IndexedAccess, Array) and verify that repeat lookups hit
-    // the ptr cache without building ExprMemoKey or GraphNode.
+    // the address memo without rebuilding any GraphNode.
     let inner_obj = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         empty_literal: false,
         properties: vec![],
@@ -301,7 +301,7 @@ fn ptr_cache_fast_path_avoids_memo_key_on_pointer_based_variants() {
     let lit_id2 = builder.node_id(&lit);
     assert_eq!(
         lit_id1, lit_id2,
-        "value-based variant should still deduplicate via ExprMemoKey"
+        "value-based variant should still deduplicate via the content memo"
     );
 }
 
@@ -892,4 +892,445 @@ fn snapshot_heap_counts_its_strings_and_node_lists_once_per_shared_table() {
         0,
         "a clone shares both tables"
     );
+}
+
+/// End-to-end witness: signatures encoded one after another each get their
+/// own function node (256 distinct signatures, 256 distinct nodes). Against
+/// code that memoised signatures by the address of a freed temporary, it
+/// fails only when the allocator hands that address to the next signature,
+/// as the system allocators on Windows and glibc do here; it depends on
+/// allocator behaviour. The allocator-independent guarantees are
+/// `every_allocation_a_memo_key_names_lives_as_long_as_the_builder` and
+/// `member_signatures_add_no_memo_entries`.
+#[test]
+fn consecutive_signatures_get_distinct_function_nodes() {
+    use verter_type_expr::FunctionExpr;
+    let mut builder = GraphBuilder::new();
+    let mut ids = Vec::new();
+    for value in 0..256u32 {
+        let function = FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(TypeExpr::Literal(LiteralValue::Number(
+                f64::from(value),
+            )))),
+            Vec::new(),
+        );
+        ids.push(builder.signature_member(0, &function).function);
+    }
+    let mut distinct = ids.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        ids.len(),
+        "{} of {} distinct signatures were answered with another signature's node",
+        ids.len() - distinct.len(),
+        ids.len()
+    );
+}
+
+/// End-to-end witness: expressions handed in as temporaries, each dropped
+/// straight after its `node_id` call, number and encode exactly as the same
+/// expressions held alive throughout. Against a memo whose keys could
+/// outlive their allocations, it fails only when the allocator reuses a
+/// freed address; it depends on allocator behaviour. The
+/// allocator-independent guarantee is
+/// `every_allocation_a_memo_key_names_lives_as_long_as_the_builder`.
+#[test]
+fn tables_do_not_depend_on_how_long_the_expressions_live() {
+    let make = |value: u32| TypeExpr::Array {
+        element: Arc::new(TypeExpr::Literal(LiteralValue::Number(f64::from(value)))),
+        readonly: false,
+    };
+    let held: Vec<TypeExpr> = (0..256).map(make).collect();
+    let mut kept = GraphBuilder::new();
+    let kept_ids: Vec<u32> = held.iter().map(|expr| kept.node_id(expr)).collect();
+    let mut transient = GraphBuilder::new();
+    let transient_ids: Vec<u32> = (0..256)
+        .map(|value| transient.node_id(&make(value)))
+        .collect();
+    assert_eq!(transient_ids, kept_ids);
+    assert_eq!(transient.nodes(), kept.nodes());
+    assert_eq!(transient.strings(), kept.strings());
+}
+
+fn leaf() -> Arc<TypeExpr> {
+    Arc::new(TypeExpr::named("Leaf"))
+}
+
+fn list() -> Arc<[TypeExpr]> {
+    Arc::from(vec![TypeExpr::named("Item")])
+}
+
+/// A reader of `value`'s reference count that itself holds one reference.
+fn watch<T: ?Sized + 'static>(value: &Arc<T>) -> Box<dyn Fn() -> usize> {
+    let value = Arc::clone(value);
+    Box::new(move || Arc::strong_count(&value))
+}
+
+fn conditional(
+    check: Arc<TypeExpr>,
+    extends: Arc<TypeExpr>,
+    true_type: Arc<TypeExpr>,
+    false_type: Arc<TypeExpr>,
+) -> TypeExpr {
+    TypeExpr::Conditional {
+        check,
+        extends,
+        true_type,
+        false_type,
+    }
+}
+
+fn mapped(source: Arc<TypeExpr>, value: Arc<TypeExpr>, name_type: Arc<TypeExpr>) -> TypeExpr {
+    TypeExpr::Mapped {
+        parameter: "K".to_string(),
+        source,
+        value,
+        optional: MappedModifier::None,
+        readonly: MappedModifier::None,
+        name_type: Some(name_type),
+    }
+}
+
+fn recursive_ref(
+    name: Arc<str>,
+    type_arguments: Arc<[TypeExpr]>,
+    conditional_context: Arc<[RecursiveConditionalFrame]>,
+) -> TypeExpr {
+    TypeExpr::RecursiveRef {
+        name,
+        type_arguments,
+        conditional_context,
+    }
+}
+
+fn frames() -> Arc<[RecursiveConditionalFrame]> {
+    Arc::from(vec![RecursiveConditionalFrame {
+        branch: RecursiveConditionalBranch::True,
+        decided: true,
+        check: leaf(),
+        extends: leaf(),
+    }])
+}
+
+/// One ownership case: a reader of the watched allocation's reference count
+/// and the expressions to encode, all built fresh.
+type OwnershipCase = (
+    &'static str,
+    fn() -> (Box<dyn Fn() -> usize>, Vec<TypeExpr>),
+);
+
+/// Every allocation a memo identity names by address is owned by the
+/// builder for its whole lifetime, whatever the caller does with the
+/// expression, so no identity can outlive its allocation. One case per
+/// address-named slot of every variant that has one (a primitive, literal,
+/// type parameter, `typeof`, import type and unknown name none). Checked
+/// through reference counts, which do not depend on how the allocator
+/// reuses memory.
+#[test]
+fn every_allocation_a_memo_key_names_lives_as_long_as_the_builder() {
+    use verter_type_expr::{
+        CompilerIntrinsicTypeOp, FunctionExpr, ObjectExpr, SyntheticCarrierKey,
+        SyntheticCarrierSurfaceKind,
+    };
+    let cases: &[OwnershipCase] = &[
+        ("intrinsic application arguments", || {
+            let arguments = list();
+            (
+                watch(&arguments),
+                vec![TypeExpr::IntrinsicApplication {
+                    op: CompilerIntrinsicTypeOp::Awaited,
+                    arguments,
+                }],
+            )
+        }),
+        ("union members", || {
+            let types = list();
+            (watch(&types), vec![TypeExpr::Union(types)])
+        }),
+        ("intersection members", || {
+            let types = list();
+            (watch(&types), vec![TypeExpr::Intersection(types)])
+        }),
+        ("array element", || {
+            let element = leaf();
+            (
+                watch(&element),
+                vec![TypeExpr::Array {
+                    element,
+                    readonly: false,
+                }],
+            )
+        }),
+        ("tuple elements", || {
+            let elements: Arc<[TupleElement]> = Arc::from(Vec::new());
+            (
+                watch(&elements),
+                vec![TypeExpr::Tuple {
+                    elements,
+                    readonly: false,
+                }],
+            )
+        }),
+        ("object", || {
+            let object = Arc::new(ObjectExpr {
+                empty_literal: true,
+                properties: Vec::new(),
+            });
+            (watch(&object), vec![TypeExpr::Object(object)])
+        }),
+        ("function", || {
+            let function = Arc::new(FunctionExpr::synthetic(
+                Vec::new(),
+                Some(leaf()),
+                Vec::new(),
+            ));
+            (watch(&function), vec![TypeExpr::Function(function)])
+        }),
+        ("constructor type", || {
+            let function = Arc::new(FunctionExpr::synthetic(
+                Vec::new(),
+                Some(leaf()),
+                Vec::new(),
+            ));
+            (watch(&function), vec![TypeExpr::ConstructorType(function)])
+        }),
+        ("reference name", || {
+            let name: Arc<str> = Arc::from("Box");
+            (
+                watch(&name),
+                vec![TypeExpr::Ref {
+                    name,
+                    type_arguments: list(),
+                }],
+            )
+        }),
+        ("reference type arguments", || {
+            let type_arguments = list();
+            (
+                watch(&type_arguments),
+                vec![TypeExpr::Ref {
+                    name: Arc::from("Box"),
+                    type_arguments,
+                }],
+            )
+        }),
+        // A reference whose name text equals an encoded one but lives in
+        // its own allocation misses the address memo, hits the content memo,
+        // and is then remembered by its own name allocation.
+        ("reference name after a content hit", || {
+            let arguments = list();
+            let second_name: Arc<str> = Arc::from("Box");
+            (
+                watch(&second_name),
+                vec![
+                    TypeExpr::Ref {
+                        name: Arc::from("Box"),
+                        type_arguments: arguments.clone(),
+                    },
+                    TypeExpr::Ref {
+                        name: second_name,
+                        type_arguments: arguments,
+                    },
+                ],
+            )
+        }),
+        ("keyof operand", || {
+            let operand = leaf();
+            (watch(&operand), vec![TypeExpr::KeyOf(operand)])
+        }),
+        ("indexed access object", || {
+            let object = leaf();
+            (
+                watch(&object),
+                vec![TypeExpr::IndexedAccess {
+                    object,
+                    index: leaf(),
+                }],
+            )
+        }),
+        ("indexed access index", || {
+            let index = leaf();
+            (
+                watch(&index),
+                vec![TypeExpr::IndexedAccess {
+                    object: leaf(),
+                    index,
+                }],
+            )
+        }),
+        ("conditional check", || {
+            let check = leaf();
+            (
+                watch(&check),
+                vec![conditional(check, leaf(), leaf(), leaf())],
+            )
+        }),
+        ("conditional extends", || {
+            let extends = leaf();
+            (
+                watch(&extends),
+                vec![conditional(leaf(), extends, leaf(), leaf())],
+            )
+        }),
+        ("conditional true branch", || {
+            let true_type = leaf();
+            (
+                watch(&true_type),
+                vec![conditional(leaf(), leaf(), true_type, leaf())],
+            )
+        }),
+        ("conditional false branch", || {
+            let false_type = leaf();
+            (
+                watch(&false_type),
+                vec![conditional(leaf(), leaf(), leaf(), false_type)],
+            )
+        }),
+        ("mapped source", || {
+            let source = leaf();
+            (watch(&source), vec![mapped(source, leaf(), leaf())])
+        }),
+        ("mapped value", || {
+            let value = leaf();
+            (watch(&value), vec![mapped(leaf(), value, leaf())])
+        }),
+        ("mapped name type", || {
+            let name_type = leaf();
+            (watch(&name_type), vec![mapped(leaf(), leaf(), name_type)])
+        }),
+        ("template literal expressions", || {
+            let expressions = list();
+            (
+                watch(&expressions),
+                vec![TypeExpr::TemplateLiteral {
+                    quasis: vec!["a".to_string(), "b".to_string()],
+                    expressions,
+                }],
+            )
+        }),
+        ("infer constraint", || {
+            let constraint = leaf();
+            (
+                watch(&constraint),
+                vec![TypeExpr::Infer {
+                    name: "U".to_string(),
+                    constraint: Some(constraint),
+                }],
+            )
+        }),
+        ("rest", || {
+            let inner = leaf();
+            (watch(&inner), vec![TypeExpr::Rest(inner)])
+        }),
+        ("parenthesized", || {
+            let inner = leaf();
+            (watch(&inner), vec![TypeExpr::Parenthesized(inner)])
+        }),
+        ("recursive reference name", || {
+            let name: Arc<str> = Arc::from("Tree");
+            (watch(&name), vec![recursive_ref(name, list(), frames())])
+        }),
+        ("recursive reference type arguments", || {
+            let type_arguments = list();
+            (
+                watch(&type_arguments),
+                vec![recursive_ref(Arc::from("Tree"), type_arguments, frames())],
+            )
+        }),
+        ("recursive reference conditional context", || {
+            let context = frames();
+            (
+                watch(&context),
+                vec![recursive_ref(Arc::from("Tree"), list(), context)],
+            )
+        }),
+        ("synthetic slot binding", || {
+            let key = Arc::new(SyntheticCarrierKey {
+                scope_canonical_id: From::from("/abs/Foo.vue"),
+                surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+                slot_name: Some(From::from("default")),
+                binding_name: From::from("controls"),
+                value_node: 7,
+            });
+            (watch(&key), vec![TypeExpr::SyntheticSlotBinding(key)])
+        }),
+    ];
+    for (case, build) in cases {
+        let (count, exprs) = build();
+        let mut builder = GraphBuilder::new();
+        for expr in &exprs {
+            builder.node_id(expr);
+        }
+        drop(exprs);
+        assert!(
+            count() > 1,
+            "{case}: the builder must own the allocation its memo names"
+        );
+        drop(builder);
+        assert_eq!(
+            count(),
+            1,
+            "{case}: the builder releases the allocation when dropped"
+        );
+    }
+}
+
+/// Member signatures (methods, call and construct signatures) live inline in
+/// their member and are interned by value: encoding them adds no function
+/// entry to either memo. Allocator-independent.
+#[test]
+fn member_signatures_add_no_memo_entries() {
+    use verter_type_expr::{
+        FunctionExpr, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember,
+    };
+    let signature = |value: u32| {
+        FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(TypeExpr::Literal(LiteralValue::Number(
+                f64::from(value),
+            )))),
+            Vec::new(),
+        )
+    };
+    let mut properties: Vec<ObjectMember> = (0..8)
+        .map(|value| {
+            ObjectMember::Method(MethodSignature::with_key_visibility(
+                format!("m{value}").as_str().into(),
+                signature(value),
+                false,
+                MemberVisibility::Public,
+                Default::default(),
+            ))
+        })
+        .collect();
+    properties.push(ObjectMember::CallSignature(signature(8)));
+    properties.push(ObjectMember::ConstructSignature(signature(9)));
+    let object = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
+        properties,
+    }));
+    let mut builder = GraphBuilder::new();
+    builder.node_id(&object);
+    assert_eq!(builder.debug_function_memo_entries(), 0);
+}
+
+/// Two import types with the same specifier, qualifier and typeof flag
+/// share one memo entry whatever their type arguments, which their wire node
+/// does not encode: the second is answered without building a node.
+#[test]
+fn equal_import_types_share_a_memo_entry() {
+    let import_type = |argument: &str| TypeExpr::ImportType {
+        specifier: Arc::from("./module"),
+        qualifier: Arc::from(vec![Arc::<str>::from("Box")]),
+        typeof_query: false,
+        type_arguments: Arc::from(vec![TypeExpr::named(argument)]),
+    };
+    let mut builder = GraphBuilder::new();
+    let first = builder.node_id(&import_type("A"));
+    let builds = builder.debug_graph_node_build_count();
+    let second = builder.node_id(&import_type("B"));
+    assert_eq!(first, second);
+    assert_eq!(builder.debug_graph_node_build_count(), builds);
 }
