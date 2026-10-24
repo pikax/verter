@@ -10,7 +10,6 @@
 //! contributes a continuation `impl VerterHost { … }` block.
 use verter_session_query::analysis::types::Hash16;
 
-use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
 use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners;
@@ -193,16 +192,7 @@ impl VerterHost {
         }
 
         let parse_env_hash = self.host_view_env_hashes_for(canonical_id).parse_env_hash;
-        let Some(old_key) =
-            verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-                Arc::from(canonical_id),
-                old_source.whole_hash,
-                old_source.source.as_ref(),
-                old_data.file_language.clone(),
-                old_data.framework_parse.as_deref(),
-                parse_env_hash,
-            )
-        else {
+        let Some(old_key) = old_data.artifact_key(Arc::from(canonical_id), parse_env_hash) else {
             return false;
         };
         let Some(old_artifacts) = self.project_type_store.indexed().get_artifacts_for_content(
@@ -2632,6 +2622,7 @@ impl VerterHost {
             let file_language = hd.file_language.clone();
             let framework_parse = hd.framework_parse.clone();
             let eval_source = Arc::clone(&hd.eval_source);
+            let source_parse_key = hd.source_parse_key();
             let source_type = hd.source_type;
             let script_analysis = Arc::clone(&hd.parse.script_analysis);
 
@@ -2873,7 +2864,12 @@ impl VerterHost {
                 declares_interface_app_config,
                 macro_hot_mirror:
                     verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
-                source_parse_key: crate::project_type_store::SourceParseKey::default(),
+                // The source snapshot already holds this revision's parse
+                // identity: the artifact starts with it rather than hashing
+                // its source again on first demand.
+                source_parse_key: crate::project_type_store::SourceParseKey::derived(
+                    source_parse_key,
+                ),
                 input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
             });
             indexed.pin_storage();
@@ -3388,15 +3384,12 @@ impl VerterHost {
                             // round-trips; when the artifact is absent, the
                             // dep's `FileWholeHash` remains the (sufficient)
                             // covering fact for a direct local export.
-                            let dep_key =
-                                verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-                                    Arc::clone(&dep_id),
-                                    source_data.parse.whole_hash,
-                                    source_snapshot.as_ref()?.source.as_ref(),
-                                    source_data.file_language.clone(),
-                                    source_data.framework_parse.as_deref(),
-                                    verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
-                                );
+                            // Keyed by the snapshot's own parse identity,
+                            // with no pass over the source.
+                            let dep_key = source_data.artifact_key(
+                                Arc::clone(&dep_id),
+                                verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
+                            );
                             if let Some(indexed) = dep_key.as_ref().and_then(|key| {
                                 self.project_type_store.indexed().get_in::<M>(
                                     verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),

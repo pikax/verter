@@ -30,8 +30,8 @@ fn indexed_input_parse_identity_growth_is_charged_after_cold_publication() {
     artifact.raw_source = std::sync::Arc::from("export type A = string");
     artifact.eval_source = artifact.raw_source.clone();
     assert!(artifact.cached_source_parse_key().is_none());
-    let input = artifact.input_record();
     let cold = account.snapshot().pinned_bytes;
+    let input = artifact.input_record();
     let key = input.source_parse_key().expect("script identity");
     let warm = account.snapshot().pinned_bytes;
     assert!(
@@ -376,6 +376,23 @@ fn scheduler_snapshots_charge_variable_payloads_and_share_artifact_sources() {
                         .bytes,
             "source and nonempty analysis backing are charged"
         );
+        let analysis_language = crate::FileLanguage::script(verter_language::ScriptSourceType::Js(
+            verter_language::JsModuleKind::Module,
+        ));
+        let analysis_key =
+            crate::host_executor::snapshot_parse_key_under(&source, &analysis_language);
+        assert!(analysis_key.is_some());
+        let with_analysis_key = account.snapshot().pinned_bytes;
+        assert!(
+            with_analysis_key > charged,
+            "a lazily cached analysis-language identity owns its pin"
+        );
+        assert_eq!(
+            crate::host_executor::snapshot_parse_key_under(&source, &analysis_language),
+            analysis_key
+        );
+        assert_eq!(account.snapshot().pinned_bytes, with_analysis_key);
+        let charged = with_analysis_key;
         // A second analysis stage shares source-owned fields but owns new export
         // and view backing. It must pay for that independently of the source pin.
         let executor = crate::host_executor::HostStageExecutor::new(
