@@ -41,7 +41,7 @@ serde_json = { workspace = true }
 # Binary `--api` op results (getSourceFile / typeToTypeNode) ride a base64
 # `{ data }` field on the vscode-jsonrpc ATTACH wire; the JSON parity oracle also
 # base64-encodes carrier content for the Node harness.
-base64 = "0.22.1"
+base64 = "0.23.1"
 # The leaf coordinate owner: the `--api` diagnostic offset contract (`pos`/`end`
 # are UTF-16 code units) delegates the numeric UTF-16→byte / UTF-16→(line,col)
 # conversion to `verter_span` so there is ONE offset-normalization implementation.

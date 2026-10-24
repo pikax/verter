@@ -96,7 +96,7 @@ memchr = "2.8.3"
 # values (a faithful port of official `scope.evaluate`, where `NUMBER` includes
 # BigInt). Already a transitive dep via `oxc_ecmascript`; pinned directly here so
 # the fold evaluator can name the type.
-num-bigint = "0.4"
+num-bigint = "0.5"
 # IEEE-754 half-precision for the const-fold evaluator's `Math.f16round` global —
 # an EXACT round-to-nearest-even f64→f16→f64 round-trip matching JS. Already a
 # transitive dev-dep via criterion; pinned directly so the fold matches official.
@@ -114,7 +114,7 @@ oxc_diagnostics = "0.151.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 oxc_sourcemap = "9.0.0"
-base64 = "0.22.1"
+base64 = "0.23.1"
 sha2 = { workspace = true }
 hex = "0.4.3"
 # Regular dependency, not dev-dependency: `assert_not_impl_any!` guards the

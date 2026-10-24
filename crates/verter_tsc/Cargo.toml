@@ -46,7 +46,7 @@ serde_json = { workspace = true }
 rayon = "1"
 # Retained for the `--declaration` emit stage's temp-file `tsgo --project` path.
 tempfile = "3.27"
-base64 = "0.22.1"
+base64 = "0.23.1"
 oxc_sourcemap = "9.0.0"
 walkdir = "2.5"
 # One-shot runtime to drive the async `TsgoClient` from the sync CLI.
