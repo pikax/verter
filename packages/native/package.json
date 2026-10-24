@@ -54,11 +54,11 @@
     "test": "pnpm run test:types && vitest run"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.6.2",
-    "@types/node": "^25.9.1",
+    "@napi-rs/cli": "^3.10.9",
+    "@types/node": "^26.6.5",
     "@verter/types": "workspace:^",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.7"
+    "vitest": "^5.0.5"
   },
   "optionalDependencies": {
     "@verter/native-darwin-arm64": "workspace:*",

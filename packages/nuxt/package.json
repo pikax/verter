@@ -35,11 +35,11 @@
     "test": "echo '@verter/nuxt has pre-existing tsc errors in module.ts (Nuxt peer-dep type gaps) unrelated to audit-footprint; no-op per plan Commit 8 escape hatch'"
   },
   "dependencies": {
-    "@nuxt/kit": "^4.4.6",
+    "@nuxt/kit": "^4.6.2",
     "@verter/unplugin": "workspace:*"
   },
   "devDependencies": {
-    "tsdown": "^0.22.0",
+    "tsdown": "^0.23.2",
     "typescript": "^6.0.3"
   },
   "peerDependencies": {
