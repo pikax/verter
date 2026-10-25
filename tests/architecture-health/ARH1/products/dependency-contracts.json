@@ -593,6 +593,7 @@
           "reset",
           "restart_driver",
           "quiesce",
+          "wait_stage_tasks_finished",
           "register_resolved_deps",
           "config",
           "commit_artifact",
