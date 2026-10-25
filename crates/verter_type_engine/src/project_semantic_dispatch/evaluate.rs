@@ -2182,6 +2182,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ) => true,
             Some(SemanticNodeData::InstantiationRef { base, .. }) => {
                 self.runtime_nominal_identity(base).is_some()
+                    || matches!(
+                        self.prepared_decl_kind(base),
+                        Some(
+                            verter_session_query::declarations::TypeDeclKind::Interface
+                                | verter_session_query::declarations::TypeDeclKind::Class
+                        )
+                    )
             }
             _ => false,
         }

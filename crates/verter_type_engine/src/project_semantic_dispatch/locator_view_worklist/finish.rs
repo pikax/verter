@@ -424,7 +424,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !projected_args.iter().any(|argument| {
                 super::super::raise::builtin_lowering_argument_is_open(self, *argument)
             }));
-        if keeps_carrier {
+        // A published interface application denotes its named type even when
+        // its instantiated surface is empty. Resolving it here loses both the
+        // declaration and its arguments before intersection reduction or output
+        // materialization can observe them. Member/operator demands still enter
+        // the ordinary Instantiate owner to read its structural surface.
+        let named_interface = context.demand == ReductionDemand::Published
+            && context.mode == ProjectionMode::Expanded
+            && context.merge_role() != MemberMergeRole::Heritage
+            && self.prepared_decl_kind(base)
+                == Some(verter_session_query::declarations::TypeDeclKind::Interface);
+        if keeps_carrier || named_interface {
             ProjectionFinish::Node(rebuild(projected_args))
         } else if self.is_instantiate_active(
             base.canonical_id.as_ref(),
