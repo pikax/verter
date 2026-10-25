@@ -1790,8 +1790,10 @@ fn long_messages_print_as_the_checker_abbreviates_them() {
 /// its signature, a class expression's instance `(Anonymous class)`, each
 /// counted as the checker's node builder counts it, so the members past
 /// the truncation length elide exactly where tsc elides them and a text of
-/// twice that length is clipped. Every expected line is TypeScript 7.0.2's
-/// on this fixture, identical with `strictNullChecks` off, cold and warm.
+/// twice that length is clipped. Every expected line is TypeScript
+/// 7.1.0-beta's on this fixture, identical with `strictNullChecks` off,
+/// cold and warm; a function type the node builder begins past the
+/// truncation length elides as `...`.
 #[test]
 fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abbreviates_them() {
     const WIDE: usize = 30;
@@ -1827,12 +1829,13 @@ fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abb
              parameter of type 'string'."
         )
     };
-    let elided = |count: usize, member: &dyn Fn(usize) -> String| {
+    // The last member begins past the truncation length: a function type
+    // there elides as `...`, a class-expression instance does not.
+    let elided = |count: usize, member: &dyn Fn(usize) -> String, last: String| {
         format!(
-            "{{ {}; ... {} more ...; {}; }}",
+            "{{ {}; ... {} more ...; {last}; }}",
             members(count, member),
             WIDE - count - 1,
-            member(WIDE - 1)
         )
     };
     let predicates = format!(
@@ -1842,17 +1845,35 @@ fn wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abb
     let rows: Vec<(&str, Vec<String>)> = vec![
         (
             "typeof_wide",
-            vec![at("(35,44)", &elided(16, &|i| format!("p{i}: () => void")))],
+            vec![at(
+                "(35,44)",
+                &elided(
+                    16,
+                    &|i| format!("p{i}: () => void"),
+                    format!("p{}: ...", WIDE - 1),
+                ),
+            )],
         ),
         (
             "qualified_wide",
-            vec![at("(37,47)", &elided(16, &|i| format!("q{i}: () => void")))],
+            vec![at(
+                "(37,47)",
+                &elided(
+                    16,
+                    &|i| format!("q{i}: () => void"),
+                    format!("q{}: ...", WIDE - 1),
+                ),
+            )],
         ),
         (
             "class_wide",
             vec![at(
                 "(42,43)",
-                &elided(5, &|i| format!("a{i}: (Anonymous class)")),
+                &elided(
+                    5,
+                    &|i| format!("a{i}: (Anonymous class)"),
+                    format!("a{}: (Anonymous class)", WIDE - 1),
+                ),
             )],
         ),
         ("class_short", vec![at("(43,44)", "(Anonymous class)")]),
@@ -2014,13 +2035,13 @@ fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
 }
 
 /// A failure through a long property path is reported while the checker's
-/// relation stack holds it, and as TS2321 where the stack overflows: the
-/// failing pair itself takes a frame when it is two object types or an
-/// intersection target's member, not when it is two primitives or an
-/// object type against a primitive. An overflow is reported twice, at the
-/// call the checker compares the types in while it chooses the candidate,
-/// then at the argument, in place of TS2345. Every line is TypeScript
-/// 7.0.2's on this fixture, identical with `strictNullChecks` off.
+/// relation stack holds it, and not at all past it, where the checker's
+/// overflowing comparison holds and reports nothing: the failing pair
+/// itself takes a frame when it is two object types or an intersection
+/// target's member, not when it is two primitives or an object type against
+/// a primitive. Every line is TypeScript 7.1.0-beta's on this fixture,
+/// identical with `strictNullChecks` off; tsc reports nothing for each
+/// empty row.
 #[test]
 fn deep_chains_report_until_the_checker_relation_stack_overflows() {
     let nest = |inner: &str, depth: usize| {
@@ -2058,16 +2079,6 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             vec!["a"; depth].join("."),
         )]
     };
-    let overflowed = |call: &str, argument: &str| {
-        [call, argument]
-            .map(|position| {
-                format!(
-                    "{position}: error TS2321: Excessive stack depth comparing types \
-                     '{clipped}' and '{clipped}'."
-                )
-            })
-            .to_vec()
-    };
     let expected: [(&str, Vec<String>); 8] = [
         (
             "object_leaf_99",
@@ -2077,7 +2088,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                 "Property 'y' is missing in type '{ x: number; }' but required in type '{ y: number; }'.",
             ),
         ),
-        ("object_leaf_100", overflowed("(7,44)", "(7,62)")),
+        ("object_leaf_100", Vec::new()),
         (
             "object_to_primitive_99",
             reported("(10,76)", 99, "Type '{ x: 1; }' is not assignable to type 'string'."),
@@ -2090,7 +2101,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
             "primitive_leaf_100",
             reported("(16,68)", 100, "Type 'string' is not assignable to type 'number'."),
         ),
-        ("primitive_leaf_101", overflowed("(19,47)", "(19,68)")),
+        ("primitive_leaf_101", Vec::new()),
         (
             "intersection_98",
             reported(
@@ -2100,7 +2111,7 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
                  Type 'string' is not assignable to type '{ p: 1; }'.",
             ),
         ),
-        ("intersection_99", overflowed("(25,44)", "(25,62)")),
+        ("intersection_99", Vec::new()),
     ];
     let host = host_with(&source);
     let mut mismatches = Vec::new();
@@ -3104,7 +3115,10 @@ fn an_assertion_every_conditional_arm_applies_narrows_past_it() {
     check_rows(CONDITIONAL_ASSERTIONS, &rows);
 }
 
-/// Symbol abbreviation depends on spelling, not unrelated interning or query history.
+/// Symbol abbreviation depends on spelling, not unrelated interning or query
+/// history, and elides where the checker does: a symbol-keyed property counts
+/// its spelling, its leaf again and twenty bytes. Measured on TypeScript
+/// 7.1.0-beta, whose abbreviation is itself history-independent.
 #[test]
 fn symbol_abbreviation_keeps_diagnostics_across_query_histories() {
     use super::signature_predicate_inference_tests::checker_report;
@@ -3129,7 +3143,7 @@ fn symbol_abbreviation_keeps_diagnostics_across_query_histories() {
         source.push_str(&format!("[u{i}]: {i}; "));
     }
     source.push_str("}) { return x; }\n");
-    let message = format!("error TS2345: Argument of type '{{ padding: \"{padding}\"; [s0]: number; [s1]: number; [s2]: number; [s3]: number; [s4]: number; ... 7 more ...; last: string; }}' is not assignable to parameter of type 'string'.");
+    let message = format!("error TS2345: Argument of type '{{ padding: \"{padding}\"; [s0]: number; [s1]: number; ... 10 more ...; last: string; }}' is not assignable to parameter of type 'string'.");
     let expected: Vec<_> = source
         .match_indices("one(x)")
         .map(|(start, _)| {
@@ -3190,7 +3204,7 @@ export function mapped_infer<T>(x: { value: { [K in keyof T]: string } extends {
     let rows = [
         ("merged", "(4,48): error TS2345: Argument of type 'Merged' is not assignable to parameter of type 'string'."),
         ("spread", "(5,86): error TS2345: Argument of type '{ a: number; b: string; }' is not assignable to parameter of type 'string'."),
-        ("constrained", "(6,271): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T extends { ...; } ? U : number; tail: boolean; }' is not assignable to parameter of type 'string'."),
+        ("constrained", "(6,271): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: T extends ... ? U : number; tail: boolean; }' is not assignable to parameter of type 'string'."),
         ("symbol_short", "(8,65): error TS2345: Argument of type '{ [key]: number; }' is not assignable to parameter of type 'string'."),
         ("symbol_wide", "(9,236): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; [key]: number; tail: boolean; last: string; }' is not assignable to parameter of type 'string'."),
         ("mapped", "(10,240): error TS2345: Argument of type '{ padding: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; value: { [K in keyof T]: string; }; tail: boolean; }' is not assignable to parameter of type 'string'."),
@@ -3324,11 +3338,15 @@ export function enum_wide(x: {{ padding: "{padding}"; [E.A]: number; tail: boole
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// A relation that overflows the checker's relation stack reports nothing
+/// at all — not at the call, not at the argument, elaborated or not, under
+/// overloads or not — while the same fixtures one level shallower report
+/// TS2719 and TS2769 (`elaborated_99`, `overloaded_99` in the measurement).
+/// Measured on TypeScript 7.1.0-beta, identical with `strictNullChecks` off.
 #[test]
-fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
+fn elaborated_and_overloaded_overflows_report_nothing() {
     let nest =
         |leaf: &str, count: usize| format!("{}{leaf}{}", "{ e: ".repeat(count), " }".repeat(count));
-    let clipped = format!("{}{{ ...", "{ e: ".repeat(63));
     for (name, overload, elaborated, count) in [
         ("elaborated", false, true, 100),
         ("overloaded", true, false, 100),
@@ -3347,31 +3365,8 @@ fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
             nest("{ x: number }", count), nest("{ y: number }", count),
             if overload { format!("declare function f(arg: {}{callback}, extra?: number): number;\n", nest("{ y: number }", count)) } else { String::new() },
             if elaborated { "{ e: x.e }" } else { "x" });
-        let line = source.lines().count();
-        let body = source.lines().last().unwrap();
-        let call = body.find("f(").unwrap() + 1;
-        let argument = call + 2;
-        let overflow =
-            format!("Excessive stack depth comparing types '{clipped}' and '{clipped}'.");
-        let mut expected = vec![format!("({line},{}): error TS2321: {overflow}", call)];
-        if overload && !elaborated {
-            expected.push(format!("({line},{argument}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {overflow}"));
-        } else if count == 101 {
-            expected.push(format!(
-                "({line},{}): error TS2321: {overflow}",
-                argument + 2
-            ));
-        } else {
-            let message = format!("Type '{clipped}' is not assignable to type '{clipped}'. Two different types with this name exist, but they are unrelated.\n  The types of '{}' are incompatible between these types.\n    Property 'y' is missing in type '{{ x: number; }}' but required in type '{{ y: number; }}'.", vec!["e"; 99].join("."));
-            if overload {
-                expected.push(format!("({line},{}): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    {}", argument + 2, message.replace('\n', "\n    ")));
-            } else {
-                expected.push(format!(
-                    "({line},{}): error TS2719: {message}",
-                    argument + 2
-                ));
-            }
-        }
+        // TypeScript 7.1.0-beta reports nothing for any of these calls.
+        let expected: Vec<String> = Vec::new();
         let host = host_with(&source);
         for pass in ["cold", "warm"] {
             for root in [STRICT_ROOT, LOOSE_ROOT] {
@@ -3383,6 +3378,11 @@ fn elaborated_and_overloaded_overflows_keep_call_and_argument_reports() {
                     "{pass} {root} {name}"
                 );
                 if overload {
+                    // The checker's overflowing argument holds and the first
+                    // candidate applies; this engine's relation still fails
+                    // past the depth (the known relation-depth deviation), so
+                    // the overloaded call is a typed gap, never a complete
+                    // answer and never a reported diagnostic.
                     super::signature_predicate_inference_tests::observe(
                         &host,
                         root,

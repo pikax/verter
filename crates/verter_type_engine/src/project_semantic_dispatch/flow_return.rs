@@ -11040,15 +11040,13 @@ pub(super) trait FlowDemandDriver {
         target: SemanticNodeId,
     ) -> Option<(String, String)>;
     /// The occurrences the checker reports for `source` failing `target`
-    /// at the authored expression `site` under `head`, elaborated;
-    /// `expression` is the whole operation expression's span.
+    /// at the authored expression `site` under `head`, elaborated.
     fn checker_relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         head: crate::semantic_query::CheckerDiagnostic,
         site: &verter_type_expr::IndexedReportSite,
-        expression: Option<(u32, u32)>,
     ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>>;
     fn resolve_closed_signature_utility(
         &self,
@@ -11783,11 +11781,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         target: SemanticNodeId,
         head: crate::semantic_query::CheckerDiagnostic,
         site: &verter_type_expr::IndexedReportSite,
-        expression: Option<(u32, u32)>,
     ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
-        ProjectSemanticDispatch::checker_relation_failure(
-            self, source, target, head, site, expression,
-        )
+        ProjectSemanticDispatch::checker_relation_failure(self, source, target, head, site)
     }
     fn resolve_closed_signature_utility(
         &self,
@@ -12089,10 +12084,8 @@ impl<D: FlowDemandDriver> crate::semantic_query::CheckerDiagnosticPrinter
         target: SemanticNodeId,
         head: crate::semantic_query::CheckerDiagnostic,
         site: &verter_type_expr::IndexedReportSite,
-        expression: Option<(u32, u32)>,
     ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
-        self.0
-            .checker_relation_failure(source, target, head, site, expression)
+        self.0.checker_relation_failure(source, target, head, site)
     }
 }
 
@@ -12671,10 +12664,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         target: SemanticNodeId,
         head: crate::semantic_query::CheckerDiagnostic,
         site: &verter_type_expr::IndexedReportSite,
-        expression: Option<(u32, u32)>,
     ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
         self.driver
-            .checker_relation_failure(source, target, head, site, expression)
+            .checker_relation_failure(source, target, head, site)
     }
     fn resolve_closed_signature_utility(
         &self,

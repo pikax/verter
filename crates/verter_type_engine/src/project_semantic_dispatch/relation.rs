@@ -513,15 +513,20 @@ type MixedDischargeResult = Result<
     crate::semantic_query::ResolveCallFailure,
 >;
 
-/// The checker's relation recursion limit: `recursiveTypeRelatedTo` sets
-/// `overflow` and answers false when `sourceDepth === 100 || targetDepth
-/// === 100` — the 101st nested structured relation of one
-/// `checkTypeRelatedTo` call — and `checkTypeRelatedTo` then reports
-/// TS2321 ("Excessive stack depth comparing types"). Measured on
-/// TypeScript 7.0.2: `[D] extends [Box<…<number>>]` answers `1` over 99
-/// nested `Box` applications or `{ v: … }` literals and `2` with TS2321
-/// over 100 (the tuple wrapper is one more level). It also bounds this
-/// engine's native recursion: a chain never opens more relation frames.
+/// The checker's relation recursion limit: the 101st nested structured
+/// relation of one `checkTypeRelatedTo` call (the tuple wrapper of a
+/// `[S] extends [T]` probe is one level). It also bounds this engine's
+/// native recursion: a chain never opens more relation frames.
+///
+/// KNOWN DEVIATION (TypeScript 7.1.0-beta): past this depth the checker no
+/// longer fails the relation — it answers `Maybe`, which holds, reports
+/// nothing, and relates the rest of the relation as usual (`[{ v: … 1 … }]
+/// extends [{ v: … number … }] ? 1 : 2` is `1` over 100 nested literals).
+/// This engine still answers false and flags the chain
+/// ([`Self::overflow_relation_chain`]); only the diagnostic side follows the
+/// checker (it reports nothing). Adopting `Maybe` here needs the checker's
+/// maybe-key reuse within one root relation so union paths stay linear; it
+/// is tracked for the operator with the measured rows.
 pub(super) const CHECKER_RELATION_DEPTH_LIMIT: u16 = 100;
 
 /// The checker's `isDeeplyNestedType` depth: a type is deeply nested once
@@ -1743,7 +1748,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `any` source), and the pair is not a small union the checker relates
     /// without caching it — a union source of fewer than four members
     /// against a target that is no union, or a union target of fewer than
-    /// four against a simple source (`skipCaching`).
+    /// four against a simple source (`skipCaching`) — nor an object type
+    /// against a primitive, which `isRelatedTo` decides first.
     fn checker_recursion_entry(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
         if source == target || !self.relation_pair_is_structured(source, target) {
             return false;
@@ -1787,6 +1793,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         match (&*source_data, &*target_data) {
             (_, SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown))
             | (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => false,
+            // An object type against a primitive is decided by `isRelatedTo`
+            // itself, before `recursiveTypeRelatedTo`.
+            (source_data, target_data)
+                if super::call_resolve::is_object_type(source_data)
+                    && (simple(target_data)
+                        || matches!(target_data, SemanticNodeData::TemplateLiteral { .. }))
+                    && !matches!(
+                        target_data,
+                        SemanticNodeData::Primitive(PrimitiveKind::Never)
+                    ) =>
+            {
+                false
+            }
             (SemanticNodeData::Primitive(PrimitiveKind::Any), target)
                 if !matches!(target, SemanticNodeData::Primitive(PrimitiveKind::Never)) =>
             {

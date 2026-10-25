@@ -60,15 +60,14 @@ property, an array element, a tuple position, a parameter, a return, a predicate
 on it; so does an intersection target's pair, a union source's pair unless it has fewer than four
 constituents (`boolean` counting two) against a non-union target (`isRelatedTo`'s `skipCaching`), and the
 failing pair itself when it lacks properties or either side is structured or instantiable — never two
-primitives, nor an object type against a primitive. Past it the checker reports TS2321
-(`Excessive stack depth comparing types`, both types printed) in place of the relation's message,
-twice: at the call expression (`CheckerDiagnosticSite::expression_start`), where it compares the types
-while choosing the candidate with no error node of its own, then at the argument. An elaborated argument
-whose whole relation overflows keeps TS2321 at the call beside its
-elaborated parts. An overflowing part keeps TS2321 at that part. Under TS2769,
-candidate selection's TS2321 remains at the call and the argument's own failure
-appears in the last-overload chain. When the two printed operands of an elaborated
-assignment coincide, its head is TS2719, retaining the complete failure chain.
+primitives, nor an object type against a primitive (`isRelatedTo` decides that pair before
+`recursiveTypeRelatedTo`, and the relation engine's `checker_recursion_entry` agrees). Past it the
+checker does not relate the pair at all: it answers `Maybe`, which holds, and nothing is reported — not
+at the call, not at the argument, elaborated or under overloads — while the rest of the relation is
+related as usual (TypeScript 7.1.0-beta). This lane reports nothing there either; the relation
+engine itself still fails the pair past the depth (the known deviation documented on
+`CHECKER_RELATION_DEPTH_LIMIT`), so such a call is a typed gap rather than a complete answer. When the two printed operands
+of an elaborated assignment coincide, its head is TS2719, retaining the complete failure chain.
 
 Types print as the checker's `typeToString` prints them (`print_diagnostic_type`,
 `DisplayContext::for_checker`): the display walk keeps the node builder's running `approximateLength`
@@ -116,38 +115,18 @@ Computed property names use the same consumer preparation worklist: non-nominal
 literal base. Display reads these settled forms without dispatching queries;
 unique-symbol keys retain their nominal spelling and deterministic symbol count.
 
-A symbol-keyed property's abbreviation contribution is the UTF-8 byte length
-of its leaf symbol spelling plus five fixed bytes. Both unique-symbol keys and
-computed keys resolved to a nominal symbol use this rule; qualification remains
-in the visible `[namespace.symbol]` spelling. No allocation id, external checker
-session or query history contributes to the count. Printable symbol-keyed types
-always retain their diagnostic, including at abbreviation boundaries.
-
-### Deterministic symbol abbreviation (2026-10-22)
-
-**Context.** TypeScript 7.0.2 counts an internal symbol name containing a decimal,
-process-global symbol id. Checking an unrelated project can change the number of
-digits and therefore the abbreviation of the same type in the same diagnostic.
-`node scripts/checker-symbol-history.mjs` reproduces this with fresh and prewarmed
-native sessions and verifies unchanged codes, locations, order and unaffected
-messages under both nullability settings.
-
-**Intent contract.** The shared printer preserves deterministic full messages
-from provider-free inputs. Only abbreviation boundaries, omitted-member counts
-and consequent clipping may differ from the checker where its length accounting
-depends on symbol ids. Visible names and type spelling, member and diagnostic
-order, codes, authored locations, recovery and all unaffected text remain exact.
-The exception never permits withholding a printable diagnostic.
-
-**Changes and legacy deletions.** The stable leaf-spelling contribution above
-replaces the symbol-id digit bound and its ambiguous-abbreviation withholding
-state in `DisplayContext`. There is no alternate printer or checker-history input.
-
-**Verification.** `symbol_abbreviation_keeps_diagnostics_across_query_histories`
-checks full consumer messages and recovery cold/warm, with unrelated symbol work
-first and at two authored call sites. The existing residual-kind, wide-argument
-and deep-chain consumer controls retain exact-checker coverage. The native
-experiment is optional oracle evidence; the Rust regressions are provider-free.
+A symbol-keyed property's abbreviation contribution (its name and colon) is the UTF-8 byte
+length of its full dotted spelling, its leaf spelling again and twenty bytes: `[s0]` counts 24,
+`[ns.q0]` 27, `[deep.er.q0]` 32. Both unique-symbol keys and computed keys resolved to a nominal
+symbol use this rule; qualification remains in the visible `[namespace.symbol]` spelling. No
+allocation id, external checker session or query history contributes to the count, and none
+contributes to the checker's either: TypeScript 7.1.0-beta abbreviates a symbol-keyed type the same
+with and without unrelated symbol work first (`node scripts/checker-symbol-history.mjs` proves it
+with fresh and prewarmed native sessions under both nullability settings), so the print is the
+checker's exactly. Printable symbol-keyed types always retain their diagnostic, including at
+abbreviation boundaries. `symbol_abbreviation_keeps_diagnostics_across_query_histories` checks full
+consumer messages and recovery cold/warm, with unrelated symbol work first and at two authored call
+sites.
 
 ### Unprintable carriers
 
@@ -193,7 +172,7 @@ boundaries, cold and warm, two call sites of one body),
 function-query, qualified-query, class-expression and predicate-method objects at their elision and
 clip, cold and warm),
 `deep_chains_report_until_the_checker_relation_stack_overflows` (the relation stack's boundary per
-leaf kind, TS2321 at the call and the argument past it),
+leaf kind, nothing reported past it), `elaborated_and_overloaded_overflows_report_nothing`,
 `call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability` (the explicit-overload
 recovery with a differing return), `a_diagnostic_the_route_cannot_place_is_not_reported`, the `checker_diagnostic::tests` recipe-binding
 units, `resolve_symbol_graph_reports_the_checkers_ts2456_at_the_alias_name`,

@@ -90,8 +90,8 @@ enum FailedStep {
 enum Explained {
     /// Its message chain is complete.
     Chain,
-    /// It needs a frame past the checker's relation stack, so the checker
-    /// reports TS2321 in place of its message.
+    /// It needs a frame past the checker's relation stack, where the
+    /// checker's comparison overflows and reports no failure at all.
     StackOverflow,
 }
 
@@ -99,7 +99,8 @@ enum Explained {
 enum RelationReport {
     /// The relation's message with its chain.
     Reported(CheckerDiagnosticOccurrence),
-    /// The relation overflows the checker's relation stack: TS2321.
+    /// The relation overflows the checker's relation stack: the checker
+    /// reports nothing for it.
     StackOverflow,
 }
 
@@ -119,25 +120,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// expression with the relation's message chain. `None` when the
     /// failure runs through a form or a step not modelled.
     ///
-    /// A relation that overflows the checker's relation stack is reported
-    /// as TS2321 naming the two types, twice: at the whole `expression`,
-    /// where the checker compares them while it chooses the candidate with
-    /// no error node of its own, then at the argument, in place of `head`.
+    /// A relation that overflows the checker's relation stack reports
+    /// nothing, at the call or at the argument, elaborated or not, under
+    /// overloads or not (TypeScript 7.1.0-beta: the overflowing comparison
+    /// raises no error).
     pub(in crate::project_semantic_dispatch) fn checker_relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         head: CheckerDiagnostic,
         site: &IndexedReportSite,
-        expression: Option<(u32, u32)>,
     ) -> Option<Vec<CheckerDiagnosticOccurrence>> {
-        if let Some(mut elaborated) = self.elaborate_failure(site.form.as_ref(), source, target)? {
-            if self.relation_overflows(source, target) {
-                elaborated.insert(
-                    0,
-                    self.stack_overflow_occurrence(source, target, expression?, head.operation)?,
-                );
-            }
+        if self.relation_overflows(source, target) {
+            return Some(Vec::new());
+        }
+        if let Some(elaborated) = self.elaborate_failure(site.form.as_ref(), source, target)? {
             return Some(elaborated);
         }
         if let Some(IndexedElaborationForm::Object(properties)) = &site.form {
@@ -151,15 +148,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let reported = self.widened_fresh_literal(site.form.as_ref(), source);
         match self.relation_report(reported, target, (site.point, site.end), head)? {
             RelationReport::Reported(occurrence) => Some(vec![occurrence]),
-            RelationReport::StackOverflow => Some(vec![
-                self.stack_overflow_occurrence(source, target, expression?, head.operation)?,
-                self.stack_overflow_occurrence(
-                    source,
-                    target,
-                    (site.point, site.end),
-                    head.operation,
-                )?,
-            ]),
+            RelationReport::StackOverflow => Some(Vec::new()),
         }
     }
 
@@ -333,12 +322,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         {
             return Some(Some(elaborated));
         }
-        Some(Some(vec![self.report_relation_failure(
-            source_return,
-            target_return,
-            (returned.point, returned.end),
-            type_not_assignable(),
-        )?]))
+        Some(
+            self.report_relation_failure(
+                source_return,
+                target_return,
+                (returned.point, returned.end),
+                type_not_assignable(),
+            )?
+            .map(|occurrence| vec![occurrence]),
+        )
     }
 
     /// `elaborateObjectLiteral`: each authored property whose type fails
@@ -388,7 +380,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     continue;
                 }
             }
-            reported.push(self.report_relation_failure(
+            reported.extend(self.report_relation_failure(
                 source_type,
                 target_type,
                 (property.point, property.end),
@@ -442,7 +434,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 reported.extend(elaborated);
                 continue;
             }
-            reported.push(self.report_relation_failure(
+            reported.extend(self.report_relation_failure(
                 source_type,
                 target_type,
                 (element.point, element.end),
@@ -528,50 +520,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// `checkTypeRelatedTo` reporting an elaborated part at `span`, as
-    /// [`Self::relation_report`] does. A part whose relation overflows the
-    /// stack reports TS2321 at that part.
+    /// [`Self::relation_report`] does: `Some(None)` for a part whose
+    /// relation overflows the stack, which the checker does not report.
     fn report_relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         span: (u32, u32),
         head: CheckerDiagnostic,
-    ) -> Option<CheckerDiagnosticOccurrence> {
+    ) -> Option<Option<CheckerDiagnosticOccurrence>> {
         match self.relation_report(source, target, span, head)? {
-            RelationReport::Reported(occurrence) => Some(occurrence),
-            RelationReport::StackOverflow => {
-                self.stack_overflow_occurrence(source, target, span, head.operation)
-            }
+            RelationReport::Reported(occurrence) => Some(Some(occurrence)),
+            RelationReport::StackOverflow => Some(None),
         }
-    }
-
-    fn stack_overflow_occurrence(
-        &self,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
-        span: (u32, u32),
-        operation: CheckerDiagnosticOperation,
-    ) -> Option<CheckerDiagnosticOccurrence> {
-        Some(CheckerDiagnosticOccurrence::new(
-            span.0,
-            span.1,
-            CheckerDiagnostic {
-                code: CheckerDiagnosticCode::ExcessiveStackDepth,
-                operation,
-            },
-            Box::new([
-                self.print_diagnostic_type(source)?.into_boxed_str(),
-                self.print_diagnostic_type(target)?.into_boxed_str(),
-            ]),
-            Box::new([]),
-        ))
     }
 
     /// `checkTypeRelatedTo` reporting at `span`: `head` naming the two
     /// types with the failure's message chain below it — or, where the
     /// pair itself lacks properties its target requires, that message in
-    /// its place — or the relation's stack overflow, which the checker
-    /// reports as TS2321 in place of either.
+    /// its place — or the relation's stack overflow, which the checker does
+    /// not report.
     fn relation_report(
         &self,
         source: SemanticNodeId,
@@ -680,8 +648,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// predicate — holds that pair open on it, and so does a union or
     /// intersection pair the checker relates on it and the failing pair
     /// itself when either side is structured. A failure explained past it
-    /// is one the checker reports as TS2321 instead:
-    /// [`Explained::StackOverflow`], its chain lines meaningless.
+    /// is one the checker does not report: [`Explained::StackOverflow`], its
+    /// chain lines meaningless.
     fn explain_failure(
         &self,
         source: SemanticNodeId,
@@ -691,8 +659,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         chain: &mut Vec<CheckerDiagnosticChainLine>,
         stack: u32,
     ) -> Option<Explained> {
-        // A frame the relation stack has no room for: the checker reports
-        // TS2321 for the whole relation in place of its message.
+        // A frame the relation stack has no room for: the checker's
+        // comparison overflows and reports nothing for the whole relation.
         macro_rules! frame {
             ($stack:expr) => {
                 match $stack {
@@ -736,7 +704,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let inner = stack.checked_sub(1);
         match step {
             // The failing pair itself is related on the stack when it is
-            // structured: past the stack the checker reports TS2321 instead.
+            // structured: past the stack the checker reports nothing.
             FailedStep::Leaf { holds_frame } => {
                 if stack > 0 || holds_frame == Some(false) {
                     Some(Explained::Chain)
@@ -1366,7 +1334,7 @@ fn occurrence(
 /// literal type.
 /// Whether the checker types `data` as an object type (`TypeFlags.Object`):
 /// not a union, an intersection or an instantiable type.
-fn is_object_type(data: &SemanticNodeData) -> bool {
+pub(in crate::project_semantic_dispatch) fn is_object_type(data: &SemanticNodeData) -> bool {
     matches!(
         data,
         SemanticNodeData::Object(_)

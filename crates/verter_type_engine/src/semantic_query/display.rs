@@ -491,12 +491,13 @@ impl DisplayContext {
         length.truncating
     }
 
-    /// Symbol-keyed properties count the stable leaf spelling plus five
-    /// fixed bytes. The native checker's decimal symbol id depends on
-    /// process history; it cannot control provider-free abbreviation or
-    /// suppress an otherwise printable diagnostic.
-    fn symbol_property_length(&mut self, name: &str) {
-        self.add_length(name.len() + 5);
+    /// A symbol-keyed property's name and colon count its full dotted
+    /// spelling, its leaf again and twenty bytes. Measured on TypeScript
+    /// 7.1.0-beta, which counts it deterministically (independent of the
+    /// checker's process history): `[s0]` 24, `[longname0]` 38, `[ns.q0]`
+    /// 27 and `[deep.er.q0]` 32 bytes, against `k0:`'s 3.
+    fn symbol_property_length(&mut self, spelling: &str, leaf: &str) {
+        self.add_length(spelling.len() + leaf.len() + 20);
     }
 
     /// Record `printed`, the text of a node whose node-builder count is not
@@ -1534,6 +1535,12 @@ fn render_object_surface(
         visited.add_length(2);
         return "{}".to_string();
     }
+    // An object type begun past the truncation length elides before it would
+    // print as its sole signature's function type (TypeScript 7.1.0-beta).
+    if visited.check_truncation() {
+        visited.add_length(3);
+        return "...".to_string();
+    }
     if checker {
         if let Some((signature, prefix)) = sole_signature(store, surface) {
             return format!(
@@ -1541,10 +1548,6 @@ fn render_object_surface(
                 display_type_node(store, signature, needs, depth, visited).0
             );
         }
-    }
-    if visited.check_truncation() {
-        visited.add_length(3);
-        return "...".to_string();
     }
     let mut signatures: Vec<String> = Vec::new();
     for sig in surface.call_signatures.iter() {
@@ -1612,12 +1615,12 @@ fn render_object_surface(
                         .member_path
                         .last()
                         .map_or(identity.symbol.as_ref(), |name| name.as_str());
-                    visited.symbol_property_length(leaf);
                     let mut name = identity.symbol.to_string();
                     for segment in identity.member_path.iter() {
                         name.push('.');
                         name.push_str(segment);
                     }
+                    visited.symbol_property_length(&name, leaf);
                     format!("[{name}]")
                 } else {
                     format!("[unique symbol {}]", identity.symbol)
@@ -1659,14 +1662,15 @@ fn render_object_surface(
                     }
                     Some(data @ SemanticNodeData::TypeOfNominal(_)) if checker => {
                         let (root, path) = data.typeof_head().expect("nominal query head");
-                        visited.symbol_property_length(
-                            path.last().map_or(root.name.as_ref(), |name| name.as_ref()),
-                        );
                         let mut name = root.name.to_string();
                         for segment in path.iter() {
                             name.push('.');
                             name.push_str(segment);
                         }
+                        visited.symbol_property_length(
+                            &name,
+                            path.last().map_or(root.name.as_ref(), |name| name.as_ref()),
+                        );
                         format!("[{name}]")
                     }
                     _ => {
