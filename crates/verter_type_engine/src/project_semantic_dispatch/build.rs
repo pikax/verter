@@ -9977,6 +9977,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// under the same edit clocks answers again by replaying what serving it
     /// read — its facts, refusal and self-roots reach the enclosing build
     /// exactly as serving it again would deliver them.
+    /// Inspect a transaction serve in a fresh consuming frame and fact tracer.
+    /// The returned flag confirms that the production read reused its table.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn indexed_serve_probe_for_tests(
+        &self,
+        canonical: &str,
+    ) -> (
+        bool,
+        Arc<verter_session_query::inputs::indexed::IndexedInputRecord>,
+        super::dispatch_txn::FlowMemberReuse,
+    ) {
+        let reused = self
+            .dispatch_txn
+            .borrow()
+            .indexed_serves
+            .get(canonical, self.workspace_edit())
+            .is_some();
+        let _consumer = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let basis = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
+        let ((record, replay), _) =
+            crate::fact_signature_helpers::install_fact_tracer(&basis, || {
+                self.record_transaction_read(
+                    || self.transaction_indexed_record(canonical),
+                    Option::is_some,
+                )
+            });
+        let (_, replay) = replay.expect("a complete indexed serve is request reusable");
+        (reused, record.expect("indexed input exists"), replay)
+    }
+
     pub(super) fn transaction_indexed_record(
         &self,
         canonical: &str,

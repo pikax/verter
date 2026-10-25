@@ -67,6 +67,7 @@ pub mod graph_fixture;
 mod graph_in;
 pub use graph_in::GraphIn;
 mod hash_cons_memos;
+pub(crate) use hash_cons_memos::CompletedDeferredEvaluation;
 pub mod inflight;
 #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
 pub use inflight::{FlightRendezvous, FlightRendezvousMiss, FlightRendezvousObservation};

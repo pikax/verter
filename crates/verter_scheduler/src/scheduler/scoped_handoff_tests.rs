@@ -1,4 +1,5 @@
 use super::*;
+use crate::dag::ResourceClass;
 use crate::source_loader::MemorySourceLoader;
 use std::sync::atomic::AtomicUsize;
 use std::task::{Poll, Wake, Waker};
@@ -640,4 +641,196 @@ fn scoped_task_waits_release_on_follower_drop_cancellation_reset_and_producer_fa
             ));
         }
     }
+}
+
+#[test]
+fn settling_a_scoped_producer_notifies_capacity_blocked_dispatch() {
+    use crate::caller_kind::CallerKind;
+    for terminal in ["success", "cancel", "drop"] {
+        let scheduler = Scheduler::test_new_sync(
+            SchedulerConfig {
+                cpu_threads: 1,
+                dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
+                ..SchedulerConfig::default()
+            },
+            Arc::new(MemorySourceLoader::new()),
+        );
+        let mut first = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+        assert!(first.poll(Waker::noop()).is_pending());
+        scheduler.pump_ready(PumpReason::DriverLoop, CallerKind::Driver);
+        let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = first.poll(Waker::noop())
+        else {
+            panic!("first flight dispatches");
+        };
+        let mut second_request = request();
+        second_request.key_hash = [0xB6; 16];
+        let mut second = scheduler
+            .begin_scoped_cache_node::<u64>(second_request)
+            .unwrap();
+        assert!(second.poll(Waker::noop()).is_pending());
+        scheduler.pump_ready(PumpReason::DriverLoop, CallerKind::Driver);
+        assert!(!scheduler
+            .pump_ready(PumpReason::DriverLoop, CallerKind::Driver)
+            .made_progress());
+        assert!(
+            scheduler.inbox.receiver.is_empty(),
+            "driver exhausted available work"
+        );
+        assert!(second.poll(Waker::noop()).is_pending());
+        match terminal {
+            "success" => producer.run(|_| 41),
+            "cancel" => {
+                drop(first);
+                drop(producer);
+            }
+            "drop" => drop(producer),
+            _ => unreachable!(),
+        }
+        assert_eq!(scheduler.dag.lock().in_flight_cpu_permits(), 0);
+        assert!(
+            matches!(scheduler.inbox.receiver.try_recv(), Ok(Submission::Wake)),
+            "{terminal}: released capacity must explicitly notify the idle driver"
+        );
+        scheduler.pump_ready(PumpReason::DriverWake, CallerKind::Driver);
+        let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = second.poll(Waker::noop())
+        else {
+            panic!("{terminal}: notified driver dispatches the queued flight");
+        };
+        producer.run(|_| 42);
+        assert!(
+            matches!(second.poll(Waker::noop()), Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 42)
+        );
+    }
+}
+
+#[test]
+fn a_pending_scoped_dependency_borrows_its_active_workers_capacity() {
+    let scheduler = Scheduler::test_new_sync(
+        SchedulerConfig {
+            cpu_threads: 1,
+            dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
+            ..SchedulerConfig::default()
+        },
+        Arc::new(MemorySourceLoader::new()),
+    );
+    let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
+    assert!(root.poll(Waker::noop()).is_pending());
+    scheduler.pump_ready(PumpReason::DriverLoop, caller_kind::CallerKind::Driver);
+    let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
+        panic!("outer flight dispatches");
+    };
+    producer.run(|_| {
+        let _worker = caller_kind::CallerKindGuard::install(caller_kind::CallerKind::CpuWorker);
+        let mut nested = request();
+        nested.key_hash = [0xB6; 16];
+        let mut child = scheduler.begin_scoped_cache_node::<u64>(nested).unwrap();
+        assert!(child.poll(Waker::noop()).is_pending());
+        scheduler.dispatch_for_pending_dependency();
+        let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = child.poll(Waker::noop())
+        else {
+            panic!("a saturated worker must loan capacity using its active path");
+        };
+        assert_eq!(scheduler.dag.lock().in_flight_cpu_permits(), 2);
+        producer.run(|_| 42);
+        let Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) = child.poll(Waker::noop()) else {
+            panic!("nested producer completes");
+        };
+        *value
+    });
+    assert!(
+        matches!(root.poll(Waker::noop()), Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 42)
+    );
+    assert_eq!(scheduler.dag.lock().in_flight_cpu_permits(), 0);
+}
+
+#[test]
+fn final_capacity_release_wakes_progress_subscribers_after_lifecycle_unlock() {
+    struct Probe {
+        scheduler: std::sync::Weak<Scheduler>,
+        calls: AtomicUsize,
+        locked: AtomicBool,
+    }
+    impl Wake for Probe {
+        fn wake(self: Arc<Self>) {
+            let scheduler = self.scheduler.upgrade().unwrap();
+            if scheduler.dag.try_lock().is_none()
+                || scheduler.scoped_cache_gate.try_lock().is_none()
+            {
+                self.locked.store(true, Ordering::SeqCst);
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let scheduler = scheduler();
+    let probe = Arc::new(Probe {
+        scheduler: Arc::downgrade(&scheduler),
+        calls: AtomicUsize::new(0),
+        locked: AtomicBool::new(false),
+    });
+    let waker = Waker::from(Arc::clone(&probe));
+    let mut dropped = scheduler.subscribe_progress();
+    let mut live = scheduler.subscribe_progress();
+    dropped.register(&waker);
+    live.register(&waker);
+    drop(dropped);
+    let reservation = Arc::new(
+        scheduler
+            .dag
+            .lock()
+            .try_reserve_for_class(ResourceClass::Cpu)
+            .unwrap(),
+    );
+    let final_share = Arc::clone(&reservation);
+    drop(reservation);
+    assert_eq!(
+        probe.calls.load(Ordering::SeqCst),
+        0,
+        "a shared permit remains held"
+    );
+    {
+        let _wakes = scheduler.dag.defer_wakes();
+        let _gate = scheduler.scoped_cache_gate.lock();
+        let _dag = scheduler.dag.lock();
+        drop(final_share);
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            0,
+            "publication cannot run a callback under lifecycle holds"
+        );
+    }
+    assert_eq!(
+        probe.calls.load(Ordering::SeqCst),
+        1,
+        "only the surviving subscriber wakes"
+    );
+    assert!(
+        !probe.locked.load(Ordering::SeqCst),
+        "wake is reentrant after unlock"
+    );
+    assert!(matches!(
+        scheduler.inbox.receiver.try_recv(),
+        Ok(Submission::Wake)
+    ));
+    assert_eq!(scheduler.dag.lock().in_flight_cpu_permits(), 0);
+
+    // Reset invalidates an old reservation's release; it must neither debit
+    // a new admission nor advertise newly available capacity.
+    let old = scheduler
+        .dag
+        .lock()
+        .try_reserve_for_class(ResourceClass::Cpu)
+        .unwrap();
+    scheduler.reset();
+    scheduler.drain_inbox();
+    live.register(&waker);
+    let current = scheduler
+        .dag
+        .lock()
+        .try_reserve_for_class(ResourceClass::Cpu)
+        .unwrap();
+    drop(old);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(scheduler.dag.lock().in_flight_cpu_permits(), 1);
+    drop(current);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
 }

@@ -84,6 +84,7 @@ mod lifecycle;
 mod scoped_handoff;
 mod submission;
 
+pub use dag_lock::SchedulerProgressSubscription;
 pub use scoped_handoff::{ScopedCacheNodeHandoff, ScopedCacheNodeProducer, ScopedCacheNodeStep};
 use submission::PendingSubmission;
 pub use submission::SchedulerSubmission;
@@ -621,18 +622,21 @@ impl Scheduler {
         io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
         task_registry: TaskRegistry,
     ) -> Arc<Self> {
+        let inbox = SubmissionInbox::new();
+        let dag = new_dag_mutex(
+            SchedulerDag::with_budget(config.resolved_dag_budget()),
+            inbox.sender.clone(),
+        );
         let scheduler = Arc::new(Self {
             task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
-            dag: Arc::new(new_dag_mutex(SchedulerDag::with_budget(
-                config.resolved_dag_budget(),
-            ))),
+            dag,
             scoped_cache_flights: DashMap::new(),
             scoped_cache_gate: Mutex::new(()),
             next_scoped_owner_id: AtomicU64::new(1),
-            inbox: SubmissionInbox::new(),
+            inbox,
             overlay: Arc::new(OverlayMap::new()),
             source_loader,
             executor,
@@ -733,18 +737,21 @@ impl Scheduler {
         #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
         task_registry: TaskRegistry,
     ) -> Arc<Self> {
+        let inbox = SubmissionInbox::new();
+        let dag = new_dag_mutex(
+            SchedulerDag::with_budget(config.resolved_dag_budget()),
+            inbox.sender.clone(),
+        );
         Arc::new(Self {
             task_registry,
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
-            dag: Arc::new(new_dag_mutex(SchedulerDag::with_budget(
-                config.resolved_dag_budget(),
-            ))),
+            dag,
             scoped_cache_flights: DashMap::new(),
             scoped_cache_gate: Mutex::new(()),
             next_scoped_owner_id: AtomicU64::new(1),
-            inbox: SubmissionInbox::new(),
+            inbox,
             overlay: Arc::new(OverlayMap::new()),
             source_loader,
             executor,
@@ -877,11 +884,13 @@ impl Scheduler {
     {
         let mut handoff = self.begin_scoped_cache_node(request)?;
         let mut build = Some(build);
+        let mut progress = self.subscribe_progress();
         verter_execution::blocking::block_on(
             verter_execution::blocking::WaitFamily::ScopedCacheNode,
             None,
             |waker| {
                 loop {
+                    progress.register(waker);
                     match handoff.poll(waker) {
                         std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) => {
                             return std::task::Poll::Ready(Ok(value));
@@ -916,15 +925,26 @@ impl Scheduler {
         producer();
     }
 
+    /// Subscribe a cooperative driver to capacity transitions. Register
+    /// before polling a dependency or rechecking dispatch readiness.
+    pub fn subscribe_progress(&self) -> SchedulerProgressSubscription {
+        SchedulerProgressSubscription::new(Arc::clone(&self.dag))
+    }
+
     /// Advance this scheduler's dispatch once on behalf of a synchronous
     /// driver whose computation waits on a dependency it admitted: dispatch
     /// ready stages this caller may run (natively) or drive one stage
     /// (wasm32). Answers whether anything progressed; when nothing did, the
-    /// dependency's own settlement wakes the computation.
+    /// dependency's own settlement or a registered progress subscription
+    /// wakes the computation.
     pub fn dispatch_for_pending_dependency(self: &Arc<Self>) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         let progress = self
-            .pump_ready(PumpReason::WaitOrDrive, caller_kind::CallerKind::current())
+            .pump_ready_with_path(
+                PumpReason::WaitOrDrive,
+                caller_kind::CallerKind::current(),
+                &caller_kind::snapshot_active_path(),
+            )
             .made_progress();
         #[cfg(target_arch = "wasm32")]
         let progress = self.drive_one();
@@ -2293,8 +2313,9 @@ impl Scheduler {
     pub fn drive_one(&self) -> bool {
         self.drain_inbox();
         let job = {
+            let active_path = caller_kind::snapshot_active_path();
             let mut dag = self.dag.lock();
-            dag.next_ready()
+            dag.next_ready_for_pump(caller_kind::CallerKind::Inline, &active_path)
         };
         if let Some(job) = job {
             self.execute_stage_inline(job);

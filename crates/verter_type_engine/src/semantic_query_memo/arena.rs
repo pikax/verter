@@ -1991,12 +1991,21 @@ impl NodeArenaCore {
         &self,
         ids: &[SemanticNodeId],
     ) -> Result<(), crate::semantic_query::QueryError> {
+        self.retain_validated(ids, ids)
+    }
+
+    /// Validate both reused and newly acquired operands under the same arena
+    /// hold, before changing any ownership count.
+    pub(super) fn retain_validated(
+        &self,
+        validate: &[SemanticNodeId],
+        retain: &[SemanticNodeId],
+    ) -> Result<(), crate::semantic_query::QueryError> {
         let mut inner = self.inner.write();
-        // Index loops: every rooted delivery retains here, and a debug
-        // build runs them without an iterator call per id.
+        // Validation finishes before any ownership count changes.
         let mut index = 0;
-        while index < ids.len() {
-            match inner.slot(ids[index]) {
+        while index < validate.len() {
+            match inner.slot(validate[index]) {
                 Slot::Live(..) => {}
                 Slot::Released => {
                     return Err(crate::semantic_query::QueryError::StaleSemanticOperand)
@@ -2008,8 +2017,8 @@ impl NodeArenaCore {
             index += 1;
         }
         let mut index = 0;
-        while index < ids.len() {
-            let id = ids[index];
+        while index < retain.len() {
+            let id = retain[index];
             match inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) {
                 Some(chunk) => chunk.owners[(id.0 & CHUNK_MASK) as usize] += 1,
                 None => unreachable!("a live slot's chunk is held"),

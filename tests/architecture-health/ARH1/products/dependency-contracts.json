@@ -570,6 +570,7 @@
           "execute_scoped_cache_node",
           "begin_scoped_cache_node",
           "run_transferred_producer",
+          "subscribe_progress",
           "dispatch_for_pending_dependency",
           "submit_request",
           "begin_submit_request",
