@@ -1615,9 +1615,7 @@ async fn demanded_scan_retry_publication_still_pings_the_editor_owned_client() {
     // publication itself.
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
-            if carrier_manifest_strict(&workspace_root)
-                .is_some_and(|manifest| manifest.projects.contains_key(&tsconfig))
-            {
+            if carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig) {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1654,6 +1652,1114 @@ async fn demanded_scan_retry_publication_still_pings_the_editor_owned_client() {
     })
     .await
     .expect("the recovered publication must ping the subscribed client");
+}
+
+/// The retry ordering above repairs the store BEFORE the scan settles, so the
+/// settle task's own refresh decision still covers the recovered publication.
+/// This companion pins the ordering that one misses: the publication stays
+/// failed THROUGH settlement — the settle task compares its unchanged counter
+/// once and exits without pinging — and only a later detached successor pass
+/// (the bounded redrive chain `background_drain` armed on the failed drain)
+/// finds the repaired store and publishes durably. Nothing else observes that
+/// increment once the completion gate has closed: the drain pass only notes
+/// pending-sync progress, so without a store-fill announcement tail parked on
+/// that signal the subscribed editor keeps its empty project view forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovered_successor_publication_pings_the_editor_owned_client_after_settlement() {
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        _temp.path().join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let app_canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": { "subscriptions": { "carrierStoreChanged": true } },
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    // Sabotage the durable store exactly as the retry test above: a FILE where
+    // the store directory would be created, so every publication attempt fails
+    // cleanly until the file is removed.
+    let store_dir = crate::external_ts::carrier_store_dir_for(
+        crate::external_ts::default_carrier_store_host_version(),
+        &workspace_root,
+    );
+    std::fs::create_dir_all(store_dir.parent().expect("the store's parent dir")).unwrap();
+    std::fs::write(&store_dir, b"not a directory").unwrap();
+
+    server
+        .spawn_background_init(None, "editor-owned post-settlement recovery test")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/ready")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the server announces readiness");
+
+    // Demand the inventory scan: the direct publication fails against the
+    // sabotaged store and the carrier is requeued.
+    let pending = tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803);
+    let overview = server
+        .get_project_overview(serde_json::Value::Null)
+        .await
+        .expect_err("the overview is pending while the demanded scan runs");
+    assert_eq!(overview.code, pending);
+
+    // Park one drain pass with the failed carrier queued, then release it
+    // WITHOUT repairing: the pass fails again, the settle task lowers the
+    // scan flag, compares its unchanged publication counter once and exits
+    // without pinging, and the bounded successor chain stays armed on the
+    // still-queued carrier.
+    let drain_arrived = Arc::new(tokio::sync::Notify::new());
+    let drain_release = Arc::new(tokio::sync::Notify::new());
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            *server.documents.snapshot_drain_pause.lock() =
+                Some((Arc::clone(&drain_arrived), Arc::clone(&drain_release)));
+            drain_arrived.notified().await;
+            if server
+                .pending_snapshot_provider_sync
+                .contains(&app_canonical_id)
+            {
+                return;
+            }
+            drain_release.notify_one();
+        }
+    })
+    .await
+    .expect("the failed first publication must requeue the carrier into a parked drain");
+    drain_release.notify_one();
+
+    // The scan flag going false means the settle task has passed its flag
+    // lower; its counter compare is the next synchronous statement, while the
+    // successor chain's first pass is one backoff delay (>=500ms) away — so
+    // repairing from here on is strictly after the compare window closed and
+    // strictly before any successor can publish.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if !server.sync_coordinator.workspace_scan_in_progress()
+                && server
+                    .pending_snapshot_provider_sync
+                    .contains(&app_canonical_id)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the scan must settle with the carrier still queued for its successor");
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/carrierStoreChanged"),
+        "settlement of a scan that published nothing must not ping the client"
+    );
+
+    // Repair the store and let the detached successor pass publish durably.
+    std::fs::remove_file(&store_dir).unwrap();
+    std::fs::create_dir_all(&store_dir).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the successor publication must fill the durable store");
+    let manifest = carrier_manifest_strict(&workspace_root).unwrap();
+    assert!(
+        manifest
+            .projects
+            .get(&tsconfig)
+            .expect("the configured project owns the carrier")
+            .ready_files
+            .keys()
+            .any(|provider| provider.ends_with(".vue.tsx")),
+        "the store must advertise the App.vue IDE companion for the editor plugin"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/carrierStoreChanged")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("a publication recovered after settlement must ping the subscribed client");
+}
+
+/// The variant above only exercises recovery AFTER the completion gate
+/// closed: its session never had a queued carrier while the gate was open,
+/// so the announcement tail started from an already-final baseline. This
+/// companion pins the ordering that one misses: the client negotiates the
+/// `carrierStoreFill` demand itself (the init's arming gate starts the
+/// scan), the sabotaged store keeps the carrier queued THROUGH the
+/// post-init drain — the completion gate parks still open, level 2
+/// suppressed — and only a detached successor pass, running while that
+/// gate is parked, finds the repaired store and publishes durably. A tail
+/// that captures its publication baseline only when the gate closes
+/// absorbs that increment and the subscribed editor keeps its empty store
+/// view forever: the scan settle compared its window once, the drain pass
+/// only notes pending-sync progress, and nothing else observes the fill.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovered_publication_while_the_completion_gate_is_open_pings_the_store_fill_client() {
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        _temp.path().join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let app_canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "subscriptions": { "carrierStoreChanged": true, "carrierStoreFill": true }
+                },
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    // Sabotage the durable store before the init runs: the negotiated
+    // store-fill demand arms the scan, every publication attempt fails
+    // cleanly, and the carrier stays queued until the file is removed.
+    let store_dir = crate::external_ts::carrier_store_dir_for(
+        crate::external_ts::default_carrier_store_host_version(),
+        &workspace_root,
+    );
+    std::fs::create_dir_all(store_dir.parent().expect("the store's parent dir")).unwrap();
+    std::fs::write(&store_dir, b"not a directory").unwrap();
+
+    server
+        .spawn_background_init(None, "store-fill recovery through the open gate test")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/ready")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the server announces readiness");
+
+    // The scan settles having published nothing: the flag goes false with
+    // the carrier still queued, so the post-init drain fails too and the
+    // completion gate parks open — level 2 stays suppressed while any
+    // provider work remains pending.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if !server.sync_coordinator.workspace_scan_in_progress()
+                && server
+                    .pending_snapshot_provider_sync
+                    .contains(&app_canonical_id)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the demanded scan must settle with the carrier still queued");
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/typeProviderSyncComplete"),
+        "the queued carrier must hold the completion gate open (no level 2 yet)"
+    );
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/carrierStoreChanged"),
+        "a scan that published nothing must not ping the client"
+    );
+
+    // Repair the store and let the detached successor pass publish durably
+    // while the completion gate is still parked.
+    std::fs::remove_file(&store_dir).unwrap();
+    std::fs::create_dir_all(&store_dir).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the successor publication must fill the durable store");
+
+    // The queue empties, so the gate closes and level 2 is announced...
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/typeProviderSyncComplete")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the recovered publication must let the completion gate close");
+    // ...and the publication that landed BEFORE the gate closed is exactly
+    // what the announcement tail's pre-gate baseline exists to catch.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/carrierStoreChanged")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("a publication recovered while the gate was open must ping the client");
+}
+
+/// The variant above parks the recovery inside the completion gate's OPEN
+/// window: its publication lands while `finish_post_scan` is parked, so a
+/// baseline taken just before the gate waits still catches it. This companion
+/// pins the ordering that one misses: the store is repaired while the
+/// POST-INIT drain itself is parked, so the publication commits inside that
+/// drain — before the gate's first queue check. The drain path publishes
+/// durably without its own `carrierStoreChanged`, the scan-settle task's
+/// compare closed when the scan flag went false, and the completion gate
+/// then finds an empty queue and closes without ever parking: only a baseline
+/// captured BEFORE the drain runs still sees the increment, and without it
+/// the recovered fill is absorbed into the tail's starting count and the
+/// subscribed editor keeps its empty store view forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovered_publication_during_the_post_init_drain_pings_the_store_fill_client() {
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        _temp.path().join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let app_canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "subscriptions": { "carrierStoreChanged": true, "carrierStoreFill": true }
+                },
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    // Sabotage the durable store before the init runs: the negotiated
+    // store-fill demand arms the scan, every publication attempt fails
+    // cleanly, and the carrier stays queued until the file is removed.
+    let store_dir = crate::external_ts::carrier_store_dir_for(
+        crate::external_ts::default_carrier_store_host_version(),
+        &workspace_root,
+    );
+    std::fs::create_dir_all(store_dir.parent().expect("the store's parent dir")).unwrap();
+    std::fs::write(&store_dir, b"not a directory").unwrap();
+
+    server
+        .spawn_background_init(None, "store-fill recovery inside the post-init drain test")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/ready")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the server announces readiness");
+
+    // Park drain passes one at a time — releasing each pass only AFTER the
+    // next hook is armed, so no pass can slip through unparked — until the
+    // parked one is POST-settle. While the scan flag is still up, a parked
+    // pass belongs to the scan's own settle drain (or a pre-settle
+    // successor); repairing there would let the settle task's own compare
+    // announce the fill, which is not this test's path. The first post-settle
+    // pass is the post-init drain: the completion waiter arms it the instant
+    // `workspace_scan_settled` fires, a full backoff delay ahead of any
+    // successor pass.
+    let release = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut parked_release: Option<Arc<tokio::sync::Notify>> = None;
+        loop {
+            let arrived = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            *server.documents.snapshot_drain_pause.lock() =
+                Some((Arc::clone(&arrived), Arc::clone(&release)));
+            if let Some(previous) = parked_release.take() {
+                previous.notify_one();
+            }
+            arrived.notified().await;
+            if !server.sync_coordinator.workspace_scan_in_progress()
+                && server
+                    .pending_snapshot_provider_sync
+                    .contains(&app_canonical_id)
+            {
+                return release;
+            }
+            parked_release = Some(release);
+        }
+    })
+    .await
+    .expect("the post-init drain must park with the failed carrier still queued");
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/typeProviderSyncComplete"),
+        "the parked post-init drain must hold the completion gate open (no level 2 yet)"
+    );
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/carrierStoreChanged"),
+        "nothing may ping the client before the store actually fills"
+    );
+
+    // Repair the store WHILE the post-init drain is parked, then release it:
+    // the drain finds the repaired store and publishes durably — an increment
+    // no other observer announces — and empties the queue, so the completion
+    // gate closes without ever parking.
+    std::fs::remove_file(&store_dir).unwrap();
+    std::fs::create_dir_all(&store_dir).unwrap();
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if carrier_manifest_strict(&workspace_root).is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the parked post-init drain must fill the durable store once repaired");
+
+    // The queue emptied, so the gate closes and level 2 is announced...
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/typeProviderSyncComplete")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the recovered publication must let the completion gate close");
+    // ...and the publication that landed INSIDE the post-init drain — before
+    // the gate's first queue check — is exactly what the tail's pre-drain
+    // baseline exists to catch.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/carrierStoreChanged")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("a publication recovered inside the post-init drain must ping the client");
+}
+
+/// The variants above recover into a gate that eventually CLOSES: every queued
+/// carrier settles, so level 2 is announced and the announcement tail starts.
+/// This companion pins the ordering that one misses: a SECOND, unrelated
+/// carrier stays pending through the recovery — here an open document whose
+/// delivery lane a concurrent interactive repair holds, so every drain pass
+/// yields it back to the queue — while the post-init drain publishes the
+/// FIRST carrier's durable fill into the repaired store. The publication
+/// increments the coordinator's counter and notes pending-sync progress, but
+/// `complete_post_scan` stays false while ANY carrier remains queued, so the
+/// completion gate parks open (level 2 suppressed, indefinitely if the busy
+/// carrier outlasts the retry budget). A tail gated on the gate's verdict
+/// would never observe the recovered fill; the tail must run independently of
+/// it. The discriminating assertion is the store-change ping ARRIVING while
+/// level 2 is still suppressed and the unrelated carrier is still queued.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovered_publication_with_an_unrelated_carrier_still_pending_pings_the_store_fill_client()
+{
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        _temp.path().join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        _temp.path().join("src/Lib.vue"),
+        "<template><p>busy lane carrier</p></template>\n",
+    )
+    .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let app_canonical_id = format!("{workspace_root}/src/App.vue");
+    let lib_canonical_id = format!("{workspace_root}/src/Lib.vue");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "subscriptions": { "carrierStoreChanged": true, "carrierStoreFill": true }
+                }
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    // Sabotage the durable store before the init runs: the negotiated
+    // store-fill demand arms the scan, every publication attempt fails
+    // cleanly, and BOTH carriers stay queued until the file is removed.
+    let store_dir = crate::external_ts::carrier_store_dir_for(
+        crate::external_ts::default_carrier_store_host_version(),
+        &workspace_root,
+    );
+    std::fs::create_dir_all(store_dir.parent().expect("the store's parent dir")).unwrap();
+    std::fs::write(&store_dir, b"not a directory").unwrap();
+
+    server
+        .spawn_background_init(None, "store-fill recovery beside a busy carrier test")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/ready")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the server announces readiness");
+
+    // Park drain passes one at a time — releasing each pass only AFTER the
+    // next hook is armed, so no pass can slip through unparked — until the
+    // parked one is the POST-SETTLE post-init drain with the failed carrier
+    // still queued (the same protocol as the post-init-drain variant above).
+    let release = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut parked_release: Option<Arc<tokio::sync::Notify>> = None;
+        loop {
+            let arrived = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            *server.documents.snapshot_drain_pause.lock() =
+                Some((Arc::clone(&arrived), Arc::clone(&release)));
+            if let Some(previous) = parked_release.take() {
+                previous.notify_one();
+            }
+            arrived.notified().await;
+            if !server.sync_coordinator.workspace_scan_in_progress()
+                && server
+                    .pending_snapshot_provider_sync
+                    .contains(&app_canonical_id)
+            {
+                return release;
+            }
+            parked_release = Some(release);
+        }
+    })
+    .await
+    .expect("the post-init drain must park with both carriers still queued");
+    assert!(
+        server
+            .pending_snapshot_provider_sync
+            .contains(&lib_canonical_id),
+        "the second carrier must have been queued by the same demanded scan"
+    );
+
+    // The unrelated carrier's delivery lane is held for the rest of the test —
+    // the drain's documented busy-lane yield: an open document whose lane
+    // another transaction owns stays queued while the pass moves on.
+    let lib_uri = crate::uri::path_to_file_uri(&lib_canonical_id).expect("lib uri");
+    server.documents.did_open(&TextDocumentItem {
+        uri: lib_uri,
+        language_id: "vue".into(),
+        version: 1,
+        text: "<template><p>busy lane carrier</p></template>\n".into(),
+    });
+    let held_lane = match server.documents.try_delivery_lane(&lib_canonical_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the busy carrier's lane must be free to hold, got {other:?}"),
+    };
+
+    // Repair the store, then release the parked post-init drain: it publishes
+    // the App carrier durably (its lane is free) while the Lib carrier yields
+    // busy and stays queued — so the completion gate parks open.
+    std::fs::remove_file(&store_dir).unwrap();
+    std::fs::create_dir_all(&store_dir).unwrap();
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let Some(manifest) = carrier_manifest_strict(&workspace_root) else {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            };
+            if manifest.projects.get(&tsconfig).is_some_and(|project| {
+                project
+                    .ready_files
+                    .keys()
+                    .any(|provider| provider.ends_with("App.vue.tsx"))
+            }) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the released post-init drain must publish the App carrier");
+    assert!(
+        server
+            .pending_snapshot_provider_sync
+            .contains(&lib_canonical_id),
+        "the busy-lane carrier must still be queued after the recovered publication"
+    );
+
+    // The discriminating assertion: the recovered fill's ping ARRIVES although
+    // the completion gate never closed — level 2 stays suppressed while the
+    // unrelated carrier remains queued.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/carrierStoreChanged")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("a publication recovered beside a still-pending carrier must ping the client");
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/typeProviderSyncComplete"),
+        "the busy-lane carrier must still hold the completion gate open (no level 2)"
+    );
+    drop(held_lane);
+}
+
+/// The scan-to-tail handoff: the settle task compares its publication counter
+/// ONCE and exits, and a detached successor pass can publish AFTER that
+/// compare — a publication no settler observes. Whether the completion
+/// waiter's announcement baseline still catches it must not depend on how
+/// long the waiter was DELAYED between the settle wait and the post-init
+/// drain: a baseline captured there (after the settle comparison) already
+/// includes the successor's fill and swallows its ping forever. This test
+/// parks the waiter at exactly that handoff (the `post_scan_settle_waiter_pause`
+/// fence), lets the successor publish while the waiter is parked, then
+/// resumes the waiter and requires the ping — pinning that the baseline was
+/// taken BEFORE the scan window opened, not at the waiter's position.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovered_publication_while_the_completion_waiter_is_delayed_pings_the_store_fill_client()
+{
+    let _temp = tempfile::tempdir().unwrap();
+    let workspace_root = crate::test_utils::canonical_test_path(_temp.path());
+    std::fs::create_dir_all(_temp.path().join("src")).unwrap();
+    std::fs::write(_temp.path().join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        _temp.path().join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst heading = 'hi'\n</script>\n<template><div>{{ heading }}</div></template>\n",
+    )
+    .unwrap();
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let app_canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+        VerterLanguageServer::new(
+            crate::outbound::Outbound::default(),
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                type_provider_topology: crate::TypeProviderTopology::EditorTsserver,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let mut socket = service.inner().outbound().wire();
+    let response = tower_service::Service::call(
+        &mut service,
+        tower_lsp_server::jsonrpc::Request::build("initialize")
+            .id(1)
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "subscriptions": { "carrierStoreChanged": true, "carrierStoreFill": true }
+                }
+            }))
+            .finish(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
+
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let drain = tokio::spawn({
+        let methods = Arc::clone(&methods);
+        let methods_changed = Arc::clone(&methods_changed);
+        async move {
+            while let Some(message) = socket.next().await {
+                methods.lock().push(message.method().to_string());
+                methods_changed.notify_waiters();
+            }
+        }
+    });
+    let _drain = AbortTaskOnDrop(drain);
+
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    *server.workspace_roots.lock().await = vec![crate::uri::path_to_file_uri(&workspace_root)
+        .expect("workspace URI")
+        .as_str()
+        .to_string()];
+
+    // Arm the waiter fence BEFORE the init runs: whenever the completion
+    // waiter passes the scan-settle wait, it parks here until released.
+    let waiter_arrived = Arc::new(tokio::sync::Notify::new());
+    let waiter_release = Arc::new(tokio::sync::Notify::new());
+    *server.post_scan_settle_waiter_pause.lock() =
+        Some((Arc::clone(&waiter_arrived), Arc::clone(&waiter_release)));
+
+    // Sabotage the durable store before the init runs: the negotiated
+    // store-fill demand arms the scan, every publication attempt fails
+    // cleanly, and the carrier stays queued until the file is removed.
+    let store_dir = crate::external_ts::carrier_store_dir_for(
+        crate::external_ts::default_carrier_store_host_version(),
+        &workspace_root,
+    );
+    std::fs::create_dir_all(store_dir.parent().expect("the store's parent dir")).unwrap();
+    std::fs::write(&store_dir, b"not a directory").unwrap();
+
+    server
+        .spawn_background_init(None, "store-fill recovery across the settle handoff test")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/ready")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the server announces readiness");
+
+    // The scan settles having published nothing: the flag goes false, the
+    // settle task's counter compare finds an unchanged count (no ping — the
+    // store never filled), and the completion waiter parks at the fence.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        waiter_arrived.notified(),
+    )
+    .await
+    .expect("the completion waiter must park at the settle-handoff fence");
+    assert!(
+        !server.sync_coordinator.workspace_scan_in_progress(),
+        "the waiter parks at the fence only after the scan settled"
+    );
+    assert!(
+        server
+            .pending_snapshot_provider_sync
+            .contains(&app_canonical_id),
+        "the failed carrier must still be queued for its successor pass"
+    );
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/carrierStoreChanged"),
+        "nothing may ping the client before the store actually fills"
+    );
+
+    // Repair the store and let the DETACHED successor pass publish durably
+    // while the waiter is still parked. The successor runs a full backoff
+    // delay (>=500ms) after the settle drain that armed it, so the settle
+    // task's compare — the synchronous statements that follow that same
+    // drain — has long closed by the time this fill commits: no settler
+    // observes it, and only the waiter's baseline still can. The wait is
+    // for the carrier's DEQUEUE, not the manifest's existence: the
+    // publication's sealed counter bump precedes the dequeue, and an empty
+    // queue ends the successor chain — so at release the count is committed
+    // and quiescent, exactly what a late baseline would absorb.
+    std::fs::remove_file(&store_dir).unwrap();
+    std::fs::create_dir_all(&store_dir).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if !server
+                .pending_snapshot_provider_sync
+                .contains(&app_canonical_id)
+                && carrier_manifest_strict(&workspace_root).is_some()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the successor publication must commit and settle the carrier");
+    assert!(
+        !methods
+            .lock()
+            .iter()
+            .any(|method| method == "$/verter/carrierStoreChanged"),
+        "a publication the settle compare already passed must not have pinged yet"
+    );
+
+    // Resume the waiter: it runs the post-init drain (nothing left queued),
+    // closes the completion gate with level 2, and the announcement tail must
+    // still owe the subscribed client the successor fill's ping — a baseline
+    // captured at the waiter's position would have absorbed it.
+    waiter_release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/carrierStoreChanged")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("a publication recovered across the settle handoff must ping the client");
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let notified = methods_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if methods
+                .lock()
+                .iter()
+                .any(|method| method == "$/verter/typeProviderSyncComplete")
+            {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("the recovered publication must let the completion gate close");
 }
 
 /// The store-fill demand is NEGOTIATED, not requested: a client that
@@ -1763,9 +2869,7 @@ async fn subscribed_store_fill_demand_scans_and_pings_the_editor_owned_client() 
     // empty generation, so wait for the scan's own publication.
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
-            if carrier_manifest_strict(&workspace_root)
-                .is_some_and(|manifest| manifest.projects.contains_key(&tsconfig))
-            {
+            if carrier_manifest_advertises_vue_companion(&workspace_root, &tsconfig) {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
