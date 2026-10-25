@@ -124,12 +124,16 @@ impl PaidOperations {
         true
     }
 
-    /// Add `identities`: how many were not paid yet.
+    /// Add `identities`: how many were not paid yet. Each identity is moved
+    /// into the set, never cloned: every sealed computation pays one.
     pub(crate) fn extend(&mut self, identities: impl IntoIterator<Item = CostIdentity>) -> usize {
-        identities
-            .into_iter()
-            .filter(|identity| self.insert(identity.clone()))
-            .count()
+        let mut added = 0;
+        for identity in identities {
+            if self.insert(identity) {
+                added += 1;
+            }
+        }
+        added
     }
 }
 

@@ -4,8 +4,9 @@
 //! to its own request state is `Send` only if that state is `Sync`. The
 //! state is still driven by one poller at a time; these cells keep the
 //! borrow discipline of [`std::cell::RefCell`] and [`std::cell::Cell`] — a
-//! conflicting borrow panics, it never waits — with an atomic borrow flag,
-//! so the state can move between polling threads with the computation.
+//! conflicting borrow panics, it never waits. Scalar cells use typed atomics
+//! where supported; arbitrary `Copy` values use a mutex. The state can move
+//! between polling threads with the computation.
 //!
 //! A borrow guard belongs to the thread that took it: holding one across a
 //! suspension point makes the computation non-`Send`, so the compiler
@@ -131,17 +132,24 @@ impl<T: Copy> SyncCell<T> {
         Self(parking_lot::const_mutex(value))
     }
 
+    #[inline(always)]
+    fn lock(&self) -> parking_lot::MutexGuard<'_, T> {
+        #[cfg(test)]
+        tests::LOCK_ACQUIRES.with(|count| count.set(count.get() + 1));
+        self.0.lock()
+    }
+
     pub fn get(&self) -> T {
-        *self.0.lock()
+        *self.lock()
     }
 
     pub fn set(&self, value: T) {
-        *self.0.lock() = value;
+        *self.lock() = value;
     }
 
     /// Replace the value, returning the old one.
     pub fn replace(&self, value: T) -> T {
-        std::mem::replace(&mut *self.0.lock(), value)
+        std::mem::replace(&mut *self.lock(), value)
     }
 
     /// Take the value, leaving its default.
@@ -149,7 +157,7 @@ impl<T: Copy> SyncCell<T> {
     where
         T: Default,
     {
-        std::mem::take(&mut *self.0.lock())
+        std::mem::take(&mut *self.lock())
     }
 
     /// Exchange the values of two cells.
@@ -182,9 +190,183 @@ impl<T: Copy + fmt::Debug> fmt::Debug for SyncCell<T> {
     }
 }
 
+// Each scalar uses its own typed atomic; values never pass through bytes or
+// pointer-width storage. A target without the required width keeps SyncCell's
+// mutex, including whole-value storage for u64 on narrower targets.
+macro_rules! scalar_cell {
+    ($name:ident, $value:ty, $atomic:ident, $width:literal) => {
+        /// A scalar cell for exclusively driven request state.
+        ///
+        /// Reads acquire and writes release, preserving publication between
+        /// polling threads. This does not make a read/modify/write sequence
+        /// atomic: the owning computation must still have only one driver.
+        /// On targets without this atomic width it uses [`SyncCell`].
+        #[cfg(target_has_atomic = $width)]
+        #[derive(Default)]
+        pub struct $name(std::sync::atomic::$atomic);
+
+        #[cfg(not(target_has_atomic = $width))]
+        pub type $name = SyncCell<$value>;
+
+        #[cfg(target_has_atomic = $width)]
+        impl $name {
+            pub const fn new(value: $value) -> Self {
+                Self(std::sync::atomic::$atomic::new(value))
+            }
+
+            #[inline(always)]
+            pub fn get(&self) -> $value {
+                self.0.load(std::sync::atomic::Ordering::Acquire)
+            }
+
+            #[inline(always)]
+            pub fn set(&self, value: $value) {
+                self.0.store(value, std::sync::atomic::Ordering::Release);
+            }
+
+            /// Replace the value, returning the old one.
+            pub fn replace(&self, value: $value) -> $value {
+                self.0.swap(value, std::sync::atomic::Ordering::AcqRel)
+            }
+
+            pub fn take(&self) -> $value {
+                self.replace(<$value>::default())
+            }
+
+            /// Exchange two cells; like `SyncCell::swap`, this is not a
+            /// transaction over the pair and requires exclusive driving.
+            pub fn swap(&self, other: &Self) {
+                if !std::ptr::eq(self, other) {
+                    self.set(other.replace(self.get()));
+                }
+            }
+
+            pub fn get_mut(&mut self) -> &mut $value {
+                self.0.get_mut()
+            }
+
+            pub fn into_inner(self) -> $value {
+                self.0.into_inner()
+            }
+        }
+
+        #[cfg(target_has_atomic = $width)]
+        impl Clone for $name {
+            fn clone(&self) -> Self {
+                Self::new(self.get())
+            }
+        }
+
+        #[cfg(target_has_atomic = $width)]
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_tuple(stringify!($name)).field(&self.get()).finish()
+            }
+        }
+    };
+}
+
+scalar_cell!(SyncBool, bool, AtomicBool, "8");
+scalar_cell!(SyncUsize, usize, AtomicUsize, "ptr");
+scalar_cell!(SyncU16, u16, AtomicU16, "16");
+scalar_cell!(SyncU32, u32, AtomicU32, "32");
+scalar_cell!(SyncU64, u64, AtomicU64, "64");
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        pub(super) static LOCK_ACQUIRES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn supported_scalar_operations_do_not_acquire_mutexes() {
+        LOCK_ACQUIRES.with(|count| count.set(0));
+        macro_rules! check {
+            ($cell:ident, $value:expr, $width:literal) => {
+                #[cfg(target_has_atomic = $width)]
+                {
+                    let mut cell = $cell::new($value);
+                    assert_eq!(cell.replace(Default::default()), $value);
+                    cell.set($value);
+                    assert_eq!(cell.get(), $value);
+                    assert_eq!(cell.take(), $value);
+                    *cell.get_mut() = $value;
+                    let other = $cell::default();
+                    cell.swap(&other);
+                    other.swap(&other);
+                    assert_eq!(other.clone().into_inner(), $value);
+                    assert_eq!(cell.into_inner(), Default::default());
+                }
+            };
+        }
+        check!(SyncBool, true, "8");
+        check!(SyncUsize, usize::MAX, "ptr");
+        check!(SyncU16, u16::MAX, "16");
+        check!(SyncU32, u32::MAX, "32");
+        check!(SyncU64, u64::MAX, "64");
+        let locks = LOCK_ACQUIRES.with(|count| count.get());
+        eprintln!("scalar_lock_acquires={locks}");
+        assert_eq!(locks, 0);
+    }
+
+    #[test]
+    fn scalar_state_resumes_on_another_thread_and_wide_reads_are_whole() {
+        let value = SyncU64::new(0xaaaa_aaaa_aaaa_aaaa);
+        let ready = SyncBool::new(false);
+        let progress = SyncUsize::new(0);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for index in 0..10_000 {
+                    value.set(if index % 2 == 0 {
+                        0x5555_5555_5555_5555
+                    } else {
+                        0xaaaa_aaaa_aaaa_aaaa
+                    });
+                    progress.set(index + 1);
+                }
+                ready.set(true);
+            });
+            // Reads may overlap the producer; each wide value must stay whole.
+            for _ in 0..10_000 {
+                assert!(matches!(
+                    value.get(),
+                    0x5555_5555_5555_5555 | 0xaaaa_aaaa_aaaa_aaaa
+                ));
+                if ready.get() {
+                    assert_eq!(progress.get(), 10_000);
+                }
+            }
+        });
+        std::thread::spawn(move || {
+            assert!(ready.get());
+            assert_eq!(progress.replace(0), 10_000);
+            assert_eq!(value.take(), 0xaaaa_aaaa_aaaa_aaaa);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn arbitrary_copy_storage_preserves_padding_and_wide_values() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        struct Record {
+            flag: bool,
+            wide: u128,
+        }
+        let first = Record {
+            flag: true,
+            wide: u128::MAX,
+        };
+        let second = Record {
+            flag: false,
+            wide: 1,
+        };
+        let cell = SyncCell::new(first);
+        assert_eq!(cell.replace(second), first);
+        assert_eq!(cell.into_inner(), second);
+    }
 
     #[test]
     fn shared_borrows_nest_and_a_conflicting_borrow_panics() {
@@ -225,5 +407,10 @@ mod tests {
         fn sync<T: Sync + Send>() {}
         sync::<SyncRefCell<Vec<u8>>>();
         sync::<SyncCell<u64>>();
+        sync::<SyncBool>();
+        sync::<SyncUsize>();
+        sync::<SyncU16>();
+        sync::<SyncU32>();
+        sync::<SyncU64>();
     }
 }

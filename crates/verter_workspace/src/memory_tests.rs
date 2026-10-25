@@ -2797,3 +2797,105 @@ fn snapshot_change_cursors_coalesce_edits_and_keep_independent_removals() {
     );
     assert_eq!(snapshot.changes.len(), 2);
 }
+
+/// A barrel's imports share their directory, its recovery scopes and the
+/// shape of their candidate lists, and their resolution reuses that shared
+/// work. What each import observed must still be its own: adding a file a
+/// resolution probed and found absent, removing the file it resolved to, or
+/// renaming that file to another probed spelling must each change that
+/// import's answer — and leave the barrel's other imports alone.
+#[test]
+fn barrel_resolutions_follow_added_removed_and_renamed_probed_files() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&ws, &["/repo"]);
+    let leaves = 6;
+    let mut barrel = String::new();
+    for index in 0..leaves {
+        barrel.push_str(&format!("export * from \"./leaf-{index}\";\n"));
+    }
+    barrel.push_str("export * from \"./late\";\n");
+    ws.inject_file("/repo/src/index.ts".to_string(), Arc::from(barrel));
+    for index in 0..leaves {
+        let extension = if index == 2 { "tsx" } else { "ts" };
+        ws.inject_file(
+            format!("/repo/src/leaf-{index}.{extension}"),
+            Arc::from(format!("export const v{index} = {index};")),
+        );
+    }
+    ws.inject_file(
+        "/repo/src/leaf-0/index.ts".to_string(),
+        Arc::from("export const fallback = 0;"),
+    );
+
+    let ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let resolve = |specifier: &str| {
+        ws.resolve_import("/repo/src/index.ts", specifier, ctx)
+            .map(|result| result.source_id)
+    };
+    let answers = || {
+        (0..leaves)
+            .map(|index| resolve(&format!("./leaf-{index}")))
+            .chain([resolve("./late")])
+            .collect::<Vec<_>>()
+    };
+    let mut expected: Vec<Option<String>> = (0..leaves)
+        .map(|index| {
+            let extension = if index == 2 { "tsx" } else { "ts" };
+            Some(format!("/repo/src/leaf-{index}.{extension}"))
+        })
+        .chain([None])
+        .collect();
+    assert_eq!(answers(), expected, "the barrel resolves as written");
+    assert_eq!(answers(), expected, "a warm barrel answers the same");
+
+    // Added: `./late` probed every candidate and found none.
+    ws.inject_file(
+        "/repo/src/late.ts".to_string(),
+        Arc::from("export const late = 1;"),
+    );
+    expected[leaves] = Some("/repo/src/late.ts".to_string());
+    assert_eq!(answers(), expected, "an added probed file is found");
+
+    // Added ahead of a hit: `./leaf-2` probed `leaf-2.ts`, absent, before
+    // it reached `leaf-2.tsx`.
+    ws.inject_file(
+        "/repo/src/leaf-2.ts".to_string(),
+        Arc::from("export const v2 = 2;"),
+    );
+    expected[2] = Some("/repo/src/leaf-2.ts".to_string());
+    assert_eq!(
+        answers(),
+        expected,
+        "a file added at a higher-priority probed spelling wins"
+    );
+
+    // Removed: `./leaf-0` falls through to its directory index.
+    ws.remove_file("/repo/src/leaf-0.ts");
+    expected[0] = Some("/repo/src/leaf-0/index.ts".to_string());
+    assert_eq!(answers(), expected, "a removed resolved file is not served");
+
+    // Renamed: `./leaf-1` follows the file to another probed spelling.
+    ws.remove_file("/repo/src/leaf-1.ts");
+    ws.inject_file(
+        "/repo/src/leaf-1.mts".to_string(),
+        Arc::from("export const v1 = 1;"),
+    );
+    expected[1] = Some("/repo/src/leaf-1.mts".to_string());
+    assert_eq!(answers(), expected, "a renamed resolved file is followed");
+
+    // Renamed away from every probed spelling.
+    ws.remove_file("/repo/src/leaf-3.ts");
+    ws.inject_file(
+        "/repo/src/leaf-3.txt".to_string(),
+        Arc::from("export const v3 = 3;"),
+    );
+    expected[3] = None;
+    assert_eq!(
+        answers(),
+        expected,
+        "a file renamed off every probed spelling no longer resolves"
+    );
+}

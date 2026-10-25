@@ -694,6 +694,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The roots carried by the production pending-call state before admission.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resolve_call_pending_self_roots_for_tests(
+        &self,
+        key: &ResolveCallKey,
+    ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
+        self.resolve_call_pending_state(
+            key,
+            ResolveCallSelection::DynamicAny,
+            Vec::new(),
+            Vec::new(),
+            None,
+            false,
+        )
+        .self_roots
+    }
+
     fn resolve_call_pending_state(
         &self,
         key: &ResolveCallKey,
@@ -725,10 +742,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let site_rooted = if let Some(indexed) =
             self.transaction_indexed_record(key.point.canonical_id.as_ref())
         {
-            if !self_roots
-                .iter()
-                .any(|(canonical, _)| canonical == &key.point.canonical_id)
-            {
+            if !self_roots.iter().any(|(canonical, hash)| {
+                canonical == &key.point.canonical_id && *hash == indexed.whole_hash
+            }) {
                 self_roots.push((key.point.canonical_id.clone(), indexed.whole_hash));
             }
             true

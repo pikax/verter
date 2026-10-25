@@ -696,6 +696,13 @@ impl VerterHost {
         // notify_delete loop, backing file still present — keep serving
         // through the artifact-only authority gate.
         self.project_type_store.indexed().clear_all();
+        // The flow-slice substrate (graph bundles, slice plans, lowered
+        // slices) is content-addressed and sits beside the artifact store:
+        // neither the cascade above nor a scheduler reset reaches it, and
+        // `evict_canonical` runs only on upsert/remove. Its bundles keep
+        // their pinned graph arenas and skeleton name indexes charged, so
+        // a closed host clears it here.
+        self.project_type_store.flow_slice().clear_all();
         self.resolver.reset_all();
         self.provenance.reset();
         // Drop the StoreViewManager's cached base-view `Arc`. The epoch
@@ -708,6 +715,15 @@ impl VerterHost {
         // regressing close()'s memory-release contract. Clearing releases
         // it now.
         self.store_view_manager().clear();
+        // Every cache owner above is released, so the store's hold on the
+        // primitive vocabulary — the one set of permanent nodes, interned by
+        // the first workload that needed them — goes too: an unheld
+        // vocabulary node is destroyed with its chunk and sidecars, one a
+        // reader still holds lives until that reader drops.
+        let _ = self
+            .project_type_store
+            .semantic_graph()
+            .release_vocabulary();
         // Every owner above is released; give back what only they reached.
         self.reclaim_released_storage();
         self.bump_store_view_epoch();

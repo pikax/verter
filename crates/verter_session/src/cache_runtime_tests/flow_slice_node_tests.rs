@@ -335,7 +335,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
         .map(|matched| matched.entry())
         .expect("myType is a served function position");
     let source_key =
-        verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
             Arc::from(canonical),
             serve.indexed.whole_hash,
             serve
@@ -458,7 +458,7 @@ fn skeleton_source_verifies_parse_env_and_toolchain() {
         .map(|matched| matched.entry())
         .expect("myType is a served function position");
     let source_key =
-        verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
             Arc::from(canonical),
             serve.indexed.whole_hash,
             serve
@@ -1172,7 +1172,7 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         .expect("myType is a served function position");
     let env = host.host_view_env_hashes_for(canonical);
     let source_key =
-        verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
             Arc::from(canonical),
             serve.indexed.whole_hash,
             serve

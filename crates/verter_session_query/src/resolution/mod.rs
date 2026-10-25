@@ -56,11 +56,11 @@ pub use crate::resolution::module_resolution_observation::ResolutionPackageManif
 pub use crate::resolution::normalized_glob::{CompiledGlob, NormalizedGlob};
 pub use crate::resolution::path_probe::PathProbe;
 pub use crate::resolution::path_utils::{
-    build_known_file_index, carrier_api_provider_path, carrier_ide_provider_path,
-    carrier_source_extensions, collapse_path, is_absolute_specifier, is_relative_specifier,
-    join_paths, normalize_canonical_id, normalize_known_file_id, parent_dir, path_is_carrier,
-    resolve_known_dependency_base, strip_carrier_extension, CARRIER_API_MODULE_SPECIFIER_SUFFIX,
-    CARRIER_API_VIRTUAL_SUFFIX,
+    ancestor_scope_prefixes, build_known_file_index, carrier_api_provider_path,
+    carrier_ide_provider_path, carrier_source_extensions, collapse_path, is_absolute_specifier,
+    is_relative_specifier, join_paths, normalize_canonical_id, normalize_known_file_id, parent_dir,
+    path_is_carrier, resolve_known_dependency_base, strip_carrier_extension,
+    CARRIER_API_MODULE_SPECIFIER_SUFFIX, CARRIER_API_VIRTUAL_SUFFIX,
 };
 pub use crate::resolution::project_config::{
     canonical_lib_file_name, IdeProjectCompilerOptions, IdeProjectConfig,

@@ -954,18 +954,25 @@ fn a_job_dropped_after_a_reset_does_not_release_against_the_new_ledger() {
     assert_eq!(dag.in_flight_io_permits(), 0);
 }
 
-/// A superseded job's node share was dropped at `cancel`; when its queued
-/// closure finally starts, the job's share is the last one, so the permit
-/// returns there — outside any pump — and the driver must be woken.
-///
-/// Discriminating: without the wake, the freed permit sits unused until the
-/// driver's idle re-pump (5 s). In the WSP6 churn lane (a document closed and
-/// reopened in a loop) that put a 5 s stall under roughly one request in
-/// five.
+#[cfg(not(target_arch = "wasm32"))]
+struct InboxProgressWake(crossbeam_channel::Sender<crate::driver::Submission>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::task::Wake for InboxProgressWake {
+    fn wake(self: Arc<Self>) {
+        let _ = self.0.try_send(crate::driver::Submission::Wake);
+    }
+}
+
+/// A superseded job still queued in a pool keeps its permit until its
+/// closure starts. Releasing that final share must explicitly wake the
+/// driver so other ready work does not wait for an idle repump.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_started_superseded_job_returns_its_permit_and_wakes_the_driver() {
+    let (inbox, wakes) = crossbeam_channel::unbounded();
     let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
+    dag.set_progress_waker(std::task::Waker::from(Arc::new(InboxProgressWake(inbox))));
     let _ = submit_io(&mut dag, "/churn.vue", Priority::Background);
     let job = dag.next_ready().expect("the load dispatches");
     let _ = dag.cancel(&job.identity);
@@ -975,8 +982,7 @@ fn a_started_superseded_job_returns_its_permit_and_wakes_the_driver() {
         "the superseded job still queued in the pool holds its permit"
     );
 
-    let (inbox, wakes) = crossbeam_channel::unbounded();
-    let _job = job.started(&inbox);
+    let _job = job.started();
 
     assert_eq!(
         dag.in_flight_io_permits(),
@@ -995,12 +1001,13 @@ fn a_started_superseded_job_returns_its_permit_and_wakes_the_driver() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_started_live_job_leaves_the_permit_with_its_node() {
+    let (inbox, wakes) = crossbeam_channel::unbounded();
     let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
+    dag.set_progress_waker(std::task::Waker::from(Arc::new(InboxProgressWake(inbox))));
     let _ = submit_io(&mut dag, "/churn.vue", Priority::Background);
     let job = dag.next_ready().expect("the load dispatches");
 
-    let (inbox, wakes) = crossbeam_channel::unbounded();
-    let job = job.started(&inbox);
+    let job = job.started();
 
     assert_eq!(
         dag.in_flight_io_permits(),

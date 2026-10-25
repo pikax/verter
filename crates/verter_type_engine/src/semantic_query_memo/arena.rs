@@ -68,7 +68,9 @@
 //! children lose the edge it held and are destroyed in turn when that was
 //! their last owner — so a node lives exactly as long as something that
 //! can still read it. The twelve `Global` primitive vocabulary nodes are the
-//! only permanent slots; provenance and the per-node sidecars own nothing.
+//! only permanent slots: the store's own hold on them, which a host close
+//! gives up once its caches are released (`release_vocabulary`) and the next
+//! intern re-establishes. Provenance and the per-node sidecars own nothing.
 //! There is no canonical sweep: a document close evicts the CACHE owners
 //! bound to the closed content (`release.rs`), and a node a caller still
 //! holds stays readable until that caller drops it.
@@ -1989,12 +1991,21 @@ impl NodeArenaCore {
         &self,
         ids: &[SemanticNodeId],
     ) -> Result<(), crate::semantic_query::QueryError> {
+        self.retain_validated(ids, ids)
+    }
+
+    /// Validate both reused and newly acquired operands under the same arena
+    /// hold, before changing any ownership count.
+    pub(super) fn retain_validated(
+        &self,
+        validate: &[SemanticNodeId],
+        retain: &[SemanticNodeId],
+    ) -> Result<(), crate::semantic_query::QueryError> {
         let mut inner = self.inner.write();
-        // Index loops: every rooted delivery retains here, and a debug
-        // build runs them without an iterator call per id.
+        // Validation finishes before any ownership count changes.
         let mut index = 0;
-        while index < ids.len() {
-            match inner.slot(ids[index]) {
+        while index < validate.len() {
+            match inner.slot(validate[index]) {
                 Slot::Live(..) => {}
                 Slot::Released => {
                     return Err(crate::semantic_query::QueryError::StaleSemanticOperand)
@@ -2006,8 +2017,8 @@ impl NodeArenaCore {
             index += 1;
         }
         let mut index = 0;
-        while index < ids.len() {
-            let id = ids[index];
+        while index < retain.len() {
+            let id = retain[index];
             match inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) {
                 Some(chunk) => chunk.owners[(id.0 & CHUNK_MASK) as usize] += 1,
                 None => unreachable!("a live slot's chunk is held"),
@@ -2027,6 +2038,35 @@ impl NodeArenaCore {
             inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
                 [(id.0 & CHUNK_MASK) as usize] += 1;
         }
+    }
+
+    /// Give up the store's hold on its primitive vocabulary: every
+    /// permanent slot becomes an ordinary counted node, destroyed now when
+    /// nothing else owns it and with its last owner otherwise. A host close
+    /// calls this once its caches have released their owners, so the first
+    /// workload's vocabulary is not left behind as residue; the next intern
+    /// of a vocabulary node makes it permanent again. Returns the slots
+    /// unpinned.
+    pub(super) fn release_vocabulary(&self) -> usize {
+        let mut held = Vec::new();
+        {
+            let mut inner = self.inner.write();
+            let keys: Vec<u64> = inner.chunks.keys().collect();
+            for key in keys {
+                let chunk = inner.chunks.get_mut(&key).expect("a listed chunk is live");
+                for index in 0..CHUNK_LEN {
+                    if chunk.permanent[index] {
+                        chunk.permanent[index] = false;
+                        // Take one count so the release below runs the
+                        // ordinary last-owner path, whoever else holds it.
+                        chunk.owners[index] += 1;
+                        held.push(SemanticNodeId((key << CHUNK_BITS) | index as u64));
+                    }
+                }
+            }
+        }
+        self.release_roots(&held);
+        held.len()
     }
 
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
@@ -2241,6 +2281,11 @@ impl NodeArena {
             0
         };
         let shard_idx = (fingerprint & SHARD_MASK) as usize;
+        // The global primitive vocabulary is permanent while the store
+        // holds it; an intern after a close re-establishes the hold
+        // (`release_vocabulary`).
+        let vocabulary =
+            matches!(data, SemanticNodeData::Primitive(_)) && scope == NodeScopeId::Global;
 
         // Sharded dedup hot path. The fingerprint routes to its shard and
         // the bucket scan checks for an existing id; the miss path acquires
@@ -2272,8 +2317,10 @@ impl NodeArena {
                 .inspect(|id| {
                     #[cfg(test)]
                     self.race_event(ArenaRaceEvent::BeforeDedupRetain);
-                    inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
-                        [(id.0 & CHUNK_MASK) as usize] += 1;
+                    let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
+                    let index = (id.0 & CHUNK_MASK) as usize;
+                    chunk.owners[index] += 1;
+                    chunk.permanent[index] |= vocabulary;
                 });
             drop(inner);
             if let Some(existing) = hit {
@@ -2303,11 +2350,10 @@ impl NodeArena {
                     matches!(inner.slot(id), Slot::Live(..))
                 }) {
                     // Another thread beat us to it.
-                    inner
-                        .chunks
-                        .get_mut(&(existing.0 >> CHUNK_BITS))
-                        .unwrap()
-                        .owners[(existing.0 & CHUNK_MASK) as usize] += 1;
+                    let chunk = inner.chunks.get_mut(&(existing.0 >> CHUNK_BITS)).unwrap();
+                    let index = (existing.0 & CHUNK_MASK) as usize;
+                    chunk.owners[index] += 1;
+                    chunk.permanent[index] |= vocabulary;
                     (existing, false)
                 } else {
                     // The id this payload would take. Ids are monotonic and
@@ -2351,8 +2397,7 @@ impl NodeArena {
                     let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
                     let index = (id.0 & CHUNK_MASK) as usize;
                     chunk.owners[index] = 1;
-                    chunk.permanent[index] = scope == NodeScopeId::Global
-                        && matches!(&*payload, SemanticNodeData::Primitive(_));
+                    chunk.permanent[index] = vocabulary;
                     drop(inner);
                     shard.insert_candidate(
                         self.retention_account(),

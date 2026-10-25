@@ -27,6 +27,16 @@ use crate::VerterHost;
 
 use super::is_raw_import_specifier_id;
 
+/// One read of the bytes a view holds for an overlay identity's raw owner
+/// ([`OverlayArtifactIdentity::view_content`]).
+pub(crate) struct ViewContent {
+    pub(crate) source: Arc<str>,
+    pub(crate) content_hash: verter_session_query::analysis::types::Hash16,
+    pub(crate) file_language: verter_language::FileLanguage,
+    /// `None` where the language has no parse identity.
+    pub(crate) parse_key: Option<verter_language::ParseKey>,
+}
+
 /// The two canonical identities an overlay artifact is keyed by.
 ///
 /// An overlay [`IndexedReady`](crate::project_type_store::IndexedReady)
@@ -71,9 +81,81 @@ impl OverlayArtifactIdentity {
     /// canonical keeps its explicit language override; path classification is
     /// used only when the overlay introduces a canonical with no runtime row.
     fn file_language(&self, host: &VerterHost) -> verter_language::FileLanguage {
-        host.effective_file_state(&self.analysis_canonical, None)
-            .map(|state| state.file_language)
+        host.scheduler
+            .try_get_source(&self.analysis_canonical)
+            .and_then(|snap| {
+                snap.downcast_data::<crate::host_executor::HostSourceData>()
+                    .map(|hd| hd.file_language.clone())
+            })
             .unwrap_or_else(|| host.language_classifier.classify(&self.analysis_canonical))
+    }
+
+    /// The bytes `view` holds for the raw owner, their content hash, the
+    /// language they are read under and their exact parse identity: the
+    /// values the key that reads an artifact is built from, and the bytes
+    /// and identity a materialisation publishes. `None` exactly where the
+    /// view holds no source or no content hash for the raw owner.
+    ///
+    /// The bytes and the hash are the view's own (`source`,
+    /// `content_hash_for`), read as every reader reads them. Their identity:
+    ///
+    /// - An overlay's comes from the view, derived once per view (a
+    ///   carrier's under its registered grammar).
+    /// - When the view's bytes are the host's current source snapshot of the
+    ///   raw owner — the snapshot's own allocation, under the snapshot's
+    ///   hash — the snapshot's identity, with no pass over the bytes: its own
+    ///   when the raw owner is its analysis canonical, else the bytes read
+    ///   under the analysis canonical's language, which the snapshot derives
+    ///   once per revision for that language.
+    /// - Otherwise (a view serving bytes of its own, a host snapshot that
+    ///   moved on between the two reads, or one without host data) the
+    ///   view's bytes are derived under the analysis canonical's language.
+    pub(crate) fn view_content(
+        &self,
+        host: &VerterHost,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<ViewContent> {
+        let raw = self.raw_overlay_owner.as_str();
+        let source = view.source(raw)?;
+        let content_hash = view.content_hash_for(raw)?;
+        if view.overlay_content_hash_for(raw).is_some() {
+            let file_language = self.file_language(host);
+            let parse_key = view.overlay_source_parse_key(raw, &file_language);
+            return Some(ViewContent {
+                source,
+                content_hash,
+                file_language,
+                parse_key,
+            });
+        }
+        if let Some(snapshot) = host.authoritative_current_source(raw).filter(|snapshot| {
+            Arc::ptr_eq(&snapshot.source, &source) && snapshot.whole_hash == content_hash
+        }) {
+            if let Some(hd) = snapshot.downcast_data::<crate::host_executor::HostSourceData>() {
+                let (file_language, parse_key) = if raw == self.analysis_canonical {
+                    (hd.file_language.clone(), hd.source_parse_key())
+                } else {
+                    let file_language = self.file_language(host);
+                    let parse_key =
+                        crate::host_executor::snapshot_parse_key_under(&snapshot, &file_language);
+                    (file_language, parse_key)
+                };
+                return Some(ViewContent {
+                    source,
+                    content_hash,
+                    file_language,
+                    parse_key,
+                });
+            }
+        }
+        let file_language = self.file_language(host);
+        let parse_key = crate::parse::source_parse_key_for(&source, &file_language);
+        Some(ViewContent {
+            source,
+            content_hash,
+            file_language,
+            parse_key,
+        })
     }
 
     /// The raw overlay owner canonical — keys `SessionView` overlay
@@ -98,19 +180,24 @@ impl OverlayArtifactIdentity {
         host: &VerterHost,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
-        let source = view.source(&self.raw_overlay_owner)?;
-        let content_hash = view.content_hash_for(&self.raw_overlay_owner)?;
-        let file_language = self.file_language(host);
+        let ViewContent {
+            content_hash,
+            file_language,
+            parse_key,
+            ..
+        } = self.view_content(host, view)?;
+        let parse_key = parse_key?;
         let parse_env_hash = view
             .overlay_artifact_discriminator(&self.raw_overlay_owner)
             .unwrap_or(verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH);
-        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-            Arc::from(self.analysis_canonical.as_str()),
-            content_hash,
-            source.as_ref(),
-            file_language,
-            None,
-            parse_env_hash,
+        Some(
+            verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
+                Arc::from(self.analysis_canonical.as_str()),
+                content_hash,
+                parse_key,
+                file_language,
+                parse_env_hash,
+            ),
         )
     }
 
@@ -301,11 +388,10 @@ impl VerterHost {
         // frontend catalog row, keyed adapter × carrier language. A miss
         // (unregistered carrier, or a row without a grammar fact) fails
         // closed as `None` — never another framework's grammar.
-        let grammar =
-            verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
-                file_language.adapter_id()?,
-                file_language.carrier_language_id()?,
-            )?;
+        let grammar = crate::carrier_publication_store::registered_carrier_grammar(
+            file_language.adapter_id()?,
+            file_language.carrier_language_id()?,
+        )?;
         let accepted = self
             .carrier_publication
             .grammar_authority
@@ -719,10 +805,16 @@ impl VerterHost {
         // the RAW `canonical_id` — the `SessionView` overlay maps are
         // keyed by the requested canonical, so a normalised id would
         // miss the overlay.
-        let overlay_source = view.source(canonical_id)?;
-        let overlay_whole_hash = view.content_hash_for(canonical_id)?;
-        let raw_source: Arc<str> = Arc::clone(&overlay_source);
-        let overlay_file_language = identity.file_language(self);
+        // The bytes, their hash, language and parse identity come from one
+        // read (`OverlayArtifactIdentity::view_content`): the same values
+        // the read key is built from, so the publish key below is the key
+        // that reads this artifact back.
+        let ViewContent {
+            source: raw_source,
+            content_hash: overlay_whole_hash,
+            file_language: overlay_file_language,
+            parse_key: materialized_parse_key,
+        } = identity.view_content(self, view)?;
         // The overlay source never carries a scheduler carrier parse; a carrier
         // overlay (`.vue` / `.svelte`) runs the carrier parser ONCE here through
         // the counted chokepoint (the carrier-neutral producer) and everything
@@ -1052,7 +1144,12 @@ impl VerterHost {
             declares_interface_app_config,
             macro_hot_mirror:
                 verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
-            source_parse_key: crate::project_type_store::SourceParseKey::default(),
+            // Seeded with the identity the read key carries for these
+            // bytes, so the publish key below and every read key agree.
+            source_parse_key: materialized_parse_key.map_or_else(
+                crate::project_type_store::SourceParseKey::default,
+                |parse_key| crate::project_type_store::SourceParseKey::derived(Some(parse_key)),
+            ),
             input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         });
 
