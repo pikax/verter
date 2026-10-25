@@ -470,6 +470,8 @@ enum DeferredEvaluationStage {
     EvaluateCurrent,
     AwaitMappedSignatureHead {
         carrier: SemanticNodeId,
+        base: crate::semantic_query::DeclIdentity,
+        args: Arc<[SemanticNodeId]>,
     },
     AwaitMappedMemberHead {
         carrier: SemanticNodeId,
@@ -2763,7 +2765,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 frame.merge_child(child);
                 match std::mem::replace(&mut frame.stage, DeferredEvaluationStage::EvaluateCurrent)
                 {
-                    DeferredEvaluationStage::AwaitMappedSignatureHead { carrier } => {
+                    DeferredEvaluationStage::AwaitMappedSignatureHead {
+                        carrier,
+                        base,
+                        args,
+                    } => {
                         if frame.completeness.is_partial()
                             || frame.availability != crate::semantic_query::FactStatus::Complete
                         {
@@ -2774,7 +2780,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 MappedHelperHeadKind::Signature,
                             ) {
                                 Ok(true) => DeferredEvaluationAction::Finish(carrier),
-                                Ok(false) => frame.advance_or_finish(child.node),
+                                // A container head, including a callable object
+                                // or an intersection of objects, reaches its
+                                // closed operators and recursive back-edges
+                                // through the shared Expanded instantiator.
+                                Ok(false) => self.mapped_container_head_action(
+                                    frame, child.node, carrier, &base, args,
+                                ),
                                 Err(reasons) => {
                                     frame.completeness = frame
                                         .completeness
@@ -2798,41 +2810,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         {
                             frame.advance_or_finish(child.node)
                         } else {
-                            match self.mapped_helper_head_contains(
-                                child.node,
-                                MappedHelperHeadKind::Container,
-                            ) {
-                                Ok(true) => {
-                                    // Navigate keeps a container's closed operators
-                                    // and self-edges as written. The shared Expanded
-                                    // instantiator reads those operators as a
-                                    // published answer does and owns the recursive
-                                    // back-edges; demand that result before
-                                    // visiting elements.
-                                    let read = self.execute_read(SemanticQueryKey::Instantiate(
-                                        crate::semantic_query::InstantiateKey::new(
-                                            self.type_slot_for(
-                                                base.canonical_id.clone(),
-                                                base.owner,
-                                                base.decl_name.clone(),
-                                            ),
-                                            args,
-                                            self.instantiate_context_for(
-                                                &base.canonical_id,
-                                                frame.context,
-                                            ),
-                                        ),
-                                    ));
-                                    self.deferred_read_action(frame, read, || carrier)
-                                }
-                                Ok(false) => frame.advance_or_finish(child.node),
-                                Err(reasons) => {
-                                    frame.completeness = frame
-                                        .completeness
-                                        .merge(ResultCompleteness::partial(reasons));
-                                    DeferredEvaluationAction::Finish(carrier)
-                                }
-                            }
+                            self.mapped_container_head_action(
+                                frame, child.node, carrier, &base, args,
+                            )
                         }
                     }
                     DeferredEvaluationStage::AwaitKeyOfBase => {
@@ -3195,6 +3175,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     } else if let QueryResult::Value(body) = read.value {
                                         frame.stage = DeferredEvaluationStage::AwaitMappedSignatureHead {
                                             carrier: current,
+                                            base: base.clone(),
+                                            args: Arc::clone(args.as_arc()),
                                         };
                                         DeferredEvaluationAction::Push {
                                             node: body,
@@ -3543,6 +3525,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let whole_sequence = whole && demand != DeferredEvaluationDemand::MappedHelperHead;
         match data {
             SemanticNodeData::Union(arms) => Some(arms.iter().copied().collect()),
+            // A declared signature slot reduces its inline intersection
+            // operands; other demands keep intersection composition as written.
+            SemanticNodeData::Intersection(arms)
+                if whole && demand == DeferredEvaluationDemand::MappedSignatureSlot =>
+            {
+                Some(arms.iter().copied().collect())
+            }
             SemanticNodeData::Array { element, .. } if whole_sequence => Some(vec![*element]),
             SemanticNodeData::Tuple { elements, .. } if whole_sequence => {
                 Some(elements.iter().map(|e| e.value).collect())
@@ -3578,6 +3567,49 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .collect(),
             ),
             _ => None,
+        }
+    }
+
+    /// Continue a completed Expanded helper head. Navigate keeps a container's
+    /// closed operators and self-edges as written. The shared Expanded
+    /// instantiator reads those operators as a published answer does and owns
+    /// the recursive back-edges; demand that result before visiting elements.
+    /// Any other head continues under the frame's own demand.
+    fn mapped_container_head_action(
+        &self,
+        frame: &mut DeferredEvaluationFrame,
+        head: SemanticNodeId,
+        carrier: SemanticNodeId,
+        base: &crate::semantic_query::DeclIdentity,
+        args: Arc<[SemanticNodeId]>,
+    ) -> DeferredEvaluationAction {
+        if frame.context.mode != ProjectionMode::Expanded
+            || !crate::semantic_query::may_reduce_operator(frame.context)
+        {
+            return frame.advance_or_finish(head);
+        }
+        match self.mapped_helper_head_contains(head, MappedHelperHeadKind::Container) {
+            Ok(true) => {
+                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        self.type_slot_for(
+                            base.canonical_id.clone(),
+                            base.owner,
+                            base.decl_name.clone(),
+                        ),
+                        args,
+                        self.instantiate_context_for(&base.canonical_id, frame.context),
+                    ),
+                ));
+                self.deferred_read_action(frame, read, || carrier)
+            }
+            Ok(false) => frame.advance_or_finish(head),
+            Err(reasons) => {
+                frame.completeness = frame
+                    .completeness
+                    .merge(ResultCompleteness::partial(reasons));
+                DeferredEvaluationAction::Finish(carrier)
+            }
         }
     }
 
@@ -3639,6 +3671,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let rebuilt = match data {
             SemanticNodeData::Union(_) => {
                 return self.intern_normalized_union_or_intersection(values, true)
+            }
+            SemanticNodeData::Intersection(_) => {
+                return self.intern_normalized_union_or_intersection(values, false)
             }
             SemanticNodeData::Array { readonly, .. } => SemanticNodeData::Array {
                 element: values[0],

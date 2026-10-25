@@ -208,6 +208,112 @@ export type Probe = { [K in 'a']: Fn<{ a: 1 }> };
     }
 }
 
+fn assert_complete_type_resolution(record: &verter_audit::RequestAuditRecord, label: &str) {
+    let verter_audit::RequestKindPayload::TypeResolution(payload) = &record.kind_payload else {
+        panic!("{label} must retain its resolution audit");
+    };
+    assert!(
+        !payload.cache_suppress
+            && !payload.recursion_limit_reached
+            && payload.walker_diagnostics.is_empty(),
+        "{label} must publish completely: {payload:?}"
+    );
+}
+
+#[test]
+fn mapped_signature_slots_keep_recursive_container_helpers_addressable() {
+    let host = make_host_with_footprint();
+    let path = "/recursive-signature-containers.ts";
+    upsert_ts(
+        &host,
+        path,
+        r#"
+type Callable<T extends { a: number }> = { (v: T['a']): Callable<T>; x: T['a'] };
+type Linked<T extends { a: number }> = { v: T['a']; next: Linked<T> };
+export type CallableProbe = { [K in 'a']: () => Callable<{ a: 1 }> };
+export type LinkedProbe = { [K in 'a']: () => Linked<{ a: 1 }> };
+"#,
+    );
+    for _ in 0..2 {
+        for name in ["CallableProbe", "LinkedProbe"] {
+            let (expr, record) = resolve_expr(&host, path, name, &[], ProjectionMode::Expanded);
+            assert_complete_type_resolution(&record, name);
+            let props = object_props(&expr);
+            let signature = function_type(&props["a"].ty);
+            let returned = signature.return_type.as_deref().expect("declared return");
+            let TypeExpr::Object(members) = returned else {
+                panic!(
+                    "{name}: expected the finite head of the recursive helper, got {returned:?}"
+                );
+            };
+            match name {
+                "CallableProbe" => {
+                    let [ObjectMember::CallSignature(call)] = members
+                        .properties
+                        .iter()
+                        .filter(|member| matches!(member, ObjectMember::CallSignature(_)))
+                        .collect::<Vec<_>>()
+                        .as_slice()
+                    else {
+                        panic!("the callable object must retain its call signature: {members:?}");
+                    };
+                    assert_number_literal(&object_props(returned)["x"].ty, 1.0);
+                    assert_number_literal(&call.parameters[0].ty, 1.0);
+                    assert_ref(
+                        call.return_type.as_deref().expect("call return"),
+                        "Callable",
+                    );
+                }
+                "LinkedProbe" => {
+                    let props = object_props(returned);
+                    assert_number_literal(&props["v"].ty, 1.0);
+                    assert_ref(&props["next"].ty, "Linked");
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn mapped_signature_slots_reduce_intersection_operands() {
+    let host = make_host_with_footprint();
+    let path = "/signature-intersections.ts";
+    upsert_ts(
+        &host,
+        path,
+        r#"
+type Pair<T extends { a: number }> = { x: T['a'] } & { y: T['a'] };
+type Fn<T extends { a: number }> = () => Pair<T>;
+export type HelperProbe = { [K in 'a']: Fn<{ a: 1 }> };
+export type InlineProbe = { [K in 'a']: () => { x: { a: 1 }['a'] } & { y: { a: 1 }['a'] } };
+"#,
+    );
+    for _ in 0..2 {
+        for name in ["HelperProbe", "InlineProbe"] {
+            let (expr, record) = resolve_expr(&host, path, name, &[], ProjectionMode::Expanded);
+            assert_complete_type_resolution(&record, name);
+            let props = object_props(&expr);
+            let signature = function_type(&props["a"].ty);
+            let returned = signature.return_type.as_deref().expect("declared return");
+            let TypeExpr::Intersection(arms) = returned else {
+                panic!("{name}: expected the intersection, got {returned:?}");
+            };
+            let mut keys = BTreeSet::new();
+            for arm in arms.iter() {
+                for (key, prop) in object_props(arm) {
+                    assert_number_literal(&prop.ty, 1.0);
+                    keys.insert(key);
+                }
+            }
+            assert_eq!(
+                keys,
+                BTreeSet::from(["x".to_owned(), "y".to_owned()]),
+                "{name}"
+            );
+        }
+    }
+}
 #[test]
 fn mapped_member_signatures_keep_recursive_aliases_addressable() {
     let host = make_host_with_footprint();
