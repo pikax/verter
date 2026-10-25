@@ -2849,6 +2849,40 @@ mod semantic_poll_contract {
         assert!(graph.resident_flight_keys_for_tests().is_empty());
     }
 
+    /// A macro payload released while its owner loads withdraws only its own
+    /// wait: nothing stays open, the load it began goes on and integrates the
+    /// owner for the next demand, and the request then answers the payload
+    /// exactly as the synchronous entry does on a fresh host.
+    #[test]
+    fn a_macro_payload_released_while_its_owner_loads_leaves_nothing_open() {
+        let synchronous = {
+            let host = unloaded_owner_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (payload, _) = owned_props_payload_keys(&dispatch, UNLOADED_OWNER);
+            read_summary(&dispatch, &dispatch.execute_via_cold_build_helper(payload))
+        };
+        let host = unloaded_owner_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (payload, _) = owned_props_payload_keys(&dispatch, UNLOADED_OWNER);
+        let gate = Arc::clone(&host.test_force.source_load_gate);
+        gate.hold(UNLOADED_OWNER);
+        let held = HeldSource(&gate);
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let mut entry = dispatch.poll_query(payload.clone());
+        let first = entry.poll(&waker).is_pending();
+        drop(entry);
+        let open = dispatch.open_request_state_for_tests();
+        let waits = graph.wait_graph_counts_for_tests().1;
+        drop(held);
+        assert!(first, "the payload yields while its owner loads");
+        assert_eq!(open, NOTHING_OPEN);
+        assert_eq!(waits, 0, "the released payload holds no wait");
+        let read = dispatch.execute_via_cold_build_helper(payload);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+    }
+
     /// A macro payload released while it waits on its payload operation
     /// withdraws its wait and releases its frame, leaving only the other
     /// producer's flight; the request then answers the payload.
