@@ -54,6 +54,28 @@ Pending scoped handoffs subscribe to their request's cancellation. Scheduler
 completion subscriptions and other unconverted waits still need that
 integration. See the root-continuations reference for the full contract.
 
+Capacity return is a scheduler progress transition. Each dispatched permit
+carries a weak notification to the lifecycle delivery rail; its final shared
+release posts a nonblocking inbox wake and wakes cooperative drivers, even
+when the release happens outside a DAG operation. A full inbox already gives
+the driver work to drain. Completion/cancellation also notifies when it makes
+dependent nodes ready. Callbacks wait until DAG, flight, incarnation and reset
+holds release. Reset replaces the CPU and I/O counter allocations: even
+an eligibility decision made before reset can debit only its original
+ledger. A release selecting after reset does not notify; a wake selected
+before reset remains advisory and may be delivered afterward. `ReadyJob::started` simply drops its permit share through this common
+rail.
+
+A cooperative driver owns a `SchedulerProgressSubscription` from
+`Scheduler::subscribe_progress`, registering its waker **before** polling its
+dependency and rechecking dispatch readiness. Drop withdraws that driver's
+interest. Both synchronous scoped execution and host-root driving use this
+subscription. `dispatch_for_pending_dependency` pumps with the caller's actual
+active path so a saturated worker can loan its own resource capacity to a
+nested dependency. Neither polling nor notification executes a producer; the
+driver runs a transferred producer outside the root poll. Progress does not
+depend on periodic repumping.
+
 Each `FileNode` keeps four shards for its small per-profile artifact map,
 independent of the host CPU count. Source-only scripts still allocate that
 map, so machine-wide sharding multiplies empty storage across an opened

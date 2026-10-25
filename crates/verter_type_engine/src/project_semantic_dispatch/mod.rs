@@ -4234,12 +4234,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
         build_local: BuildLocalTaint,
-        finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+        finalise: impl Into<verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise>,
         carrier_prelude: &CarrierNormalizationPrelude,
     ) -> (
         crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
         Option<CompletedSelfRoots>,
     ) {
+        let finalise = finalise.into();
         // A declaration/locator wrapper may return an adopted child unchanged.
         // Only that actual terminal and a locally complete output retain its
         // interpretation; another partial dependency blocks this transfer.
@@ -4322,7 +4323,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // flows to the caller; the memo refuses admission.
         output.cache_suppress |= matches!(
             &finalise,
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
+            verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::NonCacheable(
+                _
+            )
         );
         if cfg!(any(test, feature = "test-support"))
             || <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
@@ -5876,17 +5879,18 @@ pub fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabili
 fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
-    finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+    finalise: impl Into<verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise>,
     carrier_prelude: &CarrierNormalizationPrelude,
 ) -> (
     crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     Option<CompletedSelfRoots>,
 ) {
+    let finalise = finalise.into();
     let mut output = output;
     let mut rooting = None;
     let finalised_cleanly = matches!(
         &finalise,
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(_)
+        verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::Ok(_)
     ) && !carrier_prelude.is_partial()
         && !carrier_prelude.cache_suppress();
     if carrier_prelude.is_partial() {
@@ -5902,12 +5906,12 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
     output.cache_suppress |= carrier_prelude.cache_suppress();
     let finalise_is_non_cacheable = matches!(
         &finalise,
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::NonCacheable(_)
     );
     output.cache_suppress |= finalise_is_non_cacheable;
     match finalise {
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(traced_facts)
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+        verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::Ok(traced_facts)
+        | verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::NonCacheable(
             traced_facts,
         ) => {
             // Fold the build's `dep_signature` fence into the traced
@@ -5961,7 +5965,7 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
             // A traced set that already holds the fence and every observed
             // self-root is its own completed carrier.
             let shared = if prelude_facts.is_empty() {
-                crate::fact_signature_helpers::shared_completed_structural_carrier(
+                crate::fact_signature_helpers::shared_completed_structural_carrier_sealed(
                     &output.observed_self_roots,
                     &traced_facts,
                     &fence_facts,
@@ -6039,7 +6043,7 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
         }
         // A domain moved under the build: no fact list it observed can root
         // the entry.
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+        verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise::MutationUnstable => {
             crate::request_context::observe_execution_abort(
                 crate::semantic_query::ExecutionAbort::Superseded,
             );

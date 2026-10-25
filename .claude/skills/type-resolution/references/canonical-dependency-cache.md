@@ -270,3 +270,42 @@ orthogonal dimensions). The module-resolution SHAPE vocabulary
 (`ModuleResolutionMode`, `SpecifierKind`, `ConditionSet`) lives in
 `verter_workspace::module_resolution`; the FORK-C resolution matrix walker
 that consumes it is U0 `verter_session::resolver_core`.
+
+
+The shared type-parameter binder constructor predeclares sibling shells before
+lowering bounds. A declaration parameter without authored constraint or default
+keeps that already-owned shell as its final binder: its identity and scope are
+identical. Parameters with authored bounds still lower them under the same
+per-position frames and intern their final bound-carrying nodes. This removes
+a duplicate fingerprint, arena lookup and counted acquisition; it changes no
+logical work charge, bound-read proof or construction-scope lifetime.
+
+A transaction indexed-serve hit must replay its recorded reads into each fresh
+consuming build frame and fact tracer. For an exported interface this includes
+the parse-owned syntactic route-interface fact of the exact served artifact.
+The transaction edit clocks invalidate that serve after an edit; its replay
+does not authorize another transaction or replace shared-cache validation.
+The direct indexed-serve regression confirms a table hit and the required fact,
+then edits the exported interface and requires the new route fact. Omitting
+the hit's replay must fail the fresh consumer's specific fact assertion.
+
+Canonical fact finalization also returns a sealed order witness. Stepwise
+evaluation and the shared delivering-tracer close keep that witness through
+structural completion, avoiding revalidation of order already established by
+the one canonicalizer. Raw signature absorption still verifies arbitrary
+input and falls back to ordinary canonicalization when it is malformed.
+This certificate says only that facts are ordered: mutation-basis rechecks,
+strict self-root versions, fences, refusal propagation and warm validation
+retain their existing authority. Completed self-root names share the
+corresponding whole-file facts' immutable string allocations.
+
+A cold deferred completion hands its receipt and completed proof to memo
+admission. The receipt owns the input; the memo separately owns a distinct
+result, or shares the input owner when both are identical. Admission first
+reserves the receipt as before, then validates input and result together under
+the arena hold before acquiring any additional result count. A warm read
+captures both owners into the consuming construction scope before dropping
+the entry. A prerequisite receipt never takes ownership of a distinct
+result, so memo eviction and consumer/receipt release retain their separate
+lifetimes. Footprint measurement and refusable evidence admission still run
+once at publication.

@@ -364,6 +364,13 @@ pub(crate) fn observe_fan_out_canonical(sig: &std::sync::Arc<[FactVersionRef]>) 
     });
 }
 
+/// Replay the canonicalizer's immutable output without rescanning its order.
+pub(crate) fn observe_fan_out_sealed(
+    sig: &verter_session_query::facts::fact_read_set::CanonicalFactSignature,
+) {
+    observe_signature_consumers(sig, |cell| cell.absorb_sealed_signature(sig));
+}
+
 #[inline]
 fn observe_signature_consumers(sig: &[FactVersionRef], observe: impl Fn(&FactReadSetCell)) {
     if sig.is_empty() {

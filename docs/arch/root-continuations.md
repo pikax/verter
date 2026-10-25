@@ -51,6 +51,14 @@ follows the same rules:
 - **A wake only schedules.** A wake means a later poll will make progress.
   It never runs the waiting computation, so a readiness callback cannot
   re-enter a driver.
+- **A driver subscribes before checking progress.** A synchronous root driver
+  registers its `SchedulerProgressSubscription` before polling the root and
+  running a dispatch step. Returning the final shared capacity permit or
+  making a dependent DAG node ready wakes that interest after lifecycle
+  unlock and posts an inbox wake for the native driver. A release racing the
+  readiness check therefore cannot strand queued work until an idle repump.
+  Cooperative dispatch carries the worker's active path, preserving capacity
+  loans for nested dependencies without running a producer inside polling.
 - **Owned, `Send`, one poller.** Subscribers own their state and hold no
   borrow of the producer. They are `Send` whenever their result is, so a
   suspended subscriber may resume on another thread. One poller drives a

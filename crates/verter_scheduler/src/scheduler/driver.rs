@@ -749,7 +749,7 @@ impl Scheduler {
             // `job` moves into the pool closure below.
             let cache_identity = job.identity.clone();
             let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
-                let job = job.started(&inbox_for_cache);
+                let job = job.started();
                 let cancellation = job.cancellation.clone();
                 let completion = dispatch_ready_job_to_executor(
                     &job,
@@ -1002,7 +1002,7 @@ impl Scheduler {
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
             let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
-                let job = job.started(&inbox_sender);
+                let job = job.started();
                 let _guard: Option<
                     Box<dyn verter_execution::request_context::TlsUninstall + Send>,
                 > = winner_ctx
@@ -1065,7 +1065,7 @@ impl Scheduler {
             let dag_for_panic = Arc::clone(&dag_handle);
             let task_kind_for_panic = task_kind.clone();
             let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
-                let job = job.started(&inbox_sender);
+                let job = job.started();
                 let _guard: Option<
                     Box<dyn verter_execution::request_context::TlsUninstall + Send>,
                 > = winner_ctx
