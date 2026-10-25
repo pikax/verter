@@ -1838,6 +1838,13 @@ impl SemanticGraphStore {
             .async_return_payload_count
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped by the first stage of a macro payload's resolution, once
+    /// per cold build.
+    pub fn record_macro_payload_owner_read(&self) {
+        self.stats
+            .macro_payload_owner_reads
+            .fetch_add(1, Ordering::Relaxed);
+    }
     pub fn record_conditional_decided(&self) {
         self.stats
             .conditional_decided_count

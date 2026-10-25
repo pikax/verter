@@ -20961,7 +20961,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         type_args: &Arc<[SemanticNodeId]>,
         mode: ProjectionMode,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        match self.begin_resolve_macro_payload(owner, macro_index, macro_kind, type_args, mode) {
+            MacroPayloadStep::Done(output) => *output,
+            // A producer evaluated in place reads its payload operation in
+            // place, as every nested read of a synchronous build is made.
+            MacroPayloadStep::Need(build) => {
+                let read = self.execute_read(build.payload().clone());
+                self.finish_resolve_macro_payload(*build, read)
+            }
+        }
+    }
+
+    /// The first stage of a macro payload's resolution: the owning file's
+    /// indexed input and the fence it seeds, then either the payload's value
+    /// or the one payload operation the value is read from — the props
+    /// intersection, or the emits / slots / model projection — retained with
+    /// everything read so far for [`Self::finish_resolve_macro_payload`].
+    pub(super) fn begin_resolve_macro_payload(
+        &self,
+        owner: &crate::semantic_query::ResolvedDeclSlotIdentity,
+        macro_index: usize,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+        type_args: &Arc<[SemanticNodeId]>,
+        mode: ProjectionMode,
+    ) -> MacroPayloadStep {
         use verter_session_query::analysis::types::AnalyzedMacroKind;
+        self.graph().record_macro_payload_owner_read();
 
         // R6 / R20: the key is content-free. Re-source the owning
         // SFC's content version from the live indexed view at
@@ -21024,35 +21049,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::DepVersion::ProjectGeneration(project_gen),
         ));
 
-        // Fold BOTH metadata signals from the nested macro-payload reads:
-        // `cache_suppress` (inner-memo non-cacheability) and
-        // `result_is_partial` (budget/walker partial). A bare
-        // `read.value`-only extraction here would drop both via
-        // `QueryBuildOutput::from`'s default-false, letting a budget-tripped
-        // nested Instantiate's partial warm the component-meta result.
-        let mut nested_cache_suppress = false;
-        let mut nested_result_is_partial = false;
-        let result = match macro_kind {
+        let rooting = MacroPayloadRooting {
+            owner: owner.defining_canonical.clone(),
+            is_non_file_owner,
+            owner_whole_hash,
+            stale_real_file_owner,
+            type_args: Arc::clone(type_args),
+        };
+        let answered = |rooting, result, local_fence| {
+            MacroPayloadStep::Done(Box::new(self.macro_payload_output(
+                rooting,
+                local_fence,
+                result,
+                false,
+                false,
+            )))
+        };
+        let payload = match macro_kind {
             AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
                 // §3.2 sketch: 0 args → Miss; 1 arg → arg directly;
                 // ≥2 args → intersection-normalised result.
                 if type_args.is_empty() {
-                    QueryResult::Value(self.opaque(QueryError::Miss))
-                } else if type_args.len() == 1 {
-                    QueryResult::Value(type_args[0])
-                } else {
-                    let read = self.execute_read(SemanticQueryKey::reduce_intersection_operands(
-                        self.graph().store(),
-                        Arc::clone(type_args),
-                    ));
-                    crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
-                        &mut local_fence,
-                        &read.dep_signature,
-                    );
-                    nested_cache_suppress |= read.cache_suppress;
-                    nested_result_is_partial |= read.result_is_partial();
-                    read.value
+                    let miss = QueryResult::Value(self.opaque(QueryError::Miss));
+                    return answered(rooting, miss, local_fence);
                 }
+                if type_args.len() == 1 {
+                    return answered(rooting, QueryResult::Value(type_args[0]), local_fence);
+                }
+                SemanticQueryKey::reduce_intersection_operands(
+                    self.graph().store(),
+                    Arc::clone(type_args),
+                )
             }
             AnalyzedMacroKind::DefineEmits
             | AnalyzedMacroKind::DefineSlots
@@ -21086,49 +21113,105 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if owner_indexed.is_none() {
                             out.cache_suppress = true;
                         }
-                        return out;
+                        return MacroPayloadStep::Done(Box::new(out));
                     }
                 };
                 if snapshot.macros.get(macro_index).is_none() {
-                    return (
-                        QueryResult::Error(QueryError::Miss),
-                        fence_to_dep_signature(local_fence),
-                    )
-                        .into();
+                    return MacroPayloadStep::Done(Box::new(
+                        (
+                            QueryResult::Error(QueryError::Miss),
+                            fence_to_dep_signature(local_fence),
+                        )
+                            .into(),
+                    ));
                 }
                 if type_args.is_empty() {
-                    QueryResult::Value(self.opaque(QueryError::Miss))
-                } else {
-                    // Project the macro's first type argument through the
-                    // shared `ProjectPath` dispatcher in the caller's
-                    // mode. The consumer (component_meta extractor at
-                    // `verter_semantic/src/analysis/component_meta.rs:2449+`
-                    // for emits, the slot-bindings walker for slots, and
-                    // the model-name composer) walks the resulting
-                    // surface. Mode-aware so Navigate callers don't pay
-                    // for full member expansion.
-                    let read = self.execute_read(SemanticQueryKey::ProjectPath {
-                        base: type_args[0],
-                        path: verter_type_expr::OwnedSlice::from(
-                            Vec::<PathSegment>::new().into_boxed_slice(),
-                        ),
-                        context: crate::semantic_query::ProjectionReductionContext::published(mode),
-                    });
-                    local_fence.extend(read.dep_signature.iter().cloned());
-                    nested_cache_suppress |= read.cache_suppress;
-                    nested_result_is_partial |= read.result_is_partial();
-                    read.value
+                    let miss = QueryResult::Value(self.opaque(QueryError::Miss));
+                    return answered(rooting, miss, local_fence);
+                }
+                // Project the macro's first type argument through the
+                // shared `ProjectPath` dispatcher in the caller's
+                // mode. The consumer (component_meta extractor at
+                // `verter_semantic/src/analysis/component_meta.rs:2449+`
+                // for emits, the slot-bindings walker for slots, and
+                // the model-name composer) walks the resulting
+                // surface. Mode-aware so Navigate callers don't pay
+                // for full member expansion.
+                SemanticQueryKey::ProjectPath {
+                    base: type_args[0],
+                    path: verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
+                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
             AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {
-                if type_args.is_empty() {
+                let result = if type_args.is_empty() {
                     QueryResult::Value(self.opaque(QueryError::Miss))
                 } else {
                     QueryResult::Value(type_args[0])
-                }
+                };
+                return answered(rooting, result, local_fence);
             }
         };
+        MacroPayloadStep::Need(Box::new(MacroPayloadBuild {
+            rooting,
+            local_fence,
+            payload,
+        }))
+    }
 
+    /// The last stage of a macro payload's resolution: the payload
+    /// operation's read folded into what the first stage retained.
+    ///
+    /// Fold BOTH metadata signals from the nested macro-payload read:
+    /// `cache_suppress` (inner-memo non-cacheability) and
+    /// `result_is_partial` (budget/walker partial). A bare
+    /// `read.value`-only extraction here would drop both via
+    /// `QueryBuildOutput::from`'s default-false, letting a budget-tripped
+    /// nested read's partial warm the component-meta result.
+    pub(super) fn finish_resolve_macro_payload(
+        &self,
+        build: MacroPayloadBuild,
+        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let MacroPayloadBuild {
+            rooting,
+            mut local_fence,
+            ..
+        } = build;
+        crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
+            &mut local_fence,
+            &read.dep_signature,
+        );
+        let partial = read.result_is_partial();
+        self.macro_payload_output(
+            rooting,
+            local_fence,
+            read.value,
+            read.cache_suppress,
+            partial,
+        )
+    }
+
+    /// A macro payload's output: its value under the fence its stages
+    /// recorded, rooted on the owning file and on every file its type
+    /// arguments were lowered from, tainted by its payload operation's read.
+    fn macro_payload_output(
+        &self,
+        rooting: MacroPayloadRooting,
+        local_fence: Vec<crate::semantic_query::DepEntry>,
+        result: QueryResult<SemanticNodeId>,
+        nested_cache_suppress: bool,
+        nested_result_is_partial: bool,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let MacroPayloadRooting {
+            owner,
+            is_non_file_owner,
+            owner_whole_hash,
+            stale_real_file_owner,
+            type_args,
+        } = rooting;
         // Self-version rooting: the macro payload was resolved from the
         // owning SFC's macro analysis at the re-sourced `owner_whole_hash`
         // AND from the `type_args` nodes — every arm derives its value
@@ -21157,7 +21240,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if is_non_file_owner {
                 Vec::new()
             } else {
-                vec![(owner.defining_canonical.clone(), owner_whole_hash)]
+                vec![(owner, owner_whole_hash)]
             };
         for arg_root in self.observed_self_roots_from_nodes(type_args.iter().copied()) {
             if !observed_self_roots
@@ -22137,6 +22220,42 @@ pub(super) enum InstantiateStart {
     Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>),
     /// Its body is being lowered.
     Build(Box<InstantiateBuild>),
+}
+
+/// Where a macro payload's resolution stands after its first stage
+/// ([`ProjectSemanticDispatch::begin_resolve_macro_payload`]).
+pub(super) enum MacroPayloadStep {
+    /// The payload is answered.
+    Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>),
+    /// The payload is read from its payload operation.
+    Need(Box<MacroPayloadBuild>),
+}
+
+/// A macro payload's resolution while its payload operation is read: what
+/// its first stage read of the owning file and the fence it seeded, kept so
+/// the operation's read finishes the resolution without reading the owner
+/// again ([`ProjectSemanticDispatch::finish_resolve_macro_payload`]).
+pub(super) struct MacroPayloadBuild {
+    rooting: MacroPayloadRooting,
+    local_fence: Vec<crate::semantic_query::DepEntry>,
+    payload: SemanticQueryKey,
+}
+
+impl MacroPayloadBuild {
+    /// The payload operation the value is read from.
+    pub(super) fn payload(&self) -> &SemanticQueryKey {
+        &self.payload
+    }
+}
+
+/// What a macro payload's output is rooted on: the owning file at the
+/// content version its first stage observed, and its type arguments.
+struct MacroPayloadRooting {
+    owner: OwnedStr,
+    is_non_file_owner: bool,
+    owner_whole_hash: crate::semantic_query::HashValue,
+    stale_real_file_owner: bool,
+    type_args: Arc<[SemanticNodeId]>,
 }
 
 /// Where an instantiation's build stands after it ran as far as it could.

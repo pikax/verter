@@ -224,6 +224,13 @@ impl<M: ObserveExec> GraphIn<'_, M> {
     }
     /// Record optional telemetry for this execution.
     #[inline(always)]
+    pub fn record_macro_payload_owner_read(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_macro_payload_owner_read();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
     pub fn record_conditional_decided(self) {
         if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
             self.store.record_conditional_decided();

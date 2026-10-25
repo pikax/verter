@@ -2439,6 +2439,179 @@ mod semantic_poll_contract {
         drop(tasks);
     }
 
+    /// `defineProps` over two type arguments, owned by the chain's file, and
+    /// the payload operation its value is read from: the intersection of its
+    /// arguments.
+    fn props_payload_keys(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let graph = dispatch.graph_arc();
+        let args: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> = Arc::from([
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+        ]);
+        let payload = SemanticQueryKey::ResolveMacroPayload {
+            owner: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::<str>::from(TASK_FILE),
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                Arc::<str>::from("<sfc-script-setup>"),
+            ),
+            macro_index: 0,
+            macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
+            type_args: Arc::clone(&args),
+            context: verter_type_engine::semantic_query::MacroPayloadContext::new(
+                Default::default(),
+                ProjectionMode::Expanded,
+            ),
+        };
+        let intersection = SemanticQueryKey::reduce_intersection_operands(graph, args);
+        (payload, intersection)
+    }
+
+    /// The first stages of macro payload resolutions `host` ran.
+    fn macro_payload_owner_reads(host: &crate::VerterHost) -> u64 {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .macro_payload_owner_reads
+    }
+
+    /// A macro payload — the metadata root's own query — whose payload
+    /// operation another task is producing returns `Pending` with its first
+    /// stage retained instead of waiting that producer out, and its `Send`
+    /// task stays pending on another thread while the producer holds. Once
+    /// the producer goes away the payload finishes from what its first stage
+    /// kept, reading its owner once, and delivers exactly what the
+    /// synchronous entry reads on a fresh host: answer, fact status,
+    /// diagnostics and receipt, logical work included. Warm, the polled and
+    /// synchronous entries answer alike without running a stage.
+    #[test]
+    fn a_macro_payload_waiting_on_its_payload_operation_yields_and_finishes_from_its_retained_stage(
+    ) {
+        let synchronous = {
+            let host = chain_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (payload, _) = props_payload_keys(&dispatch);
+            let read = dispatch.execute_via_cold_build_helper(payload);
+            assert_eq!(macro_payload_owner_reads(&host), 1);
+            read_summary(&dispatch, &read)
+        };
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "the payload is complete and priced: {synchronous:?}"
+        );
+
+        let host = chain_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (payload, intersection) = props_payload_keys(&dispatch);
+        let (other, lease) = hold_producer(&host, graph, intersection);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut entry = dispatch.poll_query(payload.clone());
+        let (first, frames, elsewhere) = while_held(lease, || {
+            let first = entry.poll(&waker).is_pending();
+            let task = entry.task();
+            let frames = task.as_ref().map(|task| task.live_frames_for_tests());
+            let elsewhere = task.map(|task| {
+                assert_send(task);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| task.poll(&waker).is_pending())
+                        .join()
+                        .expect("the pending poll returns")
+                })
+            });
+            (first, frames, elsewhere)
+        });
+        assert!(
+            first,
+            "the payload yields while another task produces its intersection"
+        );
+        assert_eq!(frames, Some(1), "the payload's own frame waits");
+        assert_eq!(
+            elsewhere,
+            Some(true),
+            "its task stays pending on another thread while the producer holds"
+        );
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the root"
+        );
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken payload produces its intersection itself"),
+        };
+        drop(entry);
+        assert_eq!(
+            macro_payload_owner_reads(&host),
+            1,
+            "the owner stage is never run again"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+
+        let mut warm = dispatch.poll_query(payload.clone());
+        let Poll::Ready(warm_read) = warm.poll(&waker) else {
+            panic!("a warm payload answers on its first poll");
+        };
+        drop(warm);
+        let warm_sync = dispatch.execute_via_cold_build_helper(payload);
+        assert_eq!(
+            read_summary(&dispatch, &warm_read),
+            read_summary(&dispatch, &warm_sync)
+        );
+        assert_eq!(
+            macro_payload_owner_reads(&host),
+            1,
+            "a warm payload runs no stage"
+        );
+        drop(other);
+    }
+
+    /// A macro payload released while it waits on its payload operation
+    /// withdraws its wait and releases its frame, leaving only the other
+    /// producer's flight; the request then answers the payload.
+    #[test]
+    fn a_macro_payload_released_while_it_waits_leaves_nothing_open() {
+        let host = chain_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (payload, intersection) = props_payload_keys(&dispatch);
+        let (other, lease) = hold_producer(&host, graph, intersection.clone());
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let mut entry = dispatch.poll_query(payload.clone());
+        let (first, released) = while_held(lease, || {
+            let first = entry.poll(&waker).is_pending();
+            drop(entry);
+            (
+                first,
+                (
+                    graph.wait_graph_counts_for_tests().1,
+                    graph.resident_flight_keys_for_tests(),
+                ),
+            )
+        });
+        assert!(first, "the payload yields while its intersection is held");
+        assert_eq!(
+            released,
+            (0, vec![intersection]),
+            "the released payload withdraws its wait and leaves only the other producer's flight"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(payload);
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Value(SemanticQueryValue::TypeNode(_))
+            ),
+            "the request goes on: {read:?}"
+        );
+    }
+
     /// A call root uses the same owned candidate walk as a nested call. A
     /// parameter's held alias must yield before the relation consumes it.
     #[test]

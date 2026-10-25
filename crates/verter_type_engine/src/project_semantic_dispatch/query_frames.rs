@@ -61,7 +61,10 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::build::{InstantiateBuild, InstantiatePoll, InstantiateStart, TypeofBuild, TypeofStart};
+use super::build::{
+    InstantiateBuild, InstantiatePoll, InstantiateStart, MacroPayloadBuild, MacroPayloadStep,
+    TypeofBuild, TypeofStart,
+};
 use super::cost_receipt::Nesting;
 use super::{BuildLocalTaint, CarrierNormalizationPrelude, ProjectSemanticDispatch};
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
@@ -144,13 +147,15 @@ pub(super) enum QueryFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities
 
 /// The build a frame carries between its steps: an instantiation's, a
 /// `typeof`'s whose value's annotation is lowering, a conditional type's
-/// decision, a call's resolution, or a function's flow return.
+/// decision, a call's resolution, a function's flow return, or a macro
+/// payload's resolution waiting on its payload operation.
 pub(super) enum FrameBuild {
     Instantiate(Box<InstantiateBuild>),
     Typeof(Box<TypeofBuild>),
     Conditional(Box<ConditionalBuild>),
     Call(Box<CallBuild>),
     Flow(Box<FlowBuild>),
+    MacroPayload(Box<MacroPayloadBuild>),
 }
 
 /// A function's flow return between its steps: the answers to the reads
@@ -1815,9 +1820,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_same_path_claim_at(key, self.checking_site.get())
     }
 
+    /// Whether a build's dependency read of `key` can be its frame's need:
+    /// a key the synchronous entry admits as it is. An entry that first
+    /// normalizes its subject — a carrier, a scope-less subject read through
+    /// its apparent wrapper or its apparent signatures — or canonicalizes
+    /// the key itself keeps the prelude that entry records, which a frame's
+    /// need does not carry; such a read is made where the synchronous build
+    /// makes it.
+    pub(super) fn reads_as_frame_need(&self, key: &SemanticQueryKey) -> bool {
+        !matches!(
+            key,
+            SemanticQueryKey::Relate { .. }
+                | SemanticQueryKey::ProjectMember { .. }
+                | SemanticQueryKey::IndexedAccess { .. }
+                | SemanticQueryKey::ReduceUnion { .. }
+        ) && !self.key_subject_is_carrier(key)
+            && !self.key_reads_apparent_wrapper(key)
+            && !self.key_reads_apparent_signatures(key)
+    }
+
     /// Whether `key` runs on the continuation runtime when it is evaluated
-    /// outside any drive: an instantiation or a `typeof` read for its value
-    /// alone, or a conditional/call evaluated as a machinery root. A `typeof`
+    /// outside any drive: an instantiation, a `typeof` or a macro payload
+    /// read for its value alone, or a conditional/call evaluated as a
+    /// machinery root. A `typeof`
     /// whose value's type lowers from its authored value
     /// position (its annotation, its inferred initializer, its const-object
     /// shape) builds as a frame, so a chain of values each typed by the one
@@ -1825,7 +1850,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// frame's first step.
     pub(super) fn drives_on_the_runtime(&self, key: &SemanticQueryKey) -> bool {
         let family = match key {
-            SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. } => true,
+            SemanticQueryKey::Instantiate(_)
+            | SemanticQueryKey::TypeOf { .. }
+            | SemanticQueryKey::ResolveMacroPayload { .. } => true,
             SemanticQueryKey::Conditional { .. } | SemanticQueryKey::ResolveCall(_) => {
                 self.dispatch_txn.borrow().obligations.decides_root()
             }
@@ -2475,6 +2502,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(FrameBuild::Flow(build)) => {
                 self.drain_flow(&frame.key, build, delivery, frame.depth + 1)
             }
+            // A macro payload finishes with its payload operation's read and
+            // what its first stage retained; the owner is not read again.
+            Some(FrameBuild::MacroPayload(_)) => {
+                let Some(FrameBuild::MacroPayload(build)) = frame.build.take() else {
+                    unreachable!("the build was just matched")
+                };
+                let delivery =
+                    delivery.expect("a macro payload resumes with its payload operation's read");
+                let read =
+                    super::narrow_value_cache_read(self.read_frame_delivery(FrameDelivery {
+                        delivery,
+                        depth: frame.depth + 1,
+                    }));
+                InstantiatePoll::Done(Box::new(self.finish_resolve_macro_payload(*build, read)))
+                    .into()
+            }
             None => {
                 self.open_cold_build(None);
                 // A frame produces its key as a synchronous build does.
@@ -2573,6 +2616,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         };
                         self.drain_flow(&frame.key, build, None, frame.depth + 1)
                     }
+                    // A macro payload reads its owner, then needs the payload
+                    // operation its value is read from, holding what it read.
+                    SemanticQueryKey::ResolveMacroPayload {
+                        owner,
+                        macro_index,
+                        macro_kind,
+                        type_args,
+                        context,
+                    } => match self.cold_build_budget_refusal(&frame.key) {
+                        Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
+                        None => match self.begin_resolve_macro_payload(
+                            owner,
+                            *macro_index,
+                            *macro_kind,
+                            type_args,
+                            context.mode,
+                        ) {
+                            MacroPayloadStep::Done(output) => InstantiatePoll::Done(output).into(),
+                            MacroPayloadStep::Need(build)
+                                if self.reads_as_frame_need(build.payload()) =>
+                            {
+                                let need = build.payload().clone();
+                                frame.build = Some(FrameBuild::MacroPayload(build));
+                                FramePoll::Need(need)
+                            }
+                            // A payload whose entry normalizes its subject first
+                            // is read where the synchronous build reads it.
+                            MacroPayloadStep::Need(build) => {
+                                let read = self.execute_read(build.payload().clone());
+                                InstantiatePoll::Done(Box::new(
+                                    self.finish_resolve_macro_payload(*build, read),
+                                ))
+                                .into()
+                            }
+                        },
+                    },
                     // A dependency of a family without frames of its own: a
                     // read a decision or flow evaluation joined at its seam
                     // whose producer went away before the join answered.
