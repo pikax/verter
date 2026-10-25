@@ -271,7 +271,7 @@ export function probeLoaderForPlatform(
     // the guard here to throw ENOENT for those paths too so the simulation
     // stays hermetic; do NOT let any new path fall through to the real host
     // fs, or the test outcome would again depend on the runner.
-    if (id === "node:fs") {
+    if (id === "fs" || id === "node:fs") {
       const guardedReadFileSync = ((path: string, ...rest: unknown[]): unknown => {
         if (typeof path === "string" && (path.includes("/ldd") || path.includes("ld-musl"))) {
           const err = new Error(`probe: refusing host fs read of ${path}`) as NodeJS.ErrnoException;
