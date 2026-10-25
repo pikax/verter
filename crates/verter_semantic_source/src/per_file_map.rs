@@ -1,5 +1,7 @@
 //! Concurrent, self-charged maps owned by one file's artifacts.
 //! Shards allocate on first write; each entry carries its payload pin.
+//! Keys hash deterministically, so equal contents occupy equal shards and
+//! two maps holding the same entries charge the same bucket storage.
 use dashmap::DashMap;
 use std::borrow::Borrow;
 use std::hash::Hash;
@@ -11,6 +13,7 @@ use verter_retention::heap_size::{hash_table_bytes, HeapMeter, HeapSize};
 use verter_retention::pinned_heap::{PinContext, PinnedHeap};
 
 const PER_FILE_MAP_SHARDS: usize = 4;
+type Table<K, V> = DashMap<K, Value<V>, rustc_hash::FxBuildHasher>;
 struct Value<V> {
     value: V,
     _key_pin: PinnedHeap,
@@ -18,7 +21,7 @@ struct Value<V> {
 }
 
 pub struct PerFileMap<K, V> {
-    map: OnceLock<DashMap<K, Value<V>>>,
+    map: OnceLock<Table<K, V>>,
     backing: parking_lot::Mutex<(GranularPin, [usize; PER_FILE_MAP_SHARDS])>,
 }
 impl<K, V> Default for PerFileMap<K, V> {
@@ -60,9 +63,12 @@ impl<K, V> HeapSize for PerFileMap<K, V> {
     }
 }
 impl<K: Eq + Hash, V> PerFileMap<K, V> {
-    fn written(&self) -> &DashMap<K, Value<V>> {
+    fn written(&self) -> &Table<K, V> {
         self.map.get_or_init(|| {
-            let map = DashMap::with_shard_amount(PER_FILE_MAP_SHARDS);
+            let map = DashMap::with_hasher_and_shard_amount(
+                rustc_hash::FxBuildHasher,
+                PER_FILE_MAP_SHARDS,
+            );
             self.backing
                 .lock()
                 .0
@@ -113,7 +119,7 @@ impl<K: Eq + Hash, V> PerFileMap<K, V> {
         Some((key, value.value))
     }
     pub fn len(&self) -> usize {
-        self.map.get().map_or(0, DashMap::len)
+        self.map.get().map_or(0, Table::len)
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0

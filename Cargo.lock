@@ -3463,7 +3463,6 @@ dependencies = [
  "smallvec",
  "verter_audit",
  "verter_debug_assert",
- "verter_retention",
  "verter_span",
 ]
 

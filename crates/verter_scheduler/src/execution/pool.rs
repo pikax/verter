@@ -59,6 +59,56 @@ use crossbeam_channel::{bounded, Sender, TrySendError};
 #[cfg(not(target_arch = "wasm32"))]
 pub type SchedulerPoolTask = Box<dyn FnOnce() + Send + 'static>;
 
+/// Stage tasks one scheduler handed to its pools that have not finished,
+/// counting a task as finished only once everything its closure captured
+/// (the file node, its snapshots) is dropped. A task's waiter is woken
+/// before the task returns, so a caller measuring what the scheduler still
+/// retains waits here for those captures to go.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub(crate) struct StageTasksInFlight {
+    count: parking_lot::Mutex<usize>,
+    finished: parking_lot::Condvar,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StageTasksInFlight {
+    /// `task`, counted in flight until it has run (or been dropped unrun)
+    /// and its captures are gone.
+    pub(crate) fn track(self: &std::sync::Arc<Self>, task: SchedulerPoolTask) -> SchedulerPoolTask {
+        *self.count.lock() += 1;
+        let finished = StageTaskFinished(std::sync::Arc::clone(self));
+        Box::new(move || {
+            // Declared first, dropped last: after `task` consumed and
+            // dropped its captures.
+            let _finished = finished;
+            task();
+        })
+    }
+
+    /// Block until every tracked task has finished.
+    pub(crate) fn wait(&self) {
+        let mut count = self.count.lock();
+        while *count > 0 {
+            self.finished.wait(&mut count);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct StageTaskFinished(std::sync::Arc<StageTasksInFlight>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for StageTaskFinished {
+    fn drop(&mut self) {
+        let mut count = self.0.count.lock();
+        *count -= 1;
+        if *count == 0 {
+            self.0.finished.notify_all();
+        }
+    }
+}
+
 /// Successful outcome of [`SchedulerCpuPool::try_submit`] /
 /// [`SchedulerIoPool::try_submit`]: the task was enqueued onto the pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

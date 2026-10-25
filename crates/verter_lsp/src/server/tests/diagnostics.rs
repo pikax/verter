@@ -1755,17 +1755,20 @@ async fn subscribed_store_fill_demand_scans_and_pings_the_editor_owned_client() 
     .expect("the server announces readiness");
 
     // No inventory request is issued anywhere in this test: the negotiated
-    // subscription alone must fill the store.
+    // subscription alone must fill the store. The store's first head is an
+    // empty generation, so wait for the scan's own publication.
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
-            if carrier_manifest_strict(&workspace_root).is_some() {
+            if carrier_manifest_strict(&workspace_root)
+                .is_some_and(|manifest| manifest.projects.contains_key(&tsconfig))
+            {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the subscribed store-fill demand must run the inventory scan");
+    .expect("the subscribed store-fill demand must publish the configured project's carriers");
     let manifest = carrier_manifest_strict(&workspace_root).unwrap();
     assert!(
         manifest

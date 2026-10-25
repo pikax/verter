@@ -88,7 +88,9 @@ impl std::ops::DerefMut for ShallowFileState {
 }
 
 impl ShallowFileState {
-    pub(crate) fn pin_storage(&self) {
+    /// Seal this state's own storage charge (idempotent until a mutation
+    /// through `DerefMut` invalidates it).
+    pub(crate) fn seal_storage(&self) {
         self.storage.ensure(
             self,
             verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
@@ -127,7 +129,7 @@ impl verter_retention::heap_size::HeapSize for ShallowFileState {
             + synthesised_value_bodies.heap_size(meter)
     }
     fn pin_storage(&self, _context: &verter_retention::pinned_heap::PinContext) -> bool {
-        self.pin_storage();
+        self.seal_storage();
         true
     }
 }
@@ -693,7 +695,7 @@ impl ShallowFileState {
     /// the one the memo serves forever, which is why assembly never
     /// installs early.)
     fn install_shallow_lens_from_final_state(&self) {
-        self.pin_storage();
+        self.seal_storage();
         self.decl_bodies
             .install_shallow_lens(Arc::new(crate::fact_emission::build_shallow_lens(self)));
         self.decl_bodies
@@ -1221,7 +1223,7 @@ impl ShallowFileState {
                 owner,
                 symbol_name: name.to_string(),
             });
-        self.pin_storage();
+        self.seal_storage();
     }
 
     // -----------------------------------------------------------------------

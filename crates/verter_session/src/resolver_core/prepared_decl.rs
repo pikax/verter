@@ -1644,7 +1644,7 @@ pub fn build_prepared_decl_bundle(
     interner: &Arc<IdentityInterner>,
 ) -> PreparedDeclBundle {
     verter_audit::attribute_scope!(PreparedDeclBuild);
-    state.pin_storage();
+    state.seal_storage();
     let dep_edges = DepEdges::new(dep_edges);
     let import_canonicalization = Arc::new(import_canonicalization);
 

@@ -77,6 +77,12 @@ impl PinContext {
     pub fn account(&self) -> &Arc<SemanticRetentionAccount> {
         self.account.get()
     }
+
+    /// Give back the shared-allocation registry's table capacity that
+    /// released owners left behind. See [`AliasCharges::reclaim_table`].
+    pub fn reclaim_shared_storage(&self) {
+        self.aliases.reclaim_table();
+    }
 }
 
 pub(crate) struct Collector {
@@ -125,8 +131,16 @@ impl PinnedHeap {
 /// A charge embedded in a mutable assembly and sealed at publication.
 /// Cloning an assembly creates new backing, so its charge is measured again
 /// when that assembly is published. Shared child allocations stay shared.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct StoragePin(parking_lot::Mutex<Option<PinnedHeap>>);
+
+/// Storage is accounting, not content: a record's `Debug` stays the same
+/// whatever the account holds while it is printed.
+impl std::fmt::Debug for StoragePin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StoragePin")
+    }
+}
 
 impl Clone for StoragePin {
     fn clone(&self) -> Self {

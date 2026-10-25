@@ -97,17 +97,49 @@ pub(super) fn chain_entry<K: Hash + Eq + HeapSize, A: Array>(
 /// DashMap removals retain bucket capacity. Only a growing shard needs
 /// settlement, after its entry guard drops. Never scan other shards: a
 /// publication callback can legitimately hold one of their write guards.
+///
+/// The table's fixed shell (its shard array and this record's capacity
+/// slice) is charged together with its buckets, while any shard holds
+/// bucket storage: an empty table — a fresh or fully reclaimed store —
+/// keeps nothing charged, as the shared-allocation registry's table does.
 pub(super) struct TableStorage {
-    state: parking_lot::Mutex<(GranularPin, Box<[usize]>)>,
+    state: parking_lot::Mutex<TableCharge>,
+}
+
+struct TableCharge {
+    backing: GranularPin,
+    capacities: Box<[usize]>,
+    shell: usize,
+    buckets: usize,
+}
+
+impl TableCharge {
+    fn set_shard(&mut self, shard: usize, bytes: usize) {
+        self.buckets = self.buckets - self.capacities[shard] + bytes;
+        self.capacities[shard] = bytes;
+        let target = if self.buckets == 0 {
+            0
+        } else {
+            self.buckets + self.shell
+        };
+        let used = self.backing.used();
+        if target > used {
+            self.backing.add(target - used);
+        } else {
+            self.backing.sub(used - target);
+        }
+    }
 }
 
 impl Default for TableStorage {
     fn default() -> Self {
         Self {
-            state: parking_lot::Mutex::new((
-                GranularPin::new(PinContext::default().account(), 1024),
-                Box::new([]),
-            )),
+            state: parking_lot::Mutex::new(TableCharge {
+                backing: GranularPin::new(PinContext::default().account(), 1024),
+                capacities: Box::new([]),
+                shell: 0,
+                buckets: 0,
+            }),
         }
     }
 }
@@ -116,26 +148,49 @@ impl TableStorage {
     pub fn initialize<K: Hash + Eq, V>(&self, map: &DashMap<K, V>) {
         let mut state = self.state.lock();
         let capacities = vec![0; map.shards().len()].into_boxed_slice();
-        state.0.add(
-            heap_block_bytes(std::mem::size_of_val(map.shards()))
-                + heap_block_bytes(std::mem::size_of_val(&*capacities)),
-        );
-        state.1 = capacities;
+        state.shell = heap_block_bytes(std::mem::size_of_val(map.shards()))
+            + heap_block_bytes(std::mem::size_of_val(&*capacities));
+        state.capacities = capacities;
     }
 
     pub fn settle<K: Hash + Eq, V>(&self, map: &DashMap<K, V>, key: &K) {
-        let shard = map.determine_map(key);
+        self.settle_shard(map, map.determine_map(key));
+    }
+
+    fn settle_shard<K: Hash + Eq, V>(&self, map: &DashMap<K, V>, shard: usize) {
         // Release the shard before taking accounting's lock. A slower
         // settler may observe an older capacity, so only advance its maximum.
-        let bytes = hash_table_bytes(
-            map.shards()[shard].read().capacity(),
-            std::mem::size_of::<(K, V)>(),
-        );
+        let bytes = shard_bytes(map, shard);
         let mut state = self.state.lock();
-        let old = state.1[shard];
-        if bytes > old {
-            state.0.add(bytes - old);
-            state.1[shard] = bytes;
+        if bytes > state.capacities[shard] {
+            state.set_shard(shard, bytes);
         }
     }
+
+    /// Give back the bucket capacity a drained table no longer needs and
+    /// lower every shard's charge to what it still holds. Called only at a
+    /// release boundary, never with an entry guard of `map` held.
+    pub fn reclaim<K: Hash + Eq, V>(&self, map: &DashMap<K, V>) {
+        map.shrink_to_fit();
+        for shard in 0..map.shards().len() {
+            let bytes = shard_bytes(map, shard);
+            {
+                let mut state = self.state.lock();
+                if bytes < state.capacities[shard] {
+                    state.set_shard(shard, bytes);
+                }
+                state.backing.release_slack();
+            }
+            // A growth settled between the read above and the lowering is
+            // re-advanced here; a later growth settles itself.
+            self.settle_shard(map, shard);
+        }
+    }
+}
+
+fn shard_bytes<K: Hash + Eq, V>(map: &DashMap<K, V>, shard: usize) -> usize {
+    hash_table_bytes(
+        map.shards()[shard].read().capacity(),
+        std::mem::size_of::<(K, V)>(),
+    )
 }

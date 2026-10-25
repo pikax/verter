@@ -1592,6 +1592,19 @@ impl FileArtifactStore {
         reclaimed
     }
 
+    /// Give back the table capacity removals and reclaimed versions left
+    /// behind, lowering each table's backing charge to what it still holds.
+    /// For release boundaries (host close, a release-completion boundary):
+    /// a live store regrows what it needs on its next publication.
+    pub fn reclaim_table_storage(&self) {
+        let _sweep = self.reclaim_sweep.lock();
+        self.table_storage[0].reclaim(&self.artifacts);
+        self.table_storage[1].reclaim(&self.canonical_keys);
+        self.table_storage[2].reclaim(&self.retired_artifacts);
+        self.table_storage[3].reclaim(&self.retired_augmenters);
+        self.table_storage[4].reclaim(&self.augmentation_index);
+    }
+
     /// Reclaim what a released root kept reachable.
     ///
     /// The amortised sweep runs while edits retire versions, and a store
@@ -3233,6 +3246,12 @@ impl FileArtifactStore {
         // invalidates the augmentation index the removed augmenters
         // contributed to.
         let removed_pairs = self.retire_artifact_keys(&to_remove);
+        // Rows the artifact facts did not cover (a target's published
+        // absence of augmenters) describe a world with no artifacts left:
+        // retire them too, so the reset is total.
+        if !self.augmentation_index.is_empty() {
+            self.clear_augmentation_index();
+        }
         let removed = removed_pairs.len();
         if removed > 0 {
             self.live_counter
@@ -3276,6 +3295,12 @@ impl FileArtifactStore {
             .map(|entry| entry.key().clone())
             .collect();
         let removed_pairs = self.retire_artifact_keys(&to_remove);
+        // Rows the artifact facts did not cover (a target's published
+        // absence of augmenters) describe a world with no artifacts left:
+        // retire them too, so the reset is total.
+        if !self.augmentation_index.is_empty() {
+            self.clear_augmentation_index();
+        }
         let removed = removed_pairs.len();
         if removed > 0 {
             self.live_counter

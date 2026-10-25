@@ -397,20 +397,18 @@ impl StaticClassFact {
     }
 }
 
-#[derive(verter_retention::heap_size::HeapSize)]
-struct StyleSyntaxIrData {
+/// The one shared allocation holding a parsed stylesheet: every clone of a
+/// [`StyleSyntaxIr`] names it. Opaque; it describes its storage to an
+/// owning accounting layer ([`Self::source_text`],
+/// [`Self::exclusive_allocations`]) without this crate depending on one.
+pub struct StyleSyntaxIrStorage {
     source: CssSource,
-    #[heap_size(inline)]
     dialect: CssDialect,
-    // Storage is owned and measured by `_bump`, including unused capacity.
-    #[heap_size(inline)]
     statements: BumpSlice<StyleStatement>,
-    #[heap_size(with = "inline_vec_heap")]
     diagnostics: Vec<CssDiagnostic>,
     /// Every stylesheet this one pulls in, in ascending source order. Minted
     /// by the parse that already had to recognise the at-rule; nothing
     /// downstream re-derives inclusion structure from bytes.
-    #[heap_size(with = "inline_vec_heap")]
     dependencies: Vec<StyleDependency>,
     /// Every `/* … */` / line-comment span the tokenizer visited while
     /// parsing this stylesheet, in ascending source order (comments cannot
@@ -419,14 +417,12 @@ struct StyleSyntaxIrData {
     /// construction). Retained so a consumer can find comment boundaries
     /// within a byte range through [`StyleSyntaxIr::comment_spans_in`] instead of
     /// re-lexing the source for comment/string state itself.
-    #[heap_size(with = "inline_vec_heap")]
     comment_spans: Vec<Span>,
     /// The span of a `<!--` CDO token that was never paired with a later
     /// `-->` CDC token in this stylesheet. CSS Syntax Module ignores CDO/CDC
     /// as trivia; Svelte's `read/style.js` treats `<!-- … -->` as a required
     /// paired HTML comment. Minted from the parse's own token stream so the
     /// Svelte reject projection does not re-scan source for the pairing.
-    #[heap_size(inline)]
     unpaired_cdo_span: Option<Span>,
     /// Frozen last so the bump outlives every bump-backed child on drop.
     /// A live [`Bump`] cannot inhabit this struct: freeze is the type-state.
@@ -434,21 +430,42 @@ struct StyleSyntaxIrData {
 }
 
 /// Parsed stylesheet. `Clone` is an `Arc` clone and keeps bump-backed nodes valid.
-#[derive(Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Clone)]
 pub struct StyleSyntaxIr {
-    data: Arc<StyleSyntaxIrData>,
+    data: Arc<StyleSyntaxIrStorage>,
 }
 
-// These records retain only inline fields; the Copy bound makes changing
-// one to own a String, Vec, Box, or Arc require revisiting its measurement.
-fn inline_vec_heap<'t, T: Copy>(
-    values: &'t Vec<T>,
-    _meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-) -> usize {
-    verter_retention::allocation::heap_block_bytes(values.capacity() * std::mem::size_of::<T>())
+impl StyleSyntaxIrStorage {
+    /// The source text, an allocation other holders may share.
+    pub fn source_text(&self) -> &Arc<str> {
+        self.source.shared_text()
+    }
+
+    /// Payload bytes of each allocation the parse owns exclusively beyond
+    /// its shared block and its source text: the frozen arena (every chunk
+    /// with spare capacity and chunk metadata), then the capacities of the
+    /// diagnostic, dependency and comment lists. An entry of `0` is no
+    /// allocation. The listed records hold only inline fields.
+    pub fn exclusive_allocations(&self) -> [usize; 4] {
+        fn list<T: Copy>(values: &Vec<T>) -> usize {
+            values.capacity() * std::mem::size_of::<T>()
+        }
+        [
+            self._bump.reserved_bytes(),
+            list(&self.diagnostics),
+            list(&self.dependencies),
+            list(&self.comment_spans),
+        ]
+    }
 }
 
 impl StyleSyntaxIr {
+    /// The shared allocation holding this parse, for an owning layer that
+    /// accounts retained storage.
+    pub fn storage(&self) -> &Arc<StyleSyntaxIrStorage> {
+        &self.data
+    }
+
     pub fn source(&self) -> &CssSource {
         &self.data.source
     }
@@ -581,7 +598,7 @@ impl StyleSyntaxIr {
     /// order — a binary-search slice of the parse-time comment inventory, never a
     /// re-lex of `range`'s bytes.
     /// The span of an unpaired `<!--` CDO token, if the parse saw one.
-    /// See [`StyleSyntaxIrData::unpaired_cdo_span`] field doc.
+    /// See [`StyleSyntaxIrStorage::unpaired_cdo_span`] field doc.
     #[must_use]
     pub fn unpaired_cdo_span(&self) -> Option<Span> {
         self.data.unpaired_cdo_span
@@ -1385,7 +1402,7 @@ pub(crate) fn notify_parse_phase(_phase: &'static str) {}
 
 fn ir_from_frozen(bump: Bump, frozen: FrozenStyleIr) -> StyleSyntaxIr {
     StyleSyntaxIr {
-        data: Arc::new(StyleSyntaxIrData {
+        data: Arc::new(StyleSyntaxIrStorage {
             source: frozen.source,
             dialect: frozen.dialect,
             statements: frozen.statements,

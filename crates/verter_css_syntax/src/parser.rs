@@ -71,10 +71,9 @@ impl SourceSize {
     }
 }
 
-#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone)]
 pub struct CssSource {
     text: Arc<str>,
-    #[heap_size(inline)]
     size: SourceSize,
 }
 
@@ -86,6 +85,13 @@ impl CssSource {
 
     #[inline]
     pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The source text's allocation, which other holders of the same text
+    /// may share.
+    #[inline]
+    pub fn shared_text(&self) -> &Arc<str> {
         &self.text
     }
 
