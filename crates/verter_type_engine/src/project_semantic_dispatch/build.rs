@@ -14967,6 +14967,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
             Some(
                 SemanticNodeData::TypeParam { .. }
+                // An `infer` type variable is a type variable as a type
+                // parameter is: its keys are the deferred `keyof V` until
+                // the conditional binds it.
+                | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::IndexedAccess { .. }
                 | SemanticNodeData::TypeOf(_)
                 | SemanticNodeData::TypeOfNominal(_)

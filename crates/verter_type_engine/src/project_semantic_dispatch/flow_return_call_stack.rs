@@ -1200,7 +1200,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
             return None;
         }
-        let signature = self.contextual_signature(contextual)?;
+        let signature = self.contextual_signature(contextual, &expr)?;
         let request = self.function_argument_request(&expr, Some(signature))?;
         Some((position, Some(request)))
     }

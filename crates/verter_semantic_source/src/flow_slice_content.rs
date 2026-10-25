@@ -1159,6 +1159,19 @@ pub(crate) fn build_flow_slice_content(
             }),
         _ => None,
     };
+    // The checker's `getExplicitThisType`: an authored `this` parameter, or
+    // a class's member (a nested function's context says which it is).
+    let explicit_this = declared_this.is_some()
+        || match context {
+            Some(context) => context.this_is_explicit(),
+            None => matches!(
+                resolved.enclosing_this,
+                Some(
+                    verter_semantic::analysis::function_program::EnclosingThis::Instance
+                        | verter_semantic::analysis::function_program::EnclosingThis::Static
+                )
+            ),
+        };
     let this = declared_this.as_ref().map(|_| SliceThis::Explicit).or_else(|| match context {
         Some(context) => context.this().cloned(),
         None if untyped_declaration_this => Some(SliceThis::Untyped),
@@ -1211,7 +1224,9 @@ pub(crate) fn build_flow_slice_content(
         self_name: self_name.as_deref(),
         enclosing_heritage: resolved.enclosing_heritage,
         this,
+        explicit_this,
         member_this: None,
+        member_this_explicit: false,
         skeleton,
         captures,
         control: Arc::clone(entry.control()),
@@ -4156,9 +4171,15 @@ struct Lowerer<'a> {
     /// A class expression's instance initializers read the class's own
     /// receiver while they lower.
     this: Option<SliceThis>,
+    /// Whether this frame's `this` has an explicit type
+    /// ([`NestedFlowContext::with_explicit_this`]).
+    explicit_this: bool,
     /// The `this` the NEXT nested function lowered takes in place of the
     /// one its kind implies: a class expression's member function.
     member_this: Option<Option<SliceThis>>,
+    /// Whether [`Self::member_this`] is a class member's, whose `this` has
+    /// an explicit type.
+    member_this_explicit: bool,
     /// This frame's shared structural skeleton. Runtime references use the
     /// prepared map's exact occurrence records; type-position visibility
     /// queries use the skeleton's separate lexical meaning rules.
@@ -9259,7 +9280,8 @@ impl<'a> Lowerer<'a> {
     /// call neither asserts nor ends the path. A dotted name rooted at an
     /// annotated parameter or local reads its declared member type, and one
     /// rooted at a module binding, a global or a nested function
-    /// declaration its value — both settled by the evaluator. A `this` or
+    /// declaration its value — both settled by the evaluator. A `this`
+    /// root without an explicit type is inert; one with an explicit type, a
     /// `super` root, a free closed declaration (already decided) and an
     /// unmodelled binding stay unprovable.
     fn effect_callee(&mut self, call: &oxc_ast::ast::CallExpression<'_>) -> EffectCallee {
@@ -9272,6 +9294,12 @@ impl<'a> Lowerer<'a> {
                     cursor = unwrap_parenthesized(&member.object);
                 }
                 Expression::Identifier(root) => break root,
+                // A `this` without an explicit type (an object literal's method,
+                // a function with no `this` parameter) has no effects
+                // signature: the call neither asserts nor ends the path.
+                Expression::ThisExpression(_) if !self.explicit_this => {
+                    return EffectCallee::Inert;
+                }
                 Expression::ThisExpression(_) | Expression::Super(_) => {
                     return EffectCallee::Unprovable;
                 }
@@ -14588,6 +14616,9 @@ impl<'a> Lowerer<'a> {
             function: entry.key().clone(),
             context: Arc::new(context),
             has_declared_return: function.return_type.is_some(),
+            required_parameters: verter_session_query::function_program::required_parameter_count(
+                entry.params(),
+            ),
             gap,
             declared_evolving_captures: Arc::from(declared_evolving_captures.into_boxed_slice()),
             extended_captures: Arc::from([]),
@@ -14612,6 +14643,7 @@ impl<'a> Lowerer<'a> {
         invocation: Option<&oxc_ast::ast::CallExpression<'_>>,
     ) -> SliceExpr {
         let member_this = self.member_this.take();
+        let member_this_explicit = std::mem::take(&mut self.member_this_explicit);
         let Some(entry) = self.index.nested_at(self.bindings.function(), {
             let span = node_span(node);
             verter_span::Span::new(span.start, span.end)
@@ -14724,6 +14756,7 @@ impl<'a> Lowerer<'a> {
         // The context retains the shared defining frame and the exact
         // lexical region only; captured values and annotation locators are
         // selected by the child graph.
+        let member_this_present = member_this.is_some();
         let Some(context) = self.frame_gate.nested_context(
             {
                 let span = node_span(node);
@@ -14743,6 +14776,13 @@ impl<'a> Lowerer<'a> {
         ) else {
             return SliceExpr::UnmodeledBinding;
         };
+        let explicit_this = if member_this_present {
+            member_this_explicit
+        } else {
+            matches!(node, FunctionNode::Arrow(_) | FunctionNode::Initializer(_))
+                && self.explicit_this
+        };
+        let context = context.with_explicit_this(explicit_this);
         let context = if matches!(node, FunctionNode::Arrow(_)) {
             context.with_lexical_this()
         } else {
@@ -14752,6 +14792,9 @@ impl<'a> Lowerer<'a> {
             function: entry.key().clone(),
             context: Arc::new(context),
             has_declared_return: node.return_type().is_some(),
+            required_parameters: verter_session_query::function_program::required_parameter_count(
+                entry.params(),
+            ),
             gap,
             declared_evolving_captures: Arc::from(declared_evolving_captures.into_boxed_slice()),
             extended_captures: Arc::from(extended_captures.into_boxed_slice()),

@@ -270,6 +270,18 @@ pub struct FunctionProgramKey {
     pub overload_ordinal: u32,
 }
 
+/// The parameters a call must supply to `params` before the first optional,
+/// defaulted or rest one (the target count of the checker's
+/// `isAritySmaller`).
+#[must_use]
+pub fn required_parameter_count(params: &[FunctionParamRecord]) -> u32 {
+    let required = params
+        .iter()
+        .take_while(|param| !param.optional && !param.has_initializer && !param.rest)
+        .count();
+    u32::try_from(required).unwrap_or(u32::MAX)
+}
+
 /// One formal parameter's binding fact.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionParamRecord {
@@ -277,6 +289,8 @@ pub struct FunctionParamRecord {
     pub name: Option<Arc<str>>,
     /// Whether the parameter is optional (`?`).
     pub optional: bool,
+    /// Whether the parameter declares a default value (`x = 1`).
+    pub has_initializer: bool,
     /// Whether this is the rest parameter.
     pub rest: bool,
     /// Whether the parameter carries an authored TS type annotation.

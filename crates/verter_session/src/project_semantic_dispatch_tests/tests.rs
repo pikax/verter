@@ -29010,22 +29010,29 @@ fn record_shape_classification_sees_binder_inside_program_value() {
         }
     };
 
-    // A source MISSING key 'a'. The misclassified generic-key Record
-    // shape decides this pair (required key absent → NotAssignable →
-    // false branch) — a verdict borrowed from the wrong shape. With the
-    // binder visible inside the program value, the mapper is NOT a
-    // generic-key Record, no classification applies, and the honest
-    // verdict stays open (neither branch).
+    // The mapped target over the closed key `a` is the object its key maps
+    // to, `{ a: { v: 'a' } }` (the checker's `resolveMappedTypeMembers`):
+    // a source missing `a` is refused for the missing key, and a source
+    // whose `a.v` is another literal is refused by the per-key value. The
+    // misclassified generic-key Record shape would relate `a` against the
+    // raw program with a free `K` — accepted under `K`'s `string`
+    // constraint — and decide the second pair true.
     let missing_source = simple_object(&graph, &[]);
-    let decided = relate(missing_source);
-    assert_ne!(
-        decided, true_branch,
-        "no Record shape applies — the pair must not decide true"
+    assert_eq!(
+        relate(missing_source),
+        false_branch,
+        "a source without the mapped key `a` is not assignable"
     );
+    let other_literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "b".to_string(),
+    )));
+    let other_payload = simple_object(&graph, &[("v", other_literal)]);
+    let other_source = simple_object(&graph, &[("a", other_payload)]);
     assert_ne!(
-        decided, false_branch,
+        relate(other_source),
+        true_branch,
         "a program-valued K-dependent mapper is not a generic-key Record — \
-         the relation must stay open instead of borrowing the Record shape's verdict"
+         `{{ a: {{ v: 'b' }} }}` must not borrow the free-`K` Record verdict"
     );
 }
 

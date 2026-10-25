@@ -180,24 +180,44 @@ impl CalleeParameters {
 }
 
 impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
-    /// The contextual signature of `contextual`: its one call signature,
-    /// read as the checker reads a contextual signature. A union's arms
-    /// without a call signature contribute none (`getContextualSignature`):
-    /// the optional callback `((value: T) => R) | null | undefined` is typed
-    /// by its function arm. `None` when it has none, several, a generic one,
-    /// or union arms whose signatures differ.
+    /// The contextual signature `contextual` gives the function value
+    /// `function`: its one call signature, read as the checker reads a
+    /// contextual signature. A union's arms without a call signature
+    /// contribute none (`getContextualSignature`): the optional callback
+    /// `((value: T) => R) | null | undefined` is typed by its function arm.
+    /// Nor does a signature taking fewer parameters than the function
+    /// requires (`isAritySmaller`), so a Pinia getter `(state) => …` is
+    /// typed by the `(state: S) => any` arm of `((state: S) => any) | (() =>
+    /// any)`. `None` when it has none, several, a generic one, or union
+    /// arms whose signatures differ.
     pub(super) fn contextual_signature(
         &self,
         contextual: SemanticNodeId,
+        function: &SliceExpr,
     ) -> Option<ContextualSignature> {
         let graph = self.dispatch.graph();
+        let required = match function {
+            SliceExpr::NestedFunctionValue {
+                required_parameters,
+                ..
+            } => usize::try_from(*required_parameters).unwrap_or(usize::MAX),
+            _ => 0,
+        };
+        let arity_smaller = |signature: SemanticNodeId| match graph.node_data(signature).as_deref()
+        {
+            Some(SemanticNodeData::Signature { params, .. }) => {
+                let (_, params) = crate::semantic_query::split_this_receiver(params);
+                !params.iter().any(|param| param.rest) && params.len() < required
+            }
+            _ => false,
+        };
         let arms: Vec<SemanticNodeId> = match graph.node_data(contextual).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
             _ => vec![contextual],
         };
         let mut found = None;
         for arm in arms {
-            let signatures = match self
+            let mut signatures = match self
                 .dispatch
                 .shared_signature_nodes(arm, SignatureKind::Call)
             {
@@ -208,6 +228,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                     return None
                 }
             };
+            signatures.retain(|signature| !arity_smaller(*signature));
             match (signatures.as_slice(), found) {
                 ([], _) => {}
                 ([signature], None) => found = Some(*signature),
@@ -271,7 +292,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
             return None;
         }
-        let signature = self.contextual_signature(contextual)?;
+        let signature = self.contextual_signature(contextual, expr)?;
         let request = self.function_argument_request(expr, Some(signature))?;
         let node = self.eval_nested_demand(request.demand);
         self.function_argument_value(request.mark, Positional::Value(node))
@@ -296,7 +317,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
             return None;
         }
-        let signature = parameter.and_then(|parameter| self.contextual_signature(parameter));
+        let signature = parameter.and_then(|parameter| self.contextual_signature(parameter, expr));
         self.function_argument_request(expr, signature)
     }
 

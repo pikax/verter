@@ -6976,6 +6976,9 @@ impl PartialEq for QueryError {
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
             (Self::OpenSurface, Self::OpenSurface) => true,
             (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
+            // One wildcard: every permissive instantiation reads the same
+            // type, as the checker's single `wildcardType`.
+            (Self::PermissiveWildcard, Self::PermissiveWildcard) => true,
             (
                 Self::CheckerRecovery {
                     diagnostic: a_d,
