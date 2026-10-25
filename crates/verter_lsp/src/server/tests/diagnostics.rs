@@ -1611,9 +1611,13 @@ async fn demanded_scan_retry_publication_still_pings_the_editor_owned_client() {
     std::fs::create_dir_all(&store_dir).unwrap();
     drain_release.notify_one();
 
+    // The store's first head is an empty generation: wait for the retried
+    // publication itself.
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
-            if carrier_manifest_strict(&workspace_root).is_some() {
+            if carrier_manifest_strict(&workspace_root)
+                .is_some_and(|manifest| manifest.projects.contains_key(&tsconfig))
+            {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
