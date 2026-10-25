@@ -2891,6 +2891,11 @@ pub struct ResolveCallDomainRuntime {
     /// decided, so the call's relation obligations have no decided
     /// evidence to claim.
     pub(crate) undecided_relations: u64,
+    /// For each measurement window open on the count, the lowest value it
+    /// has held since the window opened, the outermost first.
+    undecided_lows: Vec<u64>,
+    /// How many discards of the count asked for more than it held.
+    undecided_saturations: u64,
 }
 
 impl Default for ResolveCallDomainRuntime {
@@ -2901,7 +2906,68 @@ impl Default for ResolveCallDomainRuntime {
             completed_members: CompletedMembers::default(),
             last_root_failure: None,
             undecided_relations: 0,
+            undecided_lows: Vec::new(),
+            undecided_saturations: 0,
         }
+    }
+}
+
+/// How a measured stretch of work moved the undecided relation count: its
+/// net change, and how far below its starting value the count went on the
+/// way. Applying it to a count of at least `depth` gives exactly what doing
+/// the work again would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UndecidedRelationDelta {
+    pub(crate) net: i64,
+    pub(crate) depth: u64,
+}
+
+impl ResolveCallDomainRuntime {
+    /// Take `count` undecided outcomes back off the count, never below zero.
+    pub(crate) fn discard_undecided_relations(&mut self, count: u64) {
+        if count > self.undecided_relations {
+            self.undecided_saturations += 1;
+        }
+        self.undecided_relations = self.undecided_relations.saturating_sub(count);
+        for low in &mut self.undecided_lows {
+            *low = (*low).min(self.undecided_relations);
+        }
+    }
+
+    /// Open a window measuring how the count moves.
+    pub(crate) fn open_undecided_window(&mut self) -> (u64, u64) {
+        self.undecided_lows.push(self.undecided_relations);
+        (self.undecided_relations, self.undecided_saturations)
+    }
+
+    /// Close the innermost window, opened when the count and the
+    /// saturation count stood at `opened`: how the count moved, or `None`
+    /// when a discard inside it asked for more than the count held.
+    pub(crate) fn close_undecided_window(
+        &mut self,
+        opened: (u64, u64),
+    ) -> Option<UndecidedRelationDelta> {
+        let low = self.undecided_lows.pop().unwrap_or(opened.0);
+        (self.undecided_saturations == opened.1).then(|| UndecidedRelationDelta {
+            net: i64::try_from(self.undecided_relations).unwrap_or(i64::MAX)
+                - i64::try_from(opened.0).unwrap_or(i64::MAX),
+            depth: opened.0 - low.min(opened.0),
+        })
+    }
+
+    /// Move the count as `delta` measured, when it holds at least
+    /// `delta.depth`; `false`, moving nothing, otherwise.
+    pub(crate) fn replay_undecided_delta(&mut self, delta: UndecidedRelationDelta) -> bool {
+        if self.undecided_relations < delta.depth {
+            return false;
+        }
+        let lowest = self.undecided_relations - delta.depth;
+        for low in &mut self.undecided_lows {
+            *low = (*low).min(lowest);
+        }
+        let moved = i64::try_from(self.undecided_relations).unwrap_or(i64::MAX) + delta.net;
+        self.undecided_relations = u64::try_from(moved).unwrap_or(0);
+        true
     }
 }
 

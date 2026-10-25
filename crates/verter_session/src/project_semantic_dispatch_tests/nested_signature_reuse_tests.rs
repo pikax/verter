@@ -259,3 +259,164 @@ fn a_preparation_that_returns_early_leaves_its_frame_unchanged() {
     assert_eq!(seeds(true), 0);
     assert!(seeds(false) > 0);
 }
+
+/// The file [`super::flow_return_class_tests::flow_key`] names a fixture
+/// position in.
+const DEMAND_FILE: &str = "/ws/cls/classes.ts";
+
+/// `f` over a dispatch of a fresh host holding `source`, whose fault
+/// knobs `arm` set first.
+fn with_dispatch_on<R>(
+    source: &str,
+    arm: impl FnOnce(&crate::VerterHost),
+    f: impl FnOnce(&super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
+) -> R {
+    let host = std::sync::Arc::new(crate::VerterHost::new_standalone(
+        crate::types::HostConfig::default(),
+    ));
+    let _ = host.upsert(crate::types::UpsertRequest {
+        canonical_id: Some(DEMAND_FILE.to_string()),
+        input_id: DEMAND_FILE.to_string(),
+        source: std::sync::Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(DEMAND_FILE)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    arm(&host);
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
+    let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
+    f(&dispatch)
+}
+
+/// What one cold demand of `name`'s whole return answered — its print,
+/// degradation and provenance — the work units it charged, and how many
+/// nested signatures it reused, under a work allowance of `allowance`
+/// units when one is given.
+fn whole_return(
+    source: &str,
+    name: &str,
+    allowance: Option<usize>,
+    skip_reuse: bool,
+) -> (String, usize, usize) {
+    use std::sync::atomic::Ordering;
+    with_dispatch_on(
+        source,
+        |host| {
+            host.flow_fault_injection
+                .skip_nested_signature_reuse
+                .store(skip_reuse, Ordering::Relaxed);
+        },
+        |dispatch| {
+            if let Some(allowance) = allowance {
+                dispatch
+                    .connected_demand()
+                    .set_limits_for_tests(allowance, 256);
+            }
+            let key = super::flow_return_class_tests::flow_key(
+                dispatch,
+                name,
+                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            );
+            let reuses = super::flow_return::nested_signature_reuses_for_tests();
+            use super::SemanticQueryApi as _;
+            let outcome = match dispatch.execute(super::SemanticQueryKey::FlowReturn(Box::new(key)))
+            {
+                super::QueryResult::Value(output) => match &output.value {
+                    super::SemanticQueryValue::FlowReturn(result) => format!(
+                        "{} {:?} {:?}",
+                        crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                            dispatch,
+                            result.return_type(),
+                            0,
+                        ),
+                        result.degradation(),
+                        output.provenance,
+                    ),
+                    other => format!("{other:?}"),
+                },
+                other => format!("{other:?}"),
+            };
+            (
+                outcome,
+                dispatch.connected_demand().work_used_for_tests(),
+                super::flow_return::nested_signature_reuses_for_tests() - reuses,
+            )
+        },
+    )
+}
+
+/// A reused signature charges the connected demand what evaluating its
+/// body again would: under every work allowance, from one that refuses
+/// almost at once to one that completes, a demand reusing the loop's
+/// callback from its second pass answers what one evaluating it on every
+/// pass answers, and charges the same work.
+#[test]
+fn a_reused_signature_charges_the_demand_its_body_cost() {
+    let source = format!(
+        "{MARKER}{DEFINE_COMPONENT}declare function g<T>(cb: () => T): T;\n\
+         declare function h(x: string): number;\n\
+         export function lp(n: number) {{ let r = 0; for (let i = 0; i < n; i++) {{ r = g(() => h(\"a\") + h(\"b\")); }} return r; }}\n\
+         export function make() {{ return defineComponent({{ data() {{ return {{ d0: 0 as const, d1: 1 as const }}; }}, methods: {{ m0() {{ return this.d0; }}, m1() {{ return this.d1; }}, m2() {{ return this.m0(); }} }} }}); }}\n"
+    );
+    for name in ["lp", "make"] {
+        let (reused, full, reuses) = whole_return(&source, name, None, false);
+        let (fresh, fresh_full, _) = whole_return(&source, name, None, true);
+        assert!(reuses > 0, "{name}: a signature is reused");
+        assert_eq!((&reused, full), (&fresh, fresh_full), "{name}");
+        let steps = 10;
+        for step in 0..=steps {
+            let allowance = 1 + full * step / steps;
+            let (reused, work, _) = whole_return(&source, name, Some(allowance), false);
+            let (fresh, fresh_work, _) = whole_return(&source, name, Some(allowance), true);
+            assert_eq!(
+                (&reused, work),
+                (&fresh, fresh_work),
+                "{name} under {allowance} of {full} work units"
+            );
+        }
+    }
+}
+
+/// A nested function whose evaluation reads a frame around it — here the
+/// inner arrow reads the outer function's destructured parameter element
+/// off its frame — reads state its inputs do not name, so it is evaluated
+/// on every pass of the loop; only the inner arrow, which reads that frame
+/// as its own capture, is reused. The same nest reading its own local is
+/// reused whole from the loop's second pass. Both answer what evaluating
+/// every body on every pass answers.
+#[test]
+fn a_body_reading_a_frame_around_it_is_evaluated_again() {
+    let saved = |inner: &str| {
+        let source = format!(
+            "export function fr({{ a }}: {{ a: number | string }}, n: number) {{ const s = () => a; let r; for (let i = 0; i < n; i++) {{ const f = () => {{ const c = 1; return () => {inner}; }}; r = f; }} return [r, s]; }}
+"
+        );
+        let run = |skip: bool| {
+            evaluations_on(&source, "ReturnType<typeof fr>", |host| {
+                host.flow_fault_injection
+                    .skip_nested_signature_reuse
+                    .store(skip, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
+        let (reused, _, answer) = run(false);
+        let (fresh, _, fresh_answer) = run(true);
+        assert!(answer.is_some(), "{source}");
+        assert_eq!(answer, fresh_answer, "{source}");
+        fresh - reused
+    };
+    assert_eq!(saved("[a, c]"), 1, "only the inner arrow is reused");
+    assert_eq!(
+        saved("c"),
+        2,
+        "the outer arrow is reused, its inner arrow with it"
+    );
+}

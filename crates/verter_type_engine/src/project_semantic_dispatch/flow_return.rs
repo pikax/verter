@@ -359,6 +359,10 @@ pub mod flow_admission_fault_injection {
         /// counts as having consumed one undecided relation outcome.
         #[cfg(any(test, feature = "test-support"))]
         pub undecided_nested_call_relations: AtomicBool,
+        /// When armed, a nested function value never reuses a signature
+        /// the root evaluation composed: its body is evaluated again.
+        #[cfg(any(test, feature = "test-support"))]
+        pub skip_nested_signature_reuse: AtomicBool,
         /// When armed, every call evidence a flow evaluation records is
         /// copied to `call_evidence` as whether its relations were decided.
         #[cfg(any(test, feature = "test-support"))]
@@ -11131,6 +11135,32 @@ pub(super) trait FlowDemandDriver {
     /// Count again the undecided relations a held executor attempt
     /// observed, for the run that resumes it.
     fn restore_call_relation_observations(&self, count: u64);
+    /// Open a window measuring how the undecided relation count moves
+    /// ([`super::dispatch_txn::ResolveCallDomainRuntime::open_undecided_window`]).
+    fn open_undecided_relation_window(&self) -> (u64, u64);
+    /// Close the innermost window [`Self::open_undecided_relation_window`]
+    /// opened: how the count moved, `None` when it cannot be replayed.
+    fn close_undecided_relation_window(
+        &self,
+        opened: (u64, u64),
+    ) -> Option<super::dispatch_txn::UndecidedRelationDelta>;
+    /// Move the count as `delta` measured; `false`, moving nothing, when
+    /// it holds less than the delta took it down by.
+    fn replay_undecided_relation_delta(
+        &self,
+        delta: super::dispatch_txn::UndecidedRelationDelta,
+    ) -> bool;
+    /// Measure the connected demand's charges apart until
+    /// [`Self::close_inline_cost`]
+    /// ([`super::connected_demand::ConnectedDemandLedger::open_inline_cost`]),
+    /// returning its place.
+    fn open_inline_cost(&self) -> usize;
+    /// Close the measurement [`Self::open_inline_cost`] opened at `place`:
+    /// what it measured, kept by the computation around it.
+    fn close_inline_cost(&self, place: usize) -> Option<super::connected_demand::InlineCost>;
+    /// Charge a measured cost again, as performing its part again would;
+    /// `false`, charging nothing, when the demand lacks the room.
+    fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool;
     /// Open a window in which a contextual callback types while its call's
     /// collector waits ([`ProjectSemanticDispatch::open_contextual_window`]).
     fn open_contextual_window(&self) -> bool;
@@ -11883,12 +11913,47 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         self.dispatch_txn.borrow().call.undecided_relations
     }
     fn discard_call_relation_observations(&self, count: u64) {
-        let mut txn = self.dispatch_txn.borrow_mut();
-        txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(count);
+        self.dispatch_txn
+            .borrow_mut()
+            .call
+            .discard_undecided_relations(count);
     }
     fn restore_call_relation_observations(&self, count: u64) {
         let mut txn = self.dispatch_txn.borrow_mut();
         txn.call.undecided_relations = txn.call.undecided_relations.saturating_add(count);
+    }
+    fn open_undecided_relation_window(&self) -> (u64, u64) {
+        self.dispatch_txn.borrow_mut().call.open_undecided_window()
+    }
+    fn close_undecided_relation_window(
+        &self,
+        opened: (u64, u64),
+    ) -> Option<super::dispatch_txn::UndecidedRelationDelta> {
+        self.dispatch_txn
+            .borrow_mut()
+            .call
+            .close_undecided_window(opened)
+    }
+    fn replay_undecided_relation_delta(
+        &self,
+        delta: super::dispatch_txn::UndecidedRelationDelta,
+    ) -> bool {
+        self.dispatch_txn
+            .borrow_mut()
+            .call
+            .replay_undecided_delta(delta)
+    }
+    fn open_inline_cost(&self) -> usize {
+        self.connected_demand().open_inline_cost()
+    }
+    fn close_inline_cost(&self, place: usize) -> Option<super::connected_demand::InlineCost> {
+        self.connected_demand().close_inline_cost(place)
+    }
+    fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
+        self.connected_demand().replay_inline_cost(
+            cost,
+            crate::request_context::current_request_budget().as_deref(),
+        )
     }
     fn open_contextual_window(&self) -> bool {
         ProjectSemanticDispatch::open_contextual_window(self)
@@ -12735,6 +12800,30 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn restore_call_relation_observations(&self, count: u64) {
         self.driver.restore_call_relation_observations(count);
+    }
+    fn open_undecided_relation_window(&self) -> (u64, u64) {
+        self.driver.open_undecided_relation_window()
+    }
+    fn close_undecided_relation_window(
+        &self,
+        opened: (u64, u64),
+    ) -> Option<super::dispatch_txn::UndecidedRelationDelta> {
+        self.driver.close_undecided_relation_window(opened)
+    }
+    fn replay_undecided_relation_delta(
+        &self,
+        delta: super::dispatch_txn::UndecidedRelationDelta,
+    ) -> bool {
+        self.driver.replay_undecided_relation_delta(delta)
+    }
+    fn open_inline_cost(&self) -> usize {
+        self.driver.open_inline_cost()
+    }
+    fn close_inline_cost(&self, place: usize) -> Option<super::connected_demand::InlineCost> {
+        self.driver.close_inline_cost(place)
+    }
+    fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
+        self.driver.replay_inline_cost(cost)
     }
     fn open_contextual_window(&self) -> bool {
         self.driver.open_contextual_window()
@@ -14011,11 +14100,13 @@ enum ExprProgress {
 #[derive(Clone, Default)]
 struct EnclosingFrames<'b>(Option<std::rc::Rc<EnclosingFrame<'b>>>);
 
-/// One frame around a nested function's evaluator.
+/// One frame around a nested function's evaluator, with `outside` frames
+/// around it.
 struct EnclosingFrame<'b> {
     function: verter_session_query::function_program::FunctionProgramKey,
     binder_env: &'b FlowBinderEnv,
     products: FlowProductStore,
+    outside: usize,
     outer: EnclosingFrames<'b>,
 }
 
@@ -14031,8 +14122,15 @@ impl<'b> EnclosingFrames<'b> {
             function,
             binder_env,
             products,
+            outside: self.len(),
             outer: self.clone(),
         })))
+    }
+
+    /// How many frames the chain holds: the number of frames around the
+    /// evaluator it is around, and the position of that evaluator's frame.
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |frame| frame.outside + 1)
     }
 
     /// The frames, innermost first.
@@ -27320,6 +27418,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         })
     }
 
+    /// Note that this evaluator read `frame`, one around it, for the
+    /// recordings of the evaluations it sits in
+    /// ([`nested::NestedResolution::note_frame_read`]).
+    fn note_enclosing_frame_read(&self, frame: &EnclosingFrame<'_>) {
+        self.resolving_functions
+            .borrow_mut()
+            .note_frame_read(self.enclosing_frames.len(), frame.outside);
+    }
+
     fn capture_source_products(
         &self,
         locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
@@ -27328,8 +27435,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self.products.clone()
         } else {
             self.enclosing_frames.iter().find_map(|frame| {
-                (frame.function == locator.declaration().defining_function)
-                    .then(|| frame.products.clone())
+                (frame.function == locator.declaration().defining_function).then(|| {
+                    self.note_enclosing_frame_read(frame);
+                    frame.products.clone()
+                })
             })?
         };
         let subject = FlowProductSubject::Local(locator.local_declaration()?);
@@ -27347,8 +27456,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             Some(self.binder_env)
         } else {
             self.enclosing_frames.iter().find_map(|frame| {
-                (frame.function == locator.declaration().defining_function)
-                    .then_some(frame.binder_env)
+                (frame.function == locator.declaration().defining_function).then(|| {
+                    self.note_enclosing_frame_read(frame);
+                    frame.binder_env
+                })
             })
         };
         let Some(binder_env) = binder_env else {
@@ -27393,7 +27504,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     fn nested_signature_prefix(
         &mut self,
-        precomputed_captures: Option<NestedCaptureInputs>,
+        precomputed: Option<(NestedCaptureInputs, verter_identity::identity::InputBasisId)>,
         nested_params: &[verter_session_query::flow::slice::SliceParam],
         type_parameters: &[verter_session_query::flow::slice::SliceTypeParam],
         capture_context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
@@ -27614,24 +27725,28 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let inputs = FlowProductInputs::for_bound_graph(&bound);
         // Inputs read before the slice content changed no frame, and no
         // frame changed since: they are the ones read here.
-        let Some(NestedCaptureInputs {
-            capture_inputs,
-            capture_basis,
-        }) = precomputed_captures.or_else(|| {
-            self.prepare_nested_capture_inputs(
-                &inputs,
-                planned,
-                capture_context,
-                declared_evolving_captures,
-                extended_captures,
-                false,
-            )
-        })
-        else {
-            unreachable!("a preparation that may change a frame always completes");
+        let (NestedCaptureInputs { capture_inputs, .. }, nested_inputs) = match precomputed {
+            Some(precomputed) => precomputed,
+            None => {
+                let Some(captures) = self.prepare_nested_capture_inputs(
+                    &inputs,
+                    planned,
+                    capture_context,
+                    declared_evolving_captures,
+                    extended_captures,
+                    false,
+                ) else {
+                    unreachable!("a preparation that may change a frame always completes");
+                };
+                let nested_inputs = self.nested_flow_inputs(
+                    &captures.capture_basis,
+                    outer_env,
+                    capture_context,
+                    contextual,
+                );
+                (captures, nested_inputs)
+            }
         };
-        let nested_inputs =
-            self.nested_flow_inputs(&capture_basis, outer_env, capture_context, contextual);
         let input_basis =
             verter_identity::identity::InputBasisId::from_canonical(&NestedFlowInputBasis {
                 inputs: nested_inputs.digest(),

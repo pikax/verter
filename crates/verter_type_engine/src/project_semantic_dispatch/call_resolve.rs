@@ -2793,8 +2793,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .iter()
                         .any(|decl| self.mentions_node(target, decl.param)) =>
                 {
-                    let mut txn = self.dispatch_txn.borrow_mut();
-                    txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(1);
+                    self.dispatch_txn
+                        .borrow_mut()
+                        .call
+                        .discard_undecided_relations(1);
                 }
                 RelationStep::Unknown | RelationStep::Assumed(_) => {
                     self.abandon_session(session_id);

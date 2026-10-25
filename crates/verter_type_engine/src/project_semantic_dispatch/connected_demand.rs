@@ -140,6 +140,22 @@ pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: u64 =
             * CONSTRUCTION_BYTES_PER_INSTANTIATION as u64
         + (512 << 20);
 
+/// The cost of an inline part of a computation, measured apart from the
+/// rest of it ([`ConnectedDemandLedger::open_inline_cost`]): the usage it
+/// charged itself, its longest tail run, and the results it consumed. A
+/// consumer that skips performing the part again charges it with
+/// [`ConnectedDemandLedger::replay_inline_cost`].
+#[derive(Clone)]
+pub(crate) struct InlineCost {
+    exclusive: LogicalUsage,
+    tail_steps: u32,
+    prerequisites: Vec<CostDependency>,
+}
+
+/// The identity of an inline measurement, which is never sealed.
+#[derive(Hash, PartialEq, Eq)]
+struct InlineCostKey;
+
 /// What one connected demand has charged so far: its work units and its
 /// construction bytes.
 #[cfg(any(test, feature = "test-support"))]
@@ -1362,6 +1378,95 @@ impl ConnectedDemandLedger<'_> {
         if let Some(scope) = self.suspend_cost_scope() {
             self.fold_into_consumer(scope);
         }
+    }
+
+    /// Open the measurement of an inline part of the computation on top:
+    /// until [`Self::close_inline_cost`], the charges the demand takes and
+    /// the results it consumes are measured apart, and stay the
+    /// computation's own. Returns the measurement's place on the recording
+    /// stack.
+    pub(crate) fn open_inline_cost(&self) -> usize {
+        let place = self.recording_depth();
+        self.open_cost_scope(CostIdentity::of_key(InlineCostKey));
+        place
+    }
+
+    /// Close the measurement [`Self::open_inline_cost`] opened at `place`:
+    /// what it measured goes to the computation below exactly as if it had
+    /// been charged there — its usage added, its tail runs joined, each
+    /// result it consumed a prerequisite of its own — and is returned.
+    /// `None`, closing nothing, when that measurement is not the recording
+    /// on top.
+    pub(crate) fn close_inline_cost(&self, place: usize) -> Option<InlineCost> {
+        if self.recording_depth() != place + 1 {
+            return None;
+        }
+        let scope = self.suspend_cost_scope()?;
+        let cost = InlineCost {
+            exclusive: scope.exclusive,
+            tail_steps: scope.tail_steps,
+            prerequisites: scope.prerequisites.clone(),
+        };
+        if let Some(consumer) = self.scopes.borrow_mut().last_mut() {
+            consumer.exclusive = consumer.exclusive.saturating_add(scope.exclusive);
+            consumer.tail_steps = consumer.tail_steps.max(scope.tail_steps);
+            consumer.prerequisites.extend(scope.prerequisites);
+        }
+        Some(cost)
+    }
+
+    /// Charge an inline part's measured cost again, as performing that part
+    /// again would: its work units, construction bytes and request
+    /// operations to the demand and its request, all of it, with its
+    /// comparisons, tail runs and consumed results, to the computation on
+    /// top. `false`, charging nothing, when the demand has tripped or been
+    /// cancelled, or lacks the room any of those charges needs: performing
+    /// the part again is then what meets the allowance.
+    pub(crate) fn replay_inline_cost(
+        &self,
+        cost: &InlineCost,
+        request: Option<&crate::request_budget::RequestBudget>,
+    ) -> bool {
+        if !self.tripped.get().is_empty() || self.cancellation.is_cancelled() {
+            return false;
+        }
+        let usage = cost.exclusive;
+        let work = usize::try_from(usage.work).unwrap_or(usize::MAX);
+        if work > self.work_limit.get().saturating_sub(self.work_used.get()) {
+            return false;
+        }
+        let enforced = usage.bytes.saturating_sub(usage.advisory_bytes);
+        if self.enforced_bytes().saturating_add(enforced) > self.bytes_limit.get() {
+            return false;
+        }
+        let operations = usize::try_from(usage.operations).unwrap_or(usize::MAX);
+        if let Some(request) = request {
+            let room = request
+                .effective_projection_op_budget()
+                .saturating_sub(request.projection_ops_executed_count());
+            if operations > room {
+                return false;
+            }
+        }
+        self.commit_usage(work, usage.bytes, usage.advisory_bytes);
+        if let Some(request) = request {
+            // `operations` was checked against the request operations left.
+            // bounded-loop: at most the request operations left in its allowance.
+            for _ in 0..operations {
+                self.spend_request_operation(request);
+            }
+        }
+        if self.scope_open.get() {
+            let comparisons = &self.pending_usage.comparisons;
+            comparisons.set(comparisons.get().saturating_add(usage.comparisons));
+            if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+                scope.tail_steps = scope.tail_steps.max(cost.tail_steps);
+                scope
+                    .prerequisites
+                    .extend(cost.prerequisites.iter().cloned());
+            }
+        }
+        true
     }
 
     /// Fold an ended recording into the recording below it, if any: the

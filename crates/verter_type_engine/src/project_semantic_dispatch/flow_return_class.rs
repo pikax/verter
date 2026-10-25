@@ -51,9 +51,9 @@ pub(super) enum ReceiverMemberRead {
 }
 
 /// One member read off a receiver: the member's name and what it found.
-/// Reads compare by name — a recording window reads each name once, since
+/// Reads compare by name — a recording window keeps each name once, since
 /// the receiver's members do not change while a body inside the window
-/// evaluates.
+/// evaluates; a window that finds one name two ways is refused.
 #[derive(Clone)]
 pub(super) struct ReceiverRead {
     pub(super) name: Arc<str>,
@@ -95,17 +95,24 @@ impl ReceiverReadLog {
         self.0.borrow_mut().begin()
     }
 
-    /// Close the window opened at `start`: each distinct read made in it.
-    pub(super) fn finish(&self, start: usize) -> Vec<ReceiverRead> {
-        self.0.borrow_mut().finish(start)
+    /// Close the window opened at `start`: each distinct read made in it,
+    /// `None` when it found one member two ways.
+    pub(super) fn finish(&self, start: usize) -> Option<Vec<ReceiverRead>> {
+        self.0
+            .borrow_mut()
+            .finish(start, |first, later| first.read == later.read)
     }
 
     /// Log the read of member `name`, which found `read`.
     pub(super) fn log(&self, name: &str, read: ReceiverMemberRead) {
-        self.0.borrow_mut().log(name, || ReceiverRead {
-            name: Arc::from(name),
-            read,
-        });
+        self.0.borrow_mut().log(
+            name,
+            || ReceiverRead {
+                name: Arc::from(name),
+                read,
+            },
+            |held| held.read == read,
+        );
     }
 }
 

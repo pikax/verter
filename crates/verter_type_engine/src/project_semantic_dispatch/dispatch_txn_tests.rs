@@ -1055,3 +1055,45 @@ fn closed_sessions_leave_the_collecting_search() {
     txn.relation.sessions.insert(position, suspended);
     assert_eq!(txn.active_session().map(|session| session.id), Some(outer));
 }
+
+/// A window over the undecided relation count measures how far the count
+/// went below where it opened, so replaying the window on a count that
+/// holds that much moves it exactly as the measured work did, and a count
+/// holding less refuses. A discard that asked for more than the count held
+/// (and so took less) leaves its window unmeasured: the same work moves a
+/// larger count differently.
+#[test]
+fn an_undecided_relation_window_replays_only_what_it_measured() {
+    let mut call = ResolveCallDomainRuntime {
+        undecided_relations: 2,
+        ..ResolveCallDomainRuntime::default()
+    };
+    let outer = call.open_undecided_window();
+    let inner = call.open_undecided_window();
+    call.discard_undecided_relations(1);
+    call.undecided_relations += 2;
+    let delta = call
+        .close_undecided_window(inner)
+        .expect("no discard saturated");
+    assert_eq!(delta, UndecidedRelationDelta { net: 1, depth: 1 });
+
+    call.undecided_relations = 0;
+    assert!(
+        !call.replay_undecided_delta(delta),
+        "the count holds less than the depth"
+    );
+    assert_eq!(call.undecided_relations, 0);
+    call.undecided_relations = 1;
+    assert!(call.replay_undecided_delta(delta));
+    assert_eq!(call.undecided_relations, 2);
+    assert_eq!(
+        call.close_undecided_window(outer),
+        Some(UndecidedRelationDelta { net: 0, depth: 2 }),
+        "the replay took the count to zero on the way, inside the outer window"
+    );
+
+    let saturating = call.open_undecided_window();
+    call.discard_undecided_relations(3);
+    call.undecided_relations += 1;
+    assert_eq!(call.close_undecided_window(saturating), None);
+}
