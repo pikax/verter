@@ -65,6 +65,9 @@ enum Root {
     Conditional,
     /// A distributed conditional whose final union reduction is held.
     Distribution,
+    /// `defineProps` over two type arguments, owned by the chain's file,
+    /// whose payload intersection is held.
+    MacroPayload,
 }
 
 fn key_for<C: ResolverCapabilities>(
@@ -122,6 +125,32 @@ fn key_for<C: ResolverCapabilities>(
                 .graph_arc()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
         },
+        Root::MacroPayload => {
+            let graph = dispatch.graph_arc();
+            let args: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> = Arc::from([
+                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+            ]);
+            if held {
+                SemanticQueryKey::reduce_intersection_operands(graph, args)
+            } else {
+                SemanticQueryKey::ResolveMacroPayload {
+                    owner:
+                        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                            Arc::<str>::from(CHAIN_FILE),
+                            verter_type_expr::TopLevelOwnerId::instance(0),
+                            Arc::<str>::from("<sfc-script-setup>"),
+                        ),
+                    macro_index: 0,
+                    macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
+                    type_args: args,
+                    context: verter_type_engine::semantic_query::MacroPayloadContext::new(
+                        Default::default(),
+                        ProjectionMode::Expanded,
+                    ),
+                }
+            }
+        }
         Root::Distribution => {
             let graph = dispatch.graph_arc();
             let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -268,6 +297,20 @@ fn semantic_poll_contract_a_distributed_reduction_yields_on_the_only_thread() {
     assert!(
         !polled.2 && !polled.3,
         "the distribution is complete and reusable"
+    );
+    assert_eq!(polled, synchronous);
+}
+
+#[wasm_bindgen_test]
+fn semantic_poll_contract_a_macro_payload_continuation_yields_on_the_only_thread() {
+    let [polled, synchronous] = poll_while_another_task_produces(Root::MacroPayload);
+    assert!(
+        polled.0.contains("TypeNode"),
+        "the payload answers a type: {polled:?}"
+    );
+    assert!(
+        !polled.2 && !polled.3,
+        "the payload is complete and reusable"
     );
     assert_eq!(polled, synchronous);
 }
