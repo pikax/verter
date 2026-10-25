@@ -231,6 +231,13 @@ impl IndexedInputs for crate::VerterHost {
         crate::VerterHost::ensure_loaded(self, canonical_id)
     }
 
+    fn begin_indexed_load(
+        &self,
+        canonical_id: &str,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
+        crate::VerterHost::begin_indexed_ready_load(self, canonical_id)
+    }
+
     #[inline]
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>> {
         crate::VerterHost::shallow_file_state(self, canonical_id).map(|state| {
@@ -680,6 +687,15 @@ pub(crate) trait RequestBoundLifecycle: Sync {
         crate::VerterHost::ensure_loaded(self.host(), canonical_id)
     }
 
+    /// Begin the load [`Self::load`] would perform, as an owned wait
+    /// instead of a drive; `Settled` where the serve loads nothing.
+    fn begin_load(
+        &self,
+        canonical_id: &str,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
+        crate::VerterHost::begin_indexed_ready_load(self.host(), canonical_id)
+    }
+
     fn shallow_file_state(
         &self,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<Self::Observe>>,
@@ -1003,6 +1019,14 @@ where
             self.0.complete_canonical(canonical_id);
         }
         loaded
+    }
+
+    fn begin_indexed_load(
+        &self,
+        canonical_id: &str,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::begin_indexed_load");
+        self.0.begin_load(canonical_id)
     }
 
     #[inline]

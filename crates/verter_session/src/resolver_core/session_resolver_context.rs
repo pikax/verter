@@ -204,6 +204,20 @@ impl<M: ObserveExec> RequestBoundLifecycle for SessionRequestLifecycle<'_, M> {
         )
     }
 
+    /// A tombstoned canonical or an explicit overlay loads nothing; any
+    /// other canonical loads as the host loads it.
+    fn begin_load(
+        &self,
+        canonical_id: &str,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
+        if self.view.is_tombstoned(canonical_id)
+            || self.view.overlay_content_hash_for(canonical_id).is_some()
+        {
+            return verter_type_engine::resolver_core::request_ports::IndexedReadiness::Settled;
+        }
+        crate::VerterHost::begin_indexed_ready_load(self.inner, canonical_id)
+    }
+
     fn shallow_file_state(
         &self,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,

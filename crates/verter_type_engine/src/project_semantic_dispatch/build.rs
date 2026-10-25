@@ -21031,11 +21031,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ))
     }
 
-    /// The first stage of a macro payload's resolution: the owning file's
-    /// indexed input and the fence it seeds, then either the payload's value
-    /// or the one payload operation the value is read from — the props
-    /// intersection, or the emits / slots / model projection — retained with
-    /// everything read so far for [`Self::finish_resolve_macro_payload`].
+    /// The first stage of a macro payload's resolution: a real-file owner's
+    /// indexed input is read next ([`Self::resume_macro_payload_owner`]); a
+    /// non-file owner has none, and the resolution goes on at once.
     #[inline(never)]
     pub(super) fn begin_resolve_macro_payload(
         &self,
@@ -21045,8 +21043,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         type_args: &Arc<[SemanticNodeId]>,
         mode: ProjectionMode,
     ) -> FamilyStep {
-        use verter_session_query::analysis::types::AnalyzedMacroKind;
         self.graph().record_continuation_begun();
+        let request = MacroPayloadRequest {
+            owner: owner.clone(),
+            macro_index,
+            macro_kind,
+            type_args: Arc::clone(type_args),
+            mode,
+        };
+        if crate::semantic_query::is_non_file_base(owner.defining_canonical.as_ref()) {
+            return self.resolve_macro_payload_with_owner(request, None);
+        }
+        FamilyStep::Load(
+            Arc::from(owner.defining_canonical.as_ref()),
+            Box::new(FamilyBuild::MacroPayload(MacroPayloadBuild::Owner(request))),
+        )
+    }
+
+    /// Resume a macro payload's resolution with its owning file's indexed
+    /// input (`None` when the live view serves none).
+    #[inline(never)]
+    pub(super) fn resume_macro_payload_owner(
+        &self,
+        build: MacroPayloadBuild,
+        serve: Option<verter_session_query::inputs::indexed::IndexedInputServe>,
+    ) -> FamilyStep {
+        let MacroPayloadBuild::Owner(request) = build else {
+            unreachable!("a macro payload reads its owner once, first")
+        };
+        self.resolve_macro_payload_with_owner(request, serve.map(|serve| serve.indexed))
+    }
+
+    /// A macro payload's resolution once its owner is read: the fence the
+    /// owner seeds, then either the payload's value or the one payload
+    /// operation the value is read from — the props intersection, or the
+    /// emits / slots / model projection — retained with everything read so
+    /// far for [`Self::finish_resolve_macro_payload`].
+    #[inline(never)]
+    fn resolve_macro_payload_with_owner(
+        &self,
+        request: MacroPayloadRequest,
+        owner_indexed: Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>>,
+    ) -> FamilyStep {
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
+        let MacroPayloadRequest {
+            owner,
+            macro_index,
+            macro_kind,
+            type_args,
+            mode,
+        } = request;
+        let owner = &owner;
+        let type_args = &type_args;
 
         // R6 / R20: the key is content-free. Re-source the owning
         // SFC's content version from the live indexed view at
@@ -21068,14 +21116,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // later serve stale.
         let owner_canonical_str = owner.defining_canonical.as_ref();
         let is_non_file_owner = crate::semantic_query::is_non_file_base(owner_canonical_str);
-        let owner_indexed: Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>> =
-            if is_non_file_owner {
-                None
-            } else {
-                self.ctx
-                    .ensure_indexed_ready_serve(owner_canonical_str)
-                    .map(|serve| serve.indexed)
-            };
         // A real-file owner unknown to the live view is a stale key —
         // suppress admission so the next caller cold-recomputes.
         let stale_real_file_owner = !is_non_file_owner && owner_indexed.is_none();
@@ -21216,7 +21256,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         FamilyStep::Need(
             payload,
-            Box::new(FamilyBuild::MacroPayload(MacroPayloadBuild {
+            Box::new(FamilyBuild::MacroPayload(MacroPayloadBuild::Payload {
                 rooting,
                 local_fence,
             })),
@@ -21238,10 +21278,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build: MacroPayloadBuild,
         read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let MacroPayloadBuild {
+        let MacroPayloadBuild::Payload {
             rooting,
             mut local_fence,
-        } = build;
+        } = build
+        else {
+            unreachable!("a macro payload finishes after its owner is read")
+        };
         crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
             &mut local_fence,
             &read.dep_signature,
@@ -22288,9 +22331,23 @@ pub(super) enum InstantiateStart {
 /// its first stage read of the owning file and the fence it seeded, kept so
 /// the operation's read finishes the resolution without reading the owner
 /// again ([`ProjectSemanticDispatch::finish_resolve_macro_payload`]).
-pub(super) struct MacroPayloadBuild {
-    rooting: MacroPayloadRooting,
-    local_fence: Vec<crate::semantic_query::DepEntry>,
+pub(super) enum MacroPayloadBuild {
+    /// Waiting for the owning file's indexed input.
+    Owner(MacroPayloadRequest),
+    /// Waiting for the payload operation's read.
+    Payload {
+        rooting: MacroPayloadRooting,
+        local_fence: Vec<crate::semantic_query::DepEntry>,
+    },
+}
+
+/// What a macro payload's resolution is asked for: its key's operands.
+pub(super) struct MacroPayloadRequest {
+    owner: crate::semantic_query::ResolvedDeclSlotIdentity,
+    macro_index: usize,
+    macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+    type_args: Arc<[SemanticNodeId]>,
+    mode: ProjectionMode,
 }
 
 /// An ordered intersection reduction while it reads a nested subgroup's
@@ -22306,8 +22363,8 @@ pub(super) struct ReduceIntersectionBuild {
 }
 
 /// What a macro payload's output is rooted on: the owning file at the
-/// content version its first stage observed, and its type arguments.
-struct MacroPayloadRooting {
+/// content version its owner stage observed, and its type arguments.
+pub(super) struct MacroPayloadRooting {
     owner: OwnedStr,
     is_non_file_owner: bool,
     owner_whole_hash: crate::semantic_query::HashValue,

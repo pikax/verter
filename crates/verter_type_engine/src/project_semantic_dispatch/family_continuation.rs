@@ -21,6 +21,10 @@
 //! so the native frame of whichever driver steps it does not grow with the
 //! families it may step.
 
+use std::sync::Arc;
+
+use verter_session_query::inputs::indexed::IndexedInputServe;
+
 use crate::project_semantic_dispatch::walk::QueryBuildOutput;
 use crate::semantic_query::{CacheRead, QueryResult, SemanticNodeId, SemanticQueryKey};
 
@@ -40,6 +44,9 @@ pub(super) enum FamilyStep {
     Done(Box<QueryBuildOutput>),
     /// The build reads this query next, holding everything it computed.
     Need(SemanticQueryKey, Box<FamilyBuild>),
+    /// The build reads this file's indexed input next, holding everything
+    /// it computed.
+    Load(Arc<str>, Box<FamilyBuild>),
 }
 
 /// Whether `key`'s family builds as a continuation
@@ -95,6 +102,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The next stage of `build`, given the indexed input of the file it
+    /// named (`None` when the live view serves none).
+    #[inline(never)]
+    pub(super) fn resume_family_source(
+        &self,
+        build: FamilyBuild,
+        serve: Option<IndexedInputServe>,
+    ) -> FamilyStep {
+        self.graph().record_continuation_resumed();
+        match build {
+            FamilyBuild::MacroPayload(build) => self.resume_macro_payload_owner(build, serve),
+            FamilyBuild::ReduceIntersection(_) => {
+                unreachable!("an intersection reduction reads no file")
+            }
+        }
+    }
+
     /// Drive a family build to its output, reading each query it names in
     /// place: the synchronous producer's driver.
     #[inline(never)]
@@ -105,6 +129,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 FamilyStep::Need(key, build) => {
                     let read = self.execute_read(key);
                     step = self.resume_family_build(*build, read);
+                }
+                FamilyStep::Load(canonical, build) => {
+                    let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
+                    step = self.resume_family_source(*build, serve);
                 }
             }
         }

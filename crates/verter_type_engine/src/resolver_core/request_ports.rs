@@ -18,6 +18,26 @@ use verter_session_query::analysis::types::Hash16;
 use verter_session_query::declarations::metadata::ValueDeclIdentity;
 use verter_session_query::facts::reuse::NonCacheableReadReason;
 
+/// Whether a file's indexed input is servable without loading the file
+/// first ([`IndexedInputs::begin_indexed_load`]).
+pub enum IndexedReadiness<'p> {
+    /// No load is needed: the serve answers now.
+    Settled,
+    /// The file is being loaded: poll the load until it is ready, then serve
+    /// the file.
+    Loading(Box<dyn IndexedLoad + Send + 'p>),
+}
+
+/// A load of one file the semantic runtime waits on instead of blocking:
+/// owned, movable between threads, with one poller. Dropping it withdraws
+/// only its own wait; the load goes on for any other demand of it.
+pub trait IndexedLoad {
+    /// `Ready` once the load was integrated, failed or stopped — the serve
+    /// then answers as it answers after a synchronous load — or `Pending`
+    /// with `waker` registered on the load's completion.
+    fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<()>;
+}
+
 /// The declaration namespace an ambient global read consumes.
 #[derive(Debug, Clone, Copy)]
 pub enum AmbientSymbolSpace {
@@ -191,6 +211,15 @@ pub trait IndexedInputs {
     fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe>;
 
     fn ensure_loaded(&self, canonical_id: &str) -> bool;
+
+    /// Begin making `canonical_id`'s indexed input servable without waiting
+    /// for it: [`IndexedReadiness::Settled`] when
+    /// [`Self::ensure_indexed_ready_serve`] answers it without loading the
+    /// file (it is loaded, or no load can supply it), else the owned load to
+    /// wait on before serving it. The load joins the task installed on this
+    /// thread and integrates the file when it completes, exactly as
+    /// [`Self::ensure_loaded`] would; it never drives the loading stages.
+    fn begin_indexed_load(&self, canonical_id: &str) -> IndexedReadiness<'_>;
 
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>>;
 

@@ -128,6 +128,12 @@ pub(crate) enum EvalStep<P: Program + ?Sized> {
     /// Continue the same demand with this frame instead: a tail transition
     /// that keeps nothing of the frame it replaces.
     Replace(P::Frame),
+    /// Park this frame on an outside producer that is not one of the
+    /// program's demands — an input the frame reads becoming available —
+    /// until it resolves. Its outcome is the frame's next delivery; a
+    /// [`External::Restart`] steps the frame again with no delivery. The
+    /// frame owns everything it computed meanwhile.
+    Await(P::Subscription),
 }
 
 /// How the program begins a demand the execution has not opened.
@@ -518,6 +524,9 @@ impl<P: Program> SemanticExecution<P> {
             }
             match external {
                 External::Complete(outcome) => self.complete(program, demand, outcome, root),
+                External::Restart if self.demands[demand.0 as usize].demand.is_none() => {
+                    self.rerun_waiters(demand)
+                }
                 External::Restart => self.begin(program, demand, root),
             }
         }
@@ -631,6 +640,24 @@ impl<P: Program> SemanticExecution<P> {
                 self.demands[produces.0 as usize].state = DemandState::Runnable(id);
                 self.ready.push_back(id);
             }
+            EvalStep::Await(subscription) => {
+                self.demands[produces.0 as usize].state = DemandState::Waiting(id);
+                // The wait is a private demand the subscription answers, as
+                // a spawned child's is: never shared, reused or on a cycle.
+                let wait =
+                    DemandId(u32::try_from(self.demands.len()).expect("demand table exhausted"));
+                self.demands.push(DemandRecord {
+                    demand: None,
+                    state: DemandState::Subscribed,
+                    waiters: SmallVec::from_elem(id, 1),
+                    value: None,
+                });
+                verter_debug_assert!(
+                    self.subscription.is_none(),
+                    "a drive runs one chain; a second live subscription breaks it"
+                );
+                self.subscription = Some((wait, subscription));
+            }
         }
     }
 
@@ -707,6 +734,17 @@ impl<P: Program> SemanticExecution<P> {
         }
         for waiter in waiters {
             self.deliver(waiter, outcome.clone());
+        }
+    }
+
+    /// Step again, with no delivery, every frame waiting on the private
+    /// wait `id`: its outside producer resolved without an outcome.
+    fn rerun_waiters(&mut self, id: DemandId) {
+        let waiters = std::mem::take(&mut self.demands[id.0 as usize].waiters);
+        for waiter in waiters {
+            let produces = self.frame_mut(waiter).produces;
+            self.demands[produces.0 as usize].state = DemandState::Runnable(waiter);
+            self.ready.push_back(waiter);
         }
     }
 

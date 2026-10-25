@@ -196,10 +196,14 @@ fn engine_policy_for(
 pub(crate) struct WorkspaceSourceLoader {
     pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
     pub(crate) language_classifier: crate::framework::HostLanguageClassifier,
+    #[cfg(test)]
+    pub(crate) source_load_gate: Arc<crate::host_test_force::SourceLoadGate>,
 }
 
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
+        #[cfg(test)]
+        self.source_load_gate.pass(canonical_id);
         self.load_through(canonical_id, |workspace, canonical| {
             workspace.read_file(canonical)
         })
@@ -207,6 +211,8 @@ impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
 
     #[cfg(feature = "semantic-observe")]
     fn load_captured(&self, canonical_id: &str, request_id: u64, timing: bool) -> Option<Arc<str>> {
+        #[cfg(test)]
+        self.source_load_gate.pass(canonical_id);
         self.load_through(canonical_id, |workspace, canonical| {
             workspace.read_file_captured(
                 canonical,
@@ -510,6 +516,8 @@ impl VerterHost {
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
+        #[cfg(test)]
+        let source_load_gate = Arc::new(crate::host_test_force::SourceLoadGate::default());
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
@@ -522,6 +530,8 @@ impl VerterHost {
                 Arc::clone(&registered_envelope_ingest),
             ));
             let loader = Arc::new(WorkspaceSourceLoader {
+                #[cfg(test)]
+                source_load_gate: Arc::clone(&source_load_gate),
                 workspace: Arc::clone(&workspace_lock),
                 language_classifier: language_classifier.clone(),
             });
@@ -629,7 +639,11 @@ impl VerterHost {
         // cumulatively across requests on this host. Test-only;
         // production builds compile without this block.
         #[cfg(any(test, feature = "test-support"))]
-        let test_force = Arc::new(crate::host_test_force::TestForceKnobs::default());
+        let test_force = Arc::new(crate::host_test_force::TestForceKnobs {
+            #[cfg(test)]
+            source_load_gate,
+            ..Default::default()
+        });
         #[cfg(test)]
         project_type_store
             .indexed()

@@ -235,3 +235,76 @@ impl VerterHost {
         }
     }
 }
+
+/// A file's load the semantic runtime waits on instead of driving it: the
+/// owned scheduler handoff, integrated on this host once Analysis is ready,
+/// exactly as [`VerterHost::ensure_loaded`] integrates it.
+struct HostIndexedLoad<'h> {
+    host: &'h VerterHost,
+    load: Option<HostLoadHandoff>,
+}
+
+impl verter_type_engine::resolver_core::request_ports::IndexedLoad for HostIndexedLoad<'_> {
+    fn poll(&mut self, waker: &Waker) -> Poll<()> {
+        let Some(load) = self.load.as_mut() else {
+            return Poll::Ready(());
+        };
+        let outcome = match load.poll(waker) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(outcome) => outcome,
+        };
+        self.load = None;
+        // A failed, stopped or superseded load integrates nothing; the serve
+        // then answers as it answers after a synchronous load that failed.
+        if let Ok(commit) = outcome {
+            let _ = commit.apply(self.host);
+        }
+        Poll::Ready(())
+    }
+}
+
+impl VerterHost {
+    /// Whether `canonical_id`'s indexed input is servable without loading
+    /// it, or the owned load to wait on first
+    /// ([`verter_type_engine::resolver_core::request_ports::IndexedInputs::begin_indexed_load`]).
+    /// A load is begun exactly where the synchronous serve would load: a
+    /// loadable canonical the scheduler holds no source for and no retained
+    /// artifact serves.
+    pub(crate) fn begin_indexed_ready_load(
+        &self,
+        canonical_id: &str,
+    ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
+        use verter_type_engine::resolver_core::request_ports::IndexedReadiness;
+        let canonical = self
+            .normalized_analysis_canonical(canonical_id)
+            .into_owned();
+        if canonical.is_empty()
+            || crate::host_manage::is_raw_import_specifier_id(&canonical)
+            || self.scheduler.try_get_source(&canonical).is_some()
+        {
+            return IndexedReadiness::Settled;
+        }
+        let observation = verter_type_engine::request_observers::CaptureTargets::installed::<
+            verter_audit::observe::Uncaptured,
+        >();
+        if self
+            .artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+                &observation,
+                &canonical,
+            )
+            .is_some_and(|indexed| self.indexed_surface_is_current(&canonical, &indexed))
+        {
+            return IndexedReadiness::Settled;
+        }
+        let scope = self.scheduler.enter_execution_scope();
+        let load = self.begin_load(
+            &canonical,
+            scope.task().clone(),
+            self.cooperative_drive.cancellation().clone(),
+        );
+        IndexedReadiness::Loading(Box::new(HostIndexedLoad {
+            host: self,
+            load: Some(load),
+        }))
+    }
+}

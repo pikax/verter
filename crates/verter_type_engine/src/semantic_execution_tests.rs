@@ -290,6 +290,92 @@ fn an_outside_producer_is_awaited_and_a_vanished_one_restarts_the_demand() {
     assert_eq!(program.starts, vec![0, 1, 2, 3, 3, 4]);
 }
 
+/// A frame parked on an outside input that is not one of the program's
+/// demands keeps everything it computed: the drive is pending while the
+/// input is unavailable, an input resolved without an outcome steps the same
+/// frame again with no delivery, one resolved with an outcome delivers it,
+/// and neither starts the frame's demand again nor repeats its earlier step.
+#[test]
+fn an_awaited_input_resumes_the_same_frame_without_restarting_its_demand() {
+    struct Awaiting {
+        pending_polls: u32,
+        outcome: bool,
+        starts: u32,
+        steps: u32,
+    }
+    impl Program for Awaiting {
+        type Demand = ();
+        type Frame = u32;
+        type Value = u32;
+        type Failure = ();
+        type Role = ();
+        type Subscription = u32;
+        fn start(&mut self, _: &()) -> Start<Self> {
+            self.starts += 1;
+            Start::Produce(0)
+        }
+        fn step(&mut self, frame: &mut u32, delivery: Option<Outcome<Self>>) -> EvalStep<Self> {
+            self.steps += 1;
+            match (*frame, delivery) {
+                (0, None) => {
+                    *frame = 5;
+                    EvalStep::Await(7)
+                }
+                (5, None) => EvalStep::Complete(*frame + 1),
+                (5, Some(Ok(value))) => EvalStep::Complete(*frame + value),
+                (state, delivery) => panic!("unexpected step at {state}: {delivery:?}"),
+            }
+        }
+        fn close_cycle(&mut self, _: &(), _: ()) -> Outcome<Self> {
+            unreachable!("an awaited input is on no cycle")
+        }
+        fn reusable(&self, _: &(), _: &u32) -> bool {
+            true
+        }
+        fn poll_subscription(&mut self, input: &mut u32, _: &Waker) -> Poll<External<Self>> {
+            if self.pending_polls > 0 {
+                self.pending_polls -= 1;
+                return Poll::Pending;
+            }
+            Poll::Ready(if self.outcome {
+                External::Complete(Ok(*input))
+            } else {
+                External::Restart
+            })
+        }
+        fn stop(&self) -> Option<()> {
+            None
+        }
+    }
+    for (outcome, answer) in [(false, 6), (true, 12)] {
+        let mut program = Awaiting {
+            pending_polls: 2,
+            outcome,
+            starts: 0,
+            steps: 0,
+        };
+        let mut execution = SemanticExecution::new();
+        assert!(execution
+            .poll(&mut program, Some(()), Waker::noop())
+            .is_pending());
+        assert_eq!(execution.live_frames(), 1, "the parked frame is kept");
+        assert!(execution
+            .poll(&mut program, None, Waker::noop())
+            .is_pending());
+        assert_eq!(
+            execution.poll(&mut program, None, Waker::noop()),
+            Poll::Ready(Ok(answer))
+        );
+        assert_eq!(
+            (program.starts, program.steps),
+            (1, 2),
+            "the demand starts once and its first step never runs again"
+        );
+        assert_eq!(execution.live_frames(), 0);
+        assert_eq!(execution.counters().external_waits, 1);
+    }
+}
+
 /// Tail transitions replace the running frame: a million replacements keep
 /// one frame alive.
 #[test]

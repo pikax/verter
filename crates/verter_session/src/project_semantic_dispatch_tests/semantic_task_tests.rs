@@ -2445,6 +2445,14 @@ mod semantic_poll_contract {
     fn props_payload_keys(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     ) -> (SemanticQueryKey, SemanticQueryKey) {
+        owned_props_payload_keys(dispatch, TASK_FILE)
+    }
+
+    /// [`props_payload_keys`] owned by `owner`.
+    fn owned_props_payload_keys(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        owner: &str,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
         let graph = dispatch.graph_arc();
         let args: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> = Arc::from([
             graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
@@ -2452,7 +2460,7 @@ mod semantic_poll_contract {
         ]);
         let payload = SemanticQueryKey::ResolveMacroPayload {
             owner: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                Arc::<str>::from(TASK_FILE),
+                Arc::<str>::from(owner),
                 verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::<str>::from("<sfc-script-setup>"),
             ),
@@ -2497,8 +2505,8 @@ mod semantic_poll_contract {
             let read = dispatch.execute_via_cold_build_helper(payload);
             assert_eq!(
                 continuation_stages(&host),
-                (2, 1),
-                "the payload and its intersection each begin once; the payload resumes once"
+                (2, 2),
+                "the payload and its intersection each begin once; the owner and the payload are read once"
             );
             read_summary(&dispatch, &read)
         };
@@ -2551,8 +2559,8 @@ mod semantic_poll_contract {
         drop(entry);
         assert_eq!(
             continuation_stages(&host),
-            (2, 1),
-            "no stage runs again: the owner is read once and the payload resumes once"
+            (2, 2),
+            "no stage runs again: the owner and the payload are read once"
         );
         assert_eq!(read_summary(&dispatch, &read), synchronous);
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
@@ -2571,7 +2579,7 @@ mod semantic_poll_contract {
         );
         assert_eq!(
             continuation_stages(&host),
-            (2, 1),
+            (2, 2),
             "a warm payload runs no stage"
         );
         drop(other);
@@ -2703,6 +2711,142 @@ mod semantic_poll_contract {
             "a warm read runs no stage"
         );
         drop(other);
+    }
+
+    /// A file the workspace holds and the host has not loaded.
+    const UNLOADED_OWNER: &str = "/semantic-task/owner.ts";
+
+    /// A host whose workspace holds [`UNLOADED_OWNER`], unloaded.
+    fn unloaded_owner_host() -> Arc<crate::VerterHost> {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        workspace.inject_file(
+            UNLOADED_OWNER.to_owned(),
+            Arc::from("export interface Props { a: string }\n"),
+        );
+        Arc::new(crate::VerterHost::new_with_scheduler_config(
+            crate::types::HostConfig {
+                analysis_level: crate::types::AnalysisLevel::Full,
+                audit_enabled: true,
+                footprint_capture: false,
+                ..crate::types::HostConfig::default()
+            },
+            workspace,
+            verter_scheduler::scheduler::SchedulerConfig {
+                cpu_threads: 1,
+                ..verter_scheduler::scheduler::SchedulerConfig::default()
+            },
+        ))
+    }
+
+    /// Wakes the thread that polls.
+    struct ThreadWaker(std::thread::Thread);
+
+    impl std::task::Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    /// Poll until ready, parking between polls until woken, failing past
+    /// [`HELD_DEADLINE`] instead of hanging.
+    fn poll_until_ready<T>(mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
+        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let deadline = std::time::Instant::now() + HELD_DEADLINE;
+        loop {
+            if let Poll::Ready(value) = poll(&waker) {
+                return value;
+            }
+            let now = std::time::Instant::now();
+            assert!(now < deadline, "the released load wakes its waiter");
+            std::thread::park_timeout(deadline - now);
+        }
+    }
+
+    /// Releases a held source read when dropped, so a failed assertion
+    /// cannot leave a scheduler worker held.
+    struct HeldSource<'h>(&'h crate::host_test_force::SourceLoadGate);
+
+    impl Drop for HeldSource<'_> {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    /// A macro payload whose owning file is still loading — its scheduler
+    /// source read held — returns `Pending` at the polled entry instead of
+    /// driving or waiting out the load, with its first stage retained; its
+    /// `Send` task stays pending on another thread. Once the read goes on,
+    /// the load completes and wakes the root, which reads its owner once and
+    /// delivers exactly what the synchronous entry, which loads the owner in
+    /// place, reads on a fresh host: answer, fact status, diagnostics and
+    /// receipt, logical work included.
+    #[test]
+    fn a_macro_payload_whose_owner_is_loading_yields_and_reads_it_once_loaded() {
+        let synchronous = {
+            let host = unloaded_owner_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (payload, _) = owned_props_payload_keys(&dispatch, UNLOADED_OWNER);
+            let read = dispatch.execute_via_cold_build_helper(payload);
+            assert!(
+                host.scheduler.try_get_source(UNLOADED_OWNER).is_some(),
+                "the synchronous entry loads the owner"
+            );
+            assert_eq!(
+                continuation_stages(&host),
+                (2, 2),
+                "the payload and its intersection begin once; the owner and the payload are read once"
+            );
+            read_summary(&dispatch, &read)
+        };
+        assert!(
+            !synchronous.2 && !synchronous.3 && synchronous.5.is_some(),
+            "a loaded owner roots a complete, cacheable, priced payload: {synchronous:?}"
+        );
+
+        let host = unloaded_owner_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (payload, _) = owned_props_payload_keys(&dispatch, UNLOADED_OWNER);
+        let gate = Arc::clone(&host.test_force.source_load_gate);
+        gate.hold(UNLOADED_OWNER);
+        let held = HeldSource(&gate);
+        let mut entry = dispatch.poll_query(payload.clone());
+        let counter = Arc::new(CountingWaker::default());
+        let counting = Waker::from(Arc::clone(&counter));
+        let first = entry.poll(&counting).is_pending();
+        let held_stages = continuation_stages(&host);
+        let loaded_while_held = host.scheduler.try_get_source(UNLOADED_OWNER).is_some();
+        let elsewhere = entry.task().map(|task| {
+            assert_send(task);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| task.poll(&counting).is_pending())
+                    .join()
+                    .expect("the pending poll returns")
+            })
+        });
+        drop(held);
+        assert!(first, "the payload yields while its owner loads");
+        assert_eq!(held_stages, (1, 0), "the first stage ran once and waits");
+        assert!(!loaded_while_held, "the owner's source read is still held");
+        assert_eq!(elsewhere, Some(true));
+        let read = poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the completed load wakes the waiting poll"
+        );
+        assert_eq!(
+            continuation_stages(&host),
+            (2, 2),
+            "no stage runs again: the owner is read once after its load"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
     }
 
     /// A macro payload released while it waits on its payload operation
