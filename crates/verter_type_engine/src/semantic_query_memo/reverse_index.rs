@@ -137,14 +137,23 @@ impl EvidenceOwner {
         }
     }
 
-    /// Visit what the node reads, in order.
+    /// Visit what the node reads, in order: each consumed receipt, and each
+    /// canonical once. A read set names a file once per fact it read of
+    /// it, but linking a holder under a file, and unlinking it, is one
+    /// edge however many of the file's facts it read.
     fn for_each_read<'a>(&'a self, mut visit: impl FnMut(EvidenceRead<'a>)) {
+        let mut visited = FirstSeen::default();
+        let mut canonical_once = |canonical: &'a str, visit: &mut dyn FnMut(EvidenceRead<'a>)| {
+            if visited.insert(canonical) {
+                visit(EvidenceRead::Canonical(canonical));
+            }
+        };
         let facts = match self {
             Self::Receipt(receipt) => receipt.facts(),
             Self::Carrier(facts) => facts,
             Self::Fence(fence) => {
                 for crate::semantic_query::DepEntry(canonical, _) in fence.iter() {
-                    visit(EvidenceRead::Canonical(canonical));
+                    canonical_once(canonical, &mut visit);
                 }
                 return;
             }
@@ -154,7 +163,7 @@ impl EvidenceOwner {
                 FactVersionRef::Receipt(child) => visit(EvidenceRead::Receipt(child)),
                 leaf => {
                     if let Some(canonical) = leaf.canonical_id() {
-                        visit(EvidenceRead::Canonical(canonical));
+                        canonical_once(canonical, &mut visit);
                     }
                 }
             }
@@ -885,22 +894,60 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
 
 /// `canonicals`, each once, in first-observation order.
 fn dedup_canonicals<'a>(canonicals: impl IntoIterator<Item = &'a str>) -> SmallVec<[&'a str; 8]> {
-    const LINEAR_SCAN_MAX: usize = 32;
-    let mut ordered: SmallVec<[&str; 8]> = SmallVec::new();
-    let mut wide: Option<FxHashSet<&str>> = None;
+    let mut seen = FirstSeen::default();
     for canonical in canonicals {
-        let fresh = match &mut wide {
-            Some(index) => index.insert(canonical),
-            None => !ordered.contains(&canonical),
+        seen.insert(canonical);
+    }
+    seen.ordered
+}
+
+/// The canonicals seen so far, in first-observation order. A short list is
+/// scanned; past [`FirstSeen::LINEAR_SCAN_MAX`] entries a table answers
+/// membership, so recording `k` distinct canonicals costs `O(k)` probes, not
+/// `k²/2` comparisons.
+#[derive(Default)]
+struct FirstSeen<'a> {
+    ordered: SmallVec<[&'a str; 8]>,
+    wide: Option<FxHashSet<&'a str>>,
+}
+
+impl<'a> FirstSeen<'a> {
+    const LINEAR_SCAN_MAX: usize = 32;
+
+    /// Record `canonical`; `false` when it was already seen.
+    fn insert(&mut self, canonical: &'a str) -> bool {
+        let fresh = match &mut self.wide {
+            Some(index) => {
+                #[cfg(test)]
+                CANONICAL_PROBES.with(|probes| probes.set(probes.get() + 1));
+                index.insert(canonical)
+            }
+            None => {
+                #[cfg(test)]
+                CANONICAL_PROBES.with(|probes| probes.set(probes.get() + self.ordered.len()));
+                !self.ordered.contains(&canonical)
+            }
         };
         if fresh {
-            ordered.push(canonical);
-            if wide.is_none() && ordered.len() > LINEAR_SCAN_MAX {
-                wide = Some(ordered.iter().copied().collect());
+            self.ordered.push(canonical);
+            if self.wide.is_none() && self.ordered.len() > Self::LINEAR_SCAN_MAX {
+                self.wide = Some(self.ordered.iter().copied().collect());
             }
         }
+        fresh
     }
-    ordered
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Canonical membership probes this thread's [`FirstSeen`] sets made.
+    static CANONICAL_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Canonical membership probes this thread has made so far.
+#[cfg(test)]
+pub(super) fn canonical_probes_for_tests() -> usize {
+    CANONICAL_PROBES.with(std::cell::Cell::get)
 }
 
 // ── The family memo's index ───────────────────────────────────────────

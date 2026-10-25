@@ -1025,12 +1025,6 @@ pub struct ProjectTypeStore {
     /// transitive-only use; by it folds into the shared route /
     /// semantic-query layer.
     imported_roots: Arc<ImportedRootDb>,
-    /// Host-owned semantic-query memo table + node arena. Shared across
-    /// every consumer that resolves a `SemanticQueryKey` through the
-    /// shared query API.
-    semantic_graph: Arc<SemanticGraphStore>,
-    /// The construction lane of `semantic_graph`, minted with it.
-    construction: verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
     /// Owner direct-import surface cache. Direct owner imports
     /// resolve exactly once per owner version and every downstream stage
     /// reads the same entry.
@@ -1183,6 +1177,14 @@ pub struct ProjectTypeStore {
     close_stats: parking_lot::Mutex<SemanticCloseStats>,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
+    /// The construction lane of `semantic_graph`, minted with it.
+    construction: verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
+    /// Host-owned semantic-query memo table + node arena. Shared across
+    /// every consumer that resolves a `SemanticQueryKey` through the
+    /// shared query API. Declared last: every cache above that holds its
+    /// nodes, and its construction lane, drop first, so the graph's
+    /// teardown finds no holder beside its own caches.
+    semantic_graph: Arc<SemanticGraphStore>,
 }
 
 impl std::fmt::Debug for ProjectTypeStore {

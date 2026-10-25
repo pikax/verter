@@ -154,9 +154,12 @@ would force a live artifact to re-parse or revoke a live handle. Both
 still consume aggregate headroom, so discretionary retention is refused
 while they are held, and crossing `pin_threshold_bytes` is REPORTED
 (`under_pin_pressure()`) rather than enforced. The hard invariant is
-therefore over the discretionary class: `retained` never exceeds
-`aggregate_ceiling_bytes − pinned − active`, under any concurrent
-interleaving (the admission is a CAS, never a check-then-reserve);
+therefore over discretionary admission: a retained reservation must fit
+`aggregate_ceiling_bytes − pinned − active` at the admission decision.
+All occupancy and peak updates share the admission lock, including
+unconditional ACTIVE reservations and refusable ACTIVE-to-retained adoption.
+Later in-flight work or pins may exceed the ceiling without revoking
+existing owners;
 production in-flight owners charge through
 `SemanticRetentionAccount::reserve_in_flight`, which attributes the
 charge to a measurement owner when an ACTIVE-occupancy window is open on
@@ -193,7 +196,7 @@ the held bytes move between ACTIVE balances with the total unchanged, and no
 window observes the adoption half-applied. `absorb` merges settled
 (non-ACTIVE) charges only. The account keeps each identified owner's ACTIVE
 bytes AND the UNKNOWN balance exactly (they sum to the account's ACTIVE bytes). Every ACTIVE transition — ACTIVE reserve and
-release, `commit_retained`, an ACTIVE `transfer_to_pinned`, a holds slice
+release, `try_adopt_retained`, an ACTIVE `transfer_to_pinned`, a holds slice
 joining an ACTIVE charge through `holding` — is noted under that same lock:
 the account keeps each owner's ACTIVE bytes exactly, so opening or finishing
 races lose nothing and overlapping windows never reset each other.
@@ -296,6 +299,18 @@ family's container (key, slot lists, budget-ledger record) is charged when
 the family is keyed and released with it. The origin-edge store's tables,
 edge lists, source lists and pooled fence blocks are part of the memo's
 bookkeeping pin, settled on every mutation.
+
+**A store's teardown releases its graph at once** (`ArenaTeardown`,
+`semantic_query_memo/arena.rs`). `SemanticGraphStore::drop` begins it before
+any field drops; while the caches drop, their root releases are deferred, and
+the guard (the store's last field) ends it. An arena no one else holds then
+drops whole — storage pin, payloads and dedup shards together, no per-node
+release. An arena a reader still holds releases the deferred roots in order,
+so exactly what that reader reaches stays live and charged. `ProjectTypeStore`
+declares its construction lane and `semantic_graph` last, so every project
+cache holding graph nodes drops first and the common teardown is the whole
+drop. Guards: `a_store_teardown_no_reader_outlives_releases_no_slot_one_by_one`,
+`a_store_teardown_leaves_charged_only_what_an_outliving_reader_reaches`.
 
 **Artifact and request caches.** The content-addressed artifact caches driven by
 `cache_runtime::lookup` (`ArtifactNode`: the component-meta shape,
@@ -508,7 +523,7 @@ quintuple is unchanged. No cache mutation, no semantic invalidation, no
 **R2.** `upsert` means "the source changed." Cache eviction is an explicit
 method with a stated scope; never a side effect of `upsert`.
 
-**R3.** Eager *reverse-dependent* cache invalidation is forbidden. Cache
+**R3.** Eager _reverse-dependent_ cache invalidation is forbidden. Cache
 entries validate on read against the exact facts they recorded; cross-file
 staleness is detected lazily through `fact_dep_signature` checks. An owner
 upsert does NOT iterate `reverse_deps_for` to drain its dependents — no
@@ -518,7 +533,7 @@ and `*_db::invalidate_canonical` as a public API are all banned in production
 (the `host_upsert_performs_no_reverse_dependent_eviction` guard enforces
 this).
 
-*Narrow exception — derived resolution currency.* Advancing a derived
+_Narrow exception — derived resolution currency._ Advancing a derived
 resolution fact (`ResolutionFactKey::Decision` /
 `::OwnerResolutionSet`) through the root-owned reverse edges is CURRENCY
 PROPAGATION, not eager cache invalidation. No reverse-dependent cache entry
@@ -536,7 +551,7 @@ and
 
 Distinct from the banned cascade: the **own-canonical drain**.
 `upsert_via_scheduler_with_priority` still drains the upserted canonical's
-*own* query-identity caches at upsert time
+_own_ query-identity caches at upsert time
 (`resolver.runtime.evict_canonical(&canonical_id)`,
 `project_type_store.evict_canonical(&canonical_id)`,
 `resolved_type_cache().clear()`).
@@ -561,7 +576,7 @@ warm-read validator decides how strictly that self-root is checked:
   the routed canonical's observed hash is read from the prepared-decl bundle
   (`PreparedDeclBundle::owner_whole_hash`) actually used for the value.
   `materialize_memo_db` additionally merges every canonical observed during
-  materialization as a cross-file dependency fact. Cross-file *dependency*
+  materialization as a cross-file dependency fact. Cross-file _dependency_
   facts keep the lazy "untracked → accept" permissiveness — only self-roots
   are strict.
 - The **`SemanticGraphStore` query nodes** validate their self-root
@@ -602,7 +617,7 @@ warm-read validator decides how strictly that self-root is checked:
   bare-generation-bump hole the old DB closed with
   `validated_at_generation`.
   `Instantiate { base, args: [], context: InstantiateContext {
-  projection_reduction, resolve_env_hash } }` with
+projection_reduction, resolve_env_hash } }` with
   `context.projection_reduction.mode = ProjectionMode::Skeleton`
   (Skeleton-mode instantiation, empty args) so unbound type parameters become
   `TypeParam` shells — preserving Conditional branches that would otherwise
@@ -948,7 +963,7 @@ The overlay materialiser (`materialize_overlay_indexed_ready_with_view`)
 derives BOTH the overlay source and its content hash from the `SessionView`
 itself (one authority) — a caller cannot pass a separate source/hash pair, so a
 stale hash can never be paired with a fresh source. `FileArtifactStore` exposes
-NO content-agnostic *currency oracle* — a canonical-only `Option`-returning
+NO content-agnostic _currency oracle_ — a canonical-only `Option`-returning
 accessor that scans `artifacts` is forbidden by the
 `file_artifact_store_defines_no_unpinned_currency_oracle` architecture guard.
 The only intentional content-agnostic escapes are `get_any` /
@@ -1026,7 +1041,7 @@ these is retired). Two cooperating pieces, tuned per cache:
   WHOLE — the batched SCC member publish, whose members are readable only while
   their fenced root stays resident — records the entire set as ONE budget step
   whose victim selection exempts every key the set needs. Per-entry admission
-  cannot see that constraint: under cap pressure entry *n*'s FIFO victim can be
+  cannot see that constraint: under cap pressure entry _n_'s FIFO victim can be
   the publisher's own root or an entry `0..n` it already wrote, leaving a
   torn SUFFIX whose surviving members depend on iteration ORDER. The exemption
   obliges the caller to REFUSE a group wider than the cap (an exemption set
@@ -1038,10 +1053,9 @@ these is retired). Two cooperating pieces, tuned per cache:
   per-slot candidate list (`DEFAULT_CANDIDATE_CAP` = 4) AND a global budget.
   `ComponentMetaResultDb` is built on it: the slot key drops `owner_whole_hash`,
   which becomes the per-candidate discriminant `D`. A fifth owner version in a
-  slot FIFO-evicts the oldest candidate; the global budget (`GLOBAL_BUDGET` =
-  512) caps the total across all slots.
+  slot FIFO-evicts the oldest candidate; the global budget (`GLOBAL_BUDGET` = 512) caps the total across all slots.
 
-Eviction is stale-first when cheaply detectable, then FIFO. Evicting a *valid*
+Eviction is stale-first when cheaply detectable, then FIFO. Evicting a _valid_
 entry is permitted — it only forces a recompute, never an incorrect result. A
 reader clones the candidate `Arc` before validating, so a concurrent removal
 never invalidates an in-flight reader; removal is keyed by an insertion
@@ -1147,7 +1161,7 @@ tag, so the arena's dense `nodes` / `scopes` storage is **append-only** — ever
 the arena id space would require a generational `SemanticNodeId` redesign (a
 mid-flight arena shrink under concurrent index-holding readers is unsafe) and
 is out of scope of the bounded-retention substrate. The substrate bounds the
-`SemanticNodeId`-keyed *caches* listed above; the node arena itself is
+`SemanticNodeId`-keyed _caches_ listed above; the node arena itself is
 unbounded by design pending that redesign.
 
 Concrete substrate (the per-domain target form):
@@ -1335,14 +1349,28 @@ as an unpublished root does. Guarded by
 `mixed_component_member_entry_self_roots_cover_all_component_files` and the
 tier's own reclamation and pressure tests (`request_completions_tests.rs`).
 
-Instantiation serves: every instantiation reads its declaration file's
-`IndexedReady` record (`ProjectSemanticDispatch::transaction_indexed_record`), as do its global-interface, member-index and augmentation-candidate reads.
+Transaction file serves: every instantiation reads its declaration file's
+`IndexedReady` record (`ProjectSemanticDispatch::transaction_indexed_record`), as do its global-interface, member-index and augmentation-candidate reads,
+and so do the other dispatcher reads that need only the record: a `typeof`
+build's and a `LowerLocator` build's own file, module-kind, exported-function
+augmentation and value-signature reads, namespace merging, a call's pending
+state and the flow evaluator's callee-augmentation check (through
+`FlowDemandDriver::transaction_indexed_record`).
 The first serve of a canonical on a transaction is recorded with
 `record_transaction_read` and kept in `CheckerDispatchTransaction::indexed_serves`
-under the workspace edit clocks it was served at; a later instantiation under
-the same clocks replays that read (`replay_transaction_read`: its facts,
-refusal and self-roots) instead of re-serving. An edit moves the clocks and the
-file is served afresh; a refused or non-reusable serve is never kept.
+under the workspace edit clocks it was served at; a later read under the same
+clocks replays that read (`replay_transaction_read`: its facts, refusal,
+self-roots and canonical evidence) into the scopes live at the later read
+instead of re-serving. The replay is the authority for what the later read
+depends on: the record alone carries none of the serve's facts, so a reader
+that skipped it would publish a carrier missing the file's parse and route
+facts (`a_replayed_declaration_serve_publishes_the_facts_its_first_serve_does`,
+`a_sibling_declaration_answered_from_the_recorded_serve_publishes_its_facts`
+fail with the replay removed). Lifetime: a kept serve lives as long as its
+transaction; an edit moves the clocks and the file is served afresh; a refused
+or non-reusable serve is never kept, and a read where no channel is
+observable (no live tracer or build-local frame, or an already partial
+cold-compute scope) is served directly and never kept.
 
 Paged signature evidence: a `fact_dep_signature` is never refused for its
 width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature
@@ -1513,7 +1541,7 @@ refuses it. The two consumer families differ in how they route the refusal:
 
 - **Cooperative cache-runtime producers** (imported registry,
   materialize-structure, ref-cycle) construct `CacheAdmission::ReturnOnly {
-  value, reason }` so the cooperative joiners receive the value without
+value, reason }` so the cooperative joiners receive the value without
   admitting a shared cache entry. The typed reason is bridged from the
   producer's `SignatureAdmission::NonCacheable(reason)` arm to the lowering site
   via a per-thread TLS slot (`cache_runtime::set_return_only_reason` /
@@ -1527,7 +1555,7 @@ refuses it. The two consumer families differ in how they route the refusal:
   single caller, and refuses the `compile_slots.insert` so no slot lands. A
   prior successful slot for the same `(canonical, profile)` is ADDITIONALLY
   removed (not just left in place) so the carrier invariant `present in
-  compile_slots ⇒ admitted cache entry for the current version` survives a
+compile_slots ⇒ admitted cache entry for the current version` survives a
   refused recompute. The companion scheduler artifact commit is gated on
   `Cacheable` admission so the refused result is not observable through
   `try_get_artifact` either.
@@ -1635,7 +1663,7 @@ closed, fact-rooted contract (`.claude/skills/type-resolution/SKILL.md`
    [`ResultTaint::join`](../../crates/verter_type_engine/src/semantic_query.rs)
    propagates the MAX level; within a level it keeps the more-severe
    `BrokenInputClass` (severity order `MissingDependency < UnresolvedReference <
-   IncompleteDeclaration < SyntaxError < TornRead`). Finite + monotone — taint
+IncompleteDeclaration < SyntaxError < TornRead`). Finite + monotone — taint
    only moves up, so propagation terminates.
 
 3. **§22 absorption is the reducers' FIRST fast-reject, as separable helpers.**
@@ -1648,7 +1676,7 @@ closed, fact-rooted contract (`.claude/skills/type-resolution/SKILL.md`
    `evaluate_deferred` / resolver work). Table: `X|any=any`, `X|never=X`,
    `X|unknown=unknown`; `X&never=never`, `X&any=any`, `X&unknown=X`; `any[K]=any`,
    `never[K]=never`, `unknown[K]`=UNCONDITIONAL error, `keyof any/never =
-   string|number|symbol`, `keyof unknown = never`; mapped over `never`=`{}`,
+string|number|symbol`, `keyof unknown = never`; mapped over `never`=`{}`,
    direct mapped over `unknown`=error; conditional `any extends T ? X : Y = X|Y`
    (union of BOTH branches via `ReduceUnion`, mode-independent, except when
    `extends` is an `infer` pattern → fall through to the infer-binding path),
@@ -1685,13 +1713,13 @@ Guards:
 **R21.** Environment hashes split into **five** orthogonal dimensions (the
 most-cited rule):
 
-| Hash | Captures |
-|---|---|
-| `parse_env_hash` | Parser / SFC / compiler feature flags, syntax mode, language target |
-| `resolve_env_hash` | `base_url`, `paths`, workspace aliases, project references, module resolution mode, package `exports`/`imports`, default extension order |
-| `type_env_hash` | TS semantic options that change type meaning (`strict`, `noImplicitAny`, etc.) |
-| `lib_env_hash` | TS built-in lib selection (`lib.dom.d.ts`, `lib.es*.d.ts`), `types`, `typeRoots`, registered ambient libs, global / module-augmentation corpus identity |
-| `project_identity` | Project root, tsconfig path, provider root, workspace root, membership / owner selection |
+| Hash               | Captures                                                                                                                                                |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parse_env_hash`   | Parser / SFC / compiler feature flags, syntax mode, language target                                                                                     |
+| `resolve_env_hash` | `base_url`, `paths`, workspace aliases, project references, module resolution mode, package `exports`/`imports`, default extension order                |
+| `type_env_hash`    | TS semantic options that change type meaning (`strict`, `noImplicitAny`, etc.)                                                                          |
+| `lib_env_hash`     | TS built-in lib selection (`lib.dom.d.ts`, `lib.es*.d.ts`), `types`, `typeRoots`, registered ambient libs, global / module-augmentation corpus identity |
+| `project_identity` | Project root, tsconfig path, provider root, workspace root, membership / owner selection                                                                |
 
 **Scoping rule for `lib_env_hash` (per R21).** `lib_env_hash` enters a cache
 key only when the cached value depends on lib data:
@@ -1707,7 +1735,8 @@ key only when the cached value depends on lib data:
 A single bundled `project_config_hash` is forbidden.
 
 The five hash functions live on `verter_session_query::resolution::IdeProjectConfig` (the `verter_workspace::env_hash` trait impls)
-+ per-call inputs surfaced through `EnvHashInputs<'_>`:
+
+- per-call inputs surfaced through `EnvHashInputs<'_>`:
 
 ```rust
 cfg.parse_env_hash(&inputs);   // Hash16
@@ -1737,7 +1766,7 @@ Concrete contract:
   and `project_identity` per their own scoping. `ResolvedImportFactsKey` =
   `{parse_env_hash, resolve_env_hash}` (NO `lib_env_hash`);
   `AugmentationTargetKey` = `{project_identity, resolve_env_hash,
-  lib_env_hash, population, target}` and `RouteDb`'s `RouteNameKey` /
+lib_env_hash, population, target}` and `RouteDb`'s `RouteNameKey` /
   `BarrelSurfaceKey` both carry `lib_env_hash` (lib because the
   ambient/types corpus supplies module augmentations).
 - **Resolve-domain ENV inputs** (hash into `resolve_env_hash` ONLY): the
@@ -1821,7 +1850,7 @@ Fields:
 - `compat_token: StoreViewCompatToken` — singleflight lane identity (epoch +
   optional session); read through `FactValidation::compat_token(ctx)`.
 - `project_identity, parse_env_hash, resolve_env_hash, type_env_hash,
-  lib_env_hash: Hash16` — the five env-hash dimensions.
+lib_env_hash: Hash16` — the five env-hash dimensions.
 - `source_map_policy_hash, public_api_mode_hash: Hash16` — typed policy
   identities (typed `SourceMapPolicy` / `CompileCacheMode` enums introduced by a
   later block lower into these `Hash16`s through their `stable_hash()`
@@ -1907,11 +1936,11 @@ whole-file or whole-export closure into a single `semantic_hash` is forbidden.
 orthogonal cache lifecycles. Consumers that select a specific member observe
 BOTH:
 
-| Fact | Purpose | Lifecycle | `semantic_hash` content |
-|---|---|---|---|
-| `MemberPresence(exporter, name, space)` | Existence + header | Phase 1 eager (parse-time) | `(name, member_kind, exporter_qualifier_salt)` |
-| `Member(exporter, name, space)` | Canonical reusable member body fingerprint | Phase 2 lazy | Body alpha-normalised TypeExpr with cross-decl references kept as references |
-| `MemberShape(exporter, space)` | Whole-surface fingerprint | Phase 1 eager | `sorted_by_name([(name, kind)])` |
+| Fact                                    | Purpose                                    | Lifecycle                  | `semantic_hash` content                                                      |
+| --------------------------------------- | ------------------------------------------ | -------------------------- | ---------------------------------------------------------------------------- |
+| `MemberPresence(exporter, name, space)` | Existence + header                         | Phase 1 eager (parse-time) | `(name, member_kind, exporter_qualifier_salt)`                               |
+| `Member(exporter, name, space)`         | Canonical reusable member body fingerprint | Phase 2 lazy               | Body alpha-normalised TypeExpr with cross-decl references kept as references |
+| `MemberShape(exporter, space)`          | Whole-surface fingerprint                  | Phase 1 eager              | `sorted_by_name([(name, kind)])`                                             |
 
 Why both `MemberPresence` and `Member` exist: their cache lifecycles differ.
 `MemberPresence` is cheap and eager — its body fingerprint is NOT included, so
@@ -2045,7 +2074,7 @@ OVERLAY-AWARE across two layers with deliberately DIFFERENT key discipline:
 
 - The **content-addressed** augmentation index (`AugmentationTargetKey` on
   `FileArtifactStore`) carries `population: AugmentationPopulation {Base,
-  Session(overlay-set fingerprint)}`. A `Base` scan filters to base
+Session(overlay-set fingerprint)}`. A `Base` scan filters to base
   (`FileArtifactKey::is_legacy`) artifacts; a `Session` scan unions the
   session's own overlay augmenters (matched by the session overlay discriminator
   derived from `SessionView::fingerprint`) with base. The fingerprint
@@ -2217,23 +2246,23 @@ The other named versions are intentionally unchanged:
 See `.claude/skills/type-cache-architecture/SKILL.md` for the canonical per-cache-layer key
 composition table. Summary:
 
-| Layer | Family | Key dimensions |
-|---|---|---|
-| `FileArtifactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, parse_key, build_toolchain_fingerprint, file_language_id` — `parse_key` canonically identifies exact bytes, language, syntax profile, and compatibility domain/epoch; the single session-owned fingerprint invalidates private DTO shape without pretending syntax changed. `IndexedReady` retains the scheduler/runtime-authoritative `FileLanguage` used to parse those bytes, and every exact writer keys from that retained row. The store retains its existing per-store lanes. |
-| `ModuleAugmentationIndex` (on `FileArtifactStore`) | Content-addressed | `project_identity, resolve_env_hash, lib_env_hash, population, target` (`population: AugmentationPopulation {Base, Session(overlay-set fingerprint)}`) |
-| `ResolvedImportFacts` | Content-addressed | `canonical, content_hash, parse_env_hash, resolve_env_hash, resolver_version` (**no `lib_env_hash`** — R21) |
-| Typed-IR resolve | Content-addressed | `canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, build_toolchain_fingerprint` |
-| `MemberSemanticFactStore` | Content-addressed | `canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space` |
-| `MemberDisplayFactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space` |
-| `BinderIdentityFactsStore` (family A, the binder-identity substrate) | Content-addressed | `canonical, parse_stable_hash, parse_env_hash` — the pre-reducer binder-identity substrate: per-file lexical scope tree with stable structural `BinderScopeId`s, env-free `DeclarationSlotSeed`s (exactly the four env-free fields of `ResolvedDeclSlotIdentity`; the env-bearing slot is derived ONLY at query-key construction via the `ProjectSemanticDispatch::finalize_slot_seed` choke point), and declaration-order / overload-group / augmentation-contribution provenance. Demand-produced from `IndexedReady` (no eager pass), value-side `ReadSetSignature` over eager parse-lane facts; negative name lookup stays `ReturnOnly` (no corpus-completeness store in this substrate). |
-| `RouteDb` per-name | Query-identity (multi-candidate) | `RouteNameKey { provider_canonical, exported_name, symbol_space, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (content-free; routes are resolve-domain so no `parse_env`/`type_env`, but `lib_env` enters — augmentations stitch the surface). Value-side `ValidatedFactCache` fact validation. |
-| `RouteDb` effective barrel surface | Query-identity (multi-candidate) | `BarrelSurfaceKey { barrel_canonical, project_identity, resolve_env_hash, lib_env_hash, resolver_version }`. Value-side `ValidatedFactCache` over `BarrelRouteSurface.fact_dep_signature`. |
-| `ClassifyMaterializationCycleGate` (materialization cycle gate — the retired `RefCycleResultDb`'s replacement) | Semantic-query family over the `SemanticGraphStore` memo | `MaterializationCycleGateKey { root: ResolvedDeclSlotIdentity, parse_env_hash, resolve_env_hash }` — content-free (fixed empty-args / `StructuralTransit` / `Skeleton` axes; no generation, no `DeclIdentity`, no algorithm version). Only `Decided` admits; value-side observed self-roots (walk root + every visited decl's file) + live-generation gate. |
-| `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `SemanticQueryKey` slot identity (e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`); the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals`. |
-| `AwaitedNormalize` / `AsyncReturnPayload` (the two awaited relations) | Semantic-query families over the `SemanticGraphStore` memo | `{ operand: SemanticNodeId, context: StructuralReduceContext { resolve_env_hash, type_env_hash, lib_env_hash, project_identity } }` — no decl slot and no content hash; the already-lowered operand carries the content, and the value roots on the operand's observed self-roots. Composite arms re-enter their OWN family, so every unwrap level is its own memo entry; builds are counted by `awaited_normalize_count` / `async_return_payload_count`, never `instantiate_count`. An honest refusal is `Error(Miss)` and never admits. |
-| `SignaturesOfType` / `ReadSignatureResult` (shared signature discovery and demand-driven results) | Semantic-query families over the `SemanticGraphStore` memo | `SignaturesOfType { subject: SemanticNodeId, kind: SignatureKind, context: SemanticContextId }` and the sealed `ReadSignatureResultKey { descriptor, call_substitution, projection: ResultDemand, evaluation: ResultEvaluationContextId, semantic_context }` — the interned `SemanticContextId` owns options / environment / policy, so no content or version hash rides the key and a changed option is a different family. Values are epoch-qualified handles into the graph store's `SignatureStore` (`SignatureSet` / `SignatureResult`); the value roots on the subject's / return node's observed self-roots, and an incomplete outcome (unsettled subject, unresolved body obligation, budget, cancellation) never admits. Enumeration never forces a body; `SignatureStore::bodies_forced` counts forced body recipes. |
-| `ShapeCacheDb` per-member slot | Generation/store-scoped graph-instance memo (NOT a durable content-free R6 query-identity key) | `ShapeCacheKey::surface_member_value_whole_with_context(scope, &SurfaceMember, context)` (`ShapeSubject::MemberValueNode`). Single-entry (not multi-candidate), not persistent, fact-validated + generation-gated. Warm reuse requires `validated_at_generation` + strict `ReadSetSignature` self-root validation over the exact `SurfaceMember.value` graph instance. |
-| `ComponentMetaResultDb` | Query-identity (multi-candidate) | `ComponentMetaResultKey { owner_canonical, options_fingerprint, project_identity, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash }` — content-free (owner whole-hash is the VALUE-side candidate discriminant, never a key field). Value-side owner whole-hash candidate + `ReadSetSignature.facts` + `validated_at_generation`. |
+| Layer                                                                                                          | Family                                                                                         | Key dimensions                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FileArtifactStore`                                                                                            | Content-addressed                                                                              | `canonical, content_hash, parse_env_hash, parse_key, build_toolchain_fingerprint, file_language_id` — `parse_key` canonically identifies exact bytes, language, syntax profile, and compatibility domain/epoch; the single session-owned fingerprint invalidates private DTO shape without pretending syntax changed. `IndexedReady` retains the scheduler/runtime-authoritative `FileLanguage` used to parse those bytes, and every exact writer keys from that retained row. The store retains its existing per-store lanes.                                                                                                                                                                                                                                                                                                 |
+| `ModuleAugmentationIndex` (on `FileArtifactStore`)                                                             | Content-addressed                                                                              | `project_identity, resolve_env_hash, lib_env_hash, population, target` (`population: AugmentationPopulation {Base, Session(overlay-set fingerprint)}`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `ResolvedImportFacts`                                                                                          | Content-addressed                                                                              | `canonical, content_hash, parse_env_hash, resolve_env_hash, resolver_version` (**no `lib_env_hash`** — R21)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Typed-IR resolve                                                                                               | Content-addressed                                                                              | `canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, build_toolchain_fingerprint`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `MemberSemanticFactStore`                                                                                      | Content-addressed                                                                              | `canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `MemberDisplayFactStore`                                                                                       | Content-addressed                                                                              | `canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `BinderIdentityFactsStore` (family A, the binder-identity substrate)                                           | Content-addressed                                                                              | `canonical, parse_stable_hash, parse_env_hash` — the pre-reducer binder-identity substrate: per-file lexical scope tree with stable structural `BinderScopeId`s, env-free `DeclarationSlotSeed`s (exactly the four env-free fields of `ResolvedDeclSlotIdentity`; the env-bearing slot is derived ONLY at query-key construction via the `ProjectSemanticDispatch::finalize_slot_seed` choke point), and declaration-order / overload-group / augmentation-contribution provenance. Demand-produced from `IndexedReady` (no eager pass), value-side `ReadSetSignature` over eager parse-lane facts; negative name lookup stays `ReturnOnly` (no corpus-completeness store in this substrate).                                                                                                                                  |
+| `RouteDb` per-name                                                                                             | Query-identity (multi-candidate)                                                               | `RouteNameKey { provider_canonical, exported_name, symbol_space, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (content-free; routes are resolve-domain so no `parse_env`/`type_env`, but `lib_env` enters — augmentations stitch the surface). Value-side `ValidatedFactCache` fact validation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `RouteDb` effective barrel surface                                                                             | Query-identity (multi-candidate)                                                               | `BarrelSurfaceKey { barrel_canonical, project_identity, resolve_env_hash, lib_env_hash, resolver_version }`. Value-side `ValidatedFactCache` over `BarrelRouteSurface.fact_dep_signature`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `ClassifyMaterializationCycleGate` (materialization cycle gate — the retired `RefCycleResultDb`'s replacement) | Semantic-query family over the `SemanticGraphStore` memo                                       | `MaterializationCycleGateKey { root: ResolvedDeclSlotIdentity, parse_env_hash, resolve_env_hash }` — content-free (fixed empty-args / `StructuralTransit` / `Skeleton` axes; no generation, no `DeclIdentity`, no algorithm version). Only `Decided` admits; value-side observed self-roots (walk root + every visited decl's file) + live-generation gate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `SemanticGraphStore` query nodes                                                                               | Query-identity (multi-candidate)                                                               | `SemanticQueryKey` slot identity (e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`); the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `AwaitedNormalize` / `AsyncReturnPayload` (the two awaited relations)                                          | Semantic-query families over the `SemanticGraphStore` memo                                     | `{ operand: SemanticNodeId, context: StructuralReduceContext { resolve_env_hash, type_env_hash, lib_env_hash, project_identity } }` — no decl slot and no content hash; the already-lowered operand carries the content, and the value roots on the operand's observed self-roots. Composite arms re-enter their OWN family, so every unwrap level is its own memo entry; builds are counted by `awaited_normalize_count` / `async_return_payload_count`, never `instantiate_count`. An honest refusal is `Error(Miss)` and never admits.                                                                                                                                                                                                                                                                                      |
+| `SignaturesOfType` / `ReadSignatureResult` (shared signature discovery and demand-driven results)              | Semantic-query families over the `SemanticGraphStore` memo                                     | `SignaturesOfType { subject: SemanticNodeId, kind: SignatureKind, context: SemanticContextId }` and the sealed `ReadSignatureResultKey { descriptor, call_substitution, projection: ResultDemand, evaluation: ResultEvaluationContextId, semantic_context }` — the interned `SemanticContextId` owns options / environment / policy, so no content or version hash rides the key and a changed option is a different family. Values are epoch-qualified handles into the graph store's `SignatureStore` (`SignatureSet` / `SignatureResult`); the value roots on the subject's / return node's observed self-roots, and an incomplete outcome (unsettled subject, unresolved body obligation, budget, cancellation) never admits. Enumeration never forces a body; `SignatureStore::bodies_forced` counts forced body recipes. |
+| `ShapeCacheDb` per-member slot                                                                                 | Generation/store-scoped graph-instance memo (NOT a durable content-free R6 query-identity key) | `ShapeCacheKey::surface_member_value_whole_with_context(scope, &SurfaceMember, context)` (`ShapeSubject::MemberValueNode`). Single-entry (not multi-candidate), not persistent, fact-validated + generation-gated. Warm reuse requires `validated_at_generation` + strict `ReadSetSignature` self-root validation over the exact `SurfaceMember.value` graph instance.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `ComponentMetaResultDb`                                                                                        | Query-identity (multi-candidate)                                                               | `ComponentMetaResultKey { owner_canonical, options_fingerprint, project_identity, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash }` — content-free (owner whole-hash is the VALUE-side candidate discriminant, never a key field). Value-side owner whole-hash candidate + `ReadSetSignature.facts` + `validated_at_generation`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 Every production `FileArtifactStore` read that can return a content candidate
 must carry the authoritative `ParseKey` and `FileLanguage`. A content hash is
@@ -2299,7 +2328,7 @@ Parse-time emission (eager, shallow, O(file_size)) populates the parse-domain
 - `LocalDecl(name, space)` — per NOT-exported local.
 - `MemberShape(exporter, space)` — whole-surface fingerprint.
 - `MemberPresence(exporter, name, space)` — header-only `(name, kind,
-  exporter_salt)`; NO body fingerprint.
+exporter_salt)`; NO body fingerprint.
 - `SyntacticExportSet` — whole-file surface fingerprint.
 - `SyntacticRouteInterface` — exact authored import/export routing interface;
   excludes bodies, spans, resolved targets, whole-content hashes, and project
@@ -2337,10 +2366,10 @@ Parse-time emission (eager, shallow, O(file_size)) populates the parse-domain
 Lazy emission (member body, on first member-access query) lives in TWO separate
 stores keyed differently to physically separate semantic vs display:
 
-| Store | Key | Keys-on |
-|---|---|---|
+| Store                     | Key                                                                                   | Keys-on                                            |
+| ------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | `MemberSemanticFactStore` | `(canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space)` | `parse_stable_hash` — cosmetic edits do NOT re-key |
-| `MemberDisplayFactStore` | `(canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space)` | `content_hash` — cosmetic edits DO re-key |
+| `MemberDisplayFactStore`  | `(canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space)`      | `content_hash` — cosmetic edits DO re-key          |
 
 Both stores admit through `entry().or_insert(...)`: insert-only-if-absent.
 Producer races for the same key collapse to one canonical fact; downstream
@@ -2367,20 +2396,20 @@ Contract:
   reordering.
 - **Path-precise**: cross-decl references resolve through `CrossDeclLens` and
   emit reference-shape edges (`LocalDecl(name, space)`, `ImportRef(spec, binding,
-  space)`, `TypeOfRef(name)`, `Unresolved(name, space)`) WITHOUT inlining the
+space)`, `TypeOfRef(name)`, `Unresolved(name, space)`) WITHOUT inlining the
   referent's body (R14). Free type parameters alpha-normalise to binder-relative
   indices.
 
 ## MemberPresence vs Member detailed table (R28)
 
-| Consumer touch | Observes |
-|---|---|
-| `Pick<Foo, "a">` | `MemberPresence(Foo, "a")` + `Member(Foo, "a")` |
-| `Omit<Foo, "a">` | `MemberShape(Foo)` (whole surface) |
-| `keyof Foo` | `MemberShape(Foo)` |
-| `Foo["a"]` | `MemberPresence(Foo, "a")` + `Member(Foo, "a")` |
-| `Foo["a"]["b"]` | both `Member` chains observed |
-| `{ [K in keyof Foo]: T }` | `MemberShape(Foo)` |
+| Consumer touch            | Observes                                        |
+| ------------------------- | ----------------------------------------------- |
+| `Pick<Foo, "a">`          | `MemberPresence(Foo, "a")` + `Member(Foo, "a")` |
+| `Omit<Foo, "a">`          | `MemberShape(Foo)` (whole surface)              |
+| `keyof Foo`               | `MemberShape(Foo)`                              |
+| `Foo["a"]`                | `MemberPresence(Foo, "a")` + `Member(Foo, "a")` |
+| `Foo["a"]["b"]`           | both `Member` chains observed                   |
+| `{ [K in keyof Foo]: T }` | `MemberShape(Foo)`                              |
 
 The discrimination matrix:
 
@@ -2568,7 +2597,7 @@ is permitted.
   `typeinfo_proto_retires_envless_decl_slot_ref` pins the proto surface.
 - **Module-resolution keys on SPLIT env.** Each import-resolving surface keys
   only on the dims it consults: `ResolvedImportFacts` keys on `{parse_env_hash,
-  resolve_env_hash}` (moduleResolution / paths / baseUrl / conditions /
+resolve_env_hash}` (moduleResolution / paths / baseUrl / conditions /
   extension order) and NEVER `lib_env_hash`; the augmentation-aware
   `AugmentationTargetKey` and `RouteDb`'s `RouteNameKey` / `BarrelSurfaceKey`
   additionally key on `lib_env_hash` (typeRoots / types corpus) +
@@ -2638,3 +2667,15 @@ keys and a membership index, distinguishes broad domains from finite empty
 ones, and never reads member values. Deferred evaluation separately keys shell
 and selected-value demands with the complete projection context and retains
 its ordinary dependency proof and cost receipt.
+
+The deferred-evaluation entry directly owns its counted operand/result roots
+and retains their owned handles in its entry charge. A serve captures the root
+owner into the active construction scope before dropping the map hold; the
+root owner returns to pinned accounting if eviction leaves only that scope.
+Internal serves carry only the node and priced receipt. They allocate no
+public delivery owner, metadata pin or metadata cache-hold slice. A warm
+operand replays its validated proof into the consuming frame's tracer and
+pays the same first step and receipt as a stepped operand; only a cold operand
+creates a continuation and tracer. Proof recording, strict validation, cost
+admission and counted ownership are REQUIRED work. Frame-start counters are
+test-only work evidence; optional audit capture remains OPTIONAL.

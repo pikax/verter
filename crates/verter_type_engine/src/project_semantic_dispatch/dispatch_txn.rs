@@ -2323,6 +2323,12 @@ pub struct CompletedRelations {
     members: Vec<CompletedSccMember>,
     /// Positions in `members` of the indexed cold answers, hashed by key.
     settled: hashbrown::HashTable<u32>,
+    /// The file roots of the queued members' operands, one per (canonical, hash)
+    /// in the order the members completed ([`super::call_resolve::union_self_roots`]):
+    /// every root close of the transaction publishes them, so they are
+    /// folded once, as each member queues, rather than re-read from every
+    /// queued member at every close.
+    self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
 }
 
 impl CompletedRelations {
@@ -2335,20 +2341,22 @@ impl CompletedRelations {
         self.members.is_empty()
     }
 
-    /// The queued members, in the order they completed.
-    pub(crate) fn iter(&self) -> std::slice::Iter<'_, CompletedSccMember> {
-        self.members.iter()
-    }
-
     /// The member queued last.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn last(&self) -> Option<&CompletedSccMember> {
         self.members.last()
     }
 
-    /// Queue `member`; when `settles`, its answer becomes the cold answer
-    /// later reads of its key take, in place of an earlier one.
-    pub(crate) fn push(&mut self, member: CompletedSccMember, settles: bool) {
+    /// Queue `member`, whose operands' file roots are `self_roots`; when
+    /// `settles`, its answer becomes the cold answer later reads of its key
+    /// take, in place of an earlier one.
+    pub(crate) fn push(
+        &mut self,
+        member: CompletedSccMember,
+        settles: bool,
+        self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    ) {
+        super::call_resolve::union_self_roots(&mut self.self_roots, self_roots);
         let position = u32::try_from(self.members.len())
             .expect("a transaction queues fewer than 2^32 relation members");
         if settles {
@@ -2378,7 +2386,14 @@ impl CompletedRelations {
     /// Take every queued member, clearing the index with them.
     pub(crate) fn take(&mut self) -> Vec<CompletedSccMember> {
         self.settled = hashbrown::HashTable::new();
+        self.self_roots = Vec::new();
         std::mem::take(&mut self.members)
+    }
+
+    /// The queued members' operand file roots, one per (canonical, hash), in the
+    /// order the members completed.
+    pub(crate) fn self_roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
+        &self.self_roots
     }
 }
 
@@ -2707,6 +2722,92 @@ pub struct CompletedResolveCallMember {
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
 }
 
+/// A member queued for a root's batched publish, carrying its own file
+/// roots.
+pub trait CompletedMemberRoots {
+    /// The member's own file roots.
+    fn member_self_roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot];
+}
+
+impl CompletedMemberRoots for CompletedFlowReturnMember {
+    fn member_self_roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
+        &self.self_roots
+    }
+}
+
+impl CompletedMemberRoots for CompletedResolveCallMember {
+    fn member_self_roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
+        &self.self_roots
+    }
+}
+
+/// The flow or call members a transaction queued for its root's batched
+/// publish, in the order they completed, with the union of their file
+/// roots (one per (canonical, hash), first queued first). Every root close of the
+/// transaction publishes that union, so it grows as members queue instead
+/// of being re-read from every queued member at every close — a chain of
+/// `n` closes would otherwise re-read `n²` members.
+#[derive(Debug)]
+pub struct CompletedMembers<T> {
+    members: Vec<T>,
+    self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+}
+
+impl<T> Default for CompletedMembers<T> {
+    fn default() -> Self {
+        Self {
+            members: Vec::new(),
+            self_roots: Vec::new(),
+        }
+    }
+}
+
+impl<T: CompletedMemberRoots> CompletedMembers<T> {
+    /// Queue `member`.
+    pub(crate) fn push(&mut self, member: T) {
+        super::call_resolve::union_self_roots(&mut self.self_roots, member.member_self_roots());
+        self.members.push(member);
+    }
+
+    /// Queue `members`, in order.
+    pub(crate) fn extend(&mut self, members: impl IntoIterator<Item = T>) {
+        for member in members {
+            self.push(member);
+        }
+    }
+}
+
+impl<T> CompletedMembers<T> {
+    /// Take every queued member, with their roots.
+    pub(crate) fn take(&mut self) -> Vec<T> {
+        self.self_roots = Vec::new();
+        std::mem::take(&mut self.members)
+    }
+
+    /// The queued members' file roots, one per (canonical, hash), in the order the
+    /// members completed.
+    pub(crate) fn self_roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
+        &self.self_roots
+    }
+}
+
+impl<T> std::ops::Deref for CompletedMembers<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.members
+    }
+}
+
+impl<'a, T> IntoIterator for &'a CompletedMembers<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.members.iter()
+    }
+}
+
 impl CompletedResolveCallMember {
     /// Own the member's admitted result in its inline flight until the
     /// batched publish stages it.
@@ -2746,7 +2847,7 @@ pub(crate) struct ClosedFlowValue {
 pub struct FlowReturnDomainRuntime {
     /// SCC-closed flow members queued for the root's batched publish
     /// drain.
-    pub completed_members: Vec<CompletedFlowReturnMember>,
+    pub completed_members: CompletedMembers<CompletedFlowReturnMember>,
     /// The VALUE channel for closed flow members: every member (and every
     /// inline SCC root) whose close produced an evaluated value records it
     /// here — proven or not. The shared return equation reads closed
@@ -2779,7 +2880,7 @@ pub struct ResolveCallDomainRuntime {
     pub(crate) applicability: crate::semantic_query::RelationKind,
     /// Mixed-component members awaiting the root carrier's drain (fenced
     /// backfill behind the root's committing admission).
-    pub completed_members: Vec<CompletedResolveCallMember>,
+    pub completed_members: CompletedMembers<CompletedResolveCallMember>,
     /// Typed failure channel for a machinery-root call whose family value is
     /// suppressed.
     pub(crate) last_root_failure: Option<ResolveCallFailure>,
@@ -2797,7 +2898,7 @@ impl Default for ResolveCallDomainRuntime {
         Self {
             contextual: None,
             applicability: crate::semantic_query::RelationKind::Assignable,
-            completed_members: Vec::new(),
+            completed_members: CompletedMembers::default(),
             last_root_failure: None,
             undecided_relations: 0,
         }

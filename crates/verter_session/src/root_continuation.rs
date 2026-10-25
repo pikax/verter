@@ -251,10 +251,12 @@ impl<'h, T> RootTask<'h, T> {
     /// run where `scheduler` runs producers (its CPU pool), and dispatch
     /// steps run here.
     pub(crate) fn drive(mut self, scheduler: &verter_scheduler::scheduler::Scheduler) -> T {
+        let mut progress = scheduler.subscribe_progress();
         verter_execution::blocking::block_on(
             verter_execution::blocking::WaitFamily::Root,
             None,
             |waker| loop {
+                progress.register(waker);
                 if let Poll::Ready(answer) = self.poll(waker) {
                     return Poll::Ready(answer);
                 }

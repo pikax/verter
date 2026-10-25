@@ -243,6 +243,62 @@ fn a_released_payload_a_reader_still_holds_stays_charged_until_the_reader_lets_g
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
+/// A store no reader outlives drops its graph whole: the caches' roots are
+/// released with the arena rather than node by node, and the teardown still
+/// restores the baseline.
+#[test]
+fn a_store_teardown_no_reader_outlives_releases_no_slot_one_by_one() {
+    const NODES: usize = 64;
+    let account = account();
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    {
+        let _scope = store.enter_node_root_scope();
+        for index in 0..NODES {
+            let node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                "cached-{index}"
+            ))));
+            // The cache entry is the node's only owner once the scope ends.
+            store.substitute_memo_publish(node, node, node, node);
+        }
+    }
+    assert!(account.snapshot().total_bytes() > 0);
+    let before = super::arena::slot_releases_for_tests();
+    drop(store);
+    assert_eq!(super::arena::slot_releases_for_tests() - before, 0);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
+/// A reader holding a root past the store's teardown keeps what it reaches
+/// live and charged, and only that: a node only a cache held is released
+/// with the cache, and the reader's drop restores the baseline.
+#[test]
+fn a_store_teardown_leaves_charged_only_what_an_outliving_reader_reaches() {
+    const CACHED: usize = 1 << 21;
+    const HELD: usize = 1 << 20;
+    let account = account();
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    {
+        let _scope = store.enter_node_root_scope();
+        let cached = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "c".repeat(CACHED),
+        )));
+        store.substitute_memo_publish(cached, cached, cached, cached);
+    }
+    let reader = store.enter_node_root_scope();
+    let _held = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "h".repeat(HELD),
+    )));
+    assert!(account.snapshot().total_bytes() >= CACHED + HELD);
+    drop(store);
+    let charged = account.snapshot().total_bytes();
+    assert!(
+        (HELD..CACHED).contains(&charged),
+        "only what the reader reaches stays charged after the teardown: {charged}"
+    );
+    drop(reader);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
 /// A payload a reader holds past the store's teardown stays charged — and
 /// only it: the rest of the graph's storage goes with the store and the
 /// last owner of its nodes, and the reader's drop restores the baseline, in

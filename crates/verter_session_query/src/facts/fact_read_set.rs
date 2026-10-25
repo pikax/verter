@@ -279,7 +279,7 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
             stamp,
         }));
     }
-    kept.sort_unstable_by(compare_fact_refs);
+    sort_fact_refs(&mut kept);
     kept.dedup();
     *facts = kept;
     true
@@ -635,6 +635,15 @@ impl FactReadSet {
         }
     }
 
+    /// Absorb output certified by this module's canonicalizer. The witness
+    /// removes order validation, not duplicate-run detection or fact merging.
+    #[inline]
+    pub fn absorb_sealed_signature(&mut self, signature: &CanonicalFactSignature) {
+        if !signature.is_empty() && !self.recently_absorbed(signature.as_arc()) {
+            self.canonical_runs.push(Arc::clone(signature.as_arc()));
+        }
+    }
+
     /// Whether one of the last [`RECENT_WINDOW`] absorbed runs is
     /// `signature`. An immutable retained run already proved its canonical
     /// order; replaying it must not grow live storage for each warm read.
@@ -781,7 +790,7 @@ impl FactReadSet {
     /// in `observations`, no runs outstanding).
     fn canonicalise(&mut self) {
         self.rewrites = self.rewrites.wrapping_add(1);
-        self.observations.sort_unstable_by(compare_fact_refs);
+        sort_fact_refs(&mut self.observations);
         self.observations.dedup();
         if !self.canonical_runs.is_empty() {
             let runs = std::mem::take(&mut self.canonical_runs);
@@ -808,13 +817,20 @@ impl FactReadSet {
     /// Every observed fact survives into the signature, however many there
     /// are.
     #[must_use]
-    pub fn finalise(mut self) -> FactReadSetFinalise {
+    pub fn finalise(self) -> FactReadSetFinalise {
+        self.finalise_canonical().into_raw()
+    }
+
+    /// Finalise through the same canonicalizer while retaining its order
+    /// witness for consumers that need not verify this immutable output again.
+    #[must_use]
+    pub fn finalise_canonical(mut self) -> CanonicalFactReadSetFinalise {
         // Width of the read set this compute observed, charged before the
         // stability outcome is decided so an unstable compute is still
         // counted for what it actually read.
         verter_audit::attribute_n!(ReadSetSignatureBuild, self.observations.len());
         if self.mutation_unstable {
-            return FactReadSetFinalise::MutationUnstable;
+            return CanonicalFactReadSetFinalise::MutationUnstable;
         }
         // A scope whose every observation lies in one completed witness it
         // replayed seals as that witness: the union is the witness, and
@@ -822,9 +838,9 @@ impl FactReadSet {
         if let Some(widest) = self.covering_run() {
             let arc = self.canonical_runs.swap_remove(widest);
             return if self.non_cacheable_propagation.is_some() {
-                FactReadSetFinalise::NonCacheable(arc)
+                CanonicalFactReadSetFinalise::NonCacheable(CanonicalFactSignature(arc))
             } else {
-                FactReadSetFinalise::Ok(arc)
+                CanonicalFactReadSetFinalise::Ok(CanonicalFactSignature(arc))
             };
         }
         // Canonicalise so two tracers that observed the same set of facts
@@ -848,9 +864,77 @@ impl FactReadSet {
             Arc::from(page_canonical(self.observations.into_vec()))
         };
         if self.non_cacheable_propagation.is_some() {
-            FactReadSetFinalise::NonCacheable(arc)
+            CanonicalFactReadSetFinalise::NonCacheable(CanonicalFactSignature(arc))
         } else {
-            FactReadSetFinalise::Ok(arc)
+            CanonicalFactReadSetFinalise::Ok(CanonicalFactSignature(arc))
+        }
+    }
+}
+
+/// An immutable canonical signature. Only this module's canonicalizer or
+/// explicit verification of an untrusted signature can mint its order witness.
+#[derive(Clone, Debug)]
+pub struct CanonicalFactSignature(Arc<[FactVersionRef]>);
+
+impl CanonicalFactSignature {
+    /// Verify a raw input without changing it. Malformed inputs keep using
+    /// the ordinary observation/canonicalization path.
+    pub fn verify(facts: Arc<[FactVersionRef]>) -> Result<Self, Arc<[FactVersionRef]>> {
+        if is_canonical_run(&facts) {
+            Ok(Self(facts))
+        } else {
+            Err(facts)
+        }
+    }
+
+    pub fn as_arc(&self) -> &Arc<[FactVersionRef]> {
+        &self.0
+    }
+
+    pub fn into_arc(self) -> Arc<[FactVersionRef]> {
+        self.0
+    }
+}
+
+impl std::ops::Deref for CanonicalFactSignature {
+    type Target = Arc<[FactVersionRef]>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The same finalization verdict as the raw interface, preserving the
+/// canonicalizer's witness and every non-cacheable/unstable distinction.
+#[derive(Clone, Debug)]
+pub enum CanonicalFactReadSetFinalise {
+    Ok(CanonicalFactSignature),
+    NonCacheable(CanonicalFactSignature),
+    MutationUnstable,
+}
+
+impl CanonicalFactReadSetFinalise {
+    pub fn into_raw(self) -> FactReadSetFinalise {
+        match self {
+            Self::Ok(facts) => FactReadSetFinalise::Ok(facts.into_arc()),
+            Self::NonCacheable(facts) => FactReadSetFinalise::NonCacheable(facts.into_arc()),
+            Self::MutationUnstable => FactReadSetFinalise::MutationUnstable,
+        }
+    }
+}
+
+impl From<FactReadSetFinalise> for CanonicalFactReadSetFinalise {
+    fn from(raw: FactReadSetFinalise) -> Self {
+        // Compatibility callers can provide raw facts. Verify them; an
+        // unordered collection is sealed by the existing canonicalizer.
+        let canonical = |facts| match CanonicalFactSignature::verify(facts) {
+            Ok(facts) => facts,
+            Err(facts) => seal_fact_signature(facts.to_vec()),
+        };
+        match raw {
+            FactReadSetFinalise::Ok(facts) => Self::Ok(canonical(facts)),
+            FactReadSetFinalise::NonCacheable(facts) => Self::NonCacheable(canonical(facts)),
+            FactReadSetFinalise::MutationUnstable => Self::MutationUnstable,
         }
     }
 }
@@ -953,6 +1037,12 @@ impl FactReadSetCell {
         self.0
             .borrow_mut()
             .absorb_canonical_signature_verified_once(signature, verified);
+    }
+
+    /// Absorb a signature whose canonicalizer already certified its order.
+    #[inline]
+    pub fn absorb_sealed_signature(&self, signature: &CanonicalFactSignature) {
+        self.0.borrow_mut().absorb_sealed_signature(signature);
     }
 
     /// The mark of everything observed so far, through `&self`. See
@@ -1122,7 +1212,7 @@ fn page_canonical_at_width(mut entries: Vec<FactVersionRef>, width: usize) -> Ve
             .collect();
         // A page orders by its digest, so the level of pages is put into
         // canonical order before it is used as entries.
-        pages.sort_unstable_by(compare_fact_refs);
+        sort_fact_refs(&mut pages);
         entries = pages;
     }
     entries
@@ -1136,10 +1226,16 @@ fn page_canonical_at_width(mut entries: Vec<FactVersionRef>, width: usize) -> Ve
 /// of operand evidence, a self-root rewrite) rather than through a
 /// tracer. It never compacts: compaction needs a tracer's live basis.
 #[must_use]
-pub fn seal_canonical_signature(mut facts: Vec<FactVersionRef>) -> Arc<[FactVersionRef]> {
+pub fn seal_canonical_signature(facts: Vec<FactVersionRef>) -> Arc<[FactVersionRef]> {
+    seal_fact_signature(facts).into_arc()
+}
+
+/// Seal through the same canonicalizer and keep its order witness.
+#[must_use]
+pub fn seal_fact_signature(mut facts: Vec<FactVersionRef>) -> CanonicalFactSignature {
     sort_dedup_facts(&mut facts);
     crate::facts::fact_cache::drop_subsumed_receipts(&mut facts);
-    Arc::from(page_canonical(facts))
+    CanonicalFactSignature(Arc::from(page_canonical(facts)))
 }
 
 /// The most facts appended past a canonical prefix that are placed into it
@@ -1153,22 +1249,31 @@ const APPENDED_TAIL_MAX: usize = 8;
 /// order as a full sort and deduplication.
 fn sort_dedup_facts(facts: &mut Vec<FactVersionRef>) {
     let mut prefix = facts.len().min(1);
-    while prefix < facts.len()
-        && compare_fact_refs(&facts[prefix - 1], &facts[prefix]) == std::cmp::Ordering::Less
-    {
+    let mut compared = 0;
+    while prefix < facts.len() && {
+        compared += 1;
+        compare_fact_refs(&facts[prefix - 1], &facts[prefix]) == std::cmp::Ordering::Less
+    } {
         prefix += 1;
     }
+    record_signature_work(compared);
     if prefix == facts.len() {
         return;
     }
     if facts.len() - prefix > APPENDED_TAIL_MAX {
-        facts.sort_unstable_by(compare_fact_refs);
+        sort_fact_refs(facts);
         facts.dedup();
         return;
     }
     let tail = facts.split_off(prefix);
     for fact in tail {
-        if let Err(at) = facts.binary_search_by(|held| compare_fact_refs(held, &fact)) {
+        let mut compared = 0;
+        let found = facts.binary_search_by(|held| {
+            compared += 1;
+            compare_fact_refs(held, &fact)
+        });
+        record_signature_work(compared);
+        if let Err(at) = found {
             facts.insert(at, fact);
         }
     }
@@ -1201,10 +1306,25 @@ fn sort_dedup_facts(facts: &mut Vec<FactVersionRef>) {
 ///   `str` CONTENT — never the pointer, never intern-table insertion
 ///   order, never a randomly-seeded hash. Two processes that observe the
 ///   same fact set emit byte-identical signatures.
+///
+/// Each comparison is one unit of signature work. A pass counts its
+/// comparisons and records them once ([`record_signature_work`]), so a
+/// sort or merge of `n` facts records `n`-proportional work without a
+/// thread-local update per comparison.
 #[inline]
 fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Ordering {
-    record_signature_work(1);
     a.cmp(b)
+}
+
+/// Sort `facts` into the canonical fact order ([`compare_fact_refs`]),
+/// recording each comparison as signature work.
+fn sort_fact_refs(facts: &mut [FactVersionRef]) {
+    let mut compared = 0;
+    facts.sort_unstable_by(|a, b| {
+        compared += 1;
+        compare_fact_refs(a, b)
+    });
+    record_signature_work(compared);
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1238,13 +1358,18 @@ pub fn signature_work_for_tests() -> usize {
 /// falls back to the ordinary observation path, which sorts it.
 fn is_canonical_run(run: &[FactVersionRef]) -> bool {
     let mut index = 1;
-    while index < run.len() {
+    let canonical = loop {
+        if index >= run.len() {
+            break true;
+        }
         if compare_fact_refs(&run[index - 1], &run[index]) != std::cmp::Ordering::Less {
-            return false;
+            index += 1;
+            break false;
         }
         index += 1;
-    }
-    true
+    };
+    record_signature_work(index - 1);
+    canonical
 }
 
 /// A signature verified to be a canonical run — strictly increasing under
@@ -1293,8 +1418,10 @@ fn merge_canonical_runs<'a>(left: &MergeLevel<'a>, right: &MergeLevel<'a>) -> Me
     let (left_len, right_len) = (left.len(), right.len());
     let mut out = Vec::with_capacity(left_len + right_len);
     let (mut i, mut j) = (0usize, 0usize);
+    let mut compared = 0;
     while i < left_len && j < right_len {
         let (l, r) = (left.get(i), right.get(j));
+        compared += 1;
         match compare_fact_refs(l, r) {
             Ordering::Less => {
                 out.push(l);
@@ -1311,6 +1438,7 @@ fn merge_canonical_runs<'a>(left: &MergeLevel<'a>, right: &MergeLevel<'a>) -> Me
             }
         }
     }
+    record_signature_work(compared);
     out.extend((i..left_len).map(|index| left.get(index)));
     out.extend((j..right_len).map(|index| right.get(index)));
     MergeLevel::Merged(out)
@@ -1520,3 +1648,85 @@ mod finalise_tests {
 #[cfg(test)]
 #[path = "fact_read_set_tests.rs"]
 mod fact_read_set_tests;
+
+#[cfg(test)]
+mod canonical_signature_tests {
+    use super::*;
+
+    fn fact(index: usize) -> FactVersionRef {
+        FactVersionRef::FileWholeHash {
+            canonical_id: Arc::from(format!("/canonical-{index:03}.ts")),
+            hash: [3; 16],
+        }
+    }
+
+    #[test]
+    fn sealed_absorption_removes_order_verification_and_keeps_the_same_facts() {
+        let mut producer = FactReadSet::new();
+        for index in (0..64).rev() {
+            producer.observe(fact(index));
+        }
+        let CanonicalFactReadSetFinalise::Ok(signature) = producer.finalise_canonical() else {
+            panic!("the producer is complete and stable");
+        };
+        let before = signature_work_for_tests();
+        let mut raw_consumer = FactReadSet::new();
+        raw_consumer.absorb_canonical_signature(signature.as_arc());
+        let FactReadSetFinalise::Ok(raw) = raw_consumer.finalise() else {
+            panic!("raw consumption remains cacheable");
+        };
+        let raw_work = signature_work_for_tests() - before;
+        let before = signature_work_for_tests();
+        let mut sealed_consumer = FactReadSet::new();
+        sealed_consumer.absorb_sealed_signature(&signature);
+        let CanonicalFactReadSetFinalise::Ok(sealed) = sealed_consumer.finalise_canonical() else {
+            panic!("sealed consumption remains cacheable");
+        };
+        let sealed_work = signature_work_for_tests() - before;
+        assert_eq!(raw, *sealed.as_arc());
+        assert!(Arc::ptr_eq(signature.as_arc(), sealed.as_arc()));
+        assert_eq!(
+            raw_work - sealed_work,
+            signature.len() - 1,
+            "the physical adjacent-order comparisons are absent on sealed delivery"
+        );
+    }
+
+    #[test]
+    fn malformed_raw_signatures_keep_the_ordinary_canonicalization_fallback() {
+        let malformed: Arc<[FactVersionRef]> = Arc::from([fact(7), fact(2), fact(7)]);
+        assert!(CanonicalFactSignature::verify(Arc::clone(&malformed)).is_err());
+        let mut consumer = FactReadSet::new();
+        consumer.absorb_canonical_signature(&malformed);
+        let FactReadSetFinalise::Ok(facts) = consumer.finalise() else {
+            panic!("ordering alone cannot refuse a raw observation set");
+        };
+        assert_eq!(&*facts, &[fact(2), fact(7)]);
+    }
+
+    #[test]
+    fn sealed_finalization_preserves_non_cacheable_and_mutation_verdicts() {
+        let mut declined = FactReadSet::new();
+        declined.observe(fact(1));
+        declined.note_non_cacheable_read(NonCacheablePropagation::Transitive);
+        assert!(matches!(
+            declined.finalise_canonical(),
+            CanonicalFactReadSetFinalise::NonCacheable(_)
+        ));
+        let mut moved = FactReadSet::new();
+        moved.set_aggregate_basis(AggregateGenerations {
+            content: Some(crate::facts::fact_cache::AggregateStamp::Generation(1)),
+            view_population: Some(crate::facts::fact_cache::ViewPopulation::Base),
+            ..AggregateGenerations::default()
+        });
+        moved.note_basis_recheck(&AggregateGenerations {
+            content: Some(crate::facts::fact_cache::AggregateStamp::Generation(2)),
+            view_population: Some(crate::facts::fact_cache::ViewPopulation::Base),
+            ..AggregateGenerations::default()
+        });
+        assert!(matches!(
+            moved.finalise_canonical(),
+            CanonicalFactReadSetFinalise::MutationUnstable
+        ));
+    }
+}

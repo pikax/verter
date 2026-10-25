@@ -94,6 +94,18 @@ impl CostIdentity {
 }
 
 impl CostIdentity {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn for_each_owned_root_for_tests(
+        &self,
+        mut visit: impl FnMut(&crate::semantic_query_memo::node_roots::NodeRootSet),
+    ) {
+        visit(&self.roots);
+        crate::semantic_query_memo::prepared::PreparedKeyHandle::producer_roots_for_tests(
+            self.key.as_ref(),
+            &mut visit,
+        );
+    }
+
     /// What the identity keeps reachable, once per `aliases`: its operand
     /// roots and its producer key's block, with the heap that key reaches.
     /// An encoded key owns its bytes; a prepared query identity owns its
@@ -369,11 +381,13 @@ impl DemandCostReceipt {
             // table, and the stored hash rejects most pairs at once.
             for dependency in prerequisites {
                 let mut kept_at = None;
-                for (position, kept) in unique.iter().enumerate() {
-                    if kept.receipt.identity == dependency.receipt.identity {
+                let mut position = 0;
+                while position < unique.len() {
+                    if unique[position].receipt.identity == dependency.receipt.identity {
                         kept_at = Some(position);
                         break;
                     }
+                    position += 1;
                 }
                 match kept_at {
                     Some(position) => {
@@ -400,58 +414,90 @@ impl DemandCostReceipt {
                 }
             }
         }
+        // Every sealed computation folds its prerequisites' footprints, so
+        // the fold is written with plain comparisons: a debug build would
+        // otherwise call out for every `max` and saturating add.
+        #[inline(always)]
+        fn raise_u16(slot: &mut u16, value: u16) {
+            if value > *slot {
+                *slot = value;
+            }
+        }
+        #[inline(always)]
+        fn raise_u32(slot: &mut u32, value: u32) {
+            if value > *slot {
+                *slot = value;
+            }
+        }
+        #[inline(always)]
+        fn saturating_add_u16(a: u16, b: u16) -> u16 {
+            let (sum, overflowed) = a.overflowing_add(b);
+            if overflowed {
+                u16::MAX
+            } else {
+                sum
+            }
+        }
         let mut footprint = OperationFootprint {
             tail_steps,
             ..OperationFootprint::default()
         };
-        for dependency in &unique {
+        let mut index = 0;
+        while index < unique.len() {
+            let dependency = &unique[index];
+            index += 1;
             let below = dependency.receipt.footprint;
             let levels = dependency.nesting.query_levels();
-            footprint.instantiation_required = footprint
-                .instantiation_required
-                .max(below.instantiation_required);
-            footprint.tail_steps = footprint.tail_steps.max(below.tail_steps);
+            raise_u32(
+                &mut footprint.instantiation_required,
+                below.instantiation_required,
+            );
+            raise_u32(&mut footprint.tail_steps, below.tail_steps);
             match dependency.nesting {
                 // The result's frames run one level below the consumer's,
                 // each from the drive: its own nesting is a frame's.
                 Nesting::Frame { .. } => {
-                    footprint.instantiation_height = footprint
-                        .instantiation_height
-                        .max(below.instantiation_height.saturating_add(1));
-                    footprint.frame_query_depth = footprint
-                        .frame_query_depth
-                        .max(below.query_depth)
-                        .max(below.frame_query_depth);
+                    raise_u16(
+                        &mut footprint.instantiation_height,
+                        saturating_add_u16(below.instantiation_height, 1),
+                    );
+                    raise_u16(&mut footprint.frame_query_depth, below.query_depth);
+                    raise_u16(&mut footprint.frame_query_depth, below.frame_query_depth);
                 }
                 // The result's frames run in a drive of their own, from
                 // its first frame, entered where the consumer is: every
                 // frame of it nests below the consumer's entry.
                 Nesting::Drive => {
-                    footprint.instantiation_required = footprint
-                        .instantiation_required
-                        .max(u32::from(below.instantiation_height) + 1);
-                    footprint.query_depth = footprint.query_depth.max(
-                        below
-                            .query_depth
-                            .max(below.frame_query_depth)
-                            .saturating_add(levels),
+                    raise_u32(
+                        &mut footprint.instantiation_required,
+                        u32::from(below.instantiation_height) + 1,
+                    );
+                    let deepest = if below.frame_query_depth > below.query_depth {
+                        below.frame_query_depth
+                    } else {
+                        below.query_depth
+                    };
+                    raise_u16(
+                        &mut footprint.query_depth,
+                        saturating_add_u16(deepest, levels),
                     );
                 }
                 // A failed prefix's frames are its consumer's own.
                 Nesting::Folded => {
-                    footprint.instantiation_height = footprint
-                        .instantiation_height
-                        .max(below.instantiation_height);
+                    raise_u16(
+                        &mut footprint.instantiation_height,
+                        below.instantiation_height,
+                    );
                 }
                 // A result read synchronously is evaluated without frames
                 // inside a running drive; frames its closure ran keep
                 // running from the drive.
                 Nesting::InPlace | Nesting::Entered => {
-                    footprint.query_depth = footprint
-                        .query_depth
-                        .max(below.query_depth.saturating_add(levels));
-                    footprint.frame_query_depth =
-                        footprint.frame_query_depth.max(below.frame_query_depth);
+                    raise_u16(
+                        &mut footprint.query_depth,
+                        saturating_add_u16(below.query_depth, levels),
+                    );
+                    raise_u16(&mut footprint.frame_query_depth, below.frame_query_depth);
                 }
             }
         }
@@ -498,6 +544,12 @@ impl DemandCostReceipt {
     /// The deepest logical nesting it needs below its own entry.
     pub fn depth(&self) -> u16 {
         self.footprint.query_depth
+    }
+
+    /// The input ownership already attached to this receipt's cost identity.
+    /// A memo borrows it; evaluated results never become receipt operands.
+    pub(crate) fn operand_roots(&self) -> &crate::semantic_query_memo::node_roots::NodeRootSet {
+        &self.identity.roots
     }
 
     /// The allowances its closure's cold run needed.

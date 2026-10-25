@@ -694,6 +694,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The roots carried by the production pending-call state before admission.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resolve_call_pending_self_roots_for_tests(
+        &self,
+        key: &ResolveCallKey,
+    ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
+        self.resolve_call_pending_state(
+            key,
+            ResolveCallSelection::DynamicAny,
+            Vec::new(),
+            Vec::new(),
+            None,
+            false,
+        )
+        .self_roots
+    }
+
     fn resolve_call_pending_state(
         &self,
         key: &ResolveCallKey,
@@ -722,15 +739,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             Err(_) => false,
         };
-        let site_rooted = if let Some(serve) = self
-            .ctx
-            .ensure_indexed_ready_serve(key.point.canonical_id.as_ref())
+        let site_rooted = if let Some(indexed) =
+            self.transaction_indexed_record(key.point.canonical_id.as_ref())
         {
-            if !self_roots
-                .iter()
-                .any(|(canonical, _)| canonical == &key.point.canonical_id)
-            {
-                self_roots.push((key.point.canonical_id.clone(), serve.indexed.whole_hash));
+            if !self_roots.iter().any(|(canonical, hash)| {
+                canonical == &key.point.canonical_id && *hash == indexed.whole_hash
+            }) {
+                self_roots.push((key.point.canonical_id.clone(), indexed.whole_hash));
             }
             true
         } else {
@@ -1124,20 +1139,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         {
             let txn = self.dispatch_txn.borrow();
-            for member in &txn.flow.completed_members {
-                union_self_roots(&mut scc_self_roots, &member.self_roots);
-            }
-            for member in &txn.call.completed_members {
-                union_self_roots(&mut scc_self_roots, &member.self_roots);
-            }
-            let relation_nodes = txn
-                .relation
-                .completed_members
-                .iter()
-                .flat_map(|member| [member.key.source, member.key.target]);
+            union_self_roots(&mut scc_self_roots, txn.flow.completed_members.self_roots());
+            union_self_roots(&mut scc_self_roots, txn.call.completed_members.self_roots());
             union_self_roots(
                 &mut scc_self_roots,
-                &self.observed_self_roots_from_nodes(relation_nodes),
+                txn.relation.completed_members.self_roots(),
             );
         }
         let discharge = self.relation_discharge_and_route(
@@ -1297,8 +1303,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             (
                 txn.relation.completed_members.take(),
-                std::mem::take(&mut txn.flow.completed_members),
-                std::mem::take(&mut txn.call.completed_members),
+                txn.flow.completed_members.take(),
+                txn.call.completed_members.take(),
             )
         };
         self.publish_scc_member_batch(
@@ -5583,14 +5589,40 @@ fn tuple_suffix_target<M: verter_audit::observe::ObserveExec>(
     }
 }
 
-/// Union `source`'s self-roots into `target`, one root per canonical.
+/// Union `source`'s distinct (canonical, hash) observations into `target`.
+/// Conflicting versions must reach carrier admission, which rejects torn roots.
 pub(crate) fn union_self_roots(
     target: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     source: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
 ) {
+    note_root_union_work(source.len());
     for root in source {
-        if !target.iter().any(|(canonical, _)| canonical == &root.0) {
+        if !target.contains(root) {
             target.push(root.clone());
         }
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static ROOT_UNION_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `entries` roots or operand nodes read to compose a published
+/// carrier's self-roots on this thread. Optional test observation: no state
+/// exists outside test builds.
+#[inline]
+pub(crate) fn note_root_union_work(entries: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    ROOT_UNION_WORK.with(|work| work.set(work.get() + entries as u64));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = entries;
+}
+
+/// The roots and operand nodes this thread has read to compose published
+/// carriers' self-roots ([`union_self_roots`] and
+/// `ProjectSemanticDispatch::observed_self_roots_from_nodes`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn root_union_work_for_tests() -> u64 {
+    ROOT_UNION_WORK.with(std::cell::Cell::get)
 }

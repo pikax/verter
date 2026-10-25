@@ -11,6 +11,8 @@
 
 use std::sync::Arc;
 
+use verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise;
+#[cfg(any(test, feature = "test-support"))]
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
 use super::ProjectSemanticDispatch;
@@ -429,7 +431,6 @@ struct DeferredEvaluationFrame {
     node: SemanticNodeId,
     context: ProjectionReductionContext,
     demand: DeferredEvaluationDemand,
-    memo_checked: bool,
     visited: VisitedNodes,
     completeness: ResultCompleteness,
     availability: crate::semantic_query::FactStatus,
@@ -443,6 +444,17 @@ struct DeferredEvaluationFrame {
     recording: bool,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static EVALUATION_FRAME_STARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Cold deferred-evaluation continuations created on this thread.
+#[cfg(any(test, feature = "test-support"))]
+pub fn deferred_evaluation_frame_starts_for_tests() -> usize {
+    EVALUATION_FRAME_STARTS.with(std::cell::Cell::get)
+}
+
 impl DeferredEvaluationFrame {
     fn new(
         node: SemanticNodeId,
@@ -450,6 +462,8 @@ impl DeferredEvaluationFrame {
         budget_epoch: u64,
         demand: DeferredEvaluationDemand,
     ) -> Self {
+        #[cfg(any(test, feature = "test-support"))]
+        EVALUATION_FRAME_STARTS.with(|count| count.set(count.get() + 1));
         let mut visited = VisitedNodes::default();
         visited.insert(node);
         Self {
@@ -457,7 +471,6 @@ impl DeferredEvaluationFrame {
             node,
             context,
             demand,
-            memo_checked: false,
             visited,
             completeness: ResultCompleteness::Complete,
             availability: crate::semantic_query::FactStatus::Complete,
@@ -530,7 +543,6 @@ enum DeferredEvaluationAction {
         context: ProjectionReductionContext,
     },
     Finish(SemanticNodeId),
-    Cached(SemanticNodeId),
 }
 
 fn clone_index_key(index: &IndexKey) -> IndexKey {
@@ -548,14 +560,15 @@ fn clone_index_key(index: &IndexKey) -> IndexKey {
 /// is the only way its observations reach them.
 fn deliver_evaluation_facts<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
     tracers: &mut [crate::fact_signature_helpers::StepwiseFactTracer<'_, W>],
-    finalise: &FactReadSetFinalise,
+    finalise: &CanonicalFactReadSetFinalise,
 ) {
-    let (FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts)) = finalise
+    let (CanonicalFactReadSetFinalise::Ok(facts)
+    | CanonicalFactReadSetFinalise::NonCacheable(facts)) = finalise
     else {
         return;
     };
     let _scope = tracers.last_mut().map(|parent| parent.install());
-    crate::fact_tracing::tracing::observe_fan_out_canonical(facts);
+    crate::fact_tracing::tracing::observe_fan_out_sealed(facts);
 }
 
 /// Deliver the facts every unfinished frame of a stopped evaluation
@@ -2302,18 +2315,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         mut frame: DeferredEvaluationFrame,
         result: SemanticNodeId,
-        finalise: FactReadSetFinalise,
+        finalise: impl Into<CanonicalFactReadSetFinalise>,
     ) -> EvaluateDeferredOutcome {
-        let mutation_unstable = matches!(&finalise, FactReadSetFinalise::MutationUnstable);
+        let finalise = finalise.into();
+        let mutation_unstable = matches!(&finalise, CanonicalFactReadSetFinalise::MutationUnstable);
         let evidence = match finalise {
-            FactReadSetFinalise::Ok(facts) => {
+            CanonicalFactReadSetFinalise::Ok(facts) => {
                 use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef};
 
                 let mut roots = self.observed_self_roots_from_nodes([frame.entry_node, result]);
                 // This memo has no single file owner. Every consumed
                 // declaration and augmentation contributor is a strict root,
                 // including whole-file facts retained on evidence pages.
-                crate::fact_signature_helpers::shared_completed_carrier_rooting_traced_files(
+                crate::fact_signature_helpers::shared_completed_carrier_rooting_sealed_files(
                     &roots, &facts,
                 )
                 .map(Ok)
@@ -2324,12 +2338,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                         _ => None,
                     }));
-                    self.ctx.complete_graph_signature(&roots, facts.to_vec())
+                    self.ctx
+                        .complete_graph_signature(&roots, facts.to_vec())
+                        .and_then(|raw| {
+                            crate::fact_signature_helpers::CompletedStructuralEvidence::verify(raw)
+                                .ok_or(
+                                    crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                                )
+                        })
                 })
                 .ok()
             }
-            FactReadSetFinalise::NonCacheable(_) => None,
-            FactReadSetFinalise::MutationUnstable => {
+            CanonicalFactReadSetFinalise::NonCacheable(_) => None,
+            CanonicalFactReadSetFinalise::MutationUnstable => {
                 crate::request_context::observe_execution_abort(
                     crate::semantic_query::ExecutionAbort::Superseded,
                 );
@@ -2390,13 +2411,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let (true, false, Some(receipt), Some(evidence)) =
             (complete, frame.cache_suppress, receipt, evidence)
         {
-            self.graph().evaluate_deferred_memo_publish(
-                frame.entry_node,
-                frame.context,
-                frame.demand,
-                result,
-                receipt,
-                evidence,
+            self.graph().evaluate_deferred_memo_publish_completed(
+                crate::semantic_query_memo::CompletedDeferredEvaluation::new(
+                    frame.entry_node,
+                    frame.context,
+                    frame.demand,
+                    result,
+                    receipt,
+                    evidence,
+                ),
             );
         }
         let availability = if !frame.completeness.is_partial() {
@@ -2632,19 +2655,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 abort,
             );
         }
-        // The demand owns its operand for its whole evaluation; one this
-        // graph no longer holds is refused, never evaluated.
-        let Ok(operand) = self.graph().root_nodes([node]) else {
+        // An operand this graph no longer holds is refused, never
+        // evaluated.
+        if !self.graph().node_is_live(node) {
             return EvaluateDeferredOutcome::refused_operand(
                 self.opaque(QueryError::StaleSemanticOperand),
             );
-        };
+        }
         // Continuations live on the heap. Authored structural depth has no
         // cap here; only connected operational limits can stop evaluation.
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
             return EvaluateDeferredOutcome::partial(node, reasons);
         }
+        // An operand that evaluates to itself completes before any step
+        // reads through it, so it is admitted without being rooted.
         if self.evaluates_to_itself(node, reduction_context, demand)
             && self.admit_self_evaluation(node, reduction_context, demand)
         {
@@ -2657,10 +2682,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph()
                 .evaluate_deferred_memo_get(node, reduction_context, demand, self.ctx)
         {
-            if self.admits_served(&served.receipt) {
+            if matches!(
+                self.admit_served(&served.receipt, super::cost_receipt::Nesting::Entered),
+                super::ServedAdmission::Admitted
+            ) {
                 return EvaluateDeferredOutcome::complete(served.value);
             }
         }
+        // A serve owns its operands through the memo's shared root owner.
+        // Only a cold evaluation needs another root for its own recording.
+        let Ok(operand) = self.graph().root_nodes([node]) else {
+            return EvaluateDeferredOutcome::refused_operand(
+                self.opaque(QueryError::StaleSemanticOperand),
+            );
+        };
         // The root evaluates, and records from its first step: every step
         // it takes is its own cost, so the receipt a later read replays
         // charges exactly what computing it did. (A nested frame pays its
@@ -2675,7 +2710,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             super::cost_receipt::CostIdentity::of_key((node, reduction_context, demand))
                 .with_roots(operand),
         );
-        root.memo_checked = true;
         root.recording = true;
         let mut frames = vec![root];
         // Tracers live beside the frames so a step can mutate its frame.
@@ -2686,9 +2720,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
         )];
         let mut completed_child: Option<EvaluateDeferredOutcome> = None;
+        let mut prepaid_step = false;
 
         loop {
-            if let Err(reasons) = self.charge_connected_work() {
+            let charge = if std::mem::take(&mut prepaid_step) {
+                Ok(())
+            } else {
+                self.charge_connected_work()
+            };
+            if let Err(reasons) = charge {
                 for frame in frames.iter().rev() {
                     if frame.recording {
                         self.connected_demand.abandon_cost_scope();
@@ -2850,46 +2890,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
             } else {
-                let (entry_node, context, demand, check_memo) = {
-                    let frame = frames
-                        .last_mut()
-                        .expect("the evaluator retains a root frame");
-                    let check_memo = !frame.memo_checked;
-                    frame.memo_checked = true;
-                    (frame.entry_node, frame.context, frame.demand, check_memo)
-                };
-                let memo_hit = if check_memo {
-                    self.graph()
-                        .evaluate_deferred_memo_get(entry_node, context, demand, self.ctx)
-                        .filter(|served| self.admits_served(&served.receipt))
-                        .map(|served| served.value)
-                } else {
-                    None
-                };
-                if check_memo && memo_hit.is_none() {
-                    // The frame evaluates: its charges are its own.
-                    self.connected_demand.open_cost_scope(
-                        super::cost_receipt::CostIdentity::of_key((entry_node, context, demand))
-                            .with_roots(
-                                self.graph()
-                                    .root_nodes([entry_node])
-                                    .expect("evaluation operand is live"),
-                            ),
-                    );
-                    frames
-                        .last_mut()
-                        .expect("the evaluator retains a root frame")
-                        .recording = true;
-                }
-                if let Some(cached) = memo_hit {
-                    DeferredEvaluationAction::Cached(cached)
-                } else {
-                    let current = frames
-                        .last()
-                        .expect("the evaluator retains a root frame")
-                        .node;
-                    if let Some(data) = self.graph().node_data(current) {
-                        match data.as_ref() {
+                let frame = frames.last().expect("the evaluator retains a root frame");
+                let context = frame.context;
+                let demand = frame.demand;
+                let current = frames
+                    .last()
+                    .expect("the evaluator retains a root frame")
+                    .node;
+                if let Some(data) = self.graph().node_data(current) {
+                    match data.as_ref() {
                             _ if demand != DeferredEvaluationDemand::Shell
                                 && self
                                     .selected_value_children(data.as_ref(), context, demand)
@@ -3130,13 +3139,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                             _ => DeferredEvaluationAction::Finish(current),
                         }
-                    } else {
-                        let frame = frames.last_mut().expect("active evaluator frame");
-                        frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
-                            PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
-                        ));
-                        DeferredEvaluationAction::Finish(self.opaque(QueryError::Miss))
-                    }
+                } else {
+                    let frame = frames.last_mut().expect("active evaluator frame");
+                    frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
+                        PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
+                    ));
+                    DeferredEvaluationAction::Finish(self.opaque(QueryError::Miss))
                 }
             };
 
@@ -3169,27 +3177,68 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     } else {
                         parent.demand
                     };
-                    if self.evaluates_to_itself(node, context, demand) {
-                        // The operand's one step is paid to this frame, as
-                        // a pushed operand's first step is.
-                        if let Err(reasons) = self.charge_connected_work() {
-                            for frame in frames.iter().rev() {
-                                if frame.recording {
-                                    self.connected_demand.abandon_cost_scope();
-                                }
+                    // A child pays its first step to the parent before a
+                    // memo serve or a cold recording, exactly as a stepped
+                    // child does. A miss carries that paid step into its
+                    // first iteration.
+                    if let Err(reasons) = self.charge_connected_work() {
+                        for frame in frames.iter().rev() {
+                            if frame.recording {
+                                self.connected_demand.abandon_cost_scope();
                             }
-                            deliver_abandoned_evaluation_facts(tracers);
-                            return aborted_evaluation_outcome(&frames, None, reasons);
                         }
+                        deliver_abandoned_evaluation_facts(tracers);
+                        return aborted_evaluation_outcome(&frames, None, reasons);
+                    }
+                    if self.evaluates_to_itself(node, context, demand) {
                         completed_child = Some(EvaluateDeferredOutcome::complete(node));
                         continue;
                     }
-                    frames.push(DeferredEvaluationFrame::new(
+                    // A memo already owns the complete proof. Deliver it
+                    // directly into the consuming frame; a warm operand
+                    // neither starts a continuation nor seals a copy of it.
+                    let served = {
+                        let _scope = tracers.last_mut().expect("active parent tracer").install();
+                        self.graph()
+                            .evaluate_deferred_memo_get(node, context, demand, self.ctx)
+                            .filter(|served| {
+                                matches!(
+                                    self.admit_served(
+                                        &served.receipt,
+                                        super::cost_receipt::Nesting::Entered
+                                    ),
+                                    super::ServedAdmission::Admitted
+                                )
+                            })
+                    };
+                    if let Some(served) = served {
+                        let outcome = match crate::request_context::current_execution_abort() {
+                            Some(abort) => EvaluateDeferredOutcome::aborted(
+                                self.opaque(QueryError::ExecutionAborted(abort)),
+                                abort,
+                            ),
+                            None => EvaluateDeferredOutcome::complete(served.value),
+                        };
+                        completed_child = Some(outcome);
+                        continue;
+                    }
+                    let mut frame = DeferredEvaluationFrame::new(
                         node,
                         context,
                         self.operation_budget_epoch.get(),
                         demand,
-                    ));
+                    );
+                    self.connected_demand.open_cost_scope(
+                        super::cost_receipt::CostIdentity::of_key((node, context, demand))
+                            .with_roots(
+                                self.graph()
+                                    .root_nodes([node])
+                                    .expect("evaluation operand is live"),
+                            ),
+                    );
+                    frame.recording = true;
+                    frames.push(frame);
+                    prepaid_step = true;
                     tracers.push(crate::fact_signature_helpers::StepwiseFactTracer::new(
                         crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
                     ));
@@ -3200,42 +3249,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let finalise = tracer.finish();
                     deliver_evaluation_facts(&mut tracers, &finalise);
                     let outcome = self.finish_deferred_evaluation_frame(frame, result, finalise);
-                    if frames.is_empty() {
-                        return outcome;
-                    }
-                    completed_child = Some(outcome);
-                }
-                DeferredEvaluationAction::Cached(cached) => {
-                    let finalise = tracers
-                        .pop()
-                        .expect("each evaluation owns a tracer")
-                        .finish();
-                    deliver_evaluation_facts(&mut tracers, &finalise);
-                    frames
-                        .pop()
-                        .expect("a memo hit belongs to an active evaluator frame");
-                    let mut outcome = EvaluateDeferredOutcome::complete(cached);
-                    match finalise {
-                        FactReadSetFinalise::Ok(_) => {}
-                        FactReadSetFinalise::NonCacheable(_) => outcome.cache_suppress = true,
-                        FactReadSetFinalise::MutationUnstable => {
-                            crate::request_context::observe_execution_abort(
-                                crate::semantic_query::ExecutionAbort::Superseded,
-                            );
-                            let abort = crate::request_context::current_execution_abort()
-                                .unwrap_or(crate::semantic_query::ExecutionAbort::Superseded);
-                            outcome = EvaluateDeferredOutcome::aborted(
-                                self.opaque(QueryError::ExecutionAborted(abort)),
-                                abort,
-                            );
-                        }
-                    }
-                    if let Some(abort) = crate::request_context::current_execution_abort() {
-                        outcome = EvaluateDeferredOutcome::aborted(
-                            self.opaque(QueryError::ExecutionAborted(abort)),
-                            abort,
-                        );
-                    }
                     if frames.is_empty() {
                         return outcome;
                     }

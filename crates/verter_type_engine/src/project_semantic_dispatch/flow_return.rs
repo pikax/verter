@@ -3604,8 +3604,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             txn.flow.closed_values.clear();
             (
                 txn.relation.completed_members.take(),
-                std::mem::take(&mut txn.flow.completed_members),
-                std::mem::take(&mut txn.call.completed_members),
+                txn.flow.completed_members.take(),
+                txn.call.completed_members.take(),
             )
         };
         self.publish_scc_member_batch(
@@ -5836,20 +5836,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         {
             let txn = self.dispatch_txn.borrow();
-            for member in &txn.flow.completed_members {
-                union_self_roots(&mut scc_self_roots, &member.self_roots);
-            }
-            for member in &txn.call.completed_members {
-                union_self_roots(&mut scc_self_roots, &member.self_roots);
-            }
-            let relation_nodes = txn
-                .relation
-                .completed_members
-                .iter()
-                .flat_map(|member| [member.key.source, member.key.target]);
+            union_self_roots(&mut scc_self_roots, txn.flow.completed_members.self_roots());
+            union_self_roots(&mut scc_self_roots, txn.call.completed_members.self_roots());
             union_self_roots(
                 &mut scc_self_roots,
-                &self.observed_self_roots_from_nodes(relation_nodes),
+                txn.relation.completed_members.self_roots(),
             );
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -10777,6 +10768,12 @@ pub(super) trait FlowDemandDriver {
         decl_name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<AugmentationContributions>;
+    /// The live `IndexedReady` record of `canonical`, served once per
+    /// transaction ([`ProjectSemanticDispatch::transaction_indexed_record`]).
+    fn transaction_indexed_record(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>>;
     fn global_named_type(
         &self,
         canonical: &str,
@@ -11373,6 +11370,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> Option<AugmentationContributions> {
         ProjectSemanticDispatch::function_augmentations(self, decl_canonical, decl_name, context)
     }
+    fn transaction_indexed_record(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>> {
+        ProjectSemanticDispatch::transaction_indexed_record(self, canonical)
+    }
     fn global_named_type(
         &self,
         canonical: &str,
@@ -11861,7 +11864,6 @@ pub(super) struct FlowCx<'a, D: FlowDemandDriver> {
         'a,
         <D::Caps as crate::resolver_core::ResolverCapabilities>::Observe,
     >,
-    inputs: &'a dyn crate::resolver_core::request_ports::IndexedInputs,
     source: &'a dyn crate::resolver_core::request_ports::ExpressionSourceSelection<
         ExpressionDemand = <D::Caps as crate::resolver_core::ResolverCapabilities>::ExpressionDemand,
     >,
@@ -11873,7 +11875,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> FlowCx<'a, ProjectSemant
         Self {
             driver,
             arena: driver.arena(),
-            inputs: driver.ctx,
             source: driver.ctx,
             #[cfg(any(test, feature = "test-support"))]
             observers: &driver.binding.observers,
@@ -12198,6 +12199,12 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> Option<AugmentationContributions> {
         self.driver
             .function_augmentations(decl_canonical, decl_name, context)
+    }
+    fn transaction_indexed_record(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>> {
+        self.driver.transaction_indexed_record(canonical)
     }
     fn global_named_type(
         &self,
@@ -29322,11 +29329,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> bool {
         let exported = self
             .dispatch
-            .inputs
-            .ensure_indexed_ready_serve(self.canonical)
-            .is_some_and(|serve| {
-                serve
-                    .indexed
+            .transaction_indexed_record(self.canonical)
+            .is_some_and(|indexed| {
+                indexed
                     .shallow_state
                     .export_target(target.declaration.name.as_ref())
                     .is_some()

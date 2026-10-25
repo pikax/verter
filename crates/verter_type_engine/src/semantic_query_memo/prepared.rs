@@ -245,6 +245,27 @@ impl PreparedKeyHandle {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn producer_roots_for_tests(
+        producer: &dyn verter_execution::tasks::ProducerIdentity,
+        mut visit: impl FnMut(&super::node_roots::NodeRootSet),
+    ) {
+        let identity = producer
+            .downcast_ref::<PreparedQueryIdentity>()
+            .or_else(|| {
+                producer
+                    .downcast_ref::<ExpressionSiteProducer>()
+                    .map(|producer| producer.0 .0.as_ref())
+            });
+        let Some(identity) = identity else { return };
+        visit(&identity._roots);
+        match &identity.family {
+            FamilyKey::Relate { key } => visit(key.roots_for_tests()),
+            FamilyKey::ResolveCall { key } => visit(key.roots_for_tests()),
+            _ => {}
+        }
+    }
+
     /// The heap a prepared identity keeps reachable beyond its own block,
     /// when `producer` is one: its key, the family projected from it (which
     /// shares the key's slices and names), its requested path and point,

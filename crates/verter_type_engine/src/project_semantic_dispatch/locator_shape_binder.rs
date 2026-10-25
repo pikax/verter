@@ -249,7 +249,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             } else {
                 None
             };
-            let binder = if bound_free {
+            // Without authored bounds the predeclared shell is already
+            // the final binder, held by this construction scope. Reuse it
+            // instead of hashing and acquiring the identical node again.
+            let binder = if bound_free || (!spec.has_constraint && !spec.has_default) {
                 shells[index].1
             } else {
                 let (decl, param_index) = mint_identity(&spec.name, index);
@@ -306,6 +309,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         (frame, finals)
     }
 
+    /// Exercise the shared constructor without authored-bound reads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unbounded_header_binder_for_tests(&self) -> SemanticNodeId {
+        use crate::project_semantic_dispatch::locator_shape::{
+            BinderIdentityMode, LocatorShapeCtx, TypeParamBinderSpec,
+        };
+        let owner = OwnedStr::from("UnboundedHeaderFixture");
+        let scope = NodeScopeId::Global;
+        let base = LocatorShapeCtx::new(&scope, &[], None, None);
+        let (_, built) = self.build_type_param_binder_frame(
+            &base,
+            BinderIdentityMode::DeclHeader {
+                owner_symbol: &owner,
+            },
+            &[TypeParamBinderSpec {
+                name: Arc::from("T"),
+                has_constraint: false,
+                has_default: false,
+            }],
+            verter_type_expr::locators::TypeParamVisibility::Body,
+            |_, _, _| panic!("an unbounded parameter must not lower a bound"),
+        );
+        built[0].binder
+    }
+
     /// Cold build for [`SemanticQueryKey::LowerLocator`] — the SESSION
     /// phase of the two-phase worker-purity split.
     ///
@@ -325,7 +353,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &LocatorLoweringKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let canonical = key.slot().defining_canonical.clone();
-        let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical.as_ref()) else {
+        let Some(indexed) = self.transaction_indexed_record(canonical.as_ref()) else {
             // The owning file is unknown to the live view — the value
             // cannot be self-rooted; refuse warm admission.
             let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
@@ -333,9 +361,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             output.cache_suppress = true;
             return output;
         };
-        // Keeps the ShallowFileState → DeclBodyMemo → SnapshotLease alive
-        // through the graph lowering below.
-        let indexed = serve.indexed;
+        // `indexed` keeps the ShallowFileState → DeclBodyMemo → SnapshotLease
+        // alive through the graph lowering below.
         let observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
             vec![(canonical.clone(), indexed.whole_hash)];
 

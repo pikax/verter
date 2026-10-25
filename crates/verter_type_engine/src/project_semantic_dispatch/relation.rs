@@ -4079,14 +4079,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
             }
             let mut rootless_flights = Vec::new();
+            let completed_roots: Vec<_> = completed
+                .iter()
+                .map(|member| {
+                    self.observed_self_roots_from_nodes([member.key.source, member.key.target])
+                })
+                .collect();
             {
                 let mut txn = self.dispatch_txn.borrow_mut();
                 for (session, _) in deferred_relation_sessions {
                     let _ = txn.relation.session_admission.drain(session);
                 }
-                for (member, settles) in completed.into_iter().zip(settles) {
+                for ((member, settles), roots) in
+                    completed.into_iter().zip(settles).zip(&completed_roots)
+                {
                     let settles = settles && member.key.inference_context.is_none();
-                    txn.relation.completed_members.push(member, settles);
+                    txn.relation.completed_members.push(member, settles, roots);
                 }
                 txn.flow.completed_members.extend(proven_flow_members);
                 for (key, state, result) in call_members {
@@ -4496,8 +4504,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             txn.flow.closed_values.clear();
             (
                 txn.relation.completed_members.take(),
-                std::mem::take(&mut txn.flow.completed_members),
-                std::mem::take(&mut txn.call.completed_members),
+                txn.flow.completed_members.take(),
+                txn.call.completed_members.take(),
             )
         };
         for member in &members {
@@ -4534,8 +4542,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             txn.flow.closed_values.clear();
             (
                 txn.relation.completed_members.take(),
-                std::mem::take(&mut txn.flow.completed_members),
-                std::mem::take(&mut txn.call.completed_members),
+                txn.flow.completed_members.take(),
+                txn.call.completed_members.take(),
             )
         };
         let graph = self.graph();
@@ -4609,55 +4617,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn relation_publication_roots(
-        &self,
-        root_key: &RelateMemoKey,
-        member_pairs: impl IntoIterator<Item = [SemanticNodeId; 2]>,
-    ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
-        let mut nodes = vec![root_key.source, root_key.target];
-        nodes.extend(member_pairs.into_iter().flatten());
-        self.observed_self_roots_from_nodes(nodes)
-    }
-
     fn relation_completed_publication_roots(
         &self,
         root_key: &RelateMemoKey,
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
-        let (member_pairs, flow_self_roots, call_self_roots) = {
-            let txn = self.dispatch_txn.borrow();
-            (
-                txn.relation
-                    .completed_members
-                    .iter()
-                    .map(|member| [member.key.source, member.key.target])
-                    .collect::<Vec<_>>(),
-                txn.flow
-                    .completed_members
-                    .iter()
-                    .flat_map(|member| member.self_roots.iter().cloned())
-                    .collect::<Vec<_>>(),
-                txn.call
-                    .completed_members
-                    .iter()
-                    .flat_map(|member| member.self_roots.iter().cloned())
-                    .collect::<Vec<_>>(),
-            )
-        };
-        // The published component's self-roots are the UNION of every
-        // drained member's roots across BOTH domains: a flow member's file
-        // roots ride the relation-rooted carrier, so a cross-file edit
-        // invalidates the whole component.
-        let mut roots = self.relation_publication_roots(root_key, member_pairs);
-        for root in flow_self_roots {
-            if !roots.iter().any(|(canonical, _)| canonical == &root.0) {
-                roots.push(root);
-            }
-        }
-        for root in call_self_roots {
-            if !roots.iter().any(|(canonical, _)| canonical == &root.0) {
-                roots.push(root);
-            }
-        }
+        // The published component's self-roots are the UNION of the root's
+        // operand roots and every queued member's roots across every
+        // domain: a flow member's file roots ride the relation-rooted
+        // carrier, so a cross-file edit invalidates the whole component.
+        // The queued members' union is folded as they queue, so a close
+        // reads it in place instead of re-reading every queued member.
+        let mut roots = self.observed_self_roots_from_nodes([root_key.source, root_key.target]);
+        let txn = self.dispatch_txn.borrow();
+        super::call_resolve::union_self_roots(
+            &mut roots,
+            txn.relation.completed_members.self_roots(),
+        );
+        super::call_resolve::union_self_roots(&mut roots, txn.flow.completed_members.self_roots());
+        super::call_resolve::union_self_roots(&mut roots, txn.call.completed_members.self_roots());
         roots
     }
 
@@ -4667,9 +4644,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         root_key: &RelateMemoKey,
         member_keys: &[RelateMemoKey],
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
-        self.relation_publication_roots(
-            root_key,
-            member_keys.iter().map(|key| [key.source, key.target]),
+        self.observed_self_roots_from_nodes(
+            [root_key.source, root_key.target]
+                .into_iter()
+                .chain(member_keys.iter().flat_map(|key| [key.source, key.target])),
         )
     }
 
@@ -4687,6 +4665,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             RelationOutcome::Assignable,
             Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
         );
+        let roots = self.observed_self_roots_from_nodes([member_key.source, member_key.target]);
         self.dispatch_txn
             .borrow_mut()
             .relation
@@ -4699,6 +4678,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 .held(self.graph().store()),
                 false,
+                &roots,
             );
         self.execute_relate_root(root_key)
     }
@@ -4721,8 +4701,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             txn.flow.closed_values.clear();
             (
                 txn.relation.completed_members.take(),
-                std::mem::take(&mut txn.flow.completed_members),
-                std::mem::take(&mut txn.call.completed_members),
+                txn.flow.completed_members.take(),
+                txn.call.completed_members.take(),
             )
         };
         self.publish_scc_member_batch(
