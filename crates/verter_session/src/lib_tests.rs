@@ -4070,6 +4070,70 @@ mod upsert_compile_cache_tests {
         );
     }
 
+    /// A reload whose file is evicted again after its load commits, but
+    /// before it integrates, writes nothing of that load: the file keeps the
+    /// dependencies it had, and the next reload integrates the content
+    /// current after the eviction.
+    #[test]
+    fn a_reload_evicted_before_it_integrates_writes_nothing() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = Arc::new(VerterHost::new(HostConfig::default(), ws.clone()));
+        let canonical = "/src/App.ts";
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from(
+                "import { a } from './a'
+export const x = a
+",
+            ),
+        );
+        assert!(host.ensure_loaded(canonical));
+        let depends_on = |stem: &str| {
+            host.dependency_cache()
+                .get(canonical)
+                .is_some_and(|state| state.dependencies.iter().any(|dep| dep.contains(stem)))
+        };
+        assert!(
+            depends_on("/src/a"),
+            "precondition: the first load records its import"
+        );
+
+        host.evict(canonical);
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from(
+                "import { b } from './b'
+export const x = b
+",
+            ),
+        );
+        {
+            let host = Arc::clone(&host);
+            crate::host_lifecycle::integrate_test_hooks::arm_after_snapshot_capture(move || {
+                host.evict(canonical)
+            });
+        }
+        assert!(
+            !host.ensure_loaded(canonical),
+            "a reload evicted again before it integrates is not loaded"
+        );
+        assert!(
+            !depends_on("/src/b"),
+            "a reload evicted again before it integrates records nothing of its load"
+        );
+
+        assert!(
+            host.ensure_loaded(canonical),
+            "the next reload loads the file"
+        );
+        assert!(
+            depends_on("/src/b"),
+            "the next reload integrates the content current after the eviction"
+        );
+    }
+
     /// A reload that fails leaves the file reloadable: once its content is
     /// back, a retry loads it.
     #[test]

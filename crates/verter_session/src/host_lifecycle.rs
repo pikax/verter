@@ -469,9 +469,17 @@ impl VerterHost {
     /// bundler state.
     ///
     /// `eviction_epoch` is the file's eviction epoch when the load began.
-    /// If an eviction has landed since, the file stays evicted and this
-    /// returns `false`: the load may have read the content that eviction
-    /// replaced.
+    /// If an eviction has landed since, this writes nothing, the file stays
+    /// evicted, and it returns `false`: the load may have read the content
+    /// that eviction replaced, and the next reload integrates the content
+    /// after it.
+    /// The reset lock of `canonical_id`'s derived row, when it has one.
+    fn eviction_reset_lock(&self, canonical_id: &str) -> Option<Arc<parking_lot::Mutex<()>>> {
+        self.derived_raw_cache()
+            .get(canonical_id)
+            .map(|derived| Arc::clone(&derived.eviction_reset))
+    }
+
     pub(crate) fn integrate_scheduler_snapshot(
         &self,
         canonical_id: &str,
@@ -486,6 +494,15 @@ impl VerterHost {
         let Some(hd) = snap.downcast_data::<HostSourceData>() else {
             return false;
         };
+        #[cfg(test)]
+        integrate_test_hooks::after_snapshot_capture();
+        if self
+            .derived_raw_cache()
+            .get(canonical_id)
+            .is_some_and(|derived| derived.eviction_epoch != eviction_epoch)
+        {
+            return false;
+        }
 
         let parsed_edges = Self::build_parsed_edges_from_analysis(
             canonical_id,
@@ -1410,21 +1427,29 @@ impl VerterHost {
         // resets and records the eviction it reset for, and the rest find it
         // reset and submit after it. An eviction landing after that record
         // raises the eviction epoch above it, so its reload resets again.
-        let reset_lock = self
-            .derived_raw_cache()
-            .get(canonical_id)
-            .map(|d| Arc::clone(&d.eviction_reset));
-        let (reload_from_workspace, pre_evict_hash, eviction_epoch) = {
+        let (reload_from_workspace, pre_evict_hash, eviction_epoch) = loop {
+            let reset_lock = self.eviction_reset_lock(canonical_id);
             let _reset = reset_lock.as_ref().map(|lock| lock.lock());
+            // The state is read under the lock its row owns: a row an
+            // eviction created, or replaced, after the lock lookup is read
+            // again under its own lock.
             let observed = self.derived_raw_cache().get(canonical_id).map(|d| {
                 (
+                    reset_lock
+                        .as_ref()
+                        .is_some_and(|lock| Arc::ptr_eq(lock, &d.eviction_reset)),
                     d.evicted,
                     d.evicted_whole_hash,
                     d.eviction_epoch,
                     d.eviction_reset_epoch,
                 )
             });
-            match observed {
+            if observed.is_some_and(|(owns_lock, ..)| !owns_lock) {
+                continue;
+            }
+            break match observed
+                .map(|(_, evicted, hash, epoch, reset)| (evicted, hash, epoch, reset))
+            {
                 Some((true, pre_evict_hash, epoch, reset_epoch)) => {
                     if reset_epoch < epoch {
                         self.scheduler.close_file(canonical_id);
@@ -1436,7 +1461,7 @@ impl VerterHost {
                 }
                 Some((false, _, epoch, _)) => (false, None, epoch),
                 None => (false, None, 0),
-            }
+            };
         };
 
         // Submit to scheduler — it loads via WorkspaceSourceLoader.
@@ -1498,7 +1523,13 @@ impl VerterHost {
         }
 
         let work_start = Instant::now();
-        let loaded = self.integrate_scheduler_snapshot(canonical_id, eviction_epoch);
+        // Integrated under the file's reset lock, so one reload's
+        // integration never interleaves with another's for the same file.
+        let loaded = {
+            let reset_lock = self.eviction_reset_lock(canonical_id);
+            let _integrating = reset_lock.as_ref().map(|lock| lock.lock());
+            self.integrate_scheduler_snapshot(canonical_id, eviction_epoch)
+        };
         self.provenance
             .ensure_loaded_work_ns
             .fetch_add(work_start.elapsed().as_nanos() as u64, Relaxed);
@@ -1651,5 +1682,27 @@ impl HostReleaseCompletion<'_> {
         self.parse.wait()?;
         self.host.reclaim_released_storage();
         Ok(())
+    }
+}
+
+/// A test seam inside snapshot integration: an action the calling thread runs
+/// once, after the snapshot is captured and before anything is written.
+#[cfg(test)]
+pub(crate) mod integrate_test_hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static AFTER_SNAPSHOT_CAPTURE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `action` at this thread's next snapshot capture.
+    pub(crate) fn arm_after_snapshot_capture(action: impl FnOnce() + 'static) {
+        AFTER_SNAPSHOT_CAPTURE.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
+    }
+
+    pub(super) fn after_snapshot_capture() {
+        if let Some(action) = AFTER_SNAPSHOT_CAPTURE.with(|slot| slot.borrow_mut().take()) {
+            action();
+        }
     }
 }
