@@ -52,8 +52,8 @@ intern_domain!(ResolveCallKey {
 
 impl InternedRelateKey {
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn roots_for_tests(&self) -> &super::node_roots::NodeRootSet {
-        self.1.set()
+    pub(super) fn roots_for_tests(&self) -> super::node_roots::NodeRootSet {
+        self.1.to_set_for_tests()
     }
 
     /// Intern `key`; its operands are owned in `arena`, the graph that
@@ -78,7 +78,7 @@ impl InternedRelateKey {
         arena: &IssuingArena,
         nodes: &[crate::semantic_query::SemanticNodeId],
     ) -> bool {
-        let roots = self.1.set();
+        let roots = &self.1;
         !roots.operands().is_empty()
             && roots.belongs_to(arena)
             && nodes.iter().all(|node| roots.operands().contains(node))
@@ -87,8 +87,8 @@ impl InternedRelateKey {
 
 impl InternedResolveCallKey {
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn roots_for_tests(&self) -> &super::node_roots::NodeRootSet {
-        self.1.set()
+    pub(super) fn roots_for_tests(&self) -> super::node_roots::NodeRootSet {
+        self.1.to_set_for_tests()
     }
 
     /// Intern `key`; its operands are owned in `arena`, the graph that

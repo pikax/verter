@@ -1514,7 +1514,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Arc::clone(self.binding.construction.arena()),
             operands,
         )
-        .capture_in_scope();
+        .capture_into_scope();
         // Receipts end with this operation, before the sink closes. The
         // carrier keeps the result's explicit roots, including reused nodes.
         drop(operation);

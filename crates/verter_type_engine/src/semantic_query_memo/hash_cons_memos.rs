@@ -209,59 +209,70 @@ impl SemanticGraphStore {
             return;
         }
         let key = (value_expr, parameter_node, arg);
-        match self.substitute_memo.entry(key) {
-            Entry::Occupied(_) => {
-                // First-writer-wins: another thread already
-                // published. No FIFO bookkeeping required.
-            }
+        if self.substitute_memo.contains_key(&key) {
+            // First-writer-wins: another thread already published.
+            return;
+        }
+        // The entry is rooted and charged before the map's shard is locked:
+        // rooting takes the arena's lock and charging the account's, and
+        // neither is taken under a cache table's guard.
+        let Ok(roots) = self.root_nodes([value_expr, parameter_node, arg, result]) else {
+            return;
+        };
+        // Charged like every retained answer; one the account refuses is
+        // computed again on demand.
+        let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+        let bytes = hash_cons_entry_bytes::<(
+            (SemanticNodeId, SemanticNodeId, SemanticNodeId),
+            SubstituteMemoEntry,
+        )>(&roots, &mut aliases);
+        // A root set's shared block is an owned allocation, charged by its
+        // own cell and held by the entry.
+        let handles = aliases.take_handles();
+        let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
+            self.retention_account().reserve(
+                verter_session_query::retention::ChargeClass::Retained,
+                bytes,
+            )
+        else {
+            return;
+        };
+        let Ok(retention) = handles.retained_with(retention, self.charge_ctx()) else {
+            return;
+        };
+        let entry = SubstituteMemoEntry {
+            result,
+            receipt,
+            roots,
+            _retention: retention,
+        };
+        // A losing publication's entry — its roots and its charge — is
+        // released only once the shard's guard is gone.
+        let lost = match self.substitute_memo.entry(key) {
+            Entry::Occupied(_) => Some(entry),
             Entry::Vacant(slot) => {
-                let Ok(roots) = self.root_nodes([value_expr, parameter_node, arg, result]) else {
-                    return;
-                };
-                // Charged like every retained answer; one the account
-                // refuses is computed again on demand.
-                let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
-                let bytes = hash_cons_entry_bytes::<(
-                    (SemanticNodeId, SemanticNodeId, SemanticNodeId),
-                    SubstituteMemoEntry,
-                )>(&roots, &mut aliases);
-                // A root set's shared block is an owned allocation, charged
-                // by its own cell and held by the entry.
-                let handles = aliases.take_handles();
-                let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
-                    self.retention_account().reserve(
-                        verter_session_query::retention::ChargeClass::Retained,
-                        bytes,
-                    )
-                else {
-                    return;
-                };
-                let Ok(retention) = handles.retained_with(retention, self.charge_ctx()) else {
-                    return;
-                };
-                slot.insert(SubstituteMemoEntry {
-                    result,
-                    receipt,
-                    roots,
-                    _retention: retention,
-                });
-                let mut fifo = self.substitute_memo_fifo.lock();
-                fifo.push_back(key);
-                while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
-                    if let Some(victim) = fifo.pop_front() {
-                        // Drop the FIFO lock BEFORE touching
-                        // `substitute_memo` to avoid blocking
-                        // concurrent publishers while DashMap's
-                        // shard lock is taken; re-acquire on the
-                        // next loop iteration if we still need
-                        // to evict.
-                        drop(fifo);
-                        self.substitute_memo.remove(&victim);
-                        fifo = self.substitute_memo_fifo.lock();
-                    } else {
-                        break;
-                    }
-                }
+                slot.insert(entry);
+                None
+            }
+        };
+        if lost.is_some() {
+            return;
+        }
+        let mut fifo = self.substitute_memo_fifo.lock();
+        fifo.push_back(key);
+        while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
+            if let Some(victim) = fifo.pop_front() {
+                // Drop the FIFO lock BEFORE touching
+                // `substitute_memo` to avoid blocking
+                // concurrent publishers while DashMap's
+                // shard lock is taken; re-acquire on the
+                // next loop iteration if we still need
+                // to evict.
+                drop(fifo);
+                self.substitute_memo.remove(&victim);
+                fifo = self.substitute_memo_fifo.lock();
+            } else {
+                break;
             }
         }
     }
@@ -410,9 +421,12 @@ impl SemanticGraphStore {
             _retention: retention,
         });
         let key = (node, context, demand);
+        // A replaced entry — its delivery and the roots that delivery holds —
+        // is released only once the shard's guard is gone.
+        let mut replaced = None;
         match self.evaluate_deferred_memo.entry(key) {
             Entry::Occupied(mut slot) => {
-                slot.insert(entry);
+                replaced = Some(slot.insert(entry));
             }
             Entry::Vacant(slot) => {
                 slot.insert(entry);
@@ -429,6 +443,7 @@ impl SemanticGraphStore {
                 }
             }
         }
+        drop(replaced);
     }
 
     /// Inspect admission under the shell demand; selected values have a

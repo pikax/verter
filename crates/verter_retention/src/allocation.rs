@@ -385,12 +385,9 @@ impl AliasSet {
     }
 
     /// `true` the first time `arc`'s allocation is offered, for an immutable
-    /// encoding a value shares with its clones in place of a copy (an
-    /// identity's canonical bytes). An owned cell's value may reach one: the
-    /// encoding never changes, and a clone holding it outside the cell is
-    /// charged, or not, exactly as the copy it replaces would be, so counting
-    /// it once per measurement charges the cell for exactly what it keeps.
-    pub fn first_shared_encoding<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
+    /// shared encoding, which an owned cell's value may reach (see
+    /// [`shared_encoding_bytes`]).
+    pub(crate) fn first_shared_encoding<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
         self.first_allocation(arc)
     }
 
@@ -482,8 +479,12 @@ pub fn arc_slice_block_bytes<T>(value: &Arc<[T]>, aliases: &mut AliasSet) -> Opt
 }
 
 /// Bytes an immutable shared encoding keeps alive, once per `aliases`: its
-/// `Arc` block the first time it is offered (see
-/// [`AliasSet::first_shared_encoding`]).
+/// `Arc` block the first time it is offered. The encoding is one a value
+/// shares with its clones in place of a copy (an identity's canonical
+/// bytes), so an owned cell's value may reach it: it never changes, and a
+/// clone holding it outside the cell is charged, or not, exactly as the copy
+/// it replaces would be, so counting it once per measurement charges the
+/// cell for exactly what it keeps.
 #[must_use]
 pub fn shared_encoding_bytes(value: &Arc<[u8]>, aliases: &mut AliasSet) -> usize {
     if aliases.first_shared_encoding(value) {

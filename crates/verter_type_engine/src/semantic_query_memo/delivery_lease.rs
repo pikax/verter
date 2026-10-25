@@ -210,7 +210,7 @@ impl SemanticDeliveryLease {
 
     /// A delivery rooting `roots` and holding no shared allocation, its own
     /// metadata pinned against `account`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_roots(
         roots: NodeRootSet,
         account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,

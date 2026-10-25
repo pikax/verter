@@ -322,18 +322,30 @@ pub struct InlineMemberFlight {
     /// The member's decided value, owned from the moment its component
     /// closes until the batched publish stages it: the construction scope
     /// that computed it may close first.
-    /// A short root set rides inline here and has no charge of its own; a
-    /// longer one's shared block is charged as in-flight work against the
-    /// store's retention account for as long as it is held — ACTIVE until
-    /// the batched publish or the abort ends the hold. A clone of the flight
-    /// shares the block and its one charge.
-    held: Option<(
-        super::node_roots::NodeRootSet,
-        Option<verter_session_query::retention::shared::CallerHold>,
-    )>,
+    /// Shared by every clone of the flight ([`HeldValue`]).
+    held: Option<Arc<HeldValue>>,
     /// The decided value named a node that was no longer live when the
     /// component closed: the batched publish refuses the whole component.
     hold_refused: bool,
+}
+
+/// An inline member's held value: the root set owning its nodes. A short
+/// set rides inline and has no charge of its own. A longer set's shared
+/// block is charged through its own cell as in-flight work — ACTIVE until
+/// the batched publish or the abort ends the hold — so a holder that keeps
+/// the same block shares that one charge instead of taking a second. When
+/// the last clone of the flight lets the value go, a charge still in flight
+/// is handed to whoever keeps the block, as a pin.
+struct HeldValue {
+    /// Kept for the counts it holds; read only by a test.
+    _roots: super::node_roots::NodeRootSet,
+    block: verter_session_query::retention::owned::OwnedHandles,
+}
+
+impl Drop for HeldValue {
+    fn drop(&mut self) {
+        self.block.hand_off_in_flight();
+    }
 }
 
 impl std::fmt::Debug for InlineMemberFlight {
@@ -365,17 +377,27 @@ impl InlineMemberFlight {
         }
         match graph.root_nodes(nodes) {
             Ok(roots) => {
-                let block = roots.heap_bytes();
-                let charge = (block > 0).then(|| {
-                    verter_session_query::retention::shared::CallerHold::in_flight(
-                        graph.retention_account(),
-                        block,
-                    )
+                let block = verter_session_query::retention::owned::OwnedHandles::of(|aliases| {
+                    roots.owned_heap_bytes(aliases)
                 });
-                self.held = Some((roots, charge));
+                block.charge_in_flight(verter_session_query::retention::owned::ChargeCtx::new(
+                    graph.retention_account(),
+                ));
+                self.held = Some(Arc::new(HeldValue {
+                    _roots: roots,
+                    block,
+                }));
             }
             Err(_) => self.hold_refused = true,
         }
+    }
+
+    /// The root set holding the member's decided value, for a test that
+    /// hands it to another holder.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn held_roots_for_tests(&self) -> Option<super::node_roots::NodeRootSet> {
+        self.held.as_ref().map(|held| held._roots.clone())
     }
 
     /// Whether the member's decided value could not be held.

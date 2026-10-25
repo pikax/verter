@@ -844,10 +844,10 @@ impl SemanticGraphStore {
     /// store alone charges it; a cache retaining an entry holds that charge
     /// instead while it does.
     pub(super) fn project_dep_name_pinned_bytes(&self) -> usize {
-        match self.project_dep_name.charge_class() {
-            Some(verter_session_query::retention::ChargeClass::Pinned) => {
-                self.project_dep_name.charge_bytes().unwrap_or(0)
-            }
+        // Bytes and class read together: a cache hold or release between two
+        // reads would count the name in neither class or in both.
+        match self.project_dep_name.charge() {
+            Some((bytes, verter_session_query::retention::ChargeClass::Pinned)) => bytes,
             _ => 0,
         }
     }

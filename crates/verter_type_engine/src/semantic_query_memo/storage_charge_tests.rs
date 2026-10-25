@@ -568,7 +568,7 @@ fn every_holder_of_a_long_root_set_charges_its_block_once_and_clones_add_nothing
     use crate::semantic_query::semantic_context::SemanticContext;
     use crate::semantic_query::stable_key::semantic_union_members;
     use verter_session_query::retention::allocation::AliasSet;
-    use verter_session_query::retention::owned::{child_registration_bytes, ChargeCtx, Owned};
+    use verter_session_query::retention::owned::ChargeCtx;
 
     const OPERANDS: usize = 6;
     let account = account();
@@ -624,11 +624,8 @@ fn every_holder_of_a_long_root_set_charges_its_block_once_and_clones_add_nothing
     assert_eq!(charged(), base);
     assert_eq!(counts(), before);
 
-    // A keyed attachment: its own cell with its registration of the
-    // shared block nested in it, and that block.
-    let attachment_bytes = Owned::<super::node_roots::NodeRootSet>::cell_block_bytes()
-        + child_registration_bytes(1)
-        + block_bytes(OPERANDS);
+    // A keyed attachment: its one cell, which owns the long list's block.
+    let attachment_bytes = super::node_roots::attachment_charge_bytes(OPERANDS);
     let attachment = IdentityNodeRoots::in_graph(&store, ids.iter().copied());
     let pin = |attachment: &IdentityNodeRoots| {
         let mut aliases = AliasSet::new();
@@ -639,7 +636,7 @@ fn every_holder_of_a_long_root_set_charges_its_block_once_and_clones_add_nothing
     assert_eq!(
         charged() - base,
         attachment_bytes,
-        "an attachment charges its cell and its set's shared block, once"
+        "an attachment charges its one cell, owning its list, once"
     );
     let attachment_clones: Vec<_> = (0..8).map(|_| attachment.clone()).collect();
     for clone in &attachment_clones {

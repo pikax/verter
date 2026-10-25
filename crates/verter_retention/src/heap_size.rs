@@ -82,14 +82,10 @@ impl<'h, 't> HeapMeter<'h, 't> {
         self.raw.insert(Arc::as_ptr(arc).cast::<()>() as u64)
     }
 
-    /// `true` the first time `arc`'s allocation is offered, for an immutable
-    /// encoding a value shares with its clones in place of a copy (an
-    /// identity's canonical bytes). An owned cell's value may reach one: the
-    /// encoding never changes, and a clone holding it outside the cell is
-    /// charged, or not, exactly as the copy it replaces would be, so counting
-    /// it once per measurement charges the cell for exactly what it keeps.
-    pub fn first_shared_encoding<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
-        self.raw.insert(Arc::as_ptr(arc).cast::<()>() as u64)
+    /// Bytes an immutable shared encoding keeps alive, once per measurement
+    /// (see [`super::allocation::shared_encoding_bytes`]).
+    pub fn shared_encoding_bytes(&mut self, value: &Arc<[u8]>) -> usize {
+        super::allocation::shared_encoding_bytes(value, self.handles)
     }
 
     /// The handle set owned allocations are offered to.
