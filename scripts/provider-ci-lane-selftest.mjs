@@ -284,7 +284,8 @@ test("CI builds one provider-free archive and runs providers serially in their o
   assert.match(core, /needs:\s*\[detect-changes, rust-test-build\]/);
   assert.match(core, /name:\s*rust-nextest-archive/);
   assert.match(core, /provider-ci\.mjs filter core/);
-  assert.match(core, /cargo nextest run --archive-file/);
+  assert.match(core, /nextest_argv=\(nextest run --archive-file/);
+  assert.match(core, /^\s+cargo "\$\{nextest_argv\[@\]\}"$/m);
   assert.match(success, /^\s*- rust-test\s*$/m);
   // One job compiles the workspace once and runs each engine's serial libtest
   // lane in turn; neither engine's run goes through the nextest archive.
@@ -389,8 +390,9 @@ test("nightly coverage instruments every CI lane after its prerequisites", () =>
     ],
     [
       "run the core partition under nextest",
-      'cargo nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)"',
+      'nextest_argv=(nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)")',
     ],
+    ["run the recorded nextest argv", 'cargo "${nextest_argv[@]}" || status=1'],
     ["run the provider lane", 'env "$REQUIRE=1" node scripts/provider-ci.mjs run "$LANE"'],
     ["report the lane", 'cargo llvm-cov report --lcov --output-path "lcov-$LANE.info" || status=1'],
   ].map(([what, text]) => {
