@@ -59,6 +59,7 @@ impl NestedDemand {
             function,
             context,
             has_declared_return,
+            required_parameters: _,
             gap,
             declared_evolving_captures,
             extended_captures,

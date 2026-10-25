@@ -1698,11 +1698,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if let Some(surface) = union_members_of(check) {
             return Some(surface);
         }
-        // A `keyof` over a type holding no type parameter is the union of
-        // its keys (`getIndexType` reduces it eagerly), which the check
-        // distributes over.
+        // A `keyof` over a type that is no generic object type is the union
+        // of its keys (`getIndexType` reduces it eagerly), which the check
+        // distributes over: a type holding no type parameter, and a
+        // reference to an interface or a class whatever its type arguments
+        // — its members are statically known, so `keyof O<S>` over
+        // `interface O<S> { id: 1; s?: S }` is `"id" | "s"` while `S` is
+        // still open (`Omit<O<S>, "id">` keeps `s`).
         let closed_key_of = match self.graph().node_data(check).as_deref() {
-            Some(SemanticNodeData::KeyOf { base }) if !self.mentions_binder(*base) => Some(*base),
+            Some(SemanticNodeData::KeyOf { base })
+                if !self.mentions_binder(*base) || self.names_object_declaration(*base) =>
+            {
+                Some(*base)
+            }
             _ => None,
         };
         if let Some(base) = closed_key_of {
@@ -1724,7 +1732,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // An interface or a class names an object type, never a union:
         // its reference has nothing to distribute over, so it is not
         // resolved here.
-        let names_object_declaration = match self.graph().node_data(check).as_deref() {
+        if self.names_object_declaration(check) {
+            return None;
+        }
+        let resolved = self
+            .normalize_node_for_structural_fact_demand(
+                check,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_complete_node()?;
+        union_members_of(resolved)
+    }
+
+    /// Whether `node` is a reference to an interface or a class: an object
+    /// type whose members are statically known whatever its type
+    /// arguments, never a union.
+    fn names_object_declaration(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
             Some(
                 SemanticNodeData::DeclRef { identity }
                 | SemanticNodeData::InstantiationRef { base: identity, .. },
@@ -1736,17 +1760,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 )
             ),
             _ => false,
-        };
-        if names_object_declaration {
-            return None;
         }
-        let resolved = self
-            .normalize_node_for_structural_fact_demand(
-                check,
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            )
-            .into_complete_node()?;
-        union_members_of(resolved)
     }
 
     /// The type a conditional operand denotes when it is a reference to a
