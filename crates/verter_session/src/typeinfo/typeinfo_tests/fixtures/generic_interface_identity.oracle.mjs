@@ -46,12 +46,14 @@ try {
         try {
           const project = snapshot.getProject(config);
           assert.deepEqual(project.program.getSemanticDiagnostics(), []);
-          const print = (name) => {
+          const typeOf = (name) => {
             const at = source.indexOf(`type ${name} =`) + "type ".length;
             const type = project.checker.getTypeAtPosition(`${dir}/probe.ts`, at);
             assert.ok(type, name);
-            return project.checker.typeToString(type, undefined, 1 | (1 << 23));
+            return type;
           };
+          const print = (name) =>
+            project.checker.typeToString(typeOf(name), undefined, 1 | (1 << 23));
           const answers = Object.fromEntries(
             [
               "Direct",
@@ -72,7 +74,20 @@ try {
           assert.match(answers.OperatorsClosed, /Empty<string>/);
           assert.equal(answers.StructurallyEqual, "true");
           assert.equal(answers.StructurallyNestedEqual, "true");
-          assert.deepEqual(answers.KeysClosed.match(/"[^"]+"/g)?.sort(), ['"own"', '"value"']);
+          // keyof retains its authored print origin; its semantic constituents
+          // independently prove the inherited and own keys.
+          const keys = typeOf("KeysClosed");
+          assert.ok(keys.isUnionType());
+          assert.deepEqual(
+            keys
+              .getTypes()
+              .map((key) => {
+                assert.ok(key.isStringLiteralType());
+                return key.value;
+              })
+              .sort(),
+            ["own", "value"],
+          );
           assert.match(answers.ChangedArgument, /Empty<number>/);
           console.log(
             JSON.stringify({ strictNullChecks, noImplicitAny, diagnostics: [], answers }),

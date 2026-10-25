@@ -1110,6 +1110,43 @@ fn materialize_alias_chain<M: verter_audit::observe::ObserveExec>(
                     MaterializationStep::Stop(node) => return Ok(node),
                 }
             }
+            // Expanded requests the root's body. A root alias that directly
+            // names an interface application now reaches its retained carrier;
+            // demand that surface through the same Instantiate owner. Interior
+            // applications remain named, as do declarations an indexed access
+            // selected. Builtin carriers retain their own open-operand stops.
+            Some(SemanticNodeData::InstantiationRef { base, args })
+                if mode == ProjectionMode::Expanded
+                    && !*read_access
+                    && base.canonical_id.as_ref() != "__builtin__" =>
+            {
+                let key = SemanticQueryKey::Instantiate(
+                    verter_type_engine::semantic_query::InstantiateKey::new(
+                        dispatch.type_slot_for(
+                            base.canonical_id.clone(), base.owner, base.decl_name.clone(),
+                        ),
+                        Arc::from(&args[..]),
+                        dispatch.instantiate_context_for(
+                            &base.canonical_id,
+                            verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
+                        ),
+                    ),
+                );
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_materialization_step(step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
             // A declaration the access named stays the reference it is.
             Some(
                 SemanticNodeData::DeclRef { .. }

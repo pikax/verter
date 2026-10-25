@@ -18,7 +18,10 @@ drops. This decision belongs to the shared post-substitution view projector
 the existing typed carrier without reconstructing a name from an expanded body
 or provenance. A direct declaration instantiation, a demanded member, `keyof`
 and an indexed access still read the interface's instantiated structural meaning
-through the same engine. Heritage positions materialize their interface bodies
+through the same engine. An Expanded root alias that directly names an
+application still requests its body through the shared named/wire root
+materializer; a named declaration selected by an indexed access stays named.
+Heritage positions materialize their interface bodies
 so inherited members remain visible. Aliases, including closed conditional
 helpers beside a named interface, still evaluate normally. Navigate and Shallow
 keep their existing demand boundaries and do not expand unrelated members.

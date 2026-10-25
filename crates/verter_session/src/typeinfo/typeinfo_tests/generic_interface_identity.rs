@@ -126,6 +126,14 @@ fn generic_interface_members_and_closed_operators_still_reduce() {
             panic!("operator tuple")
         };
         assert_application(&elements[0].ty, "Empty", expected);
+        let TypeExpr::Intersection(arms) = &elements[0].ty else {
+            unreachable!()
+        };
+        let selected = arms
+            .iter()
+            .find(|arm| matches!(arm, TypeExpr::Object(_)))
+            .expect("closed conditional alias must reduce beside a named interface");
+        assert_primitive(&object_props(selected)["selected"].ty, expected);
         assert_primitive(&elements[1].ty, expected);
         for expression in [
             format!("Child<{argument}>['value']"),
