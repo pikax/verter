@@ -24,9 +24,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
-use verter_execution::sync_cell::{
-    SyncBool, SyncCell, SyncRefCell, SyncU16, SyncU32, SyncU64, SyncUsize,
-};
+use verter_execution::sync_cell::{SyncBool, SyncRefCell, SyncU16, SyncU32, SyncU64, SyncUsize};
 
 use rustc_hash::FxHashSet;
 
@@ -294,7 +292,6 @@ impl<'a> DemandCancellation<'a> {
 }
 
 /// The reason set's explicit bit representation, read and replaced whole.
-/// Structured request effects keep their arbitrary-Copy cell.
 struct PartialReasonCell(SyncU32);
 
 impl PartialReasonCell {
@@ -312,6 +309,68 @@ impl PartialReasonCell {
 
     fn swap(&self, other: &Self) {
         self.0.swap(&other.0);
+    }
+}
+
+/// Exclusive receipt charges since the last recording transition. Budget
+/// counters advance immediately; only their attribution to the locked scope
+/// stack is batched. Like the ledger, these cells have one driver at a time.
+#[derive(Default)]
+struct PendingUsage {
+    work: SyncU64,
+    bytes: SyncU64,
+    advisory_bytes: SyncU64,
+    operations: SyncU64,
+    comparisons: SyncU64,
+}
+
+impl PendingUsage {
+    fn take(&self) -> LogicalUsage {
+        fn take(cell: &SyncU64) -> u64 {
+            let value = cell.get();
+            cell.set(0);
+            value
+        }
+        LogicalUsage {
+            work: take(&self.work),
+            bytes: take(&self.bytes),
+            advisory_bytes: take(&self.advisory_bytes),
+            operations: take(&self.operations),
+            comparisons: take(&self.comparisons),
+        }
+    }
+
+    fn swap(&self, other: &Self) {
+        self.work.swap(&other.work);
+        self.bytes.swap(&other.bytes);
+        self.advisory_bytes.swap(&other.advisory_bytes);
+        self.operations.swap(&other.operations);
+        self.comparisons.swap(&other.comparisons);
+    }
+}
+
+#[derive(Default)]
+struct RequestEffectCells {
+    operations: SyncUsize,
+    paid: SyncUsize,
+}
+
+impl RequestEffectCells {
+    fn get(&self) -> RequestEffects {
+        RequestEffects {
+            operations: self.operations.get(),
+            paid: self.paid.get(),
+        }
+    }
+
+    fn reset(&self) {
+        self.operations.set(0);
+        self.paid.set(0);
+    }
+
+    fn swap(&self, other: &Self) {
+        self.operations.swap(&other.operations);
+        self.paid.swap(&other.paid);
     }
 }
 
@@ -349,12 +408,13 @@ pub struct ConnectedDemandLedger<'a> {
     /// taken outside any recording pays one flag read.
     scopes: SyncRefCell<Vec<CostScope>>,
     scope_open: SyncBool,
+    pending_usage: PendingUsage,
     /// The computations whose receipt, and its whole prerequisite closure,
     /// this connected demand has paid.
     paid: SyncRefCell<CostIdentitySet>,
     /// What this connected demand itself did to its request: the request
     /// operations it spent and the computations it was first to pay.
-    request_effects: SyncCell<RequestEffects>,
+    request_effects: RequestEffectCells,
     /// Whether one of this demand's reads was answered with a recursion
     /// carrier another task's schedule decided — a cross-task wait cycle,
     /// or a joined producer's own re-entry: the demand went on without work
@@ -631,6 +691,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             tripped,
             scopes,
             scope_open,
+            pending_usage,
             paid,
             request_effects,
             schedule_cut,
@@ -652,6 +713,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         tripped.swap(&other.tripped);
         scopes.swap(&other.scopes);
         scope_open.swap(&other.scope_open);
+        pending_usage.swap(&other.pending_usage);
         paid.swap(&other.paid);
         request_effects.swap(&other.request_effects);
         schedule_cut.swap(&other.schedule_cut);
@@ -698,8 +760,9 @@ impl<'a> ConnectedDemandLedger<'a> {
             tripped: PartialReasonCell::new(PartialReasonSet::empty()),
             scopes: SyncRefCell::new(Vec::new()),
             scope_open: SyncBool::new(false),
+            pending_usage: PendingUsage::default(),
             paid: SyncRefCell::new(CostIdentitySet::default()),
-            request_effects: SyncCell::new(RequestEffects::default()),
+            request_effects: RequestEffectCells::default(),
             schedule_cut: SyncBool::new(false),
         }
     }
@@ -754,10 +817,11 @@ impl<'a> ConnectedDemandLedger<'a> {
             self.bytes_used.set(0);
             self.advisory_bytes_used.set(0);
             self.paid.borrow_mut().clear();
-            self.request_effects.set(RequestEffects::default());
+            self.request_effects.reset();
             self.schedule_cut.set(false);
             self.scopes.borrow_mut().clear();
             self.scope_open.set(false);
+            self.pending_usage.take();
             self.query_depth.set(0);
             self.tripped.set(PartialReasonSet::empty());
             self.active.set(true);
@@ -874,12 +938,8 @@ impl<'a> ConnectedDemandLedger<'a> {
         if !self.scope_open.get() {
             return;
         }
-        if let Some(scope) = self.scopes.borrow_mut().last_mut() {
-            scope.exclusive.comparisons = scope
-                .exclusive
-                .comparisons
-                .saturating_add(u64::from(comparisons));
-        }
+        let cell = &self.pending_usage.comparisons;
+        cell.set(cell.get().saturating_add(u64::from(comparisons)));
     }
 
     /// Construction room for a batch, before committing any reservation.
@@ -904,13 +964,17 @@ impl<'a> ConnectedDemandLedger<'a> {
         if !self.scope_open.get() {
             return;
         }
-        if let Some(scope) = self.scopes.borrow_mut().last_mut() {
-            #[cfg(test)]
-            SCOPE_CHARGE_WRITES.with(|count| count.set(count.get() + 1));
-            scope.exclusive.work = scope.exclusive.work.saturating_add(work as u64);
-            scope.exclusive.bytes = scope.exclusive.bytes.saturating_add(bytes);
-            scope.exclusive.advisory_bytes =
-                scope.exclusive.advisory_bytes.saturating_add(advisory);
+        let usage = &self.pending_usage;
+        if work != 0 {
+            usage.work.set(usage.work.get().saturating_add(work as u64));
+        }
+        if bytes != 0 {
+            usage.bytes.set(usage.bytes.get().saturating_add(bytes));
+        }
+        if advisory != 0 {
+            usage
+                .advisory_bytes
+                .set(usage.advisory_bytes.get().saturating_add(advisory));
         }
     }
 
@@ -1154,11 +1218,26 @@ impl ConnectedDemandLedger<'_> {
         self.scope_open.set(!scopes.is_empty());
     }
 
+    /// Materialize the current recording's pending charges before it moves,
+    /// is suspended, or lends its totals to a prefix recording. A transition
+    /// already holds the stack, so charging itself never acquires that lock.
+    fn flush_usage(&self, scopes: &mut [CostScope]) {
+        if let Some(scope) = scopes.last_mut() {
+            let usage = self.pending_usage.take();
+            if usage != LogicalUsage::default() {
+                #[cfg(test)]
+                SCOPE_CHARGE_WRITES.with(|count| count.set(count.get() + 1));
+                scope.exclusive = scope.exclusive.saturating_add(usage);
+            }
+        }
+    }
+
     /// Take the open computation's recording off the stack without ending
     /// it: a suspended frame keeps its recording between its steps, so a
     /// sibling's charges never accrue to it. `None` when none is open.
     pub(crate) fn suspend_cost_scope(&self) -> Option<CostScope> {
         let mut scopes = self.scopes.borrow_mut();
+        self.flush_usage(&mut scopes);
         let scope = scopes.pop();
         self.sync_top(&scopes);
         scope
@@ -1167,6 +1246,7 @@ impl ConnectedDemandLedger<'_> {
     /// Put a suspended recording back on top: its frame runs again.
     pub(crate) fn resume_cost_scope(&self, scope: CostScope) {
         let mut scopes = self.scopes.borrow_mut();
+        self.flush_usage(&mut scopes);
         scopes.push(scope);
         self.sync_top(&scopes);
     }
@@ -1180,9 +1260,8 @@ impl ConnectedDemandLedger<'_> {
     ) -> bool {
         self.note_request_effects(1, 0);
         if self.scope_open.get() {
-            if let Some(scope) = self.scopes.borrow_mut().last_mut() {
-                scope.exclusive.operations = scope.exclusive.operations.saturating_add(1);
-            }
+            let cell = &self.pending_usage.operations;
+            cell.set(cell.get().saturating_add(1));
         }
         request.check_projection_op_count()
     }
@@ -1190,11 +1269,15 @@ impl ConnectedDemandLedger<'_> {
     /// Record `operations` request operations this demand spent and `paid`
     /// computations it was first to pay in its request.
     pub(crate) fn note_request_effects(&self, operations: usize, paid: usize) {
-        let effects = self.request_effects.get();
-        self.request_effects.set(RequestEffects {
-            operations: effects.operations.saturating_add(operations),
-            paid: effects.paid.saturating_add(paid),
-        });
+        let effects = &self.request_effects;
+        if operations != 0 {
+            effects
+                .operations
+                .set(effects.operations.get().saturating_add(operations));
+        }
+        if paid != 0 {
+            effects.paid.set(effects.paid.get().saturating_add(paid));
+        }
     }
 
     /// What this connected demand itself has done to its request.
@@ -1578,6 +1661,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         if depth == 0 || scopes.len() != depth {
             return None;
         }
+        self.flush_usage(&mut scopes);
         let scope = scopes.last_mut()?;
         let held = CostScope {
             identity: scope.identity.clone(),
@@ -1621,6 +1705,7 @@ impl PrefixRecording<'_, '_> {
             if scopes.len() != self.depth {
                 return None;
             }
+            ledger.flush_usage(&mut scopes);
             let scope = scopes.last_mut()?;
             let receipt = DemandCostReceipt::with_tail_steps(
                 identity.clone(),
@@ -1941,6 +2026,88 @@ mod envelope_tests {
 mod advisory_bytes_tests {
     use super::*;
 
+    /// Charging a run does not edit the locked recording for each operation.
+    /// Suspending and resuming still attribute every charge to its producer.
+    #[test]
+    fn repeated_charges_commit_once_per_recording_interval() {
+        let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+            crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            )),
+        );
+        let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+        let (_guard, trip) = ledger.enter(false);
+        assert!(trip.is_none());
+        ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([1])));
+        let request = crate::request_budget::RequestBudget::new(352);
+        SCOPE_CHARGE_WRITES.with(|count| count.set(0));
+        // bounded-loop: fixed batch of parent charges before its child opens.
+        for _ in 0..128 {
+            ledger.charge_construction(1, 100).unwrap();
+            ledger.accrue_comparisons(2);
+            assert!(!ledger.spend_request_operation(&request));
+        }
+        ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([2])));
+        // bounded-loop: fixed batch of child charges before suspension.
+        for _ in 0..128 {
+            ledger.charge_construction(1, 100).unwrap();
+            ledger.accrue_comparisons(2);
+            assert!(!ledger.spend_request_operation(&request));
+        }
+        let child = ledger.suspend_cost_scope().unwrap();
+        assert_eq!(child.exclusive.work, 128);
+        assert_eq!(child.exclusive.bytes, 12_800);
+        // bounded-loop: fixed batch charged to the resumed parent.
+        for _ in 0..64 {
+            ledger.charge_construction(1, 100).unwrap();
+            ledger.accrue_comparisons(2);
+            assert!(!ledger.spend_request_operation(&request));
+        }
+        ledger.resume_cost_scope(child);
+        // bounded-loop: fixed batch charged to the resumed child.
+        for _ in 0..32 {
+            ledger.charge_construction(1, 100).unwrap();
+            ledger.accrue_comparisons(2);
+            assert!(!ledger.spend_request_operation(&request));
+        }
+        let child = ledger.seal_cost_scope(None).unwrap();
+        assert_eq!(child.exclusive().work, 160);
+        assert_eq!(child.exclusive().bytes, 16_000);
+        assert_eq!(child.exclusive().advisory_bytes, 16_000);
+        assert_eq!(child.exclusive().comparisons, 320);
+        assert_eq!(child.exclusive().operations, 160);
+        ledger.record_prerequisite(&child, Nesting::InPlace);
+        let parent = ledger.seal_cost_scope(None).unwrap();
+        assert_eq!(parent.exclusive().work, 192);
+        assert_eq!(parent.exclusive().bytes, 19_200);
+        assert_eq!(parent.exclusive().comparisons, 384);
+        assert_eq!(parent.exclusive().operations, 192);
+        assert_eq!(request.projection_ops_executed_count(), 352);
+        assert_eq!(ledger.request_effects().operations, 352);
+        assert_eq!(parent.closure_usage().work, 352);
+        assert_eq!(parent.closure_usage().bytes, 35_200);
+        let writes = SCOPE_CHARGE_WRITES.with(Cell::get);
+        eprintln!("recording_charge_writes={writes}");
+        assert!(
+            writes <= 4,
+            "charges must batch at scope transitions: {writes}"
+        );
+
+        ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([3])));
+        ledger.charge_units(3).unwrap();
+        let prefixes = ledger.record_prefixes(1).unwrap();
+        ledger.charge_units(5).unwrap();
+        let prefix = prefixes
+            .seal_prefix(CostIdentity::new(Arc::<[u8]>::from([4])), None)
+            .unwrap();
+        assert_eq!(prefix.exclusive().work, 5);
+        ledger.charge_units(7).unwrap();
+        drop(prefixes);
+        let receipt = ledger.seal_cost_scope(None).unwrap();
+        assert_eq!(receipt.exclusive().work, 10);
+        assert_eq!(receipt.closure_usage().work, 15);
+    }
+
     /// A canonical construction's footprint, charged while the advisory
     /// construction-byte rail is off, is accounted in the demand's bytes but
     /// never enforced: a reservation after it still has the whole byte
@@ -1975,8 +2142,8 @@ mod advisory_bytes_tests {
             let writes = SCOPE_CHARGE_WRITES.with(Cell::get);
             eprintln!("construction_scope_writes={writes}");
             assert_eq!(
-                writes, 1,
-                "one construction records its combined charge once"
+                writes, 0,
+                "charging does not edit the locked scope until its transition"
             );
             ledger
                 .reserve_bytes(100)
@@ -1986,9 +2153,11 @@ mod advisory_bytes_tests {
                 .reserve_bytes(1)
                 .unwrap_err()
                 .contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT));
-            ledger
+            let receipt = ledger
                 .seal_cost_scope(None)
-                .expect("a complete computation")
+                .expect("a complete computation");
+            assert_eq!(SCOPE_CHARGE_WRITES.with(Cell::get), 1);
+            receipt
         };
         assert_eq!(receipt.exclusive().work, 1);
         assert_eq!(receipt.exclusive().bytes, 1_100);

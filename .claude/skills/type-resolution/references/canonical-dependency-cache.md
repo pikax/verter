@@ -221,8 +221,8 @@ constructed for an internal evaluation serve.
 
 The connected-demand ledger keeps scalar accounting in typed
 `verter_execution::sync_cell` cells: supported scalar widths use acquire/release
-atomics, with whole-value mutex fallbacks on unsupported targets. Structured
-request-effect values keep `SyncCell<T>` storage; refusal reasons use their
+atomics, with whole-value mutex fallbacks on unsupported targets. Request-effect
+operation and paid counts use separate typed scalar cells; refusal reasons use their
 explicit `PartialReasonSet` bit encoding in `SyncU32`. The dispatcher's depth,
 degraded-read and evidence/budget epoch counters use the same scalar cells.
 Computations remain exclusively driven across thread resumptions; these cells do not make
@@ -233,6 +233,15 @@ updating its receipt and each open span once. With the enforced byte rail enable
 work still commits before the byte reservation, preserving charged work when a
 reservation refuses or observes cancellation. See `docs/arch/root-continuations.md`
 for the storage contract.
+
+Exclusive receipt totals accumulate in scalar cells between recording transitions.
+The work, byte and request-operation budget authorities still advance and refuse at
+each charge. Only attribution to the locked scope stack is batched: push, suspension,
+seal and prefix boundaries flush the current totals to their recording. Suspended
+recordings carry their full totals, and a task handoff exchanges pending totals
+with the rest of its ledger. Abandonment folds the flushed totals into the consumer;
+prefix recording restores its held totals beside later charges. No charge changes
+its cost identity or moves across those boundaries.
 
 Each cold heap continuation traces its steps. A warm operand validates and
 replays its existing proof directly into the parent tracer, without starting

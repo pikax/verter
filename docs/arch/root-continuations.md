@@ -259,7 +259,10 @@ read and replaced whole. No generic value is reinterpreted as atomic bytes.
 
 The connected-demand ledger uses scalar cells for its flags, work and byte
 counts, limits and query depth. Refusal reasons use their explicit `u32`
-bit encoding; structured request effects remain mutex-backed. The dispatcher's
+bit encoding; request-effect operation and paid counts use typed scalar cells.
+Exclusive receipt totals accumulate in scalar cells and flush to the recording
+at scope and prefix transitions; budget checks still run at every charge.
+Pending totals move with the ledger during a task handoff. The dispatcher's
 operation depth, degraded-read counter and evidence/budget epochs use the same
 typed scalar cells. The dispatcher is `Sync`, allowing a `Send`
 computation to resume on another thread, but each computation still has one

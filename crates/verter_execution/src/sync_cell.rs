@@ -214,10 +214,12 @@ macro_rules! scalar_cell {
                 Self(std::sync::atomic::$atomic::new(value))
             }
 
+            #[inline(always)]
             pub fn get(&self) -> $value {
                 self.0.load(std::sync::atomic::Ordering::Acquire)
             }
 
+            #[inline(always)]
             pub fn set(&self, value: $value) {
                 self.0.store(value, std::sync::atomic::Ordering::Release);
             }
