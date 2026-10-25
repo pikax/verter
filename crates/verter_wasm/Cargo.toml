@@ -54,3 +54,4 @@ verter_identity = { path = "../verter_identity" }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
 verter_session = { path = "../verter_session", features = ["test-support"] }
+verter_workspace = { path = "../verter_workspace" }

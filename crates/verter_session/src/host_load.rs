@@ -269,12 +269,18 @@ impl VerterHost {
     /// ([`verter_type_engine::resolver_core::request_ports::IndexedInputs::begin_indexed_load`]).
     /// A load is begun exactly where the synchronous serve would load: a
     /// loadable canonical the scheduler holds no source for and no retained
-    /// artifact serves.
+    /// artifact serves. A scheduler without a driver thread (every wasm32
+    /// host) has no executor but the caller, so nothing would advance a load
+    /// begun here: the serve performs it in place, executing its stages on
+    /// this thread, as the synchronous load does.
     pub(crate) fn begin_indexed_ready_load(
         &self,
         canonical_id: &str,
     ) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'_> {
         use verter_type_engine::resolver_core::request_ports::IndexedReadiness;
+        if !self.scheduler.has_driver_thread() {
+            return IndexedReadiness::Settled;
+        }
         let canonical = self
             .normalized_analysis_canonical(canonical_id)
             .into_owned();

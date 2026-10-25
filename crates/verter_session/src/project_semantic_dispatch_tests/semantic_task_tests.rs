@@ -2439,6 +2439,130 @@ mod semantic_poll_contract {
         drop(tasks);
     }
 
+    /// A flow frame whose own body's read another task is producing keeps
+    /// its evaluation across the suspension: once the producer goes away
+    /// the body is evaluated once in all, and the root delivers exactly the
+    /// synchronous entry's evidence, logical work included.
+    #[test]
+    #[ignore = "a flow frame drops its evaluation at an unanswered read and evaluates the body again after the delivery: its evaluator positions are not yet retained across a suspension"]
+    fn a_flow_suspended_at_a_held_read_evaluates_its_body_once() {
+        use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
+        let (synchronous, synchronous_evaluations) = {
+            let host = contextual_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let before = flow_evaluations_for_tests();
+            let read = dispatch.execute_via_cold_build_helper(contextual_return_key(&dispatch));
+            (
+                joined_evidence(&dispatch, &read, |answer| display_return(&host, answer)),
+                flow_evaluations_for_tests() - before,
+            )
+        };
+        let host = contextual_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let mut keys = callee_signature_reads(&dispatch);
+        keys.dedup();
+        let (tasks, leases): (Vec<_>, Vec<_>) = keys
+            .into_iter()
+            .flat_map(|key| {
+                [
+                    hold_producer(&host, graph, key.clone()),
+                    hold_producer_with(&host, graph, key, ReadCapture::expression_for_tests()),
+                ]
+            })
+            .unzip();
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let before = flow_evaluations_for_tests();
+        let mut entry = dispatch.poll_query(contextual_return_key(&dispatch));
+        let first = while_held(leases, || entry.poll(&waker));
+        assert!(first.is_pending(), "the flow yields while its read is held");
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken flow reads the signatures itself"),
+        };
+        drop(entry);
+        assert_eq!(
+            (
+                joined_evidence(&dispatch, &read, |answer| display_return(&host, answer)),
+                flow_evaluations_for_tests() - before,
+            ),
+            (synchronous, synchronous_evaluations),
+            "the suspended flow evaluates its body once and reads exactly what the synchronous entry reads"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        drop(tasks);
+    }
+
+    /// The overload set of `both`'s call signatures — a family built in one
+    /// step — and the signature-list reads its build makes.
+    fn overload_set_keys(
+        host: &crate::VerterHost,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, Vec<SemanticQueryKey>) {
+        let reads = callee_signature_reads(dispatch);
+        let SemanticQueryKey::SignaturesOfType { subject, .. } = reads[0] else {
+            unreachable!("the reads are signature-list reads")
+        };
+        let set = SemanticQueryKey::ResolveOverloadSet {
+            callee: subject,
+            kind: verter_type_engine::semantic_query::SignatureKind::Call,
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: verter_type_engine::semantic_query::OverloadSetContext {
+                resolve_env_hash: host
+                    .host_view_env_hashes_for(CONTEXTUAL_FILE)
+                    .resolve_env_hash,
+                ..Default::default()
+            },
+        };
+        (set, reads)
+    }
+
+    /// A family built in one step whose nested read another task is
+    /// producing yields at the polled entry instead of waiting that producer
+    /// out inside the poll, and once the producer goes away reads exactly
+    /// what the synchronous entry reads.
+    #[test]
+    #[ignore = "an overload set builds in one synchronous step: its signature-list read waits on another task's producer inside the poll until its build reads that list as a need"]
+    fn an_overload_set_whose_signature_read_is_held_yields_and_reads_what_the_synchronous_entry_reads(
+    ) {
+        let synchronous = {
+            let host = contextual_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (set, _) = overload_set_keys(&host, &dispatch);
+            let read = dispatch.execute_via_cold_build_helper(set);
+            read_summary(&dispatch, &read)
+        };
+        let host = contextual_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (set, mut reads) = overload_set_keys(&host, &dispatch);
+        reads.dedup();
+        let (tasks, leases): (Vec<_>, Vec<_>) = reads
+            .into_iter()
+            .flat_map(|key| {
+                [
+                    hold_producer(&host, graph, key.clone()),
+                    hold_producer_with(&host, graph, key, ReadCapture::expression_for_tests()),
+                ]
+            })
+            .unzip();
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let mut entry = dispatch.poll_query(set);
+        let first = while_held(leases, || entry.poll(&waker));
+        assert!(
+            first.is_pending(),
+            "the overload set yields while its signature read is held"
+        );
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken overload set reads the signatures itself"),
+        };
+        drop(entry);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        drop(tasks);
+    }
+
     /// `defineProps` over two type arguments, owned by the chain's file, and
     /// the payload operation its value is read from: the intersection of its
     /// arguments.

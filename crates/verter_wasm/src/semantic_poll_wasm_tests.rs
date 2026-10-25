@@ -314,3 +314,71 @@ fn semantic_poll_contract_a_macro_payload_continuation_yields_on_the_only_thread
     );
     assert_eq!(polled, synchronous);
 }
+
+const UNLOADED_FILE: &str = "/semantic-poll/unloaded.ts";
+
+/// A host whose workspace holds [`UNLOADED_FILE`], unloaded.
+fn unloaded_host() -> host::VerterHost {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    workspace.inject_file(
+        UNLOADED_FILE.to_owned(),
+        Arc::from("export interface Props { a: string }\n"),
+    );
+    host::VerterHost::new(
+        host::HostConfig {
+            analysis_level: host::AnalysisLevel::Full,
+            ..host::HostConfig::default()
+        },
+        workspace,
+    )
+}
+
+/// The instantiation of the `Props` [`UNLOADED_FILE`] declares.
+fn unloaded_props_key<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+) -> SemanticQueryKey {
+    SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+        dispatch.type_slot_for(
+            UNLOADED_FILE,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        ),
+        Arc::from([]),
+        dispatch.instantiate_context_for(
+            UNLOADED_FILE,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        ),
+    ))
+}
+
+/// An instantiation whose declaring file is not loaded: on the only
+/// thread, the polled entry waits on the file's load before the build
+/// begins and, polled again whenever it is pending, delivers within a
+/// bounded number of polls what the synchronous entry serves on a fresh
+/// host.
+#[wasm_bindgen_test]
+fn semantic_poll_contract_an_instantiation_of_an_unloaded_file_loads_on_the_only_thread() {
+    let synchronous = {
+        let host = unloaded_host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        summary(&dispatch.execute_via_cold_build_helper(unloaded_props_key(&dispatch)))
+    };
+    assert!(
+        synchronous.0.contains("TypeNode") && !synchronous.3,
+        "the instantiation answers a complete type: {synchronous:?}"
+    );
+    let host = unloaded_host();
+    let mut dispatch = ProjectSemanticDispatch::new(&host);
+    let waker = Waker::from(Arc::new(CountingWaker::default()));
+    let mut entry = dispatch.poll_query(unloaded_props_key(&dispatch));
+    let polled = (0..64)
+        .find_map(|_| match entry.poll(&waker) {
+            Poll::Ready(read) => Some(read),
+            Poll::Pending => None,
+        })
+        .expect("the load completes on the only thread within bounded polls");
+    drop(entry);
+    assert_eq!(summary(&polled), synchronous);
+}
