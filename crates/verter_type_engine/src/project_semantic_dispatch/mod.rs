@@ -133,6 +133,9 @@ pub mod evaluate;
 // place by the synchronous producer and by needs on the continuation
 // runtime.
 mod family_continuation;
+pub use family_continuation::ContinuationStage;
+// The stages of those family builds, written against the stage capability.
+mod continuation_stages;
 pub mod locator_shape;
 pub mod locator_view;
 pub mod locator_view_worklist;

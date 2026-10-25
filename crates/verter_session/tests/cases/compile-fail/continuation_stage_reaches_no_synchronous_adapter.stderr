@@ -1,0 +1,23 @@
+error[E0616]: field `dispatch` of struct `ContinuationStage` is private
+ --> tests/cases/compile-fail/continuation_stage_reaches_no_synchronous_adapter.rs:9:17
+  |
+9 |     let _ = &cx.dispatch;
+  |                 ^^^^^^^^ private field
+
+error[E0599]: no method named `dispatch` found for reference `&ContinuationStage<'_, '_, C>` in the current scope
+  --> tests/cases/compile-fail/continuation_stage_reaches_no_synchronous_adapter.rs:10:16
+   |
+10 |     let _ = cx.dispatch().execute_read(key.clone());
+   |                ^^^^^^^^ private field, not a method
+
+error[E0599]: no method named `execute_read` found for reference `&ContinuationStage<'_, '_, C>` in the current scope
+  --> tests/cases/compile-fail/continuation_stage_reaches_no_synchronous_adapter.rs:11:16
+   |
+11 |     let _ = cx.execute_read(key);
+   |                ^^^^^^^^^^^^ method not found in `&ContinuationStage<'_, '_, C>`
+
+error[E0599]: no method named `ensure_indexed_ready_serve` found for reference `&ContinuationStage<'_, '_, C>` in the current scope
+  --> tests/cases/compile-fail/continuation_stage_reaches_no_synchronous_adapter.rs:12:16
+   |
+12 |     let _ = cx.ensure_indexed_ready_serve("/a.ts");
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ContinuationStage<'_, '_, C>`

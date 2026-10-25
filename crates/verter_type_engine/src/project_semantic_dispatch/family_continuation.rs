@@ -17,9 +17,14 @@
 //!   the read's delivery; no stage that completed runs again.
 //!
 //! A stage reads no other query itself and waits on nothing: the reads are
-//! the transitions between stages. Each stage function stays out of line,
-//! so the native frame of whichever driver steps it does not grow with the
-//! families it may step.
+//! the transitions between stages. That is enforced, not documented: a stage
+//! is a method of [`ContinuationStage`], which holds the dispatcher in a
+//! field private to this module and offers a stage only what cannot wait —
+//! graph construction, the construction meter, canonical-composite
+//! normalization, the project generation a fence pins and the self-roots its
+//! nodes observed. Only the two drivers here hold the dispatcher. Each stage
+//! function stays out of line, so the native frame of whichever driver steps
+//! it does not grow with the families it may step.
 
 use std::sync::Arc;
 
@@ -28,8 +33,63 @@ use verter_session_query::inputs::indexed::IndexedInputServe;
 use crate::project_semantic_dispatch::walk::QueryBuildOutput;
 use crate::semantic_query::{CacheRead, QueryResult, SemanticNodeId, SemanticQueryKey};
 
-use super::build::{MacroPayloadBuild, ReduceIntersectionBuild};
+use super::continuation_stages::{MacroPayloadBuild, ReduceIntersectionBuild};
 use super::ProjectSemanticDispatch;
+
+/// The capability a family continuation's stage runs with: everything a
+/// stage computes with, and nothing that reads another query, reads or
+/// loads a file, joins another task's producer or drives an execution.
+/// A stage names each such dependency as a [`FamilyStep`], which its driver
+/// answers — needing it on the continuation runtime, or reading it in place
+/// on the synchronous producer.
+pub struct ContinuationStage<'s, 'a, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: &'s ProjectSemanticDispatch<'a, C>,
+}
+
+impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStage<'s, 'a, C> {
+    /// The semantic graph the stage constructs its nodes in.
+    pub fn graph_store(&self) -> &'s crate::semantic_query_memo::SemanticGraphStore {
+        self.dispatch.graph().store()
+    }
+
+    /// The semantic graph, with this execution's construction accounting.
+    pub(super) fn graph(&self) -> crate::semantic_query_memo::GraphIn<'s, C::Observe> {
+        self.dispatch.graph()
+    }
+
+    /// An opaque node carrying `error`.
+    pub(super) fn opaque(&self, error: crate::semantic_query::QueryError) -> SemanticNodeId {
+        self.dispatch.opaque(error)
+    }
+
+    /// The meter constructions are charged to.
+    pub(super) fn construction_meter(&self) -> super::canonical_algebra::ConstructionMeter<'s> {
+        self.dispatch.construction_meter()
+    }
+
+    /// The canonical composite's output over `members`, with its origin
+    /// edges and evidence.
+    pub(super) fn build_normalize_composite(
+        &self,
+        members: &Arc<[SemanticNodeId]>,
+        composite: super::canonical_algebra::CanonicalComposite,
+    ) -> QueryBuildOutput {
+        self.dispatch.build_normalize_composite(members, composite)
+    }
+
+    /// The project generation a fence pins.
+    pub(super) fn project_generation(&self) -> u64 {
+        self.dispatch.snapshot.current_project_generation()
+    }
+
+    /// The file versions `nodes` were lowered from.
+    pub(super) fn observed_self_roots_from_nodes(
+        &self,
+        nodes: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
+        self.dispatch.observed_self_roots_from_nodes(nodes)
+    }
+}
 
 /// A family build between two of its stages: what the stages before the
 /// read it waits on computed.
@@ -59,6 +119,11 @@ pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// The stage capability over this dispatcher.
+    pub(super) fn continuation_stage(&self) -> ContinuationStage<'_, 'a, C> {
+        ContinuationStage { dispatch: self }
+    }
+
     /// The first stage of `key`'s family build, for a family that builds as
     /// a continuation; `None` for any other family.
     #[inline(never)]
@@ -70,7 +135,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 macro_kind,
                 type_args,
                 context,
-            } => Some(self.begin_resolve_macro_payload(
+            } => Some(self.continuation_stage().begin_resolve_macro_payload(
                 owner,
                 *macro_index,
                 *macro_kind,
@@ -81,7 +146,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 input,
                 purpose,
                 context,
-            } => Some(self.begin_reduce_intersection(input.clone(), *purpose, context.clone())),
+            } => Some(self.continuation_stage().begin_reduce_intersection(
+                input.clone(),
+                *purpose,
+                context.clone(),
+            )),
             _ => None,
         }
     }
@@ -95,10 +164,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> FamilyStep {
         self.graph().record_continuation_resumed();
         match build {
-            FamilyBuild::MacroPayload(build) => {
-                FamilyStep::Done(Box::new(self.finish_resolve_macro_payload(build, read)))
-            }
-            FamilyBuild::ReduceIntersection(build) => self.resume_reduce_intersection(build, read),
+            FamilyBuild::MacroPayload(build) => FamilyStep::Done(Box::new(
+                self.continuation_stage()
+                    .finish_resolve_macro_payload(build, read),
+            )),
+            FamilyBuild::ReduceIntersection(build) => self
+                .continuation_stage()
+                .resume_reduce_intersection(build, read),
         }
     }
 
@@ -112,7 +184,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> FamilyStep {
         self.graph().record_continuation_resumed();
         match build {
-            FamilyBuild::MacroPayload(build) => self.resume_macro_payload_owner(build, serve),
+            FamilyBuild::MacroPayload(build) => self
+                .continuation_stage()
+                .resume_macro_payload_owner(build, serve),
             FamilyBuild::ReduceIntersection(_) => {
                 unreachable!("an intersection reduction reads no file")
             }
