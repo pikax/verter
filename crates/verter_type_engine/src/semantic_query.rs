@@ -12924,7 +12924,8 @@ mod tests {
     ///   decl_subexpression_lowering_count, relation_check_count,
     ///   mapped_per_k_materializations, substitute_memo_hits,
     ///   substitute_memo_misses, evaluate_deferred_memo_hits,
-    ///   evaluate_deferred_memo_misses.
+    ///   evaluate_deferred_memo_misses, continuation_builds_begun,
+    ///   continuation_stages_resumed.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -12959,6 +12960,8 @@ mod tests {
             "evaluate_deferred_memo_misses",
             "awaited_normalize_count",
             "async_return_payload_count",
+            "continuation_builds_begun",
+            "continuation_stages_resumed",
         ];
         for field in expected_to_fire {
             assert!(
