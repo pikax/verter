@@ -606,7 +606,11 @@ emits/slots/model projection) and ordered intersection reductions
   same frame again once the load resolves) with its build retained
   (`FrameBuild::FamilySource`); the synchronous entry's drive loads the file
   in place as its external driver. An explicit session overlay or a
-  tombstoned file needs no load.
+  tombstoned file needs no load. A scheduler without a driver thread
+  (every wasm32 host) has no executor but the caller, so nothing would
+  advance a load begun for a frame to wait on: there the serve loads the
+  file in place, executing its stages on the polling thread, exactly as
+  the synchronous load does.
 - **Stage capability.** Every stage is a method of `ContinuationStage`, which
   holds the dispatcher in a field private to `family_continuation` and
   exposes only graph construction, the construction meter, canonical
@@ -629,6 +633,46 @@ stay pending when their `Send` task is polled on another thread, and then
 deliver exactly the synchronous entry's answer, fact status, diagnostics and
 receipt with each stage run once; a released waiting payload leaves nothing
 open.
+
+### Frame entry loads
+
+An instantiation's or a `typeof`'s frame on a production poll's drive
+performs no load before its build begins. Its first step asks for the
+loads that build would perform first and waits on each as an outside input
+(`EvalStep::Await`) instead:
+
+- its own file — the instantiation's declaring file, the `typeof`'s value
+  file — while it is still loading (`IndexedInputs::begin_indexed_load`);
+- then each file that file's prepared declaration bundle routes an import to
+  and would load while materializing (`IndexedInputs::begin_prepared_bundle_load`),
+  in the order the materialization loads them. The host answers it from the
+  bundle's own route-edge plan (`VerterHost::route_dep_edge_plan`, shared
+  with `prepared_decl_bundle_route_dep_edges_with_context`), so it begins
+  exactly the loads the materialization would perform and never one it
+  would not. It materializes nothing and reads the owner only when that
+  file is already current.
+
+Nothing of the build has run while the frame waits, so the step the last
+load restarts begins the build once, over loaded files. Every file waited on
+joins the frame's `awaited_loads` and is never waited on again: a load that
+failed leaves the build to read the file as a synchronous build reads it
+after its own failed load. What the check itself reads is observed in a fact
+tracer and observation scope of its own and dropped; the build observes
+what it reads. On the synchronous entry's drive the frame waits on nothing,
+and its build performs the same loads in place as their external driver.
+
+Behaviour, in the session's `semantic_poll_contract` group: an
+instantiation whose declaring file's scheduler source read is held, a
+`typeof` whose value file is held, and a `typeof` in a loaded file whose
+initializer reads a value imported from a held file each return `Pending`,
+stay pending when their `Send` task is polled on another thread, leave the
+held file unloaded, and once the read goes on deliver exactly the
+synchronous entry's answer, fact status, diagnostics and receipt with as
+many instantiations built; an instantiation released while its file loads
+leaves no wait, flight or request state open. The WASM control
+`semantic_poll_contract_an_instantiation_of_an_unloaded_file_loads_on_the_only_thread`
+polls the same instantiation on the driverless single thread and reads what
+the synchronous entry serves.
 
 ### Cache admission and publication
 
@@ -802,8 +846,20 @@ object-spread projection, locator lowering, relations, flow returns and the
 call walk below a suspension point. Their nested query reads and resolver
 port calls (`ensure_indexed_ready_serve`, prepared declarations, module
 export tables, route resolution, declaration lowering) remain synchronous
-inside the step. A flow frame still drops and re-runs its evaluation when its
-body meets an unanswered read. Retaining that evaluation is blocked on the
+inside the step. Frame entry loads (above) cover only the loads an
+instantiation or `typeof` build performs before anything else: a file a
+build reaches later — a re-export chain's hop resolved at demand time, a
+heritage or member declaration of another file, a declaration body lowered
+on its owner shard — still loads or is lowered in place. A flow frame still
+drops and re-runs its evaluation when its body meets an unanswered read.
+
+Two ignored acceptance tests in the session's `semantic_poll_contract` group
+state the polled entry's contract for these gaps and fail today:
+`an_overload_set_whose_signature_read_is_held_yields_and_reads_what_the_synchronous_entry_reads`
+(an overload set, built in one step, waits on its held signature-list read
+inside the poll) and `a_flow_suspended_at_a_held_read_evaluates_its_body_once`
+(after the held read is delivered the flow evaluates its body again: one
+evaluation and its logical work more than the synchronous entry). Retaining that evaluation is blocked on the
 flow product execution authority, which is asserted `!Send`
 (`FlowProductStore`, `FlowProductExecution`, `FlowProductKey`,
 `SelectedFlowSite` in `flow_products.rs`), on the evaluator's borrowed
@@ -830,7 +886,7 @@ its higher-level traversals still use the external synchronous compatibility dri
 | Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |
 | Store-view capture (`StoreViewManager::base_view`) | `verter_session/src/store_view_handoff.rs` | `capture_batch_fixed_view` at every component-meta entry | `VerterHost::begin_store_view` with owned build/maintenance producer; callers still synchronous |
 | Carrier publication and stable parse | `verter_session/src/carrier_publication_store/owned.rs` | scheduler Source stage; base/overlay structure | `OwnedPublication` → external Work and owned S subscription; `OwnedStableParse` → external stable producer; callers still synchronous |
-| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; synchronous callers externally drive and integrate |
+| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; a macro payload's owner and a frame's entry loads (its file, its bundle's import targets) wait on it; other synchronous callers externally drive and integrate |
 | Batch upsert completion (`Scheduler::wait_batch`) | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
 | Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
 | Scheduler inbox submission (`send_submission`) | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
