@@ -3765,7 +3765,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         reuse,
                         replay: super::dispatch_txn::FlowMemberReuse {
                             reads: crate::resolver_core::resolver_context::RecordedFactReads {
-                                facts: std::sync::Arc::from(vec![receipt]),
+                                facts: verter_session_query::facts::fact_set::FactSet::from(vec![
+                                    receipt,
+                                ]),
                                 non_cacheable: reads.non_cacheable,
                             },
                             observed_self_roots: observed.observed_self_roots,

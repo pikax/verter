@@ -546,7 +546,10 @@ impl VerterHost {
         // concurrent writer could move state between two facts of the
         // SAME signature and each half would validate against a different
         // world.
-        if !current.view().validates_fact_signature(&signature.facts) {
+        if !current
+            .view()
+            .validates_fact_signature((&signature.facts).into())
+        {
             return None;
         }
         verter_type_engine::fact_signature_helpers::observe_fact_signature(&signature.facts);

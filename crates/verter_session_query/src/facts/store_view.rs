@@ -271,7 +271,7 @@ pub trait StoreView {
     #[inline]
     fn validate_fact_signature(
         &self,
-        sig: &[FactVersionRef],
+        sig: crate::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
         let mut walk = crate::facts::fact_cache::ReceiptWalk::default();
@@ -299,7 +299,7 @@ pub trait StoreView {
     ///
     /// Wrapper over [`Self::validate_fact_signature`] with no self-roots.
     #[inline]
-    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+    fn validates_fact_signature(&self, sig: crate::facts::fact_set::FactsRef<'_>) -> bool {
         self.validate_fact_signature(sig, &[]).is_ok()
     }
 
@@ -310,7 +310,7 @@ pub trait StoreView {
     #[inline]
     fn validates_fact_signature_with_self_roots(
         &self,
-        sig: &[FactVersionRef],
+        sig: crate::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> bool {
         self.validate_fact_signature(sig, self_root_canonicals)
@@ -373,7 +373,7 @@ impl crate::facts::fact_cache::FactVersionValidator for dyn StoreView + '_ {
     /// The view's own whole-signature rule, one receipt walk shared by
     /// the signature, never a fresh walk per fact.
     #[inline]
-    fn validates_fact_signature(&self, facts: &[FactVersionRef]) -> bool {
+    fn validates_fact_signature(&self, facts: crate::facts::fact_set::FactsRef<'_>) -> bool {
         StoreView::validates_fact_signature(self, facts)
     }
 }
@@ -466,13 +466,13 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         (**self).aggregate_basis_seed()
     }
     #[inline]
-    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+    fn validates_fact_signature(&self, sig: crate::facts::fact_set::FactsRef<'_>) -> bool {
         (**self).validates_fact_signature(sig)
     }
     #[inline]
     fn validate_fact_signature(
         &self,
-        sig: &[FactVersionRef],
+        sig: crate::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
         (**self).validate_fact_signature(sig, self_root_canonicals)
@@ -480,7 +480,7 @@ impl<T: StoreView + ?Sized> StoreView for &T {
     #[inline]
     fn validates_fact_signature_with_self_roots(
         &self,
-        sig: &[FactVersionRef],
+        sig: crate::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> bool {
         (**self).validates_fact_signature_with_self_roots(sig, self_root_canonicals)

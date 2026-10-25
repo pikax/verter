@@ -11,7 +11,7 @@
 //!    `install_fact_tracer(host, || { ... })`. The helper installs
 //!    a fresh `FactReadSetCell` on TLS, runs the body, re-checks the
 //!    scope's compaction basis, and finalises the read set into its
-//!    complete (paged when wide) signature.
+//!    complete signature, whole at any width.
 //!    Without the install scope,
 //!    the cold body's per-fact `observe_fan_out_borrowed` calls
 //!    fan into NOTHING — the producer publishes a value with an

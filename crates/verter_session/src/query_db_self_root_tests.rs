@@ -114,8 +114,8 @@ fn host_with_unrelated_file() -> VerterHost {
 
 /// A one-fact signature whose sole entry is a self-root
 /// `FileWholeHash` for `canonical` at [`PLANTED_HASH`].
-fn planted_self_root(canonical: &str) -> Arc<[FactVersionRef]> {
-    Arc::from(vec![FactVersionRef::FileWholeHash {
+fn planted_self_root(canonical: &str) -> verter_session_query::facts::fact_set::FactSet {
+    verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
         canonical_id: canonical.into(),
         hash: PLANTED_HASH,
     }])
@@ -2430,7 +2430,7 @@ fn imported_registry_db_signature_builder_is_provenance_pure() {
         .expect("observed-current signature builds")
         .facts;
     assert!(
-        signature_roots_whole_hash(&anchored, c, observed_h1),
+        signature_roots_whole_hash(&anchored.to_vec(), c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
     );
 
@@ -2462,7 +2462,7 @@ fn imported_registry_db_signature_builder_is_provenance_pure() {
         .expect("current-observed signature still builds")
         .facts;
     assert!(
-        signature_roots_whole_hash(&current_sig, c, current_h2),
+        signature_roots_whole_hash(&current_sig.to_vec(), c, current_h2),
         "the current-observed signature must root on H2 — confirming step 4's None is \
          the stale-observation refusal",
     );
@@ -2486,7 +2486,7 @@ fn declaration_lookup_db_signature_builder_is_provenance_pure() {
         .expect("observed-current signature builds")
         .facts;
     assert!(
-        signature_roots_whole_hash(&anchored, c, observed_h1),
+        signature_roots_whole_hash(&anchored.to_vec(), c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
     );
 
@@ -2512,7 +2512,7 @@ fn declaration_lookup_db_signature_builder_is_provenance_pure() {
         .expect("current-observed signature still builds")
         .facts;
     assert!(
-        signature_roots_whole_hash(&current_sig, c, current_h2),
+        signature_roots_whole_hash(&current_sig.to_vec(), c, current_h2),
         "the current-observed signature must root on H2",
     );
 }
@@ -2535,7 +2535,7 @@ fn resolvability_db_signature_builder_is_provenance_pure() {
         .expect("observed-current signature builds")
         .facts;
     assert!(
-        signature_roots_whole_hash(&anchored, c, observed_h1),
+        signature_roots_whole_hash(&anchored.to_vec(), c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
     );
 
@@ -2561,7 +2561,7 @@ fn resolvability_db_signature_builder_is_provenance_pure() {
         .expect("current-observed signature still builds")
         .facts;
     assert!(
-        signature_roots_whole_hash(&current_sig, c, current_h2),
+        signature_roots_whole_hash(&current_sig.to_vec(), c, current_h2),
         "the current-observed signature must root on H2",
     );
 }
@@ -2585,7 +2585,7 @@ fn owner_collection_db_signature_builder_is_provenance_pure() {
         .expect("observed-current signature builds")
         .facts;
     assert!(
-        signature_roots_whole_hash(&anchored, c, observed_h1),
+        signature_roots_whole_hash(&anchored.to_vec(), c, observed_h1),
         "anchor: the signature for the observed-current case must root on H1",
     );
 
@@ -2611,7 +2611,7 @@ fn owner_collection_db_signature_builder_is_provenance_pure() {
         .expect("current-observed signature still builds")
         .facts;
     assert!(
-        signature_roots_whole_hash(&current_sig, c, current_h2),
+        signature_roots_whole_hash(&current_sig.to_vec(), c, current_h2),
         "the current-observed signature must root on H2",
     );
 }
@@ -3257,10 +3257,11 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
     );
 
     // Base-view publish — self-roots the keyed canonical at its BASE hash.
-    let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.into(),
-        hash: base_hash,
-    }]);
+    let base_self_root: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
+            canonical_id: canonical.into(),
+            hash: base_hash,
+        }]);
     {
         let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let db = host.project_type_store().imported_registry_db();
@@ -3274,7 +3275,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
                         value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
                             imported_symbol(canonical, "winner-base"),
                         )),
-                        fact_dep_signature: Arc::clone(&base_self_root),
+                        fact_dep_signature: base_self_root.clone(),
                         validated_at_generation: ctx.request_flags().current_project_generation(),
                     },
                 )
@@ -3326,10 +3327,12 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
                         value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
                             imported_symbol(canonical, "follower-overlay"),
                         )),
-                        fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
-                            canonical_id: canonical.into(),
-                            hash: overlay_hash,
-                        }]),
+                        fact_dep_signature: verter_session_query::facts::fact_set::FactSet::from(
+                            vec![FactVersionRef::FileWholeHash {
+                                canonical_id: canonical.into(),
+                                hash: overlay_hash,
+                            }],
+                        ),
                         validated_at_generation: host
                             .project_type_store()
                             .current_project_generation(),
@@ -3417,10 +3420,11 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
         .live_count();
 
     // Base publish.
-    let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.into(),
-        hash: base_hash,
-    }]);
+    let base_self_root: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
+            canonical_id: canonical.into(),
+            hash: base_hash,
+        }]);
     {
         let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let db = host.project_type_store().imported_registry_db();
@@ -3432,7 +3436,7 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
                         value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
                             imported_symbol(canonical, "winner-base"),
                         )),
-                        fact_dep_signature: Arc::clone(&base_self_root),
+                        fact_dep_signature: base_self_root.clone(),
                         validated_at_generation: ctx.request_flags().current_project_generation(),
                     },
                 )
@@ -3469,10 +3473,12 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
                         value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
                             imported_symbol(canonical, "follower-overlay"),
                         )),
-                        fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
-                            canonical_id: canonical.into(),
-                            hash: overlay_hash,
-                        }]),
+                        fact_dep_signature: verter_session_query::facts::fact_set::FactSet::from(
+                            vec![FactVersionRef::FileWholeHash {
+                                canonical_id: canonical.into(),
+                                hash: overlay_hash,
+                            }],
+                        ),
                         validated_at_generation: host
                             .project_type_store()
                             .current_project_generation(),
@@ -4653,8 +4659,8 @@ fn shape_member(
 /// supplied `hash` — the exact content version the cache entry is rooted on.
 /// The strict warm-read validator checks this against the live view's
 /// authoritative self-root hash for the keyed canonical.
-fn self_root_at(canonical: &str, hash: [u8; 16]) -> Arc<[FactVersionRef]> {
-    Arc::from(vec![FactVersionRef::FileWholeHash {
+fn self_root_at(canonical: &str, hash: [u8; 16]) -> verter_session_query::facts::fact_set::FactSet {
+    verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
         canonical_id: canonical.into(),
         hash,
     }])

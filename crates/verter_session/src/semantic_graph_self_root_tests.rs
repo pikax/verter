@@ -48,7 +48,7 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 use verter_session_query::facts::{
     fact_cache::FactVersionRef,
-    fact_read_set::{FactReadSetFinalise, FACT_PAGE_WIDTH},
+    fact_read_set::{FactReadSetFinalise, WIDE_SIGNATURE_WIDTH},
 };
 use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt;
 use verter_type_engine::resolver_core::ResolverContext;
@@ -118,9 +118,9 @@ impl StoreView for StrictWorldTestView {
     }
 }
 
-/// One full evidence page of distinct terminal witnesses.
-pub(crate) fn page_width_terminal_witness_facts() -> Vec<FactVersionRef> {
-    (0..FACT_PAGE_WIDTH)
+/// One wide signature's width of distinct terminal witnesses.
+pub(crate) fn wide_width_terminal_witness_facts() -> Vec<FactVersionRef> {
+    (0..WIDE_SIGNATURE_WIDTH)
         .map(|generation| {
             FactVersionRef::StrictSelfRootWorld(
                 verter_session_query::facts::fact_cache::StrictSelfRootWorld {
@@ -417,10 +417,7 @@ fn instantiations_entry_facts(
     let carrier = graph
         .entry_read_set_signature_for_tests(&key(published))
         .unwrap_or_else(|| panic!("`{published:?}` must admit its instantiation"));
-    let mut facts: Vec<FactVersionRef> =
-        verter_session_query::facts::fact_cache::signature_entries(&carrier.facts)
-            .cloned()
-            .collect();
+    let mut facts: Vec<FactVersionRef> = carrier.facts.iter().cloned().collect();
     facts.sort();
     facts.dedup();
     facts
@@ -644,10 +641,11 @@ fn read_set_signature_rejects_traced_self_root_hash_mismatch() {
     );
 }
 
-/// A traced set wider than one page whose facts sit on evidence pages.
-/// `root` is placed among `ProjectGeneration` fillers wide enough to page.
-fn paged_traced_set(root: FactVersionRef) -> Arc<[FactVersionRef]> {
-    let mut traced: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH + 76)
+/// A traced set wider than a wide signature: `root` among
+/// `ProjectGeneration` fillers, one fact of a set read only through its
+/// own iteration.
+fn wide_traced_set(root: FactVersionRef) -> verter_session_query::facts::fact_set::FactSet {
+    let mut traced: Vec<FactVersionRef> = (0..WIDE_SIGNATURE_WIDTH + 76)
         .map(|generation| FactVersionRef::ProjectGeneration {
             generation: generation as u64,
         })
@@ -655,47 +653,52 @@ fn paged_traced_set(root: FactVersionRef) -> Arc<[FactVersionRef]> {
     traced.push(root);
     let sealed = verter_session_query::facts::fact_read_set::seal_canonical_signature(traced);
     assert!(
-        sealed
-            .iter()
-            .all(|fact| !matches!(fact, FactVersionRef::FileWholeHash { .. })),
-        "fixture: the root fact must sit on an evidence page, not at the top level",
+        sealed.len() > WIDE_SIGNATURE_WIDTH,
+        "fixture: the traced set is wide"
     );
     sealed
 }
 
 /// The torn-read rejection holds when the traced set is wide: a disagreeing
-/// self-root `FileWholeHash` held on an evidence page is still a torn read.
+/// self-root `FileWholeHash` among a wide set's facts is still a torn read.
 #[test]
-fn read_set_signature_rejects_a_traced_self_root_hash_mismatch_on_an_evidence_page() {
+fn read_set_signature_rejects_a_traced_self_root_hash_mismatch_in_a_wide_set() {
     let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
         vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
-    let traced = paged_traced_set(FactVersionRef::FileWholeHash {
+    let traced = wide_traced_set(FactVersionRef::FileWholeHash {
         canonical_id: "/w/a.ts".into(),
         hash: [0x99; 16],
     });
     assert_eq!(
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
-            .unwrap_err(),
+        semantic_graph_read_set_signature(
+            &StrictWorldTestView::default(),
+            &observed,
+            &traced.to_vec()
+        )
+        .unwrap_err(),
         verter_audit::NonAdmissionReason::SelfRootConflict,
-        "a paged traced FileWholeHash disagreeing with the observed self-root is a torn read",
+        "a wide traced FileWholeHash disagreeing with the observed self-root is a torn read",
     );
 }
 
-/// An agreeing self-root fact held on an evidence page keeps its precise
-/// root: the carrier's width is already held by pages, so no strict-world
-/// witness — bound to the one view that minted it — replaces the root, and
-/// every traced fact is kept.
+/// An agreeing self-root of a traced set already wider than a wide
+/// signature keeps its precise root: the completion did not make the
+/// carrier wide, so no strict-world witness — bound to the one view that
+/// minted it — replaces the root, and every traced fact is kept.
 #[test]
-fn a_paged_agreeing_self_root_keeps_its_precise_root() {
+fn a_wide_traced_set_keeps_its_agreeing_precise_root() {
     let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
         vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
-    let traced = paged_traced_set(FactVersionRef::FileWholeHash {
+    let traced = wide_traced_set(FactVersionRef::FileWholeHash {
         canonical_id: "/w/a.ts".into(),
         hash: [0x11; 16],
     });
-    let (facts, roots) =
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
-            .expect("an agreeing paged self-root builds a carrier");
+    let (facts, roots) = semantic_graph_read_set_signature(
+        &StrictWorldTestView::default(),
+        &observed,
+        &traced.to_vec(),
+    )
+    .expect("an agreeing wide self-root builds a carrier");
     assert_eq!(roots.as_ref(), [Arc::<str>::from("/w/a.ts")]);
     let entries: Vec<FactVersionRef> = ReadSetSignature::new(facts).entries().cloned().collect();
     assert!(!entries
@@ -711,7 +714,7 @@ fn a_paged_agreeing_self_root_keeps_its_precise_root() {
             .iter()
             .filter(|fact| matches!(fact, FactVersionRef::ProjectGeneration { .. }))
             .count(),
-        FACT_PAGE_WIDTH + 76,
+        WIDE_SIGNATURE_WIDTH + 76,
         "every other traced fact is kept",
     );
 }
@@ -769,11 +772,12 @@ fn read_set_signature_keeps_traced_project_generation_fact() {
     );
 }
 
-/// A structural carrier with more self-roots than one evidence page carries
-/// them as one strict-world witness rather than one precise fact per root.
+/// A structural carrier with more self-roots than a wide signature's width
+/// carries them as one strict-world witness rather than one precise fact
+/// per root.
 #[test]
 fn oversized_self_root_set_builds_a_bounded_carrier() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=WIDE_SIGNATURE_WIDTH)
         .map(|index| {
             (
                 verter_type_expr::OwnedStr::from(format!("/w/root-{index}.ts")),
@@ -787,8 +791,8 @@ fn oversized_self_root_set_builds_a_bounded_carrier() {
             .expect("cardinality alone must not make a self-rooted carrier uncacheable");
 
     assert!(
-        carrier.0.len() <= FACT_PAGE_WIDTH,
-        "the completed structural carrier's top level must fit one page; got {} facts",
+        carrier.0.len() <= WIDE_SIGNATURE_WIDTH,
+        "the completed structural carrier is bounded by its witness; got {} facts",
         carrier.0.len(),
     );
     assert!(
@@ -804,12 +808,12 @@ fn oversized_self_root_set_builds_a_bounded_carrier() {
     );
 }
 
-/// When the self-roots themselves overflow the top level, the strict-world
-/// witness replaces every precise root fact — one held on a traced evidence
-/// page included — and keeps every other traced fact.
+/// When the self-roots themselves make the carrier wide, the strict-world
+/// witness replaces every precise root fact — one the traced set holds
+/// included — and keeps every other traced fact.
 #[test]
-fn an_oversized_root_set_strips_a_paged_root_fact_beside_its_witness() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
+fn an_oversized_root_set_strips_a_traced_root_fact_beside_its_witness() {
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=WIDE_SIGNATURE_WIDTH)
         .map(|index| {
             (
                 verter_type_expr::OwnedStr::from(format!("/w/root-{index}.ts")),
@@ -817,34 +821,37 @@ fn an_oversized_root_set_strips_a_paged_root_fact_beside_its_witness() {
             )
         })
         .collect();
-    let traced = paged_traced_set(FactVersionRef::FileWholeHash {
+    let traced = wide_traced_set(FactVersionRef::FileWholeHash {
         canonical_id: "/w/root-0.ts".into(),
         hash: [0; 16],
     });
-    let (facts, roots) =
-        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
-            .expect("an agreeing paged root builds a carrier");
+    let (facts, roots) = semantic_graph_read_set_signature(
+        &StrictWorldTestView::default(),
+        &observed,
+        &traced.to_vec(),
+    )
+    .expect("an agreeing traced root builds a carrier");
     assert!(roots.is_empty(), "the roots ride the strict-world witness");
     let entries: Vec<FactVersionRef> = ReadSetSignature::new(facts).entries().cloned().collect();
     assert!(
         !entries
             .iter()
             .any(|fact| matches!(fact, FactVersionRef::FileWholeHash { .. })),
-        "no precise root fact survives beside the witness, on a page or not",
+        "no precise root fact survives beside the witness",
     );
     assert_eq!(
         entries
             .iter()
             .filter(|fact| matches!(fact, FactVersionRef::ProjectGeneration { .. }))
             .count(),
-        FACT_PAGE_WIDTH + 76,
+        WIDE_SIGNATURE_WIDTH + 76,
         "every other traced fact is kept",
     );
 }
 
 #[test]
 fn oversized_self_root_compaction_strictly_checks_every_root() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=WIDE_SIGNATURE_WIDTH)
         .map(|index| {
             (
                 verter_type_expr::OwnedStr::from(format!("/w/root-{index}.ts")),
@@ -872,7 +879,7 @@ fn strict_world_witness_discriminates_without_a_precise_root_list() {
     )]));
 
     assert!(carrier.has_view_discriminating_self_root(&[]));
-    assert!(view.validates_fact_signature(&carrier.facts));
+    assert!(view.validates_fact_signature((&carrier.facts).into()));
 
     let other = StrictWorldTestView {
         world: verter_session_query::facts::fact_cache::StrictSelfRootWorld {
@@ -885,7 +892,7 @@ fn strict_world_witness_discriminates_without_a_precise_root_list() {
         ..StrictWorldTestView::default()
     };
     assert!(
-        !other.validates_fact_signature(&carrier.facts),
+        !other.validates_fact_signature((&carrier.facts).into()),
         "a different effective population must reject the witness",
     );
 }
@@ -909,14 +916,14 @@ fn generic_content_aggregate_is_not_a_strict_self_root_witness() {
 }
 
 /// Width applies to the completed carrier, not merely the tracer output: a
-/// signature finalised at a full page that grows when a structural self-root
-/// is merged afterward is paged whole — every traced fact kept, the root
-/// carried by its strict-world witness — never refused.
+/// signature finalised at a wide signature's width that grows when a
+/// structural self-root is merged afterward is sealed whole — every traced
+/// fact kept, the root carried by its strict-world witness — never refused.
 #[test]
-fn post_finalise_self_root_merge_pages_the_completed_carrier() {
+fn post_finalise_self_root_merge_seals_the_completed_carrier_whole() {
     let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
         vec![(verter_type_expr::OwnedStr::from("/w/root.ts"), [0x11; 16])];
-    let traced: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH)
+    let traced: Vec<FactVersionRef> = (0..WIDE_SIGNATURE_WIDTH)
         .map(|generation| FactVersionRef::ProjectGeneration {
             generation: generation as u64,
         })
@@ -924,13 +931,14 @@ fn post_finalise_self_root_merge_pages_the_completed_carrier() {
 
     let (facts, roots) =
         semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
-            .expect("a completed carrier wider than one page is paged, never refused");
-    assert!(
-        facts.len() <= FACT_PAGE_WIDTH,
-        "the top level fits one page"
+            .expect("a wide completed carrier is sealed, never refused");
+    assert_eq!(
+        facts.len(),
+        WIDE_SIGNATURE_WIDTH + 1,
+        "every traced fact and the witness, nothing else"
     );
     assert!(roots.is_empty(), "the root rides the strict-world witness");
-    let entries: Vec<FactVersionRef> = ReadSetSignature::new(Arc::clone(&facts))
+    let entries: Vec<FactVersionRef> = ReadSetSignature::new(facts.clone())
         .entries()
         .cloned()
         .collect();
@@ -941,10 +949,10 @@ fn post_finalise_self_root_merge_pages_the_completed_carrier() {
 }
 
 #[test]
-fn completed_structural_carrier_at_exactly_one_page_keeps_its_precise_root() {
+fn completed_structural_carrier_at_exactly_the_wide_width_keeps_its_precise_root() {
     let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
         vec![(verter_type_expr::OwnedStr::from("/w/root.ts"), [0x11; 16])];
-    let traced: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH - 1)
+    let traced: Vec<FactVersionRef> = (0..WIDE_SIGNATURE_WIDTH - 1)
         .map(|generation| FactVersionRef::ProjectGeneration {
             generation: generation as u64,
         })
@@ -952,8 +960,8 @@ fn completed_structural_carrier_at_exactly_one_page_keeps_its_precise_root() {
 
     let (facts, roots) =
         semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
-            .expect("a one-page completed carrier is admitted");
-    assert_eq!(facts.len(), FACT_PAGE_WIDTH);
+            .expect("a completed carrier exactly the wide width is admitted");
+    assert_eq!(facts.len(), WIDE_SIGNATURE_WIDTH);
     assert_eq!(roots.as_ref(), &[Arc::<str>::from("/w/root.ts")]);
 }
 
@@ -1010,14 +1018,14 @@ fn validate_with_self_roots_accepts_matching_tracked_self_root() {
     );
 }
 
-/// A self-rooted carrier wider than one evidence page validates against
-/// the live view only while every fact on every page holds: an edit to the
-/// file whose fact sits on the LAST page misses the warm read exactly as an
-/// edit on the first page does.
+/// A self-rooted carrier wider than a wide signature validates against the
+/// live view only while every fact holds: an edit to the file whose fact is
+/// LAST in canonical order misses the warm read exactly as an edit to the
+/// first does.
 #[test]
-fn validate_with_self_roots_checks_every_page_of_a_wide_carrier() {
+fn validate_with_self_roots_checks_every_fact_of_a_wide_carrier() {
     let host = host();
-    let width = 2 * FACT_PAGE_WIDTH + 3;
+    let width = 2 * WIDE_SIGNATURE_WIDTH + 3;
     let paths: Vec<String> = (0..width)
         .map(|index| format!("/sg_self_root/wide/{index:05}.ts"))
         .collect();
@@ -1036,22 +1044,19 @@ fn validate_with_self_roots_checks_every_page_of_a_wide_carrier() {
     let carrier = ReadSetSignature::new(
         verter_session_query::facts::fact_read_set::seal_canonical_signature(observe(&host)),
     );
-    assert!(
-        carrier.facts.len() <= FACT_PAGE_WIDTH,
-        "the carrier is paged"
-    );
+    assert_eq!(carrier.facts.len(), width, "the carrier holds every fact");
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(paths[0].as_str())]);
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         carrier.validate_with_self_roots(ctx, &self_roots),
-        "an unchanged world validates every page of the wide carrier"
+        "an unchanged world validates every fact of the wide carrier"
     );
     let last = paths.last().expect("non-empty");
     upsert(&host, last, "export const z = 2;\n");
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         !carrier.validate_with_self_roots(ctx, &self_roots),
-        "an edit to the file on the last page must miss the warm read"
+        "an edit to the file of the last fact must miss the warm read"
     );
 }
 

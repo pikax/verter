@@ -6,8 +6,8 @@
 //! - **Empty signature on a source-dependent cache** → admission
 //!   refused, `FactSignatureAdmissionRefused` emitted,
 //!   `admission_refused_count` advances.
-//! - **Signature width** is never a refusal: a signature wider than one
-//!   evidence page is paged and admitted whole.
+//! - **Signature width** is never a refusal: a signature wider than
+//!   `WIDE_SIGNATURE_WIDTH` is admitted whole.
 //!
 //! The refusal path preserves correctness by falling back to cold
 //! recompute every time — they never poison the cache with torn
@@ -17,8 +17,8 @@
 //!
 //! - `empty_signature_refuses_admission` — a non-empty signature is
 //!   admitted (control); an empty signature is refused (effect).
-//! - `wide_signature_admits_paged` — signatures at and one over the
-//!   page width are both admitted.
+//! - `wide_signature_admits_whole` — signatures at and one over
+//!   `WIDE_SIGNATURE_WIDTH` are both admitted.
 //! - `admission_guard_returns_correct_value_on_cold_recompute` —
 //!   the R20 contract requires that an admission-refused cache
 //!   miss falls through to a correct cold compute. We assert this
@@ -29,7 +29,7 @@ use verter_session::resolver_core::ValidatedFactCache;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::{
     fact_cache::{FactVersionRef, ParseFactRef},
-    fact_read_set::FACT_PAGE_WIDTH,
+    fact_read_set::WIDE_SIGNATURE_WIDTH,
 };
 use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
@@ -102,10 +102,10 @@ fn loose_insert_arc_admits_empty_signature_for_legacy_callers() {
 }
 
 #[test]
-fn wide_signature_admits_paged() {
+fn wide_signature_admits_whole() {
     let cache: ValidatedFactCache<&'static str, u32> = ValidatedFactCache::default();
 
-    let at_width: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH)
+    let at_width: Vec<FactVersionRef> = (0..WIDE_SIGNATURE_WIDTH)
         .map(|i| fake_fact(&format!("F{i}")))
         .collect();
     cache.insert_value_with_kind(
@@ -114,9 +114,9 @@ fn wide_signature_admits_paged() {
         at_width,
         "test_cache",
     );
-    assert_eq!(cache.len(), 1, "a signature of exactly one page admits");
+    assert_eq!(cache.len(), 1, "a signature exactly the wide width admits");
 
-    let over_width: Vec<FactVersionRef> = (0..=FACT_PAGE_WIDTH)
+    let over_width: Vec<FactVersionRef> = (0..=WIDE_SIGNATURE_WIDTH)
         .map(|i| fake_fact(&format!("G{i}")))
         .collect();
     cache.insert_value_with_kind(
@@ -128,7 +128,7 @@ fn wide_signature_admits_paged() {
     assert_eq!(
         cache.len(),
         2,
-        "a signature one fact wider than a page is paged and admitted, never refused"
+        "a signature one fact wider than the wide width is admitted whole, never refused"
     );
     assert_eq!(
         cache.admission_refused_count(),

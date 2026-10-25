@@ -15,22 +15,16 @@
 //! validates, each distinct receipt visited once
 //! ([`ResultReceipt::all_leaves`]).
 //!
-//! The same carrier holds an EVIDENCE PAGE ([`ResultReceipt::page`]): one
-//! fixed-width slice of a signature too wide for one level. A page is not a
-//! consumed result — it names no computation and carries no cost identity —
-//! but it validates, projects and is shared exactly as a receipt is, so a
-//! wide signature stays complete without any consumer learning a second
-//! evidence shape.
-//!
-//! A page's storage is charged to the retention account for exactly as long
-//! as the page lives, once, however many signatures share it. It is born a
-//! [`ChargeClass::Pinned`] obligation of the live signature that sealed it.
-//! The first cache admission that retains a signature holding the page
-//! claims it ([`reserve_retained_with_evidence`], or [`claim_evidence_pages`]
-//! for a store that charges no bytes of its own): the page's bytes join that
-//! admission's refusable [`ChargeClass::Retained`] reservation — so a wide
-//! candidate is refused for its whole footprint like any other entry — and
-//! the page's pin is exchanged for its share of the granted reservation.
+//! A receipt's storage is charged to the retention account for exactly as
+//! long as the receipt lives, once, however many signatures share it. It is
+//! born a [`ChargeClass::Pinned`] obligation of the live value holding it.
+//! The first cache admission that retains a signature reaching it claims it
+//! ([`reserve_retained_with_evidence`], or [`claim_retained_storage`] for a
+//! store that charges no bytes of its own): its bytes join that admission's
+//! refusable [`ChargeClass::Retained`] reservation — so a wide candidate is
+//! refused for its whole footprint like any other entry — and its pin is
+//! exchanged for its share of the granted reservation. A sealed set's tree
+//! nodes are claimed the same way ([`super::fact_tree`]).
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -40,24 +34,12 @@ use crate::retention::{
     ChargeClass, RetentionAdmission, RetentionCharge, RetentionRefusal, SemanticRetentionAccount,
 };
 
-/// What one shared evidence holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum EvidenceKind {
-    /// A completed result's own facts and the receipts of what it consumed.
-    Result,
-    /// One fixed-width page of a signature wider than one level (see
-    /// [`crate::facts::fact_read_set::FACT_PAGE_WIDTH`]): a slice of that
-    /// signature's canonical entries, never a computation's evidence.
-    Page,
-}
-
 /// The evidence one completed result recorded: its own facts and the
 /// receipts of the results it consumed, in canonical order, with the
 /// summaries a consumer projecting a signature needs without walking it.
 #[derive(Debug)]
 pub struct ResultEvidence {
     facts: Arc<[FactVersionRef]>,
-    kind: EvidenceKind,
     digest: u128,
     /// Every canonical a fact reachable from here names: a persistent set
     /// sharing its structure with the sets of the receipts it consumed.
@@ -275,10 +257,10 @@ impl ResultReceipt {
     /// shared allocation. Admission claims its pin together with the payload.
     #[must_use]
     pub fn retained_signature(
-        facts: &[FactVersionRef],
+        facts: super::fact_set::FactsRef<'_>,
         account: &Arc<SemanticRetentionAccount>,
     ) -> Self {
-        Self::seal(facts.to_vec(), EvidenceKind::Result, account)
+        Self::seal(facts.iter().cloned().collect(), account)
     }
 
     /// Join complete dependency receipts without expanding their evidence or
@@ -310,14 +292,14 @@ impl ResultReceipt {
             .collect();
         facts.dedup();
         drop_subsumed_receipts(&mut facts);
-        Self::seal(facts, EvidenceKind::Result, account)
+        Self::seal(facts, account)
     }
 
     /// The receipt for `facts`, a completed result's own facts and the
     /// receipts of what it consumed. Sorted and deduplicated here.
     ///
-    /// Like a page, its storage is pinned against the process retention
-    /// account from birth and claimed into the first retaining admission's
+    /// Its storage is pinned against the process retention account from
+    /// birth and claimed into the first retaining admission's
     /// reservation, so every receipt is charged for exactly as long as it
     /// lives, however many signatures share it.
     #[must_use]
@@ -334,40 +316,11 @@ impl ResultReceipt {
         });
         facts.dedup();
         drop_subsumed_receipts(&mut facts);
-        Self::seal(facts, EvidenceKind::Result, account)
+        Self::seal(facts, account)
     }
 
-    /// One page of a wide signature: `facts`, a contiguous run of that
-    /// signature's canonical (strictly increasing) entries, kept whole —
-    /// nothing is re-sorted, deduplicated or dropped.
-    ///
-    /// The page's storage is pinned against the process retention account
-    /// from birth: a page exists only because a live signature holds it.
-    /// A cache admission retaining it later exchanges the pin for a share
-    /// of its refusable reservation ([`reserve_retained_with_evidence`]);
-    /// either way the charge is released by the page's last holder's drop,
-    /// once, however many candidates, refusal summaries or enclosing
-    /// signatures share it.
-    #[must_use]
-    pub fn page(facts: Vec<FactVersionRef>) -> Self {
-        Self::page_on(facts, &SemanticRetentionAccount::process_local())
-    }
-
-    /// [`Self::page`], pinned against `account`.
-    pub(crate) fn page_on(
-        facts: Vec<FactVersionRef>,
-        account: &Arc<SemanticRetentionAccount>,
-    ) -> Self {
-        Self::seal(facts, EvidenceKind::Page, account)
-    }
-
-    fn seal(
-        facts: Vec<FactVersionRef>,
-        kind: EvidenceKind,
-        account: &Arc<SemanticRetentionAccount>,
-    ) -> Self {
+    fn seal(facts: Vec<FactVersionRef>, account: &Arc<SemanticRetentionAccount>) -> Self {
         let mut digester = xxhash_rust::xxh3::Xxh3::new();
-        kind.hash(&mut digester);
         facts.len().hash(&mut digester);
         for fact in &facts {
             fact.hash(&mut digester);
@@ -422,7 +375,6 @@ impl ResultReceipt {
         )));
         Self(Arc::new(ResultEvidence {
             facts: facts.into(),
-            kind,
             digest,
             canonicals,
             aggregated: aggregated.into(),
@@ -430,19 +382,6 @@ impl ResultReceipt {
             evidence_claimed: std::sync::atomic::AtomicBool::new(false),
             retention,
         }))
-    }
-
-    /// What this evidence holds: a result's, or one page of a wide
-    /// signature.
-    #[must_use]
-    pub fn kind(&self) -> EvidenceKind {
-        self.0.kind
-    }
-
-    /// Whether this is one page of a wide signature.
-    #[must_use]
-    pub fn is_page(&self) -> bool {
-        self.0.kind == EvidenceKind::Page
     }
 
     /// Bytes this evidence holds charged against the retention account,
@@ -622,36 +561,72 @@ pub enum ReceiptVerdict {
 }
 
 /// Reserve a cache candidate's retained bytes against `account`: its own
-/// `own_bytes` together with every evidence page `signatures` reach — pages
-/// of pages, and pages a consumed result's receipt holds, included — that no
-/// earlier admission claimed, as ONE refusable
+/// `own_bytes` together with every receipt and sealed-set tree node
+/// `signatures` reach — receipts a consumed result's receipt holds included —
+/// that no earlier admission claimed, as ONE refusable
 /// [`ChargeClass::Retained`] reservation — so a wide candidate is refused,
 /// as oversized or under pressure, for everything it would newly retain.
 ///
-/// On admission each claimed page's pin is exchanged for its share of the
-/// reservation, which the page then holds for the rest of its life; the
-/// returned charge holds `own_bytes`. A page another admission claimed
-/// first, concurrently, keeps that claim and its share is released here.
-/// The reservation is taken before any pin is released, so a page is never
-/// uncharged during the exchange. The owned names a claimed evidence's
-/// facts reach are held with its share, so they are retained as long as it
-/// is. On refusal nothing changes: every page and name stays pinned by the
-/// live signatures holding it.
-pub fn reserve_retained_with_evidence(
+/// On admission each claimed receipt's and node's pin is exchanged for its
+/// share of the reservation, which it then holds for the rest of its life;
+/// the returned charge holds `own_bytes`. A receipt or node another
+/// admission claimed first, concurrently, keeps that claim and its share is
+/// released here. The reservation is taken before any pin is released, so
+/// nothing is uncharged during the exchange. The owned names a claimed
+/// receipt's or node's facts reach are held with its share, so they are
+/// retained as long as it is. On refusal nothing changes: every receipt,
+/// node and name stays pinned by the live signatures holding it.
+pub fn reserve_retained_with_evidence<S: SignatureFacts + ?Sized>(
     account: &Arc<SemanticRetentionAccount>,
     own_bytes: usize,
-    signatures: &[&[FactVersionRef]],
+    signatures: &[&S],
 ) -> RetentionAdmission {
     use std::sync::atomic::Ordering;
     let mut seen: rustc_hash::FxHashSet<*const ResultEvidence> = rustc_hash::FxHashSet::default();
     let mut walked: Vec<&ResultEvidence> = Vec::new();
     let mut claim: Vec<(&ResultEvidence, usize)> = Vec::new();
-    let mut stack: Vec<&[FactVersionRef]> = signatures.to_vec();
-    // Every distinct evidence that can reach a page is walked once, whatever
-    // its kind: a consumed result's receipt carries its own charge, claimed
-    // here like any other evidence no earlier admission claimed, and may hold
-    // pages (a result recorded over a wide warm-hit signature), which the
-    // candidate retains through it just as it retains its own.
+    // A tree set's nodes: every node it reaches that no earlier admission
+    // claimed, each once (a claimed node's subtree is claimed).
+    let mut nodes: Vec<&Arc<super::fact_tree::Node>> = Vec::new();
+    let mut stack: Vec<&[FactVersionRef]> = Vec::new();
+    for signature in signatures {
+        if let Some(root) = signature.fact_set().and_then(|set| set.tree_root()) {
+            super::fact_tree::unclaimed_nodes(root, &mut nodes);
+        }
+        signature.visit_receipt_candidates(&mut |fact| {
+            let FactVersionRef::Receipt(receipt) = fact else {
+                return;
+            };
+            if receipt.0.evidence_claimed.load(Ordering::Acquire)
+                || !seen.insert(Arc::as_ptr(&receipt.0))
+            {
+                return;
+            }
+            walked.push(&receipt.0);
+            let charge = receipt.0.retention.lock();
+            if charge.class() != ChargeClass::Retained {
+                claim.push((&receipt.0, charge.bytes()));
+            }
+            stack.push(&receipt.0.facts);
+        });
+    }
+    let node_claims: Vec<(&Arc<super::fact_tree::Node>, usize)> = nodes
+        .iter()
+        .filter_map(|node| {
+            let charge = node.charge().lock();
+            charge
+                .as_ref()
+                .filter(|charge| charge.class() != ChargeClass::Retained)
+                .map(|charge| (*node, charge.bytes()))
+        })
+        .collect();
+    let node_bytes: usize = node_claims.iter().map(|(_, bytes)| bytes).sum();
+    // Every distinct receipt reachable from a walked receipt is walked once:
+    // a consumed result's receipt carries its own charge, claimed here like
+    // any other receipt no earlier admission claimed, and may hold further
+    // receipts (a result recorded over a warm-hit signature that consumed
+    // results), which the candidate retains through it just as it retains
+    // its own.
     while let Some(level) = stack.pop() {
         for fact in level {
             let FactVersionRef::Receipt(receipt) = fact else {
@@ -671,7 +646,10 @@ pub fn reserve_retained_with_evidence(
         }
     }
     let evidence_bytes: usize = claim.iter().map(|(_, bytes)| bytes).sum();
-    let mut charge = match account.reserve(ChargeClass::Retained, own_bytes + evidence_bytes) {
+    let mut charge = match account.reserve(
+        ChargeClass::Retained,
+        own_bytes + evidence_bytes + node_bytes,
+    ) {
         RetentionAdmission::Admitted(charge) => charge,
         refused @ RetentionAdmission::Refused(_) => return refused,
     };
@@ -680,6 +658,13 @@ pub fn reserve_retained_with_evidence(
     for (evidence, _) in &claim {
         match evidence_names(&evidence.facts).hold(ctx) {
             Ok(holds) => names.push(holds),
+            Err(refusal) => return RetentionAdmission::Refused(refusal),
+        }
+    }
+    let mut node_names = Vec::with_capacity(node_claims.len());
+    for (node, _) in &node_claims {
+        match super::fact_tree::node_names(node).hold(ctx) {
+            Ok(holds) => node_names.push(holds),
             Err(refusal) => return RetentionAdmission::Refused(refusal),
         }
     }
@@ -695,30 +680,129 @@ pub fn reserve_retained_with_evidence(
         drop(held);
         drop(released);
     }
-    // Every page reachable from a walked evidence is retained now, by this
-    // admission or by the one that claimed it first.
+    // Every receipt reachable from a walked receipt is retained now, by
+    // this admission or by the one that claimed it first.
     for evidence in walked {
         evidence.evidence_claimed.store(true, Ordering::Release);
+    }
+    // Each unclaimed tree node exchanges its pin for its share, exactly as
+    // an evidence does; a node another admission claimed meanwhile keeps
+    // that claim and its share is released here.
+    for ((node, bytes), names) in node_claims.into_iter().zip(node_names) {
+        let share = charge.split_off(bytes).holding(names);
+        let mut held = node.charge().lock();
+        let released = match held.as_mut() {
+            Some(pinned) if pinned.class() != ChargeClass::Retained => {
+                std::mem::replace(pinned, share)
+            }
+            _ => share,
+        };
+        drop(held);
+        drop(released);
+    }
+    // Deepest first, so a node marked claimed always has its subtree
+    // claimed: the walk discovered every node after its parent.
+    for node in nodes.into_iter().rev() {
+        node.mark_claimed();
     }
     RetentionAdmission::Admitted(charge)
 }
 
-/// Claim every evidence page `signature` reaches that no earlier admission
-/// claimed, for a cache admission that retains the signature but charges
-/// none of its own bytes against `account`: the reservation
+/// A signature a retaining admission reserves for: its facts (a consumed
+/// result's receipt, and every receipt it holds, claimed with it) and, for a
+/// wide sealed set, its tree nodes' charges.
+pub trait SignatureFacts {
+    /// Visit the facts that may be receipts: for a canonical set, only its
+    /// tail (receipts sort after every other fact); for a plain list, all of
+    /// it.
+    fn visit_receipt_candidates<'a>(&'a self, visit: &mut dyn FnMut(&'a FactVersionRef));
+    /// The sealed set, when the signature is one: its tree nodes are
+    /// claimed with the reservation.
+    fn fact_set(&self) -> Option<&super::fact_set::FactSet> {
+        None
+    }
+}
+
+impl SignatureFacts for [FactVersionRef] {
+    fn visit_receipt_candidates<'a>(&'a self, visit: &mut dyn FnMut(&'a FactVersionRef)) {
+        self.iter().for_each(visit);
+    }
+}
+
+impl SignatureFacts for Vec<FactVersionRef> {
+    fn visit_receipt_candidates<'a>(&'a self, visit: &mut dyn FnMut(&'a FactVersionRef)) {
+        self.iter().for_each(visit);
+    }
+}
+
+impl SignatureFacts for Arc<[FactVersionRef]> {
+    fn visit_receipt_candidates<'a>(&'a self, visit: &mut dyn FnMut(&'a FactVersionRef)) {
+        self.iter().for_each(visit);
+    }
+}
+
+impl SignatureFacts for super::fact_set::FactSet {
+    fn visit_receipt_candidates<'a>(&'a self, visit: &mut dyn FnMut(&'a FactVersionRef)) {
+        self.iter()
+            .rev()
+            .take_while(|fact| {
+                matches!(
+                    fact,
+                    FactVersionRef::Receipt(_)
+                        | FactVersionRef::DomainGeneration(_)
+                        | FactVersionRef::StrictSelfRootWorld(_)
+                )
+            })
+            .for_each(visit);
+    }
+
+    fn fact_set(&self) -> Option<&super::fact_set::FactSet> {
+        Some(self)
+    }
+}
+
+impl SignatureFacts for super::fact_set::FactsRef<'_> {
+    fn visit_receipt_candidates<'a>(&'a self, visit: &mut dyn FnMut(&'a FactVersionRef)) {
+        match self {
+            Self::Set(set) => set.visit_receipt_candidates(visit),
+            Self::Slice(facts) => facts.visit_receipt_candidates(visit),
+        }
+    }
+
+    fn fact_set(&self) -> Option<&super::fact_set::FactSet> {
+        match self {
+            Self::Set(set) => Some(set),
+            Self::Slice(_) => None,
+        }
+    }
+}
+
+impl SignatureFacts for super::fact_cache::ReadSetSignature {
+    fn visit_receipt_candidates<'a>(&'a self, visit: &mut dyn FnMut(&'a FactVersionRef)) {
+        self.facts.visit_receipt_candidates(visit);
+    }
+
+    fn fact_set(&self) -> Option<&super::fact_set::FactSet> {
+        Some(&self.facts)
+    }
+}
+
+/// Claim every receipt and tree node `signature` reaches that no earlier
+/// admission claimed, for a cache admission that retains the signature but
+/// charges none of its own bytes against `account`: the reservation
 /// [`reserve_retained_with_evidence`] takes with no own bytes, so the
-/// claimed pages are refused, as oversized or under pressure, exactly as a
-/// participant's are.
+/// claimed storage is refused, as oversized or under pressure, exactly as a
+/// participant's is.
 ///
-/// A signature reaching no unclaimed page reserves nothing and is always
+/// A signature reaching no unclaimed storage reserves nothing and is always
 /// admitted. On refusal the caller must not retain the signature: it
-/// delivers its value uncached, and every page stays pinned by the live
-/// signatures holding it until their last holder drops.
-pub fn claim_evidence_pages(
+/// delivers its value uncached, and every receipt and node stays pinned by
+/// the live signatures holding it until their last holder drops.
+pub fn claim_retained_storage<S: SignatureFacts + ?Sized>(
     account: &Arc<SemanticRetentionAccount>,
-    signature: &[FactVersionRef],
+    signature: &S,
 ) -> Result<(), RetentionRefusal> {
-    if !has_unclaimed_evidence_pages(signature) {
+    if !has_unclaimed_retained_storage(signature) {
         return Ok(());
     }
     match reserve_retained_with_evidence(account, 0, &[signature]) {
@@ -727,13 +811,22 @@ pub fn claim_evidence_pages(
     }
 }
 
-/// Whether retaining this signature needs an evidence-page reservation.
+/// Whether retaining this signature needs a reservation for receipts or
+/// sealed-set tree nodes no earlier admission claimed.
 #[must_use]
-pub fn has_unclaimed_evidence_pages(signature: &[FactVersionRef]) -> bool {
-    signature.iter().any(|fact| {
-        matches!(fact, FactVersionRef::Receipt(receipt)
-            if !receipt.0.evidence_claimed.load(std::sync::atomic::Ordering::Acquire))
-    })
+pub fn has_unclaimed_retained_storage<S: SignatureFacts + ?Sized>(signature: &S) -> bool {
+    if signature
+        .fact_set()
+        .is_some_and(super::fact_set::FactSet::has_unclaimed_storage)
+    {
+        return true;
+    }
+    let mut unclaimed = false;
+    signature.visit_receipt_candidates(&mut |fact| {
+        unclaimed |= matches!(fact, FactVersionRef::Receipt(receipt)
+            if !receipt.0.evidence_claimed.load(std::sync::atomic::Ordering::Acquire));
+    });
+    unclaimed
 }
 
 /// Drop from `facts` every receipt another receipt in `facts` directly
@@ -771,7 +864,6 @@ pub fn drop_subsumed_receipts(facts: &mut Vec<FactVersionRef>) {
 impl std::fmt::Debug for ResultReceipt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResultReceipt")
-            .field("kind", &self.0.kind)
             .field("digest", &format_args!("{:032x}", self.0.digest))
             .field("facts", &self.0.facts.len())
             .finish()
@@ -782,7 +874,6 @@ impl PartialEq for ResultReceipt {
     fn eq(&self, other: &Self) -> bool {
         self.ptr_eq(other)
             || (self.0.digest == other.0.digest
-                && self.0.kind == other.0.kind
                 && compare_evidence(&self.0, &other.0) == std::cmp::Ordering::Equal)
     }
 }
@@ -803,7 +894,6 @@ impl Ord for ResultReceipt {
         self.0
             .digest
             .cmp(&other.0.digest)
-            .then_with(|| self.0.kind.cmp(&other.0.kind))
             .then_with(|| compare_evidence(&self.0, &other.0))
     }
 }
@@ -837,7 +927,7 @@ fn compare_evidence(a: &ResultEvidence, b: &ResultEvidence) -> std::cmp::Orderin
                 if x.ptr_eq(y) {
                     continue;
                 }
-                match x.0.digest.cmp(&y.0.digest).then(x.0.kind.cmp(&y.0.kind)) {
+                match x.0.digest.cmp(&y.0.digest) {
                     Ordering::Equal => {}
                     unequal => return unequal,
                 }

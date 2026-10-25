@@ -24,7 +24,7 @@
 //!   field points at is charged on its own. A value held directly in a
 //!   container slot is charged by the container's slot convention.
 //! * **Self-charged allocations.** An allocation that carries its own
-//!   charge — an evidence page, a cost receipt, a pooled identity string, a
+//!   charge — a fact-tree node, a cost receipt, a pooled identity string, a
 //!   graph node — is never charged again by a holder: holding it costs the
 //!   holder only the handle's inline bytes.
 //! * **Aliases inside one charge.** Within one charge each distinct `Arc`

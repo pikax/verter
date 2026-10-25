@@ -14,9 +14,7 @@
 
 use super::*;
 use crate::{HostConfig, UpsertRequest, VerterHost};
-use verter_session_query::facts::fact_cache::{
-    signature_entries, FactVersionRef, ReadSetSignature,
-};
+use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
 use verter_session_query::facts::receipt::ReceiptWalk;
 use verter_session_query::facts::{FactKey, SymbolSpace};
 use verter_type_engine::semantic_query::{FlowReturnKey, SemanticQueryOutput};
@@ -94,7 +92,7 @@ struct FlowReturnRead {
 fn leaf_facts(signature: &ReadSetSignature) -> Vec<FactVersionRef> {
     let mut walk = ReceiptWalk::default();
     let mut facts = Vec::new();
-    for entry in signature_entries(&signature.facts) {
+    for entry in signature.facts.iter() {
         match entry {
             FactVersionRef::Receipt(receipt) => {
                 walk.leaves(receipt, |fact| {

@@ -100,7 +100,7 @@ fn warm_sanity_then_misses(host: &verter_session::VerterHost, owner: &str) -> u6
 /// props must carry the new member type.
 ///
 /// Discrimination property: `ComponentMetaResultDb::get_with_view`
-/// runs `view.validates_fact_signature(&entry.fact_dep_signature)` on
+/// runs `view.validates_fact_signature((&entry.fact_dep_signature).into())` on
 /// the warm-hit path. The entry's signature records the dep's
 /// pre-edit parse facts; the post-edit facts mismatch. Removing that
 /// `validates_fact_signature` check serves the stale entry as a hit

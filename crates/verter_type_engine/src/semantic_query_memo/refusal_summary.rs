@@ -105,9 +105,9 @@ impl RefusalSummary {
     /// slot and eviction-order record, and its request prefix's paid lists.
     /// Its read's delivery metadata charges itself; its carrier, self-roots
     /// and delivered allocations are shared allocations, held once through
-    /// the store's registry; a wide
-    /// carrier's evidence pages are claimed into this reservation, a page
-    /// being charged once however many summaries and candidates share it
+    /// the store's registry; the receipts and tree nodes a wide carrier
+    /// reaches are claimed into this reservation, each charged once however
+    /// many summaries and candidates share it
     /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]).
     fn own_retained_footprint(&self) -> verter_session_query::retention::Footprint {
         use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};

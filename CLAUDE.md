@@ -111,7 +111,7 @@ Guards: `many_individually_legal_entries_stop_at_the_aggregate_ceiling`, `concur
 
 Guards: `cache_satisfaction_is_materialized_point_not_nominal_demand`, `cache_satisfaction_requires_path_exact_not_prefix`, `backfill_writes_only_recorded_materialized_points`, `no_off_store_host_caches`, the `r6_*` cluster, plus the four migrated-query-identity-key guards in `tests/cases/g_cache/r6_r21_query_identity_keys.rs` (`component_meta_result_key_*`, `route_name_key_*`/`barrel_surface_key_*`, `materialization_cycle_gate_key_*`, `materialization_cache_key_*`).
 
-See `/type-cache-architecture` skill for the full rule set (R1–R31, two-fact `MemberPresence`/`Member` model, multi-candidate substrate, paged signature-evidence contract (width is never a refusal), module augmentation completeness, heuristic-cache-semantics prevention, exact policy identity) and `.claude/skills/type-cache-architecture/SKILL.md` for the per-field audit table + per-cache-layer key composition.
+See `/type-cache-architecture` skill for the full rule set (R1–R31, two-fact `MemberPresence`/`Member` model, multi-candidate substrate, canonical fact-set signature contract and its laws (width is never a refusal), module augmentation completeness, heuristic-cache-semantics prevention, exact policy identity) and `.claude/skills/type-cache-architecture/SKILL.md` for the per-field audit table + per-cache-layer key composition.
 
 ### Macro Type Traversal Rule (CRITICAL)
 

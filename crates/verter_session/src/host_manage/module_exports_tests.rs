@@ -53,7 +53,7 @@ fn export_table_refusals_keep_the_complete_answer_and_typed_reason() {
                 }
                 Some(NonAdmissionReason::UnresolvedProvenance) => {
                     match SignatureAdmission::from_finalise(FactReadSetFinalise::NonCacheable(
-                        Arc::from([]),
+                        verter_session_query::facts::fact_set::FactSet::empty(),
                     )) {
                         SignatureAdmission::NonCacheable(reason) => Err(reason),
                         _ => panic!("non-cacheable provenance cannot admit"),

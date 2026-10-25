@@ -1959,7 +1959,8 @@ mod fact_validation_authority {
                 verter_type_expr::OwnedStr,
                 verter_session_query::analysis::types::Hash16,
             )],
-            facts: Vec<FactVersionRef>,
+            traced: &verter_session_query::facts::fact_set::FactSet,
+            extra: Vec<FactVersionRef>,
         ) -> Result<
             verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
             verter_audit::NonAdmissionReason,
@@ -1968,7 +1969,9 @@ mod fact_validation_authority {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
             };
-            verter_type_engine::semantic_query_memo::semantic_graph_carrier(&view, roots, facts)
+            verter_type_engine::semantic_query_memo::semantic_graph_carrier(
+                &view, roots, traced, extra,
+            )
         }
         fn tracer_forcing(&self) -> bool {
             self.test_force
@@ -2120,7 +2123,10 @@ mod fact_validation_authority {
         ) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
             verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched
         }
-        fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+        fn validates_fact_signature(
+            &self,
+            sig: verter_session_query::facts::fact_set::FactsRef<'_>,
+        ) -> bool {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
@@ -2130,7 +2136,7 @@ mod fact_validation_authority {
         }
         fn validate_fact_signature(
             &self,
-            sig: &[FactVersionRef],
+            sig: verter_session_query::facts::fact_set::FactsRef<'_>,
             self_root_canonicals: &[&str],
         ) -> Result<(), usize> {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
@@ -2142,7 +2148,7 @@ mod fact_validation_authority {
         }
         fn validates_fact_signature_with_self_roots(
             &self,
-            sig: &[FactVersionRef],
+            sig: verter_session_query::facts::fact_set::FactsRef<'_>,
             self_root_canonicals: &[&str],
         ) -> bool {
             let view = match crate::VerterHost::resolver_store_view_read(self) {

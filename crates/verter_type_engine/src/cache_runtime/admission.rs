@@ -19,7 +19,6 @@
 
 use std::sync::Arc;
 
-use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// Refusal classification for a non-cacheable admission. Re-exported
@@ -197,9 +196,10 @@ pub enum CacheAdmission<V> {
 /// An entry exists only charged ([`Self::admit`]). Its own allocations —
 /// its map slot and key, its block, its fact slice, its self-root list,
 /// whatever heap its value keeps outside owned cells, and the evidence
-/// pages its signature reaches — are one refusable `Retained` reservation
-/// released with the entry. The value's owned cells (the allocations a warm
-/// hit hands out) carry their own charges, which the reservation holds:
+/// storage (receipts and tree nodes) its signature reaches — are one
+/// refusable `Retained` reservation released with the entry. The value's
+/// owned cells (the allocations a warm hit hands out) carry their own
+/// charges, which the reservation holds:
 /// when the entry goes, each passes to the handles callers still keep and
 /// is released by the last of them.
 pub struct CacheEntry<V> {
@@ -456,7 +456,7 @@ pub struct FactCandidateDiscriminant {
     /// World generation the candidate was computed under.
     pub validated_at_generation: u64,
     /// The path-precise fact set the candidate was admitted with.
-    pub facts: Arc<[FactVersionRef]>,
+    pub facts: verter_session_query::facts::fact_set::FactSet,
 }
 
 impl PartialEq for FactCandidateDiscriminant {

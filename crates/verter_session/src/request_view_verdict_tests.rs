@@ -68,7 +68,10 @@ fn reads(
     roots: &[&str],
 ) -> (Result<(), usize>, usize) {
     let before = view.leaf_validations_for_tests();
-    let answer = view.validate_fact_signature(signature, roots);
+    let answer = view.validate_fact_signature(
+        verter_session_query::facts::fact_set::FactsRef::from(signature),
+        roots,
+    );
     (answer, view.leaf_validations_for_tests() - before)
 }
 
@@ -168,10 +171,11 @@ fn a_retained_signature_answers_its_settled_verdict() {
         canonical_id: "/stale.ts".into(),
         hash: [2; 16],
     });
-    let stale: Arc<[FactVersionRef]> = Arc::from(facts);
-    let valid: Arc<[FactVersionRef]> = (1..32).map(whole).collect();
+    let stale: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::fact_set::FactSet::from(facts);
+    let valid: verter_session_query::facts::fact_set::FactSet = (1..32).map(whole).collect();
     let view = RequestStoreView::new(&base, overlay);
-    let probe = |signature: &Arc<[FactVersionRef]>| {
+    let probe = |signature: &verter_session_query::facts::fact_set::FactSet| {
         let before = view.leaf_validations_for_tests();
         let answer = view.validates_retained_signature(signature, &[]);
         (answer, view.leaf_validations_for_tests() - before)
@@ -183,7 +187,7 @@ fn a_retained_signature_answers_its_settled_verdict() {
     assert_eq!(probe(&valid), (true, 0), "a settled valid signature");
     assert_eq!(view.settled_signatures_for_tests(), 2);
     assert_eq!(
-        reads(&view, &stale, &[]),
+        reads(&view, &stale.to_vec(), &[]),
         (Err(31), 32),
         "the same facts borrowed"
     );
@@ -233,7 +237,7 @@ fn uncertain_torn_and_refused_failures_settle_nothing() {
             }
         },
     ));
-    assert!(torn.validate_fact_signature(&deep, &[]).is_err());
+    assert!(torn.validate_fact_signature((&deep).into(), &[]).is_err());
     assert_eq!(
         (
             torn.settled_receipts_for_tests(true),
@@ -264,7 +268,8 @@ fn uncertain_torn_and_refused_failures_settle_nothing() {
 
     let unproven = RequestStoreView::new_cold_seed(&base, overlay_through(33), false);
     assert_eq!(reads(&unproven, &deep, &[]), (Err(0), 0));
-    let retained: Arc<[FactVersionRef]> = Arc::from(deep);
+    let retained: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::fact_set::FactSet::from(deep);
     assert!(!unproven.validates_retained_signature(&retained, &[]));
     assert_eq!(
         (
@@ -541,12 +546,18 @@ fn settled_verdicts_release_their_evidence_with_the_view() {
     {
         let levels = stale_chain(|facts| ResultReceipt::new_on(facts, &account));
         let valid = ResultReceipt::new_on(vec![whole(32)], &account);
-        let retained: Arc<[FactVersionRef]> = Arc::from(vec![
-            FactVersionRef::Receipt(levels[31].clone()),
-            FactVersionRef::Receipt(valid.clone()),
-        ]);
+        let retained: verter_session_query::facts::fact_set::FactSet =
+            verter_session_query::facts::fact_set::FactSet::from(vec![
+                FactVersionRef::Receipt(levels[31].clone()),
+                FactVersionRef::Receipt(valid.clone()),
+            ]);
         assert!(view
-            .validate_fact_signature(&[FactVersionRef::Receipt(valid)], &[])
+            .validate_fact_signature(
+                verter_session_query::facts::fact_set::FactsRef::from(&[FactVersionRef::Receipt(
+                    valid
+                )]),
+                &[]
+            )
             .is_ok());
         assert!(!view.validates_retained_signature(&retained, &[]));
         assert_eq!(view.settled_receipts_for_tests(true), 32);

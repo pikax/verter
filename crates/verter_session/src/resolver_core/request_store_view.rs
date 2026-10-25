@@ -1131,7 +1131,7 @@ impl SignatureOutcome {
 /// (held alive, so its address names it alone), the strict self-roots and
 /// the completion state it was validated under, and its verdict.
 struct SettledSignature {
-    signature: Arc<[FactVersionRef]>,
+    signature: verter_session_query::facts::fact_set::FactSet,
     strict: Box<[Box<str>]>,
     state: CompletionOverlayState,
     verdict: Verdict,
@@ -1152,13 +1152,13 @@ struct SignatureVerdicts(
 );
 
 impl SignatureVerdicts {
-    fn address(signature: &Arc<[FactVersionRef]>) -> usize {
-        Arc::as_ptr(signature).cast::<FactVersionRef>() as usize
+    fn address(signature: &verter_session_query::facts::fact_set::FactSet) -> usize {
+        signature.address()
     }
 
     fn get(
         &self,
-        signature: &Arc<[FactVersionRef]>,
+        signature: &verter_session_query::facts::fact_set::FactSet,
         strict: &[&str],
         state: CompletionOverlayState,
     ) -> Option<Verdict> {
@@ -1167,7 +1167,7 @@ impl SignatureVerdicts {
             .get(&Self::address(signature))?
             .iter()
             .find(|entry| {
-                Arc::ptr_eq(&entry.signature, signature)
+                entry.signature.ptr_eq(signature)
                     && entry.state == state
                     && entry.strict.len() == strict.len()
                     && entry
@@ -1181,7 +1181,7 @@ impl SignatureVerdicts {
 
     fn insert(
         &self,
-        signature: &Arc<[FactVersionRef]>,
+        signature: &verter_session_query::facts::fact_set::FactSet,
         strict: &[&str],
         state: CompletionOverlayState,
         verdict: Verdict,
@@ -1191,7 +1191,7 @@ impl SignatureVerdicts {
             .entry(Self::address(signature))
             .or_default()
             .push(SettledSignature {
-                signature: Arc::clone(signature),
+                signature: signature.clone(),
                 strict: strict.iter().map(|root| Box::from(*root)).collect(),
                 state,
                 verdict,
@@ -1416,7 +1416,7 @@ impl<'a> RequestStoreView<'a> {
     /// (see [`SignatureVerdicts`]).
     pub(crate) fn validates_retained_signature(
         &self,
-        sig: &Arc<[FactVersionRef]>,
+        sig: &verter_session_query::facts::fact_set::FactSet,
         self_root_canonicals: &[&str],
     ) -> bool {
         if sig.is_empty() {
@@ -1434,7 +1434,10 @@ impl<'a> RequestStoreView<'a> {
                 return verdict == Verdict::Valid;
             }
         }
-        let (verdict, state) = match self.signature_outcome(sig, self_root_canonicals) {
+        let (verdict, state) = match self.signature_outcome(
+            verter_session_query::facts::fact_set::FactsRef::Set(sig),
+            self_root_canonicals,
+        ) {
             SignatureOutcome::Valid(state) => (Verdict::Valid, state),
             SignatureOutcome::Stale(_, state) => (Verdict::Stale, state),
             SignatureOutcome::Refused(_) => return false,
@@ -1592,7 +1595,7 @@ impl<'a> RequestStoreView<'a> {
     /// settling every receipt the answer proves something about.
     fn signature_outcome(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> SignatureOutcome {
         if !self.base_is_current {
@@ -1970,7 +1973,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
 
     fn validate_fact_signature(
         &self,
-        sig: &[FactVersionRef],
+        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
         if sig.is_empty() {

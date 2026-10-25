@@ -248,7 +248,7 @@ pub(crate) fn record_resolution_witness<T>(
     }
     WITNESS_FRAMES.with(|frames| {
         for frame in frames.borrow_mut().iter_mut() {
-            frame.extend_from_slice(facts);
+            frame.extend(facts.iter().cloned());
         }
     });
 }

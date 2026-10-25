@@ -14,8 +14,8 @@ use crate::semantic_query::{QueryResult, SemanticQueryValue};
 /// One memo candidate's charges.
 ///
 /// * `own` — the candidate's cache-only bookkeeping
-///   ([`MemoEntry::own_retained_footprint`]), and every evidence page
-///   its carrier newly retains. Nothing here is handed to a caller, so it
+///   ([`MemoEntry::own_retained_footprint`]), and every receipt and tree
+///   node its carrier newly retains. Nothing here is handed to a caller, so it
 ///   is released the moment the candidate drains.
 /// * `carrier` — the fact rail and self-root list, shared by every
 ///   candidate the same build published (the root, its prefix backfills,
@@ -172,9 +172,9 @@ impl SemanticGraphStore {
     /// against the same account, for as long as it lives
     /// ([`DemandCostReceipt::reserve_retention`]).
     ///
-    /// The candidate's own reservation also claims every evidence page its
-    /// carrier holds that no earlier admission claimed, so a wide candidate
-    /// is refused for the whole footprint it would newly retain
+    /// The candidate's own reservation also claims every receipt and tree
+    /// node its carrier reaches that no earlier admission claimed, so a
+    /// wide candidate is refused for the whole footprint it would newly retain
     /// ([`reserve_retained_with_evidence`]). Its carrier and delivered
     /// allocations are held through the store's registry, so an allocation
     /// a sibling candidate already charges is shared, not charged again.
@@ -204,7 +204,7 @@ impl SemanticGraphStore {
 
     /// The charges of one candidate after its receipt is reserved. The
     /// shared allocations are held first, so a refused own reservation
-    /// leaves every page pinned exactly as it found it.
+    /// leaves every receipt and tree node pinned exactly as it found it.
     fn reserve_candidate_charges(
         &self,
         entry: &MemoEntry,
@@ -231,12 +231,28 @@ impl SemanticGraphStore {
         &self,
         parts: SharedParts<'_>,
     ) -> Result<SharedHolds, RetentionRefusal> {
-        use verter_session_query::retention::allocation::{arc_str_list_bytes, fact_slice_bytes};
+        use verter_session_query::retention::allocation::{
+            arc_str_list_bytes, fact_arc_slice_bytes,
+        };
         let account = self.retention_account();
+        // A slice set is held by its slice; a tree set by its header, its
+        // nodes charging themselves (claimed with the candidate's own
+        // reservation).
+        let facts_hold = match parts.facts.flat_arc() {
+            Some(flat) => self
+                .alias_charges
+                .hold(account, flat, |aliases| fact_arc_slice_bytes(flat, aliases))?,
+            None => self.alias_charges.hold(
+                account,
+                parts
+                    .facts
+                    .tree_storage()
+                    .expect("a set held by no slice is a tree"),
+                |_| verter_session_query::facts::fact_set::FactSet::header_bytes(),
+            )?,
+        };
         let mut carrier = vec![
-            self.alias_charges.hold(account, parts.facts, |aliases| {
-                fact_slice_bytes(parts.facts, aliases)
-            })?,
+            facts_hold,
             self.alias_charges
                 .hold(account, parts.self_roots, |aliases| {
                     arc_str_list_bytes(parts.self_roots, aliases)
@@ -475,7 +491,7 @@ impl SemanticGraphStore {
 /// value its reads deliver.
 pub(super) struct SharedParts<'a> {
     pub(super) lease: &'a super::delivery_lease::SemanticDeliveryLease,
-    pub(super) facts: &'a Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+    pub(super) facts: &'a verter_session_query::facts::fact_set::FactSet,
     pub(super) self_roots: &'a Arc<[Arc<str>]>,
     pub(super) diagnostics: &'a crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     pub(super) dep_signature: &'a crate::semantic_query::DepSignature,

@@ -165,7 +165,7 @@ impl MemoEntry {
     ///
     /// Returns `true` only when the path-precise fact rail validates
     /// (self-roots strict, cross-file dependency facts lazy), every
-    /// evidence page of a wide carrier included. An empty carrier with no self-roots validates vacuously.
+    /// fact of a wide carrier included. An empty carrier with no self-roots validates vacuously.
     ///
     /// This is the strict warm-read validation entry point: a
     /// same-canonical content edit on any self-root canonical, or a
@@ -2678,11 +2678,11 @@ pub fn requested_point_for_key(key: &SemanticQueryKey) -> MaterializedPoint {
 /// fact signature references `canonical_id`. The reverse index
 /// registers under every canonical the fact rail names, so this
 /// predicate is the fact-rail membership check the drain falls back to.
-pub fn carrier_facts_reference_canonical(
-    facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+pub fn carrier_facts_reference_canonical<'s>(
+    facts: impl Into<verter_session_query::facts::fact_set::FactsRef<'s>>,
     canonical_id: &str,
 ) -> bool {
-    facts.iter().any(|fact| match fact {
+    facts.into().iter().any(|fact| match fact {
         verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: c,
             ..

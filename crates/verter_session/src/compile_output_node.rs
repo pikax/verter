@@ -482,7 +482,7 @@ impl ArtifactNode for CompileOutputNodePureContent {
 
 /// The charge a session slot keeping `value` under `signature` holds: its
 /// map slot and inline record, the diagnostics and override text it keeps,
-/// its fact slice and the evidence pages it reaches, on one refusable
+/// its fact slice and the receipts and tree nodes it reaches, on one refusable
 /// reservation that also holds the products' cell — which, once the slot
 /// goes, passes to the warm hits still sharing it.
 ///
@@ -542,7 +542,7 @@ pub(crate) fn compile_slot_retention(
 /// cheaper own-content / override-hash predicates.
 pub(crate) struct CompileOutputNodeFactValidatedSession {
     inflight: InflightTable<QueryFlightKey<CompileOutputSessionKey>>,
-    /// The account a published slot's evidence pages are claimed into.
+    /// The account a published slot's shared storage is claimed into.
     retention_account: verter_session_query::retention::StoreAccount,
 }
 
@@ -558,7 +558,7 @@ impl CompileOutputNodeFactValidatedSession {
         }
     }
 
-    /// A node whose published slots claim their evidence pages into
+    /// A node whose published slots claim their shared storage into
     /// `account`.
     pub(crate) fn with_retention_account(
         account: verter_session_query::retention::StoreAccount,
@@ -650,10 +650,11 @@ impl CompileOutputNodeFactValidatedSession {
     /// in compile_slots ⇒ admitted cacheable entry` holds across
     /// re-computes.
     ///
-    /// A slot retains its signature's evidence pages, so a `Cacheable`
-    /// publish first claims them into a refusable reservation; a refused
-    /// claim publishes nothing, removes the prior slot like any other
-    /// refusal, and leaves the compiled value with its caller.
+    /// A slot retains its signature's shared storage (receipts and tree
+    /// nodes), so a `Cacheable` publish first claims it into a refusable
+    /// reservation; a refused claim publishes nothing, removes the prior
+    /// slot like any other refusal, and leaves the compiled value with its
+    /// caller.
     ///
     /// Returns `SessionPublishOutcome::Admitted` when the slot was
     /// published, or `SessionPublishOutcome::Refused(reason)` when

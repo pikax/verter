@@ -2416,7 +2416,7 @@ fn chain_evidence(
 fn replayed_receipt(
     reads: &verter_type_engine::resolver_core::resolver_context::RecordedFactReads,
 ) -> verter_session_query::facts::fact_cache::ResultReceipt {
-    match reads.facts.as_ref() {
+    match reads.facts.to_vec().as_slice() {
         [verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt)] => {
             receipt.clone()
         }

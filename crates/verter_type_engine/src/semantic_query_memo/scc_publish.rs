@@ -670,11 +670,11 @@ impl SemanticGraphStore {
                 super::retention::own_reservation(entry, family, 1, direct_edges)
             })
             .collect();
-        // A shared carrier's evidence pages were claimed with the root; a
-        // page only a member's carrier holds is claimed here.
-        let carriers: Vec<&[verter_session_query::facts::fact_cache::FactVersionRef]> = members
+        // A shared carrier's receipts and tree nodes were claimed with the
+        // root; storage only a member's carrier reaches is claimed here.
+        let carriers: Vec<&verter_session_query::facts::fact_set::FactSet> = members
             .iter()
-            .map(|(_, entry)| &*entry.read_set_signature.facts)
+            .map(|(_, entry)| &entry.read_set_signature.facts)
             .collect();
         let mut batch = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             account,

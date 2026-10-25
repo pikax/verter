@@ -6,6 +6,7 @@ use crate::semantic_query::{LiteralValue, SemanticNodeData};
 use verter_audit::observe::Uncaptured;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+use verter_session_query::facts::fact_set::FactSet;
 use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount, StoreAccount};
 
 #[test]
@@ -38,7 +39,7 @@ fn a_deferred_memo_serve_roots_its_result_in_the_consuming_scope() {
                 Vec::new(),
             ),
             (
-                Arc::from([dependency.clone()]),
+                FactSet::from([dependency.clone()]),
                 Arc::from([Arc::from("/dependency.ts")]),
             ),
         );
@@ -60,8 +61,8 @@ fn a_deferred_memo_serve_roots_its_result_in_the_consuming_scope() {
             panic!("a validated memo proof stays complete");
         };
         assert_eq!(
-            facts.as_ref(),
-            &[dependency],
+            facts,
+            FactSet::from([dependency]),
             "a consumed memo must deliver its dependency proof"
         );
         assert_eq!(read.value, result);
@@ -117,7 +118,7 @@ fn deferred_publication_reuses_the_receipts_operand_owner() {
             demand,
             result,
             receipt,
-            (Arc::from([]), Arc::from([])),
+            (FactSet::empty(), Arc::from([])),
         );
         assert_eq!(
             graph.peek_evaluate_deferred_memo_for_tests(input, context),
@@ -162,7 +163,7 @@ fn a_held_evaluation_receipt_does_not_keep_a_distinct_result_after_eviction() {
             demand,
             result,
             Arc::clone(&receipt),
-            (Arc::from([]), Arc::from([])),
+            (FactSet::empty(), Arc::from([])),
         );
         (input, result, receipt)
     };
@@ -264,7 +265,7 @@ fn retained_topology_includes_an_unrelated_prerequisite_operand() {
                         demand,
                         nodes[1],
                         receipt,
-                        (Arc::from([]), Arc::from([])),
+                        (FactSet::empty(), Arc::from([])),
                     );
                 }
                 (nodes[0], nodes[1], nodes[2])

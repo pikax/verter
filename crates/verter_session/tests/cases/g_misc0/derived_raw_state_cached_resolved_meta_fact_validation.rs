@@ -93,7 +93,7 @@ fn cached_resolved_meta_substrate_and_consumer_wired() {
     );
     let cwindow = &consumer_src[cidx..cidx + cend];
     assert!(
-        cwindow.contains("view.validates_fact_signature(&cached.fact_versions)"),
+        cwindow.contains("view.validates_fact_signature((&cached.fact_versions).into())"),
         "try_get_cached_resolved_meta_for_view_fingerprint_with_store_view_and_admission \
          must gate the warm-hit return on `view.validates_fact_signature(...)`. \
          Window:\n{cwindow}"

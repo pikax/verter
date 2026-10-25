@@ -24,10 +24,13 @@
 
 use std::sync::Arc;
 
+use crate::facts::fact_set::FactSet;
+
 use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId, ScriptSourceType};
 
 use super::{
-    compare_fact_refs, FactReadSet, FactReadSetFinalise, FACT_DOMAIN_PRECISE_MAX, FACT_PAGE_WIDTH,
+    compare_fact_refs, FactReadSet, FactReadSetFinalise, FACT_DOMAIN_PRECISE_MAX,
+    WIDE_SIGNATURE_WIDTH,
 };
 use crate::facts::fact_cache::{
     AggregateGenerations, AggregatePopulation, AggregateStamp, CompactionDomain, DerivedFactKind,
@@ -323,7 +326,7 @@ fn permute(facts: &[FactVersionRef], seed: u64) -> Vec<FactVersionRef> {
     out
 }
 
-fn finalise_all(facts: &[FactVersionRef]) -> Arc<[FactVersionRef]> {
+fn finalise_all(facts: &[FactVersionRef]) -> FactSet {
     let mut read_set = FactReadSet::new();
     for fact in facts {
         read_set.observe(fact.clone());
@@ -352,8 +355,8 @@ fn identical_observation_sets_finalise_identically_under_every_permutation() {
         let permuted = permute(&corpus, seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let signature = finalise_all(&permuted);
         assert_eq!(
-            signature.as_ref(),
-            baseline.as_ref(),
+            signature.to_vec(),
+            baseline.to_vec(),
             "permutation {seed} produced a different signature: the fact ordering is not a total \
              order, so at least one pair of DISTINCT facts compares Equal and the sort's output \
              depends on input order"
@@ -394,7 +397,7 @@ fn every_distinct_pair_in_the_corpus_orders_strictly() {
     // non-transitive comparator is not reliably increasing.
     let mut sorted = corpus.clone();
     sorted.sort_unstable_by(compare_fact_refs);
-    for pair in sorted.windows(2) {
+    for pair in sorted.to_vec().windows(2) {
         assert!(
             compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less,
             "sorted corpus is not strictly increasing:\n  {:?}\n  {:?}",
@@ -527,7 +530,7 @@ fn signature_order_is_independent_of_string_allocation_identity() {
     // hash would diverge here.
     let first = finalise_all(&diverse_corpus());
     let second = finalise_all(&permute(&diverse_corpus(), 0xDEAD_BEEF));
-    assert_eq!(first.as_ref(), second.as_ref());
+    assert_eq!(first.to_vec(), second.to_vec());
 
     // And the whole signature is reproducible from its own Debug form,
     // which is what a golden/on-wire consumer would compare.
@@ -564,6 +567,7 @@ fn canonical_ordering_is_free_of_transient_allocation() {
         other => panic!("finalised as {other:?}"),
     };
     assert!(signature
+        .to_vec()
         .windows(2)
         .all(|pair| compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less));
 }
@@ -602,7 +606,7 @@ fn absorbing_a_canonical_witness_yields_the_exact_union() {
         "the witness must contain facts the attempt-local set does not"
     );
 
-    let run: Arc<[FactVersionRef]> = Arc::from(canonical.clone());
+    let run: FactSet = FactSet::from(canonical.clone());
     let mut merged = FactReadSet::new();
     for fact in &local {
         merged.observe(fact.clone());
@@ -619,7 +623,7 @@ fn absorbing_a_canonical_witness_yields_the_exact_union() {
     union.dedup();
 
     assert_eq!(
-        merged.as_ref(),
+        merged.to_vec(),
         union.as_slice(),
         "the merged witness must be exactly the union of the absorbed run and the attempt-local \
          observations"
@@ -642,9 +646,9 @@ fn absorbing_a_canonical_witness_yields_the_exact_union() {
 #[test]
 fn absorbed_witness_merge_is_order_independent_and_dedups_across_the_seam() {
     let (canonical, local) = split_corpus();
-    let run: Arc<[FactVersionRef]> = Arc::from(canonical.clone());
+    let run: FactSet = FactSet::from(canonical.clone());
 
-    let mut baseline: Option<Arc<[FactVersionRef]>> = None;
+    let mut baseline: Option<FactSet> = None;
     for seed in 1u64..=64 {
         let permuted = permute(&local, seed.wrapping_mul(0x2545_F491_4F6C_DD1D));
         let mut read_set = FactReadSet::new();
@@ -665,6 +669,7 @@ fn absorbed_witness_merge_is_order_independent_and_dedups_across_the_seam() {
         };
         assert!(
             signature
+                .to_vec()
                 .windows(2)
                 .all(|pair| compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less),
             "merged witness is not strictly increasing — a duplicate survived the seam or the \
@@ -672,7 +677,7 @@ fn absorbed_witness_merge_is_order_independent_and_dedups_across_the_seam() {
         );
         match &baseline {
             None => baseline = Some(signature),
-            Some(expected) => assert_eq!(signature.as_ref(), expected.as_ref()),
+            Some(expected) => assert_eq!(signature.to_vec(), expected.to_vec()),
         }
     }
 }
@@ -686,7 +691,7 @@ fn absorbing_a_non_canonical_arc_still_produces_the_canonical_union() {
     let (canonical, local) = split_corpus();
     let mut scrambled = permute(&canonical, 0x1234_5678);
     scrambled.push(canonical[0].clone());
-    let scrambled: Arc<[FactVersionRef]> = Arc::from(scrambled);
+    let scrambled: FactSet = FactSet::from(scrambled);
 
     let mut read_set = FactReadSet::new();
     for fact in &local {
@@ -701,27 +706,27 @@ fn absorbing_a_non_canonical_arc_still_produces_the_canonical_union() {
     let mut union: Vec<FactVersionRef> = canonical.iter().chain(local.iter()).cloned().collect();
     union.sort_unstable_by(compare_fact_refs);
     union.dedup();
-    assert_eq!(merged.as_ref(), union.as_slice());
+    assert_eq!(merged.to_vec(), union.as_slice());
 }
 
 #[test]
 fn absorbed_runs_count_towards_the_signature_width() {
     // Width is a property of the FINALISED set, not of the locally
-    // observed facts: an absorbed wide run pages, it is never truncated.
-    let wide: Vec<FactVersionRef> = (0..=FACT_PAGE_WIDTH)
+    // observed facts: an absorbed wide run is sealed whole, never truncated.
+    let wide: Vec<FactVersionRef> = (0..=WIDE_SIGNATURE_WIDTH)
         .map(|index| FactVersionRef::FileWholeHash {
             canonical_id: format!("/p/f-{index:05}.ts").into(),
             hash: hash16(0),
         })
         .collect();
-    let run: Arc<[FactVersionRef]> = Arc::from(wide.clone());
+    let run: FactSet = FactSet::from(wide.clone());
 
     let mut read_set = FactReadSet::new();
     read_set.absorb_canonical_signature(&run);
-    assert_eq!(read_set.len(), FACT_PAGE_WIDTH + 1);
+    assert_eq!(read_set.len(), WIDE_SIGNATURE_WIDTH + 1);
     assert!(!read_set.is_empty());
     let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
-        panic!("a wide absorbed run seals into pages, never a refusal");
+        panic!("a wide absorbed run seals whole, never a refusal");
     };
     let signature = crate::facts::fact_cache::ReadSetSignature::new(signature);
     assert_eq!(
@@ -733,7 +738,7 @@ fn absorbed_runs_count_towards_the_signature_width() {
 
 #[test]
 fn absorbing_an_empty_signature_is_a_no_op() {
-    let empty: Arc<[FactVersionRef]> = Arc::from(Vec::new());
+    let empty: FactSet = FactSet::from(Vec::new());
     let mut read_set = FactReadSet::new();
     read_set.absorb_canonical_signature(&empty);
     assert!(read_set.is_empty());
@@ -824,8 +829,11 @@ fn finalise_with_basis(
     read_set.finalise()
 }
 
-fn aggregates_of(signature: &[FactVersionRef]) -> Vec<DomainGenerationFact> {
+fn aggregates_of<'s>(
+    signature: impl Into<crate::facts::fact_set::FactsRef<'s>>,
+) -> Vec<DomainGenerationFact> {
     signature
+        .into()
         .iter()
         .filter_map(|fact| match fact {
             FactVersionRef::DomainGeneration(aggregate) => Some(*aggregate),
@@ -1002,7 +1010,7 @@ fn a_view_derived_domain_stays_precise_without_a_view_population() {
     let facts = distinct_content_facts(FACT_DOMAIN_PRECISE_MAX + 1);
 
     let FactReadSetFinalise::Ok(signature) = finalise_with_basis(&facts, basis) else {
-        panic!("an uncompacted wide set seals into pages, never a refusal");
+        panic!("an uncompacted wide set seals whole, never a refusal");
     };
     assert_eq!(
         sorted_entries(&signature),
@@ -1279,12 +1287,12 @@ fn lifting_one_domain_leaves_every_other_domain_precise() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Paged evidence
+// Wide signatures and retained evidence
 // ────────────────────────────────────────────────────────────────────
 
 /// A validator over a live `canonical → whole hash` table: a whole-hash
-/// fact holds when the table still records its hash, and a page or a
-/// receipt holds when every fact it reaches does.
+/// fact holds when the table still records its hash, and a receipt holds
+/// when every fact it reaches does.
 struct LiveWholeHashes(rustc_hash::FxHashMap<String, [u8; 16]>);
 
 impl crate::facts::fact_cache::FactVersionValidator for LiveWholeHashes {
@@ -1301,12 +1309,11 @@ impl crate::facts::fact_cache::FactVersionValidator for LiveWholeHashes {
     }
 }
 
-/// A signature's entries with its pages read through, in canonical order
-/// (a level of pages is ordered by page digest, not by what each holds).
-fn sorted_entries(signature: &[FactVersionRef]) -> Vec<FactVersionRef> {
-    let mut entries: Vec<FactVersionRef> = crate::facts::fact_cache::signature_entries(signature)
-        .cloned()
-        .collect();
+/// A signature's entries, in canonical order.
+fn sorted_entries<'s>(
+    signature: impl Into<crate::facts::fact_set::FactsRef<'s>>,
+) -> Vec<FactVersionRef> {
+    let mut entries: Vec<FactVersionRef> = signature.into().iter().cloned().collect();
     entries.sort_unstable_by(compare_fact_refs);
     entries
 }
@@ -1347,35 +1354,33 @@ fn seal(facts: &[FactVersionRef]) -> crate::facts::fact_cache::ReadSetSignature 
     }
 }
 
-/// Width is never a refusal: at, around and well beyond one page, every
-/// observed fact survives into the signature, the top level fits one
-/// page, and the whole set validates against an unchanged world.
+/// Width is never a refusal: at, around and well beyond
+/// [`WIDE_SIGNATURE_WIDTH`], every observed fact survives into the
+/// signature as one canonical set, and the whole set validates against an
+/// unchanged world.
 ///
-/// Mutation recipe: drop the last run in `page_canonical_at_width` (map
-/// `chunks` to `chunks_exact`) — the 1025 and 3077 rows lose their tail
+/// Mutation recipe: make finalisation keep only the first
+/// [`WIDE_SIGNATURE_WIDTH`] facts — the 1025 and 3077 rows lose their tail
 /// and the entry comparison fails.
 #[test]
-fn signatures_around_and_beyond_the_page_width_keep_and_validate_every_fact() {
+fn signatures_around_and_beyond_the_wide_width_keep_and_validate_every_fact() {
     for width in [
-        FACT_PAGE_WIDTH - 1,
-        FACT_PAGE_WIDTH,
-        FACT_PAGE_WIDTH + 1,
-        3 * FACT_PAGE_WIDTH + 5,
+        WIDE_SIGNATURE_WIDTH - 1,
+        WIDE_SIGNATURE_WIDTH,
+        WIDE_SIGNATURE_WIDTH + 1,
+        3 * WIDE_SIGNATURE_WIDTH + 5,
     ] {
         let facts = wide_whole_hashes(width);
         let signature = seal(&facts);
+        // One flat canonical set at every width: every fact itself, no
+        // evidence entry standing for a run of them.
+        assert_eq!(signature.facts.len(), width);
         assert!(
-            signature.facts.len() <= FACT_PAGE_WIDTH,
-            "{width}: the top level fits one page, got {}",
-            signature.facts.len()
-        );
-        assert_eq!(
-            signature.facts.iter().any(|entry| matches!(
-                entry,
-                FactVersionRef::Receipt(page) if page.is_page()
-            )),
-            width > FACT_PAGE_WIDTH,
-            "{width}: only a set wider than one page is paged"
+            !signature
+                .facts
+                .iter()
+                .any(|entry| matches!(entry, FactVersionRef::Receipt(_))),
+            "{width}: a sealed set holds its facts themselves"
         );
         assert_eq!(
             sorted_entries(&signature.facts),
@@ -1390,21 +1395,21 @@ fn signatures_around_and_beyond_the_page_width_keep_and_validate_every_fact() {
     }
 }
 
-/// An edit to ANY page's fact invalidates the signature — the first and
-/// the last fact of every page, and above all the very last fact of the
-/// set, which sits alone at the end of a short final page.
+/// An edit to ANY fact invalidates the signature — the first fact, the
+/// facts either side of every multiple of [`WIDE_SIGNATURE_WIDTH`] in
+/// canonical order, and above all the last fact in canonical order.
 ///
 /// Mutation recipe: make the validator-facing default
 /// `validates_fact_signature` stop after the first entry — every edit
-/// past page one validates and the loop fails on page two.
+/// past the first fact validates and the loop fails on the second probe.
 #[test]
-fn an_edit_on_every_page_including_the_last_invalidates() {
-    let width = 3 * FACT_PAGE_WIDTH + 5;
+fn an_edit_to_any_fact_including_the_last_invalidates() {
+    let width = 3 * WIDE_SIGNATURE_WIDTH + 5;
     let facts = wide_whole_hashes(width);
     let signature = seal(&facts);
     let mut probes: Vec<usize> = (0..width)
-        .step_by(FACT_PAGE_WIDTH)
-        .flat_map(|start| [start, (start + FACT_PAGE_WIDTH - 1).min(width - 1)])
+        .step_by(WIDE_SIGNATURE_WIDTH)
+        .flat_map(|start| [start, (start + WIDE_SIGNATURE_WIDTH - 1).min(width - 1)])
         .collect();
     probes.push(width - 1);
     for index in probes {
@@ -1415,18 +1420,19 @@ fn an_edit_on_every_page_including_the_last_invalidates() {
         live.0.insert(canonical_id.to_string(), hash16(2));
         assert!(
             !signature.validates(&live),
-            "an edit to fact {index} (page {}) must invalidate the signature",
-            index / FACT_PAGE_WIDTH
+            "an edit to fact {index} (run {} of the wide width) must invalidate the signature",
+            index / WIDE_SIGNATURE_WIDTH
         );
     }
 }
 
-/// The same observed set always seals to the same pages, whatever order
-/// it was observed in, and a sealed wide signature absorbed into an
-/// enclosing tracer keeps its pages shared rather than copied.
+/// The same observed set always seals to the same set, whatever order it
+/// was observed in, and a sealed wide signature absorbed into an enclosing
+/// tracer is shared rather than copied: the enclosing set is built on its
+/// tree and holds its storage charge.
 #[test]
-fn paging_is_deterministic_and_absorbed_pages_are_shared() {
-    let facts = wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3);
+fn sealing_is_deterministic_and_absorbed_sets_are_shared() {
+    let facts = wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3);
     let forward = {
         let mut read_set = FactReadSet::new();
         for fact in &facts {
@@ -1438,7 +1444,11 @@ fn paging_is_deterministic_and_absorbed_pages_are_shared() {
         signature
     };
     let reverse = seal(&facts).facts;
-    assert_eq!(forward, reverse, "paging is a function of the observed set");
+    assert_eq!(
+        forward, reverse,
+        "the seal is a function of the observed set"
+    );
+    assert_eq!(forward.digest(), reverse.digest());
 
     let mut outer = FactReadSet::new();
     outer.absorb_canonical_signature(&forward);
@@ -1446,48 +1456,32 @@ fn paging_is_deterministic_and_absorbed_pages_are_shared() {
     let FactReadSetFinalise::Ok(enclosing) = outer.finalise() else {
         panic!("seals");
     };
-    let shared = enclosing
-        .iter()
-        .filter_map(|entry| match entry {
-            FactVersionRef::Receipt(page) if page.is_page() => Some(page),
-            _ => None,
-        })
-        .filter(|page| {
-            forward.iter().any(
-                |inner| matches!(inner, FactVersionRef::Receipt(original) if original.ptr_eq(page)),
-            )
-        })
-        .count();
-    assert_eq!(
-        shared,
-        forward.len(),
-        "the enclosing signature holds the absorbed pages themselves, never a copy"
-    );
-}
-
-/// A level of pages wider than one page is paged again: the index keeps
-/// every entry reachable, in order, under a top level that fits.
-#[test]
-fn a_level_of_pages_wider_than_one_page_is_indexed_again() {
-    let facts = wide_whole_hashes(21);
-    let sealed = super::page_canonical_at_width(facts.clone(), 4);
+    assert_eq!(enclosing.len(), forward.len() + 1);
+    assert!(enclosing.is_superset(&forward));
+    // A fresh seal is one slice; the first set built from it is a tree, and
+    // every set built from that tree shares it.
     assert!(
-        sealed.len() <= 4,
-        "the index's top level fits: {}",
-        sealed.len()
+        forward.tree_storage().is_none(),
+        "a fresh seal is one slice"
     );
-    let depth_two = sealed.iter().any(|entry| match entry {
-        FactVersionRef::Receipt(page) => page
-            .facts()
-            .iter()
-            .any(|inner| matches!(inner, FactVersionRef::Receipt(child) if child.is_page())),
-        _ => false,
-    });
-    assert!(depth_two, "21 entries at width 4 need an index level");
-    assert_eq!(sorted_entries(&sealed), facts);
     assert!(
-        crate::facts::fact_cache::ReadSetSignature::new(Arc::from(sealed))
-            .validates(&live_table(&facts))
+        enclosing.tree_storage().is_some(),
+        "an extended wide set is a tree"
+    );
+    let mut next = FactReadSet::new();
+    next.absorb_canonical_signature(&enclosing);
+    next.observe(FactVersionRef::ProjectGeneration { generation: 8 });
+    let FactReadSetFinalise::Ok(enclosing_twice) = next.finalise() else {
+        panic!("seals");
+    };
+    let (own, shared) = enclosing_twice.tree_nodes_against(&enclosing);
+    assert!(
+        shared > own * 4,
+        "the next set shares the absorbed set's nodes, never a copy: {own} own, {shared} shared"
+    );
+    assert!(
+        enclosing_twice.tree_charge_beyond(&enclosing) * 8 < enclosing.tree_node_charges(),
+        "the next set is charged for its own path only"
     );
 }
 
@@ -1508,53 +1502,53 @@ fn long_named_whole_hashes(count: usize, name_len: usize) -> Vec<FactVersionRef>
         .collect()
 }
 
-/// A page's charge covers what it stores — its entry array, the strings
+/// A receipt's charge covers what it stores — its entry array, the strings
 /// its facts own and the canonical summary it builds from them — so a
-/// page of long canonicals is charged for every byte of them; the charge
+/// receipt of long canonicals is charged for every byte of them; the charge
 /// is shared by every holder and released exactly when the last one drops.
 #[test]
-fn every_page_is_charged_for_what_it_stores() {
+fn every_receipt_is_charged_for_what_it_stores() {
     let account = isolated_account();
-    let facts = long_named_whole_hashes(FACT_PAGE_WIDTH, 1_000);
+    let facts = long_named_whole_hashes(WIDE_SIGNATURE_WIDTH, 1_000);
     let strings: usize = facts
         .iter()
         .filter_map(FactVersionRef::canonical_id)
         .map(str::len)
         .sum();
-    let page = crate::facts::fact_cache::ResultReceipt::page_on(facts.clone(), &account);
-    let charged = page.retained_charge_bytes();
+    let receipt = crate::facts::fact_cache::ResultReceipt::new_on(facts.clone(), &account);
+    let charged = receipt.retained_charge_bytes();
     let stored_at_least = std::mem::size_of_val(facts.as_slice()) + 2 * strings;
     assert!(
         charged >= stored_at_least,
-        "a page is charged at least its entries, their strings and its canonical summary: \
+        "a receipt is charged at least its entries, their strings and its canonical summary: \
          charged {charged}, stores at least {stored_at_least}"
     );
     assert_eq!(account.snapshot().pinned_bytes, charged);
 
-    let one = crate::facts::fact_cache::ResultReceipt::page_on(facts[..1].to_vec(), &account);
+    let one = crate::facts::fact_cache::ResultReceipt::new_on(facts[..1].to_vec(), &account);
     assert!(
         one.retained_charge_bytes() > 0 && one.retained_charge_bytes() < charged,
-        "a one-fact page is charged, and less than a full one"
+        "a one-fact receipt is charged, and less than a wide one"
     );
     drop(one);
     assert_eq!(account.snapshot().pinned_bytes, charged);
 
-    let second_holder = page.clone();
-    drop(page);
+    let second_holder = receipt.clone();
+    drop(receipt);
     assert_eq!(
         account.snapshot().pinned_bytes,
         charged,
-        "a page another holder keeps stays charged"
+        "a receipt another holder keeps stays charged"
     );
     drop(second_holder);
     assert_eq!(
         account.snapshot().pinned_bytes,
         0,
-        "the last holder's drop releases the page's charge"
+        "the last holder's drop releases the receipt's charge"
     );
 }
 
-/// A completed result's receipt is charged like a page: for every byte its
+/// A completed result's receipt is charged for every byte its
 /// own facts keep alive — an oversized canonical in full — once, however
 /// many candidates retain it, from its birth until its last holder drops.
 #[test]
@@ -1602,15 +1596,16 @@ fn a_result_receipt_is_charged_once_for_its_variable_text_until_its_last_holder_
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
-/// A signature's pages, sealed against `account`, in their top-level order.
-fn pages_on(
+/// A signature of result receipts sealed against `account`, each holding
+/// one contiguous run of [`WIDE_SIGNATURE_WIDTH`] of `facts`, in order.
+fn receipts_on(
     facts: Vec<FactVersionRef>,
     account: &Arc<crate::retention::SemanticRetentionAccount>,
 ) -> Vec<FactVersionRef> {
     facts
-        .chunks(FACT_PAGE_WIDTH)
+        .chunks(WIDE_SIGNATURE_WIDTH)
         .map(|run| {
-            FactVersionRef::Receipt(crate::facts::fact_cache::ResultReceipt::page_on(
+            FactVersionRef::Receipt(crate::facts::fact_cache::ResultReceipt::new_on(
                 run.to_vec(),
                 account,
             ))
@@ -1618,26 +1613,26 @@ fn pages_on(
         .collect()
 }
 
-fn page_classes(signature: &[FactVersionRef]) -> Vec<Option<crate::retention::ChargeClass>> {
+fn receipt_classes(signature: &[FactVersionRef]) -> Vec<Option<crate::retention::ChargeClass>> {
     signature
         .iter()
         .map(|entry| match entry {
-            FactVersionRef::Receipt(page) => page.retained_charge_class(),
+            FactVersionRef::Receipt(receipt) => receipt.retained_charge_class(),
             _ => None,
         })
         .collect()
 }
 
-/// A cache admission retaining a wide signature claims its pages into its
-/// own refusable reservation: the pages' pins become retained bytes, a
+/// A cache admission retaining a signature claims its receipts into its
+/// own refusable reservation: the receipts' pins become retained bytes, a
 /// second candidate sharing them is not charged for them again, and the
-/// pages stay charged after the candidates that claimed them are gone, until
-/// the last holder drops.
+/// receipts stay charged after the candidates that claimed them are gone,
+/// until the last holder drops.
 #[test]
-fn a_retained_candidate_claims_its_pages_once_into_its_refusable_reservation() {
+fn a_retained_candidate_claims_its_receipts_once_into_its_refusable_reservation() {
     use crate::retention::{ChargeClass, RetentionAdmission};
     let account = isolated_account();
-    let signature = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &account);
+    let signature = receipts_on(wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3), &account);
     let page_bytes = account.snapshot().pinned_bytes;
     assert!(page_bytes > 0);
 
@@ -1654,10 +1649,10 @@ fn a_retained_candidate_claims_its_pages_once_into_its_refusable_reservation() {
     let after_claim = account.snapshot();
     assert_eq!(
         after_claim.pinned_bytes, 0,
-        "every page's pin was exchanged"
+        "every receipt's pin was exchanged"
     );
     assert_eq!(after_claim.retained_bytes, 100 + page_bytes);
-    assert!(page_classes(&signature)
+    assert!(receipt_classes(&signature)
         .iter()
         .all(|class| *class == Some(ChargeClass::Retained)));
 
@@ -1667,7 +1662,7 @@ fn a_retained_candidate_claims_its_pages_once_into_its_refusable_reservation() {
     assert_eq!(
         account.snapshot().retained_bytes,
         140 + page_bytes,
-        "a page is charged once however many candidates retain it"
+        "a receipt is charged once however many candidates retain it"
     );
 
     drop(first);
@@ -1675,25 +1670,25 @@ fn a_retained_candidate_claims_its_pages_once_into_its_refusable_reservation() {
     assert_eq!(
         account.snapshot().retained_bytes,
         page_bytes,
-        "a live signature keeps its claimed pages charged"
+        "a live signature keeps its claimed receipts charged"
     );
     drop(signature);
     let drained = account.snapshot();
     assert_eq!(
         (drained.retained_bytes, drained.pinned_bytes),
         (0, 0),
-        "the last holder's drop drains every page charge"
+        "the last holder's drop drains every receipt charge"
     );
 }
 
-/// A wide candidate is refused for the whole footprint it would retain —
-/// its pages included — and a refusal leaves every page pinned by the live
-/// signature, nothing retained.
+/// A candidate is refused for the whole footprint it would retain — its
+/// receipts included — and a refusal leaves every receipt pinned by the
+/// live signature, nothing retained.
 #[test]
-fn a_wide_candidate_is_refused_for_its_pages_and_the_refusal_changes_nothing() {
+fn a_wide_candidate_is_refused_for_its_receipts_and_the_refusal_changes_nothing() {
     use crate::retention::{ChargeClass, RetentionAdmission, RetentionLimits, RetentionRefusal};
     let probe = isolated_account();
-    let probe_pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &probe);
+    let probe_pages = receipts_on(wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3), &probe);
     let page_bytes = probe.snapshot().pinned_bytes;
     drop(probe_pages);
 
@@ -1701,40 +1696,40 @@ fn a_wide_candidate_is_refused_for_its_pages_and_the_refusal_changes_nothing() {
         max_entry_bytes: page_bytes,
         ..RetentionLimits::defaults()
     });
-    let signature = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &account);
+    let signature = receipts_on(wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3), &account);
     match crate::facts::receipt::reserve_retained_with_evidence(&account, 1, &[&signature]) {
         RetentionAdmission::Refused(RetentionRefusal::Oversized { requested, .. }) => {
             assert_eq!(requested, 1 + page_bytes);
         }
         other => {
-            panic!("a candidate over the entry limit only with its pages is refused: {other:?}")
+            panic!("a candidate over the entry limit only with its receipts is refused: {other:?}")
         }
     }
     let after = account.snapshot();
     assert_eq!(after.retained_bytes, 0);
     assert_eq!(after.pinned_bytes, page_bytes);
-    assert!(page_classes(&signature)
+    assert!(receipt_classes(&signature)
         .iter()
         .all(|class| *class == Some(ChargeClass::Pinned)));
 }
 
-/// Pages a consumed result's receipt holds are retained by the candidate
+/// Receipts a consumed result's receipt holds are retained by the candidate
 /// holding that receipt, so the admission claims them like its own: an
 /// over-limit footprint is refused whatever receipt wraps it, and an
-/// admitted one leaves every reachable page retained, charged once, until
-/// the last holder drops.
+/// admitted one leaves every reachable receipt retained, charged once,
+/// until the last holder drops.
 #[test]
-fn pages_behind_a_result_receipt_join_the_retaining_reservation() {
+fn receipts_behind_a_result_receipt_join_the_retaining_reservation() {
     use crate::retention::{ChargeClass, RetentionAdmission, RetentionLimits, RetentionRefusal};
     let probe = isolated_account();
-    let probe_pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &probe);
+    let probe_pages = receipts_on(wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3), &probe);
     let page_bytes = probe.snapshot().pinned_bytes;
     drop(probe_pages);
-    // The two result receipts wrapping the pages are charged too: the
-    // admission claims them with the pages.
-    let wrapped = |pages: &[FactVersionRef],
+    // The two result receipts wrapping the inner receipts are charged too:
+    // the admission claims them with the inner receipts.
+    let wrapped = |receipts: &[FactVersionRef],
                    account: &Arc<crate::retention::SemanticRetentionAccount>| {
-        let inner = crate::facts::fact_cache::ResultReceipt::new_on(pages.to_vec(), account);
+        let inner = crate::facts::fact_cache::ResultReceipt::new_on(receipts.to_vec(), account);
         let inner_bytes = inner.retained_charge_bytes();
         let outer = crate::facts::fact_cache::ResultReceipt::new_on(
             vec![FactVersionRef::Receipt(inner)],
@@ -1748,21 +1743,21 @@ fn pages_behind_a_result_receipt_join_the_retaining_reservation() {
         max_entry_bytes: page_bytes,
         ..RetentionLimits::defaults()
     });
-    let pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &tight);
-    let (signature, wrapper_bytes) = wrapped(&pages, &tight);
+    let receipts = receipts_on(wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3), &tight);
+    let (signature, wrapper_bytes) = wrapped(&receipts, &tight);
     match crate::facts::receipt::reserve_retained_with_evidence(&tight, 1, &[&signature]) {
         RetentionAdmission::Refused(RetentionRefusal::Oversized { requested, .. }) => {
             assert_eq!(requested, 1 + page_bytes + wrapper_bytes);
         }
         other => panic!("a result-wrapped over-limit footprint is refused: {other:?}"),
     }
-    assert!(page_classes(&pages)
+    assert!(receipt_classes(&receipts)
         .iter()
         .all(|class| *class == Some(ChargeClass::Pinned)));
 
     let account = isolated_account();
-    let pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &account);
-    let (signature, wrapper_bytes) = wrapped(&pages, &account);
+    let receipts = receipts_on(wide_whole_hashes(2 * WIDE_SIGNATURE_WIDTH + 3), &account);
+    let (signature, wrapper_bytes) = wrapped(&receipts, &account);
     let charge =
         crate::facts::receipt::reserve_retained_with_evidence(&account, 100, &[&signature])
             .admitted()
@@ -1771,14 +1766,14 @@ fn pages_behind_a_result_receipt_join_the_retaining_reservation() {
     assert_eq!(
         (claimed.retained_bytes, claimed.pinned_bytes),
         (100 + page_bytes + wrapper_bytes, 0),
-        "every page and receipt behind the signature is claimed, once"
+        "every receipt behind the signature is claimed, once"
     );
-    assert!(page_classes(&pages)
+    assert!(receipt_classes(&receipts)
         .iter()
         .all(|class| *class == Some(ChargeClass::Retained)));
     drop(charge);
     drop(signature);
-    drop(pages);
+    drop(receipts);
     let drained = account.snapshot();
     assert_eq!((drained.retained_bytes, drained.pinned_bytes), (0, 0));
 }

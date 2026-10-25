@@ -10,8 +10,9 @@
 //! an explicit graph invalidation also clears both stores.
 //!
 //! First insertions enter a bounded FIFO. Replacing an evaluation candidate
-//! does not add another FIFO entry. Evaluation receipts, proof pages and
-//! entry storage reserve the shared retention account before publication.
+//! does not add another FIFO entry. Evaluation receipts, the shared storage
+//! a proof reaches and entry storage reserve the shared retention account
+//! before publication.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -59,7 +60,7 @@ pub(crate) struct CompletedDeferredEvaluation {
     demand: DeferredEvaluationDemand,
     result: SemanticNodeId,
     receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
-    evidence: crate::fact_signature_helpers::CompletedStructuralEvidence,
+    evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
 }
 
 impl CompletedDeferredEvaluation {
@@ -69,7 +70,7 @@ impl CompletedDeferredEvaluation {
         demand: DeferredEvaluationDemand,
         result: SemanticNodeId,
         receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
-        evidence: crate::fact_signature_helpers::CompletedStructuralEvidence,
+        evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
     ) -> Self {
         Self {
             node,
@@ -85,7 +86,7 @@ impl CompletedDeferredEvaluation {
 pub(crate) struct DeferredEvaluationMemoEntry {
     result: SemanticNodeId,
     receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
-    evidence: crate::fact_signature_helpers::CompletedStructuralEvidence,
+    evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
     roots: super::node_roots::NodeRootSet,
     _retention: verter_session_query::retention::RetentionCharge,
 }
@@ -287,9 +288,9 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
     ) -> Option<DeferredEvaluationRead> {
         self.read_deferred_evaluation::<M>(node, context, demand, |entry| {
-            verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
-                &entry.evidence.0,
-            ))
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                verter_session_query::facts::fact_set::FactSet::clone(&entry.evidence.0),
+            )
             .validate_with_self_roots(ctx, &entry.evidence.1)
         })
     }
@@ -318,7 +319,7 @@ impl SemanticGraphStore {
                 }
             })
             .map(|entry| {
-                crate::fact_tracing::tracing::observe_fan_out_sealed(&entry.evidence.0);
+                crate::fact_tracing::tracing::observe_fan_out_canonical(&entry.evidence.0);
                 // Capture both before releasing the entry. The memo owns the
                 // result, and its receipt independently owns the input.
                 entry.receipt.operand_roots().retain_for_delivery();
@@ -354,8 +355,6 @@ impl SemanticGraphStore {
         receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
     ) {
-        let evidence = crate::fact_signature_helpers::CompletedStructuralEvidence::verify(evidence)
-            .expect("the fixture supplies canonical evidence");
         self.evaluate_deferred_memo_publish_completed(CompletedDeferredEvaluation::new(
             node, context, demand, result, receipt, evidence,
         ));
@@ -383,9 +382,10 @@ impl SemanticGraphStore {
             return;
         };
         // The entry's block, slot and FIFO record and its proof (its
-        // root owner's own charge is held with the entry): the fact slice with every fact's owned text and the
-        // self-root list. A page of a wide proof is claimed into the same
-        // reservation and charged once wherever it is shared.
+        // root owner's own charge is held with the entry): the fact set with
+        // every fact's owned text and the self-root list. A receipt or tree
+        // node a wide proof reaches is claimed into the same reservation and
+        // charged once wherever it is shared.
         let (own_bytes, handles) = {
             use verter_session_query::retention::allocation::{
                 arc_block_bytes, arc_str_list_bytes, fact_slice_bytes, AliasSet,

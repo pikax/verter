@@ -65,9 +65,8 @@ the cache-runtime overhaul and any feature admitting cache entries.
    `project_identity` must not be bundled into a single
    `project_config_hash`.
 5. Signature width is never a refusal. Every observed fact is recorded;
-   a signature wider than one evidence page is sealed into immutable,
-   retention-charged pages and validated in full. Empty means
-   dependency-free.
+   a signature is one canonical `FactSet` however wide, retention-charged
+   and validated in full. Empty means dependency-free.
 6. A non-cacheable read, budget exhaustion, cancellation, generation
    supersession, incomplete self-rooting, and unresolved provenance all
    route through `ReturnOnly`.
@@ -224,8 +223,9 @@ measured by `allocation::fact_slice_bytes` (every fact's owned canonical
 materialised points, dependency rails, query values, request prefixes,
 cost identities) by `semantic_query/allocation_footprint.rs`'s
 `OwnedHeap`. Each distinct `Arc` counts once per charge (`AliasSet`); an
-allocation that carries its own charge (an evidence page, a cost receipt,
-a pooled identity string, a graph node) is never charged by a holder.
+allocation that carries its own charge (a result receipt, a fact-set tree
+node, a cost receipt, a pooled identity string, a graph node) is never
+charged by a holder.
 
 **Self-charged delivered allocations** (`verter_retention/src/owned.rs`). Everything
 a read hands its caller — the dependency rail (`DepSignature`, whose
@@ -316,7 +316,8 @@ drop. Guards: `a_store_teardown_no_reader_outlives_releases_no_slot_one_by_one`,
 `cache_runtime::lookup` (`ArtifactNode`: the component-meta shape,
 declaration-lookup, owner-collection and resolvability caches, the
 flow-slice stores, the compile-output caches) reserve entry metadata, key,
-facts, roots and measured payloads as well as their evidence pages.
+facts, roots and measured payloads as well as the receipts and fact-set tree
+nodes their signatures reach.
 Direct compile publication uses the same reservation path. Independently
 delivered generated code and source maps are `OwnedStr` cells.
 Fresh delivery pins them through `pin_generated_texts`, including stateless,
@@ -627,9 +628,15 @@ projection_reduction, resolve_env_hash } }` with
   artifact), gated by `indexed_surface_is_current` — edge currency plus the
   `project_generation` stamp for surfaces with cross-file edges.
 
-When a completed structural carrier is wider than one evidence page
-(`FACT_PAGE_WIDTH`) and carries explicit self-roots, the terminal publisher
-replaces those precise `FileWholeHash` roots with one `StrictSelfRootWorld`. Minting validates every root strictly in the exact
+When a completed structural carrier is wider than `WIDE_SIGNATURE_WIDTH`
+(1024 distinct facts) and its completion is what made it wide — the traced
+set alone is no wider, or the completion's own additions (its self-roots,
+fence and prelude facts) outnumber `WIDE_SIGNATURE_WIDTH` — and it carries
+explicit self-roots, the terminal publisher replaces those precise
+`FileWholeHash` roots with one `StrictSelfRootWorld`. A traced set already
+wider keeps its precise roots: a precise root stays valid in any view that
+agrees on the root's content, where the witness is bound to the one view
+that minted it. The rule reads logical widths only, never storage. Minting validates every root strictly in the exact
 effective view before and after the validation loop. The witness identity is
 the process-unique workspace authority id, its dedicated trackedness
 generation, the captured scheduler/artifact root epochs, and the exact
@@ -637,8 +644,9 @@ generation, the captured scheduler/artifact root epochs, and the exact
 during an authority transition and on an artifact-only backend whose external
 `file_exists` mutations are not completely bridged. A generic Content
 `DomainGeneration` is not a substitute for this witness. Every completed
-carrier is then sealed whole through `seal_canonical_signature` (paged when
-wide); width never makes it `ReturnOnly`.
+carrier is then sealed whole onto the traced set it completes
+(`seal_edit`/`seal_onto`, sharing the traced set's storage); width never
+makes it `ReturnOnly`.
 
 The own-canonical drain serving the edited file's own caches is retained only
 as a redundant fast eviction now that every query-identity cache validates its
@@ -1190,8 +1198,8 @@ version is shared as the completed carrier rather than copied and sealed
 again. The reverse index
 (`semantic_query_memo::ReceiptReverseIndex`, shared by the family memo, the
 refusal-summary table and `cache_runtime::ReverseIndexedCandidateStore`)
-registers DIRECT edges, each once: canonical → the evidence (carrier, receipt
-or page, cached or not) whose own facts read it, consumed receipt → the
+registers DIRECT edges, each once: canonical → the evidence (carrier or
+receipt, cached or not) whose own facts read it, consumed receipt → the
 evidence that consumed it, carrier → its candidates, dispatch fence → the
 candidates sharing that fence allocation (one node per interned fence, so its
 canonicals register once), plus each candidate's strict self-roots. A chain or diamond costs
@@ -1372,42 +1380,99 @@ or non-reusable serve is never kept, and a read where no channel is
 observable (no live tracer or build-local frame, or an already partial
 cold-compute scope) is served directly and never kept.
 
-Paged signature evidence: a `fact_dep_signature` is never refused for its
-width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature
-a producer assembles by hand) cuts a canonical set wider than
-`FACT_PAGE_WIDTH` (1024) into fixed-width contiguous runs, each held by one
-immutable evidence page — a `ResultReceipt` of `EvidenceKind::Page` — and pages
-the level of pages again until the top level fits one page. Pages are
-deterministic (cut points are positions in the canonical order), lossless,
-validated leaf by leaf through the same receipt walk as a consumed result's
-receipt, registered in the reverse index as evidence nodes like any consumed
-receipt (each page once, under the canonicals its own facts read and the
-evidence that consumed it), and shared by `Arc` with every candidate, refusal summary and
-enclosing signature that absorbs them. Each page holds ONE retention charge for
-its whole life, sized by what it stores (entry array, owned fact strings, the
-canonical-set storage it does not share), however many holders share it. A page
-is born `Pinned` (the live signature that sealed it owns it); the first cache
-admission retaining a signature that holds it claims it through
-`receipt::reserve_retained_with_evidence`: the candidate's own bytes and every
-unclaimed page's bytes are ONE refusable `Retained` reservation (so a wide
-candidate is refused as `Oversized`/under pressure for what it would newly
-retain, and its complete value is delivered uncached), and each claimed page's
-pin is exchanged for its split-off share. The claim walks every receipt that
-can reach a page — a consumed result's receipt included, since a candidate
-retains the pages behind it — skipping evidence that reaches none or whose
-pages are already claimed. `ValidatedFactCache` (route, imported-root,
-resolved-import, fallthrough, component-meta runtime) claims the pages its own
-sealing mints at admission; a refused claim admits nothing. A retaining store
-that charges none of its own bytes claims through
-`receipt::claim_evidence_pages` (the same reservation with no own bytes; a
-signature reaching no unclaimed page reserves nothing): the generic
-`cache_runtime` artifact and query-candidate publish paths (a refused claim
-bubbles the signature and returns the value `ReturnOnly`), compile slots,
-binder-identity facts, owner import surfaces, framework surface and resolved
-script-fact stores, the raw-template analysis slot's class-fact signature,
-and the app-config proof seed. Workspace and request-overlay lazy-resolution
-candidates reserve their own bytes (including decision edges in the workspace
-lane) together with reachable unclaimed pages through
+### Sealed signatures: the canonical `FactSet`
+
+A `fact_dep_signature` is never refused for its width. `FactReadSet::finalise`
+(and `seal_canonical_signature` / `seal_onto` for a signature a producer
+assembles by hand) seals every observed fact into ONE canonical
+`FactSet` (`verter_session_query/src/facts/fact_set.rs`): sorted, deduplicated,
+the whole read set, however wide. Readers iterate it (`FactSet::iter`,
+double-ended), count it, search it (`contains`, `iter_from` for one variant's
+or one file's run) and compare it; nothing they can ask depends on how it is
+stored.
+
+**`ReadSetSignature` laws** — the contract every reader and every later task
+may cite:
+
+1. **Canonical content.** A signature holds each fact at most once, in the
+   derived `Ord` of `FactVersionRef`. Iteration order is that order:
+   deterministic across runs and processes.
+2. **Content-defined identity.** Equality, ordering and hashing read the facts
+   alone: two signatures with the same facts are equal, compare equal and hash
+   equal however they were built. `Ord` is the lexicographic order of the
+   canonical runs; `Hash` hashes the length then each fact in order with the
+   caller's hasher, exactly as a sorted slice does. `FactSet::digest` is the
+   order-independent wrapping sum of a strong per-fact hash, maintained on
+   every insertion and removal and never taken as equality without comparing
+   content.
+3. **Exact validation.** A signature validates exactly when every fact it
+   holds validates under the view's per-fact rule (a consumed result's
+   receipt read through to every fact it reaches, each receipt once), with a
+   listed self-root's `FileWholeHash` validated strictly. Validation reads the
+   set in place (`StoreView::validate_fact_signature(FactsRef, roots)`); a
+   failure names the position, in iteration order, of the fact it stopped at.
+   Width never changes the rule: an edit to any fact, the last in canonical
+   order included, misses the warm read.
+4. **Domain compaction.** Lifting runs inside the one sealer, on the distinct
+   facts: a domain whose precise bucket outgrows `FACT_DOMAIN_PRECISE_MAX`
+   (with a live generation and a nameable population) lifts to its terminal
+   aggregate, an aggregate already present absorbs its bucket's precise facts,
+   receipts and strict self-root worlds never lift, and a receipt another
+   receipt of the set consumed is dropped. Every finalised signature, from
+   every entry point, compacts identically.
+5. **No hidden copies.** There is no slice view of a wide set: `as_flat`
+   answers only for a set held as one slice already, and `to_vec` is test
+   support. A reader that needs every fact iterates them.
+
+**Storage.** A narrow set (at most 32 facts) and every freshly sealed set is
+one shared slice. A wider set built by extending another — a scope absorbing a
+completed witness and adding its own facts, a carrier completing a traced set
+— is a persistent B+tree (`fact_tree.rs`, leaves of 16 inline facts, branches
+of 16 children) that shares every node of the set it was built from except
+the paths its insertions and removals copied. A chain of nested results —
+each link its child's set plus a few facts of its own — therefore holds one
+path per link, never a copy of every prefix (alias-chain-1000 retains about
+19 MB of signature state where flat copies retained about 120 MB).
+
+**Retention: every node charges exactly its own allocation.** A slice set is
+charged inline by its holder: its block and its facts' owned heap
+(`allocation::fact_slice_bytes`). A tree set's holder charges only the set's
+header (`FactSet::header_bytes`, through the alias registry). Each tree node
+carries its own `RetentionCharge`, pinned on the process account when the
+edit that built it seals and released by the node's own drop — exactly when
+its allocation is freed, however many sets shared it. The charge is measured
+from the node itself under the declared allocation convention: its `Arc`
+block, its vector's backing by capacity and, for a leaf, the heap its facts
+own (measured once per leaf with the alias-aware fact measurement — a text
+several leaves share is charged by each, the bounded per-carrier
+overcharge). The allocator canary
+`a_fact_tree_charges_exactly_what_it_allocates` checks the charge against the
+real allocator: never below what the nodes allocate, never above it by more
+than one allocator granule and header per block, and every byte back when the
+last set drops.
+
+**Claiming.** A node is born `Pinned`; the first cache admission retaining a
+signature that reaches it claims it through
+`receipt::reserve_retained_with_evidence`: the candidate's own bytes, every
+unclaimed consumed-result receipt and every unclaimed tree node are ONE
+refusable `Retained` reservation (so a wide candidate is refused as
+`Oversized`/under pressure for what it would newly retain, and its complete
+value is delivered uncached), and each claimed node's pin is exchanged for its
+split-off share. A node is marked claimed only after its subtree (children are
+always older than their parents), so a claim walk stops at the first claimed
+node and costs only what the set built. `ValidatedFactCache` (route,
+imported-root, resolved-import, fallthrough, component-meta runtime) stores
+its own sealed copy, charged inline. A retaining store that charges none of
+its own bytes claims through `receipt::claim_retained_storage` (the same
+reservation with no own bytes; a signature reaching nothing unclaimed reserves
+nothing): the generic `cache_runtime` artifact and query-candidate publish
+paths (a refused claim bubbles the signature and returns the value
+`ReturnOnly`), compile slots, binder-identity facts, owner import surfaces,
+framework surface and resolved script-fact stores, the raw-template analysis
+slot's class-fact signature, and the app-config proof seed. Workspace and
+request-overlay lazy-resolution candidates reserve their own bytes (including
+decision edges in the workspace lane) together with the unclaimed storage
+their signature reaches through
 `ResolutionRetentionAccount::reserve_retained_with_evidence`; the production
 `ResolutionRetention` adapter performs the one combined reservation. Byte-only
 test accounts refuse signatures requiring an evidence transfer; tests that
@@ -1417,23 +1482,19 @@ and self-root validation or a query node's rejection lowering. Compile companion
 publication uses the session node's actual `SessionPublishOutcome`: a refused
 slot publishes neither scheduler artifacts nor raw-template companions.
 A lowered invalid query propagates `PostComputeRevalidationFailed` to its
-consumer, even when its page claim also failed. Only validated complete
+consumer, even when its storage claim also failed. Only validated complete
 delivery keeps `RetentionPressure` family-local. A refused compile evicts
 previous companions under its captured source-version/witness fence; a late
 refusal cannot evict a newer publication.
-A refused claim stores
-nothing and the complete value is delivered uncached. A later candidate sharing a claimed
-page is not charged for it again; the page's charge drains when its last holder
-drops. Candidate footprints therefore count a page entry once, not its contents.
-Self-root discrimination reads through pages: a disagreeing traced
-`FileWholeHash` on a page is a `SelfRootConflict`. A carrier whose width is
-held by pages keeps its precise self-roots (validated strictly through the
-pages); only a carrier whose TOP level overflows trades them for a
-`StrictSelfRootWorld`, which is bound to the view that minted it.
-`ReadSetSignature { facts }` is a complete rail; `entries()` reads it with its
-pages read through. Producers still consume a hierarchical fact (a consumed
-result's receipt, a downstream `semantic_hash`) instead of flattening
-transitive facts: paging bounds a signature's storage, never its honesty.
+A refused claim stores nothing and the complete value is delivered uncached. A
+later candidate sharing a claimed node is not charged for it again; the
+node's charge drains when its last holder drops.
+
+Self-root discrimination reads the set in place: a disagreeing traced
+`FileWholeHash` is a `SelfRootConflict` however wide the traced set.
+Producers still consume a hierarchical fact (a consumed result's receipt, a
+downstream `semantic_hash`) instead of flattening transitive facts: shared
+storage bounds a signature's memory, never its honesty.
 
 ### Non-cacheability marking and source evidence
 
@@ -1502,8 +1563,8 @@ Whole-module export proofs use `ResultReceipt::retained_signature` for an
 already-canonical producer signature and `retained_join` for its dependency
 receipts. Joins radix-order receipt digests, retaining exact comparison for
 equal digests, and never copy a child's transitive facts. These result-evidence
-allocations use the same pin-to-retained reservation transfer as evidence
-pages, so their charges remain attached when an enclosing cache retains the
+allocations use the same pin-to-retained reservation transfer as every
+self-charged evidence, so their charges remain attached when an enclosing cache retains the
 proof after the export table is evicted. Canonical summaries are persistent
 hash tries; their public iteration stays lexical through a byte radix walk.
 Radix ordering consumes common prefixes once per bucket (including small
@@ -1525,7 +1586,7 @@ Producers convert their finalised fact tracer into a typed admission verdict via
 Two arms:
 
 - `SignatureAdmission::Cacheable(ReadSetSignature)` — the tracer finalised with
-  its complete (paged when wide) path-precise signature. The producer publishes its cache entry
+  its complete path-precise signature. The producer publishes its cache entry
   under this signature; the warm-hit oracle validates it against the live store
   view on every read.
 - `SignatureAdmission::NonCacheable(NonAdmissionReason)` — the tracer
@@ -1621,13 +1682,18 @@ Hard rules:
   world-generation lives on `CacheEntry<V>` alongside the value
   (`validated_at_generation`). Conflating generation onto the signature blurs
   the responsibility boundary.
-- Width is never a refusal: a signature wider than one evidence page is
-  paged, admitted and validated in full; an edit to a fact on any page —
-  the last included — misses the warm read.
+- Width is never a refusal: a wide signature is admitted and validated in
+  full; an edit to any fact — the last in canonical order included — misses
+  the warm read.
 
-Guards: `signatures_around_and_beyond_the_page_width_keep_and_validate_every_fact`,
-`an_edit_on_every_page_including_the_last_invalidates`,
-`validate_with_self_roots_checks_every_page_of_a_wide_carrier`,
+Guards: `signatures_around_and_beyond_the_wide_width_keep_and_validate_every_fact`,
+`an_edit_to_any_fact_including_the_last_invalidates`,
+`validate_with_self_roots_checks_every_fact_of_a_wide_carrier`,
+`one_content_is_one_set_whatever_its_history`,
+`the_tree_reads_exactly_as_an_ordered_set`,
+`a_chain_of_sets_shares_its_storage_and_charges_each_link_its_own_part`,
+`a_fact_tree_charges_exactly_what_it_allocates`,
+`a_tree_set_offers_no_flat_copy`,
 `a_wide_work_refusal_carries_its_whole_proving_prefix`,
 `compile_fact_tracer_refusal_does_not_publish_compile_slot`.
 
