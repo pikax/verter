@@ -575,6 +575,61 @@ yields, but a query a frame step or a cold build evaluates in place still
 reaches the waits under
 [Boundaries that still block](#boundaries-that-still-block).
 
+### Family continuations
+
+A family whose build reads other queries or files can be written as an owned
+sequential continuation (`project_semantic_dispatch/family_continuation.rs`).
+Its first stage either answers or names the one dependency it reads next —
+a query (`FamilyStep::Need`) or a file's indexed input (`FamilyStep::Load`)
+— and retains everything it computed in a `FamilyBuild`; each later stage
+resumes from that state with the dependency's answer. Macro payloads
+(`ResolveMacroPayload`: owner file, then the props intersection or the
+emits/slots/model projection) and ordered intersection reductions
+(`ReduceIntersection`: each nested subgroup) are written this way.
+
+- **One implementation, two drivers.** The synchronous producer (the cold
+  build every synchronous entry runs) drives the continuation in place,
+  reading each named dependency where the build stands. A query frame drives
+  the same stages by needing each named query, so another task's producer of
+  it suspends the frame with the build owned by the frame
+  (`FrameBuild::Family`), and the delivery resumes it. A family read from an
+  entry outside every open checker obligation drives on the runtime from its
+  synchronous entry as well, so both entries price their reads alike. A
+  query whose entry first normalizes its subject (a carrier, an apparent
+  wrapper or apparent signatures) keeps the prelude that entry records and is
+  read in place by the frame.
+- **File loads.** `IndexedInputs::begin_indexed_load` answers whether a file
+  is servable without loading it, or returns an owned `IndexedLoad` over the
+  host's `begin_load` handoff, which integrates the file when Analysis is
+  ready exactly as `ensure_loaded` does. On a production poll's drive a frame
+  waits on that load as an outside input (`EvalStep::Await`, which steps the
+  same frame again once the load resolves) with its build retained
+  (`FrameBuild::FamilySource`); the synchronous entry's drive loads the file
+  in place as its external driver. An explicit session overlay or a
+  tombstoned file needs no load.
+- **Stage capability.** Every stage is a method of `ContinuationStage`, which
+  holds the dispatcher in a field private to `family_continuation` and
+  exposes only graph construction, the construction meter, canonical
+  composite normalization, the project generation a fence pins and the
+  self-roots its nodes observed. A stage therefore cannot read another
+  query, read or load a file, join a producer or drive an execution; only
+  the two drivers hold the dispatcher. Contracts:
+  `continuation_stage_constructs_through_its_capability` (positive) and
+  `continuation_stage_reaches_no_synchronous_adapter` (negative), in the
+  session compile contracts.
+- **No replay.** The per-graph counters `continuation_builds_begun` and
+  `continuation_stages_resumed` count stages wherever they run, so a stage
+  run again under either driver changes them.
+
+Behaviour, in the session's `semantic_poll_contract` group: a macro payload
+whose payload operation another task produces, an intersection reduction
+whose nested subgroup another task reduces, and a macro payload whose owner's
+scheduler source read is held each return `Pending` at the polled entry,
+stay pending when their `Send` task is polled on another thread, and then
+deliver exactly the synchronous entry's answer, fact status, diagnostics and
+receipt with each stage run once; a released waiting payload leaves nothing
+open.
+
 ### Cache admission and publication
 
 Both artifact and query-candidate admission use one owned protocol. Artifact
@@ -738,6 +793,24 @@ that child waits. A held-reduction control
 compares the exact cold synchronous receipt and checks completed-member work.
 Internal relation/inference stages, winner processing and nested queries
 evaluated inside other synchronous adapters still require continuation conversion.
+
+Family continuations (above) cover macro payloads and intersection
+reductions. Every other family a frame or cold build reaches still builds in
+one synchronous step: path projection, mapped types, `keyof`, template
+literals, apparent types, overload sets, class surfaces, signature discovery,
+object-spread projection, locator lowering, relations, flow returns and the
+call walk below a suspension point. Their nested query reads and resolver
+port calls (`ensure_indexed_ready_serve`, prepared declarations, module
+export tables, route resolution, declaration lowering) remain synchronous
+inside the step. A flow frame still drops and re-runs its evaluation when its
+body meets an unanswered read. Retaining that evaluation is blocked on the
+flow product execution authority, which is asserted `!Send`
+(`FlowProductStore`, `FlowProductExecution`, `FlowProductKey`,
+`SelectedFlowSite` in `flow_products.rs`), on the evaluator's borrowed
+explicit stacks (`ExprRun`, `RegionEvalFrame`, call frames, `NestedStore`),
+and on the dispatch read helpers the body calls (signature discovery, the
+contextual call executor, type-leaf lowering, the relation entry) being
+continuations themselves.
 
 These are the production waits a component-meta or compile root can reach
 in the current tree. Each one parks the polling thread inside whatever poll
