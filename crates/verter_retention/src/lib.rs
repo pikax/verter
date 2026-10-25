@@ -13,14 +13,16 @@
 //!
 //! ## Charge classes
 //!
-//! A charge is exactly one of three classes, and the class decides
-//! whether a reservation can be REFUSED:
+//! A charge is exactly one of three classes:
 //!
 //! - [`ChargeClass::Active`] — bytes an in-flight computation holds
-//!   before it decides whether to publish. REFUSABLE, and additionally
-//!   bounded by its own sub-limit
-//!   ([`RetentionLimits::active_ceiling_bytes`]) so one runaway request
-//!   cannot starve every cache in the process.
+//!   before it decides whether to publish. An admitted computation is
+//!   never refused or truncated for bytes: a request the dispatcher
+//!   already started runs to its complete answer whatever its working
+//!   set costs, so an ACTIVE reservation is charged unconditionally
+//!   ([`SemanticRetentionAccount::reserve_in_flight`]). ACTIVE bytes
+//!   still consume aggregate headroom, pushing back on discretionary
+//!   retention below.
 //! - [`ChargeClass::Retained`] — bytes a warm cache entry owns.
 //!   REFUSABLE: a refused admission returns the freshly-computed value
 //!   to its caller UNCACHED (the existing `ReturnOnly` rail) under
@@ -34,15 +36,17 @@
 //!   lease contract forbids. Pins are nonetheless CHARGED, so they
 //!   consume headroom and push back on discretionary retention.
 //!
-//! The hard invariant the account enforces is therefore stated over the
-//! refusable classes: **`active + retained` never exceeds
-//! `aggregate_ceiling_bytes` minus the bytes currently pinned**, under
-//! any interleaving of concurrent reservations. Pins may themselves push
-//! the total past the ceiling (they are liveness obligations, not policy
-//! choices); when they do, every refusable reservation is refused until
-//! pins drop. That is the pressure behaviour, and it is intentional: the
-//! process stops ADDING discretionary bytes rather than dropping bytes a
-//! live reader still needs.
+//! The account's byte policy is therefore stated over DISCRETIONARY
+//! retention: **`retained` never exceeds `aggregate_ceiling_bytes`
+//! minus the bytes currently pinned and active**, under any
+//! interleaving of concurrent reservations. Pins and in-flight ACTIVE
+//! work may themselves push the total past the ceiling (they are
+//! liveness obligations of computation and handles the process already
+//! committed to); when they do, every retained reservation is refused
+//! until they drop. That is the pressure behaviour, and it is
+//! intentional: the process stops ADDING discretionary bytes rather
+//! than dropping bytes a live reader still needs or aborting work it
+//! already admitted.
 //!
 //! ## Reserve / commit / release ownership
 //!
@@ -120,17 +124,13 @@ use verter_audit::NonAdmissionReason;
 pub struct RetentionLimits {
     /// Total refusable + pinned bytes the process aims to retain.
     pub aggregate_ceiling_bytes: usize,
-    /// Sub-limit on [`ChargeClass::Active`] bytes alone, so in-flight
-    /// working sets cannot consume the whole aggregate ceiling and
-    /// starve every cache.
-    pub active_ceiling_bytes: usize,
     /// Largest single cache entry the account will ever retain. A
     /// [`ChargeClass::Retained`] reservation above this is refused as
     /// [`RetentionRefusal::Oversized`] without consulting occupancy —
     /// retaining it would evict an unbounded number of useful entries to
     /// store one outlier. It is a rule about what a cache keeps, not about
     /// what a computation may build: an [`ChargeClass::Active`]
-    /// reservation is bounded by [`Self::active_ceiling_bytes`] alone.
+    /// reservation is charged unconditionally.
     pub max_entry_bytes: usize,
     /// Pinned bytes past which the process is considered to be under PIN
     /// pressure ([`SemanticRetentionAccount::under_pin_pressure`]).
@@ -154,17 +154,12 @@ impl RetentionLimits {
     /// Ratified per-request cap, applied here as the largest single
     /// reservation any one request may contribute.
     pub const DEFAULT_MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
-    /// Process-wide in-flight sub-limit. Sized at the pin threshold so
-    /// concurrent active work can never, on its own, leave a live pin
-    /// set without headroom.
-    pub const DEFAULT_ACTIVE_CEILING_BYTES: usize = Self::DEFAULT_PIN_THRESHOLD_BYTES;
 
     /// The default ratified limits.
     #[must_use]
     pub const fn defaults() -> Self {
         Self {
             aggregate_ceiling_bytes: Self::DEFAULT_AGGREGATE_CEILING_BYTES,
-            active_ceiling_bytes: Self::DEFAULT_ACTIVE_CEILING_BYTES,
             max_entry_bytes: Self::DEFAULT_MAX_ENTRY_BYTES,
             pin_threshold_bytes: Self::DEFAULT_PIN_THRESHOLD_BYTES,
         }
@@ -182,10 +177,11 @@ impl Default for RetentionLimits {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Which accounting class a reservation belongs to. See the module docs
-/// for the refusable / pinned split.
+/// for the discretionary / always-charged split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChargeClass {
-    /// In-flight computation bytes. Refusable; sub-limited.
+    /// In-flight computation bytes. Charged unconditionally; consumes
+    /// aggregate headroom.
     Active,
     /// Warm cache-entry bytes. Refusable.
     Retained,
@@ -194,16 +190,22 @@ pub enum ChargeClass {
 }
 
 impl ChargeClass {
-    /// Whether a reservation in this class can be refused.
+    /// Whether a reservation in this class competes for discretionary
+    /// aggregate headroom at admission time. Only [`Self::Retained`]
+    /// does: an [`Self::Active`] reservation is an already-admitted
+    /// computation the process never refuses or truncates for bytes,
+    /// and a [`Self::Pinned`] one is a liveness obligation.
     #[must_use]
     pub const fn is_refusable(self) -> bool {
-        matches!(self, Self::Active | Self::Retained)
+        matches!(self, Self::Retained)
     }
 }
 
 /// Why a reservation was refused. Carries the figures the refusal was
 /// decided on so a caller can report a truthful pressure diagnosis
-/// instead of a bare boolean.
+/// instead of a bare boolean. Only discretionary retention is refused:
+/// in-flight computation ([`ChargeClass::Active`]) and live handles
+/// ([`ChargeClass::Pinned`]) are charged unconditionally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionRefusal {
     /// The single reservation exceeds [`RetentionLimits::max_entry_bytes`].
@@ -220,20 +222,12 @@ pub enum RetentionRefusal {
         /// Bytes available when the decision was taken.
         headroom: usize,
     },
-    /// The [`ChargeClass::Active`] sub-limit has no headroom. The work
-    /// is exhausted of its resource budget, not merely unable to cache.
-    ActiveExhausted {
-        /// Bytes the caller asked to hold active.
-        requested: usize,
-        /// Active bytes available when the decision was taken.
-        headroom: usize,
-    },
 }
 
 impl RetentionRefusal {
     /// The typed cache-runtime refusal reason this maps onto.
     ///
-    /// All three arms describe a COMPLETE, correct value the process
+    /// Both arms describe a COMPLETE, correct value the process
     /// declines to retain, so they carry the same locally-confined
     /// reason: the caller still returns its value, and an enclosing
     /// derivation that consumed it may still cache its own result.
@@ -257,13 +251,6 @@ impl std::fmt::Display for RetentionRefusal {
                 requested,
                 headroom,
             } => write!(f, "pressure ({requested} B > {headroom} B headroom)"),
-            Self::ActiveExhausted {
-                requested,
-                headroom,
-            } => write!(
-                f,
-                "active budget exhausted ({requested} B > {headroom} B active headroom)"
-            ),
         }
     }
 }
@@ -384,7 +371,11 @@ pub struct RetentionAccountSnapshot {
     pub refusals_oversized: u64,
     /// Reservations refused as [`RetentionRefusal::Pressure`].
     pub refusals_pressure: u64,
-    /// Reservations refused as [`RetentionRefusal::ActiveExhausted`].
+    /// Reservations refused for the ACTIVE class. Structurally zero: no
+    /// admission path refuses in-flight computation for bytes (see the
+    /// module docs), so a nonzero reading is an accounting bug. The
+    /// count stays a public current figure so a public snapshot keeps
+    /// reporting the refusal classes its readers know.
     pub refusals_active: u64,
     /// Charges released over the account's lifetime.
     pub releases: u64,
@@ -505,15 +496,52 @@ impl SemanticRetentionAccount {
     ///
     /// A [`ChargeClass::Pinned`] request is charged unconditionally and
     /// always returns [`RetentionAdmission::Admitted`] — see the module
-    /// docs for why a pin is not a policy choice. The refusable classes
-    /// admit only when the reservation fits under the ceiling at the
-    /// CAS-guarded aggregate-state linearization point. Pins take that
-    /// same guard, so a refusable admission can never validate against a
-    /// stale pinned total.
+    /// docs for why a pin is not a policy choice. A
+    /// [`ChargeClass::Active`] request is charged unconditionally too:
+    /// it names bytes of computation the process already admitted, which
+    /// it never refuses or truncates for bytes — production in-flight
+    /// owners charge through [`Self::reserve_in_flight`], which also
+    /// attributes the charge to a measurement owner. Only
+    /// [`ChargeClass::Retained`] is refusable, at the CAS-guarded
+    /// aggregate-state linearization point. Pins take that same guard,
+    /// so a retained admission can never validate against a stale
+    /// pinned total.
     ///
     /// A zero-byte reservation is always admitted and charges nothing.
     pub fn reserve(self: &Arc<Self>, class: ChargeClass, bytes: usize) -> RetentionAdmission {
         self.reserve_with(class, bytes, Provenance::UNKNOWN)
+    }
+
+    /// Reserve `bytes` of IN-FLIGHT computation: charged unconditionally
+    /// as [`ChargeClass::Active`], so work the dispatcher already
+    /// admitted runs to its complete answer whatever its working set
+    /// costs. The bytes still join the aggregate occupancy, so
+    /// discretionary retention is refused while they are held.
+    ///
+    /// This is the production entry point for in-flight owners (a
+    /// semantic flight's storage, a delivery's payload before its
+    /// publication or caller handoff, a member value a batched publish
+    /// has not staged yet). In a build carrying the ACTIVE-occupancy
+    /// window, the charge is attributed to the owner of the window open
+    /// on this thread, if any; in a production build it carries no
+    /// provenance at all.
+    #[must_use = "the charge releases the bytes it holds; keep it with what it covers"]
+    pub fn reserve_in_flight(self: &Arc<Self>, bytes: usize) -> RetentionCharge {
+        self.reserve_active(bytes, current_in_flight_provenance(self))
+    }
+
+    fn reserve_active(self: &Arc<Self>, bytes: usize, provenance: Provenance) -> RetentionCharge {
+        if bytes == 0 {
+            self.admissions.fetch_add(1, Ordering::Relaxed);
+            return self.mint_charge(ChargeClass::Active, 0, provenance);
+        }
+        let mut state = self.lock_aggregate_state();
+        state.active_bytes += bytes;
+        state.refusable_bytes += bytes;
+        self.admissions.fetch_add(1, Ordering::Relaxed);
+        self.note_active_locked(provenance, bytes, 0);
+        state.note_peak();
+        self.mint_charge(ChargeClass::Active, bytes, provenance)
     }
 
     fn reserve_with(
@@ -522,10 +550,16 @@ impl SemanticRetentionAccount {
         bytes: usize,
         provenance: Provenance,
     ) -> RetentionAdmission {
-        if !class.is_refusable() {
-            return RetentionAdmission::Admitted(self.pin(bytes));
+        match class {
+            ChargeClass::Pinned => {
+                return RetentionAdmission::Admitted(self.pin(bytes));
+            }
+            ChargeClass::Active => {
+                return RetentionAdmission::Admitted(self.reserve_active(bytes, provenance));
+            }
+            ChargeClass::Retained => {}
         }
-        if class == ChargeClass::Retained && bytes > self.limits.max_entry_bytes {
+        if bytes > self.limits.max_entry_bytes {
             self.refusals_oversized.fetch_add(1, Ordering::Relaxed);
             verter_audit::attribute!(RetentionAdmitRefused);
             return RetentionAdmission::Refused(RetentionRefusal::Oversized {
@@ -552,20 +586,6 @@ impl SemanticRetentionAccount {
                 requested: bytes,
                 headroom,
             });
-        }
-        if class == ChargeClass::Active {
-            let active = state.active_bytes;
-            let active_headroom = this.limits.active_ceiling_bytes.saturating_sub(active);
-            if bytes > active_headroom {
-                this.refusals_active.fetch_add(1, Ordering::Relaxed);
-                verter_audit::attribute!(RetentionAdmitRefused);
-                return RetentionAdmission::Refused(RetentionRefusal::ActiveExhausted {
-                    requested: bytes,
-                    headroom: active_headroom,
-                });
-            }
-            state.active_bytes = active + bytes;
-            this.note_active_locked(provenance, bytes, 0);
         }
         state.refusable_bytes = current + bytes;
         this.admissions.fetch_add(1, Ordering::Relaxed);
@@ -747,6 +767,43 @@ impl SemanticRetentionAccount {
         Ok(())
     }
 
+    /// Commit `bytes` already charged ACTIVE to a cache's retention, under
+    /// the admission rules a fresh retained reservation of them meets. The
+    /// in-flight bytes are this very allocation — already inside the
+    /// refusable occupancy — so they are not counted against their own
+    /// adoption: the decision is only whether a CACHE may keep them
+    /// long-lived. On success they stay charged exactly once, moving from
+    /// the in-flight total to the retained one.
+    fn adopt_active(&self, bytes: usize, provenance: Provenance) -> Result<(), RetentionRefusal> {
+        if bytes > self.limits.max_entry_bytes {
+            self.refusals_oversized.fetch_add(1, Ordering::Relaxed);
+            verter_audit::attribute!(RetentionAdmitRefused);
+            return Err(RetentionRefusal::Oversized {
+                requested: bytes,
+                max_entry_bytes: self.limits.max_entry_bytes,
+            });
+        }
+        let mut state = self.lock_aggregate_state();
+        let refusable = state.refusable_bytes;
+        let pinned = state.pinned_bytes;
+        let headroom = self
+            .limits
+            .aggregate_ceiling_bytes
+            .saturating_sub(refusable - bytes)
+            .saturating_sub(pinned);
+        if bytes > headroom {
+            self.refusals_pressure.fetch_add(1, Ordering::Relaxed);
+            verter_audit::attribute!(RetentionAdmitRefused);
+            return Err(RetentionRefusal::Pressure {
+                requested: bytes,
+                headroom,
+            });
+        }
+        state.active_bytes -= bytes;
+        self.note_active_locked(provenance, 0, bytes);
+        Ok(())
+    }
+
     fn lock_aggregate_state(&self) -> parking_lot::MutexGuard<'_, Occupancy> {
         self.admission_lock.lock()
     }
@@ -790,6 +847,23 @@ impl Provenance {
         #[cfg(not(any(test, feature = "test-support", feature = "soak-support")))]
         let _ = other;
         self
+    }
+}
+
+/// The provenance a production in-flight charge
+/// ([`SemanticRetentionAccount::reserve_in_flight`]) reserves with. In a
+/// build carrying the ACTIVE-occupancy window it is the owner of the
+/// window open on this thread, when that owner is bound to `account`; a
+/// build without the window has no provenance to carry.
+fn current_in_flight_provenance(account: &Arc<SemanticRetentionAccount>) -> Provenance {
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    {
+        active_window::current_window_owner(account)
+    }
+    #[cfg(not(any(test, feature = "test-support", feature = "soak-support")))]
+    {
+        let _ = account;
+        Provenance::UNKNOWN
     }
 }
 
@@ -1067,50 +1141,65 @@ impl RetentionCharge {
         }
     }
 
-    /// Adopt a pinned charge into cache retention: a cache is about to
-    /// retain an allocation callers already hold, so its bytes become a
-    /// refusable [`ChargeClass::Retained`] charge again.
+    /// Adopt this charge into cache retention: a cache is about to
+    /// retain an allocation its in-flight owner (or callers) already
+    /// hold, so its bytes become a refusable
+    /// [`ChargeClass::Retained`] charge.
     ///
-    /// Decided at the same linearization point as [`SemanticRetentionAccount::reserve`],
-    /// counting the bytes once (they leave the pinned total as they join the
-    /// refusable one). On refusal nothing changes: the allocation stays
-    /// pinned by the callers holding it and the cache keeps nothing. A
-    /// charge already refusable is unchanged and admitted.
+    /// Decided at the same linearization point as
+    /// [`SemanticRetentionAccount::reserve`], under the same rules a
+    /// fresh retained reservation of these bytes meets: the per-entry
+    /// cap, and aggregate headroom counted EXCLUDING the bytes this
+    /// charge already occupies (an [`ChargeClass::Active`] charge's
+    /// bytes already sit in the refusable occupancy; a pin's already
+    /// sit in the pinned one), so the adoption decides only whether a
+    /// CACHE may keep them long-lived. On refusal nothing changes: the
+    /// allocation stays charged to its current owner — in flight, or
+    /// pinned by the callers holding it — and the cache keeps nothing.
+    /// A charge already retained is unchanged and admitted.
     ///
     /// # Errors
     ///
-    /// The account's refusal, exactly as a fresh reservation of these bytes
-    /// would be refused.
+    /// The account's refusal, exactly as a fresh reservation of these
+    /// bytes would be refused.
     pub fn try_adopt_retained(&mut self) -> Result<(), RetentionRefusal> {
-        if self.class != ChargeClass::Pinned {
-            return Ok(());
+        match self.class {
+            ChargeClass::Retained => Ok(()),
+            ChargeClass::Active => {
+                if let Some(account) = self.account.as_ref() {
+                    account.adopt_active(self.bytes, self.provenance)?;
+                }
+                self.class = ChargeClass::Retained;
+                Ok(())
+            }
+            ChargeClass::Pinned => {
+                if let Some(account) = self.account.as_ref() {
+                    account.adopt_pinned(self.bytes)?;
+                }
+                self.class = ChargeClass::Retained;
+                Ok(())
+            }
         }
-        if let Some(account) = self.account.as_ref() {
-            account.adopt_pinned(self.bytes)?;
-        }
-        self.class = ChargeClass::Retained;
-        Ok(())
     }
 
-    /// Reclassify an [`ChargeClass::Active`] charge as
-    /// [`ChargeClass::Retained`] when the in-flight work it covered
-    /// decided to publish.
+    /// Take over a charge a cache was just granted as this cache hold's
+    /// retained bytes. Calling it on a charge that is not already
+    /// retained is rejected (see Panics); a pinned or in-flight charge is
+    /// adopted only through the refusable paths
+    /// ([`RetentionCharge::try_adopt_retained`], `shared::CallerHold::adopt`),
+    /// which decide the per-entry cap and aggregate headroom.
     ///
-    /// Infallible and gap-free: the bytes stay charged throughout, so a
-    /// concurrent reservation can never slip into a window where this
-    /// payload is unaccounted, and the commit only RELEASES active
-    /// sub-limit pressure. Calling it on a non-active charge is a no-op.
+    /// # Panics
+    ///
+    /// When `charge` is [`ChargeClass::Active`]: committing an in-flight
+    /// charge unconditionally could move bytes a refused retention never
+    /// admitted into [`ChargeClass::Retained`].
     #[must_use]
-    pub fn commit_retained(mut self) -> Self {
+    pub fn commit_retained(self) -> Self {
         if self.class == ChargeClass::Active {
-            if let Some(account) = self.account.as_ref() {
-                let mut state = account.lock_aggregate_state();
-                if self.bytes > 0 {
-                    state.active_bytes -= self.bytes;
-                    account.note_active_locked(self.provenance, 0, self.bytes);
-                }
-            }
-            self.class = ChargeClass::Retained;
+            unreachable!(
+                "an in-flight charge is adopted into retention refusably, never committed"
+            );
         }
         self
     }

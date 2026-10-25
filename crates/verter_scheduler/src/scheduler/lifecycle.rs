@@ -534,7 +534,8 @@ impl Drop for Scheduler {
         // Join driver thread
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(handle) = self.driver_handle.lock().take() {
+            let handle = self.driver_handle.lock().take();
+            if let Some(handle) = handle {
                 if should_join_driver_thread(handle.thread().id(), std::thread::current().id()) {
                     let _ = handle.join();
                 }

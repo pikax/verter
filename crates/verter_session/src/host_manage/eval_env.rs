@@ -967,10 +967,27 @@ impl VerterHost {
         owner_canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
     ) -> std::collections::BTreeSet<String> {
+        let indexed = self
+            .ensure_indexed_ready_serve(owner_canonical_id)
+            .map(|serve| serve.indexed);
+        self.cache_dependency_candidates_from_captured_snapshot(
+            owner_canonical_id,
+            snapshot,
+            indexed.as_deref(),
+        )
+    }
+
+    /// Collect candidates from this capture's own index and snapshot. An
+    /// overlay owner supplies its overlay index instead of loading base bytes.
+    pub(crate) fn cache_dependency_candidates_from_captured_snapshot(
+        &self,
+        owner_canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        indexed: Option<&crate::project_type_store::IndexedReady>,
+    ) -> std::collections::BTreeSet<String> {
         let mut candidates = std::collections::BTreeSet::new();
 
-        if let Some(serve) = self.ensure_indexed_ready_serve(owner_canonical_id) {
-            let facts = &serve.indexed;
+        if let Some(facts) = indexed {
             // The shallow routing surface is parse domain: it names the
             // AUTHORED specifiers, never a target. Every edge resolves
             // here through the one live route-edge authority, so a

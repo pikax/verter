@@ -184,17 +184,26 @@ A comment may supplement that durable explanation with a GitHub issue only when 
 ### Test Economy
 
 The recursive mapped-index regressions run on every ordinary debug run as
-three separately discoverable tests over one generator and one set of
+four separately discoverable tests over one generator and one set of
 assertions: `recursive_mapped_index_publishes_dotted_paths_across_three_modules`
 (20 entities across three modules, under the default request fuse),
 `recursive_mapped_index_publishes_dotted_paths_across_five_modules` (100
-entities across five modules, under an explicit 50,000-operation allowance)
+entities across five modules, under an explicit 50,000-operation allowance),
+`recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities`
+(300 entities across five modules, under the same 50,000-operation allowance)
 and `recursive_mapped_index_publishes_dotted_paths_in_small_cyclic_layouts`
 (six entities across three modules and ten across five). Each asserts the
 exact dotted-path set and the instantiation bound through the public host
 resolver. No environment variable selects a population, and no layout moves
 out of the normal lane; the large-key mapped-value benchmark keeps its
 separate 1,000/3,000/10,000-key populations.
+
+The exact 300-entity test is temporarily accepted as known-slow, documented
+in `.config/nextest.toml`. Its normal CI surface, 10-second slow warning and
+20-second termination remain unchanged; it has no timeout override. Shared
+engine improvements must restore the under-10-second loaded-debug target
+before the known-slow note is removed. Preserve the full path set, logical
+charges, instantiation/work assertions and request allowance throughout.
 
 The Svelte projection profile gates run one solution build per pinned
 TypeScript engine. Every profile and corruption/publication twin remains a

@@ -83,11 +83,14 @@ pub struct DagCapacityReservation {
     /// (`None`) once the permits are given back.
     pub(super) class_counter: Option<Arc<AtomicU64>>,
     /// The ledger's reset epoch and its value when this reservation was
-    /// taken. [`crate::dag::SchedulerDag::clear`] zeroes the counters and
-    /// bumps the epoch; a reservation from before the reset (still held by
-    /// a job queued or running in a pool) then gives nothing back, so it can
-    /// never drive a counter below the admissions made after the reset.
+    /// taken. [`crate::dag::SchedulerDag::clear`] replaces the counters and
+    /// bumps the epoch. An already-selected release debits its old counter;
+    /// a release selecting after reset gives nothing back and does not wake.
     pub(super) epoch: Option<(Arc<AtomicU64>, u64)>,
+    /// Notifies readiness after the final shared permit returns, including
+    /// releases outside a DAG operation. The scheduler defers callbacks across
+    /// its lifecycle locks; standalone DAGs can omit the callback.
+    pub(super) progress: Option<std::task::Waker>,
 }
 
 impl DagCapacityReservation {
@@ -112,11 +115,20 @@ impl DagCapacityReservation {
     /// reservation was taken. Saturating, so a straggler can never wrap a
     /// counter.
     fn give_back(&mut self) {
-        let permits = self.permits as u64;
-        let current = self
-            .epoch
+        let current = self.release_epoch_is_current();
+        self.return_capacity(current);
+    }
+
+    fn release_epoch_is_current(&self) -> bool {
+        self.epoch
             .as_ref()
-            .is_none_or(|(epoch, taken_at)| epoch.load(Ordering::Acquire) == *taken_at);
+            .is_none_or(|(epoch, taken_at)| epoch.load(Ordering::Acquire) == *taken_at)
+    }
+
+    /// The eligibility read can precede a reset; this reservation's counter
+    /// must therefore remain an independent ledger after that reset.
+    fn return_capacity(&mut self, current: bool) {
+        let permits = self.permits as u64;
         let saturating_sub = |counter: &AtomicU64| {
             let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 Some(value.saturating_sub(permits))
@@ -125,6 +137,9 @@ impl DagCapacityReservation {
         if let Some(counter) = self.class_counter.take() {
             if current {
                 saturating_sub(&counter);
+                if let Some(progress) = &self.progress {
+                    progress.wake_by_ref();
+                }
             }
         }
     }
@@ -143,5 +158,75 @@ impl std::fmt::Debug for DagCapacityReservation {
 impl Drop for DagCapacityReservation {
     fn drop(&mut self) {
         self.give_back();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dag::SchedulerDag;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Wake, Waker};
+
+    struct Progress(AtomicUsize);
+
+    impl Wake for Progress {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_release_selected_before_reset_debits_only_its_original_ledger() {
+        for class in [ResourceClass::Cpu, ResourceClass::Io] {
+            for loan in [false, true] {
+                let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 2, io: 2 });
+                let probe = Arc::new(Progress(AtomicUsize::new(0)));
+                dag.set_progress_waker(Waker::from(Arc::clone(&probe)));
+                let reserve = |dag: &SchedulerDag| {
+                    if loan {
+                        dag.loan_capacity_for_class(class).unwrap()
+                    } else {
+                        dag.try_reserve_for_class(class).unwrap()
+                    }
+                };
+                let mut selected = reserve(&dag);
+                let late = reserve(&dag);
+                let eligible = selected.release_epoch_is_current();
+                assert!(eligible);
+                dag.clear();
+                let replacement = reserve(&dag);
+                let in_flight = |dag: &SchedulerDag| match class {
+                    ResourceClass::Cpu => dag.in_flight_cpu_permits(),
+                    ResourceClass::Io => dag.in_flight_io_permits(),
+                };
+                assert_eq!(in_flight(&dag), 1);
+
+                // Resume the actual debit after a replacement admission. The
+                // pre-reset eligibility decision can still select an advisory wake.
+                selected.return_capacity(eligible);
+                assert_eq!(
+                    in_flight(&dag),
+                    1,
+                    "{class:?}, loan={loan}: old eligibility cannot debit the new ledger"
+                );
+                assert_eq!(probe.0.load(Ordering::SeqCst), 1);
+                drop(selected);
+                assert_eq!(in_flight(&dag), 1, "debit consumes the counter before Drop");
+                assert_eq!(probe.0.load(Ordering::SeqCst), 1);
+
+                assert!(!late.release_epoch_is_current());
+                drop(late);
+                assert_eq!(in_flight(&dag), 1);
+                assert_eq!(
+                    probe.0.load(Ordering::SeqCst),
+                    1,
+                    "post-reset selection does not wake"
+                );
+                drop(replacement);
+                assert_eq!(in_flight(&dag), 0);
+                assert_eq!(probe.0.load(Ordering::SeqCst), 2);
+            }
+        }
     }
 }

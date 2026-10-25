@@ -64,7 +64,7 @@ impl FingerprintHasher {
     /// One `SipRound`. Every interned payload's fingerprint runs it per
     /// word, so its rotations are written as shifts, which a debug build
     /// emits in place rather than as a call per rotation.
-    #[inline]
+    #[inline(always)]
     #[expect(
         clippy::manual_rotate,
         reason = "a debug build calls out for every `rotate_left`; the shifts are emitted in place"
@@ -86,8 +86,10 @@ impl FingerprintHasher {
         self.v2 = (self.v2 << 32) | (self.v2 >> 32);
     }
 
-    /// Compress one message word: one compression round.
-    #[inline]
+    /// Compress one message word: one compression round. Forced inline:
+    /// every payload write is a word, and a debug build would otherwise
+    /// call out twice per word.
+    #[inline(always)]
     fn word(&mut self, word: u64) {
         self.v3 ^= word;
         self.round();

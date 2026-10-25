@@ -35,6 +35,10 @@ pub(crate) struct SubstituteMemoEntry {
     _retention: verter_session_query::retention::RetentionCharge,
 }
 
+#[cfg(test)]
+#[path = "hash_cons_memos_tests.rs"]
+mod tests;
+
 /// The bytes one memo entry keeps: its map slot and FIFO record, its value
 /// inline, and the root owner it keeps.
 fn hash_cons_entry_bytes<V>(
@@ -46,17 +50,51 @@ fn hash_cons_entry_bytes<V>(
         + roots.owned_heap_bytes(aliases)
 }
 
+/// The completed cold evaluation handed to admission. The producer creates
+/// this only after all completeness, refusal and mutation checks have run.
+pub(crate) struct CompletedDeferredEvaluation {
+    node: SemanticNodeId,
+    context: ProjectionReductionContext,
+    demand: DeferredEvaluationDemand,
+    result: SemanticNodeId,
+    receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+    evidence: crate::fact_signature_helpers::CompletedStructuralEvidence,
+}
+
+impl CompletedDeferredEvaluation {
+    pub(crate) fn new(
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
+        result: SemanticNodeId,
+        receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+        evidence: crate::fact_signature_helpers::CompletedStructuralEvidence,
+    ) -> Self {
+        Self {
+            node,
+            context,
+            demand,
+            result,
+            receipt,
+            evidence,
+        }
+    }
+}
+
 pub(crate) struct DeferredEvaluationMemoEntry {
     result: SemanticNodeId,
     receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
-    evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
-    lease: super::delivery_lease::SemanticDeliveryLease,
+    evidence: crate::fact_signature_helpers::CompletedStructuralEvidence,
+    roots: super::node_roots::NodeRootSet,
     _retention: verter_session_query::retention::RetentionCharge,
-    /// The entry's retention of its delivery's metadata, which its hits
-    /// share with their readers.
-    _lease_metadata: Option<verter_session_query::retention::shared::CacheHold>,
-    /// The root owners the delivery's metadata names, held with it.
-    _lease_handles: verter_session_query::retention::owned::HeldHandles,
+}
+
+/// An internal evaluation serve. The active construction scope owns the
+/// entry's nodes before the map hold is released; no public delivery is
+/// constructed for an evaluation that stays inside the engine.
+pub(crate) struct DeferredEvaluationRead {
+    pub(crate) value: SemanticNodeId,
+    pub(crate) receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
 }
 
 impl SemanticGraphStore {
@@ -226,7 +264,7 @@ impl SemanticGraphStore {
         context: ProjectionReductionContext,
         demand: DeferredEvaluationDemand,
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
-    ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
+    ) -> Option<DeferredEvaluationRead> {
         self.read_deferred_evaluation::<M>(node, context, demand, |entry| {
             verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
                 &entry.evidence.0,
@@ -241,7 +279,7 @@ impl SemanticGraphStore {
         context: ProjectionReductionContext,
         demand: DeferredEvaluationDemand,
         validate: impl FnOnce(&DeferredEvaluationMemoEntry) -> bool,
-    ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
+    ) -> Option<DeferredEvaluationRead> {
         let entry = self
             .evaluate_deferred_memo
             .get(&(node, context, demand))
@@ -259,15 +297,14 @@ impl SemanticGraphStore {
                 }
             })
             .map(|entry| {
-                crate::fact_tracing::tracing::observe_fan_out_canonical(&entry.evidence.0);
-                crate::semantic_query::CacheRead {
-                    lease: entry.lease.clone(),
+                crate::fact_tracing::tracing::observe_fan_out_sealed(&entry.evidence.0);
+                // Capture both before releasing the entry. The memo owns the
+                // result, and its receipt independently owns the input.
+                entry.receipt.operand_roots().retain_for_delivery();
+                entry.roots.retain_for_delivery();
+                DeferredEvaluationRead {
                     value: entry.result,
-                    dep_signature: super::empty_signature(),
-                    walker_diagnostics: super::empty_diagnostics(),
-                    cache_suppress: false,
-                    fact_status: crate::semantic_query::FactStatus::Complete,
-                    receipt: crate::semantic_query::ReadReceipt::Priced(Arc::clone(&entry.receipt)),
+                    receipt: Arc::clone(&entry.receipt),
                 }
             });
         if super::records_telemetry::<M>() {
@@ -286,6 +323,7 @@ impl SemanticGraphStore {
 
     /// Publish the complete evaluation and the facts it actually read.
     /// A new view replaces a stale candidate under the content-free key.
+    #[cfg(test)]
     pub(crate) fn evaluate_deferred_memo_publish(
         &self,
         node: SemanticNodeId,
@@ -295,18 +333,36 @@ impl SemanticGraphStore {
         receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
     ) {
+        let evidence = crate::fact_signature_helpers::CompletedStructuralEvidence::verify(evidence)
+            .expect("the fixture supplies canonical evidence");
+        self.evaluate_deferred_memo_publish_completed(CompletedDeferredEvaluation::new(
+            node, context, demand, result, receipt, evidence,
+        ));
+    }
+
+    pub(crate) fn evaluate_deferred_memo_publish_completed(
+        &self,
+        completed: CompletedDeferredEvaluation,
+    ) {
+        let CompletedDeferredEvaluation {
+            node,
+            context,
+            demand,
+            result,
+            receipt,
+            evidence,
+        } = completed;
         if receipt.reserve_retention(self.retention_account()).is_err() {
             return;
         }
-        let Ok(roots) = self.root_nodes([node, result]) else {
+        let Ok(roots) = receipt
+            .operand_roots()
+            .retain_evaluation_result(self, node, result)
+        else {
             return;
         };
-        let lease = super::delivery_lease::SemanticDeliveryLease::from_roots(
-            roots,
-            self.retention_account(),
-        );
         // The entry's block, slot and FIFO record and its proof (its
-        // delivery's metadata is adopted below): the fact slice with every fact's owned text and the
+        // root owner's own charge is held with the entry): the fact slice with every fact's owned text and the
         // self-root list. A page of a wide proof is claimed into the same
         // reservation and charged once wherever it is shared.
         let (own_bytes, handles) = {
@@ -317,7 +373,8 @@ impl SemanticGraphStore {
             let bytes = arc_block_bytes(std::mem::size_of::<DeferredEvaluationMemoEntry>())
                 + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
                 + fact_slice_bytes(&evidence.0, &mut aliases)
-                + arc_str_list_bytes(&evidence.1, &mut aliases);
+                + arc_str_list_bytes(&evidence.1, &mut aliases)
+                + roots.owned_heap_bytes(&mut aliases);
             // The proof's owned names are charged by their own cells, held
             // by the entry.
             (bytes, aliases.take_handles())
@@ -335,20 +392,12 @@ impl SemanticGraphStore {
             }
             verter_session_query::retention::RetentionAdmission::Refused(_) => return,
         };
-        let Ok(lease_metadata) = lease.adopt_metadata() else {
-            return;
-        };
-        let Ok(lease_handles) = lease.hold_metadata_handles(self.charge_ctx()) else {
-            return;
-        };
         let entry = Arc::new(DeferredEvaluationMemoEntry {
             result,
             receipt,
             evidence,
-            lease,
+            roots,
             _retention: retention,
-            _lease_metadata: lease_metadata,
-            _lease_handles: lease_handles,
         });
         let key = (node, context, demand);
         match self.evaluate_deferred_memo.entry(key) {
@@ -397,17 +446,41 @@ impl SemanticGraphStore {
             .then_some(())
     }
 
-    /// Exact nonpermanent topology retained by the hash-cons caches. This
-    /// fixture probe distinguishes cache residue from a live dispatcher's
-    /// operation attachments without clearing either owner first.
+    /// Nonpermanent topology reached by the caches' explicit graph-root
+    /// attachments, including receipt prerequisites. Signature-epoch leases
+    /// have separate store ownership. This fixture probe distinguishes cache
+    /// residue from live dispatcher attachments without clearing either owner.
     #[cfg(any(test, feature = "test-support"))]
     pub fn hash_cons_retained_nodes_for_tests(&self) -> rustc_hash::FxHashSet<SemanticNodeId> {
         let mut pending = Vec::new();
+        let mut receipts = Vec::new();
         for entry in &self.substitute_memo {
             pending.extend_from_slice(entry.value().roots.operands());
+            receipts.push(Arc::clone(&entry.value().receipt));
         }
         for entry in &self.evaluate_deferred_memo {
-            pending.extend_from_slice(entry.value().lease.roots());
+            pending.extend_from_slice(entry.value().roots.operands());
+            receipts.push(Arc::clone(&entry.value().receipt));
+        }
+        // Keep visited receipts alive: address deduplication must remain valid
+        // even if a concurrent eviction drops the store's last other owner.
+        let mut visited = rustc_hash::FxHashMap::default();
+        while let Some(receipt) = receipts.pop() {
+            if visited.contains_key(&Arc::as_ptr(&receipt)) {
+                continue;
+            }
+            receipt.identity().for_each_owned_root_for_tests(|roots| {
+                if roots.belongs_to(&self.arena.core) {
+                    pending.extend_from_slice(roots.operands());
+                }
+            });
+            receipts.extend(
+                receipt
+                    .prerequisites()
+                    .iter()
+                    .map(|dependency| Arc::clone(&dependency.receipt)),
+            );
+            visited.insert(Arc::as_ptr(&receipt), receipt);
         }
         let mut retained = rustc_hash::FxHashSet::default();
         while let Some(node) = pending.pop() {

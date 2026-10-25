@@ -309,7 +309,7 @@ impl<M: ObserveExec> GraphIn<'_, M> {
         context: crate::semantic_query::ProjectionReductionContext,
         demand: crate::project_semantic_dispatch::evaluate::DeferredEvaluationDemand,
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
-    ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
+    ) -> Option<super::hash_cons_memos::DeferredEvaluationRead> {
         self.store
             .evaluate_deferred_memo_get::<M>(node, context, demand, ctx)
     }

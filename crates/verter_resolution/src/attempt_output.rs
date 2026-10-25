@@ -45,6 +45,24 @@ impl AttemptOutput {
         }
     }
 
+    /// A fresh, empty accumulator retained in `retention` — what [`Self::new`]
+    /// builds when `retention` is the current scope.
+    pub(crate) fn new_in(
+        retention: super::input_resolution_budgets::InputResolutionRetention,
+    ) -> Self {
+        Self {
+            data: Arc::new(AttemptOutputData::new_in(retention)),
+        }
+    }
+
+    /// Whether this output's witnesses are retained in `retention`'s ledger.
+    pub(crate) fn is_retained_in(
+        &self,
+        retention: &super::input_resolution_budgets::InputResolutionRetention,
+    ) -> bool {
+        self.data.retention.same_operation(retention)
+    }
+
     /// Record one observed fact in first-occurrence order.
     pub fn record_fact(
         &mut self,
@@ -179,6 +197,14 @@ impl AttemptOutputData {
     /// A fresh, empty accumulator — one per attempt.
     #[must_use]
     pub fn new() -> Self {
+        Self::new_in(
+            super::input_resolution_budgets::InputResolutionRetention::current_or_default(),
+        )
+    }
+
+    fn new_in(retention: super::input_resolution_budgets::InputResolutionRetention) -> Self {
+        #[cfg(test)]
+        OUTPUTS_BUILT.set(OUTPUTS_BUILT.get() + 1);
         Self {
             observed_facts: Vec::new(),
             ambient_dependencies: Vec::new(),
@@ -186,8 +212,7 @@ impl AttemptOutputData {
             observed_fact_set: FxHashSet::default(),
             ambient_dependency_set: FxHashSet::default(),
             consumed_resolution_observation_set: FxHashSet::default(),
-            retention:
-                super::input_resolution_budgets::InputResolutionRetention::current_or_default(),
+            retention,
         }
     }
 
@@ -401,6 +426,12 @@ impl Drop for AttemptOutputData {
             );
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Accumulators built on this thread, clones included.
+    pub(crate) static OUTPUTS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

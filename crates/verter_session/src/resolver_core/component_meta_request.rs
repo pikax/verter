@@ -1,5 +1,5 @@
 use crate::resolver_core::{
-    run_stable_request, RequestRunResult, ResolutionNodeKey, SingleflightGroup,
+    run_stable_request_pollable, RequestRunResult, ResolutionNodeKey, SingleflightGroup,
     StableExecutionValue, StableRequestExecutor,
 };
 use verter_session_query::facts::store_view::StoreView;
@@ -55,7 +55,9 @@ pub(crate) trait ComponentMetaRequestHost {
     /// but forgets the override silently launder every snapshot as
     /// proven-current. Hosts that own no manager and never churn
     /// (test/stub hosts) state that explicitly by returning `(view, true)`.
-    fn snapshot_store_view_read(&self) -> (Self::View, bool);
+    /// A reader joining an in-progress build suspends rather than driving
+    /// the external blocking adapter inside the request's poll.
+    async fn snapshot_store_view_read(&self) -> (Self::View, bool);
     /// Live `u64` fold of the host's EXTERNAL-supersession token
     /// dimensions (epoch / project-generation / env-hash / identity /
     /// overlay — the same set
@@ -67,7 +69,9 @@ pub(crate) trait ComponentMetaRequestHost {
     /// `set_default_resolve_extensions` env-hash shift) advanced
     /// mid-compute, so the result MUST NOT be promoted.
     fn current_view_supersession_fingerprint(&self) -> u64;
-    fn capture_component_meta_inputs(
+    /// The cold compute's inputs for `canonical` under `store_view`. A
+    /// capture that waits on the owner's artifact suspends the request.
+    async fn capture_component_meta_inputs(
         &self,
         canonical: &str,
         store_view: &Self::View,
@@ -217,7 +221,7 @@ where
         self.host.cache_key(&self.canonical, self.mode)
     }
 
-    fn snapshot_view(&mut self) -> Self::View {
+    async fn snapshot_view(&mut self) -> Self::View {
         // Each attempt's stability must reflect ONLY that attempt's
         // snapshot. The driver's outer loop calls `snapshot_view()` up to
         // `max_attempts` times on the SAME executor instance: if an earlier
@@ -252,7 +256,8 @@ where
             self.snapshot_view_current = *is_current;
             self.captured_inputs = self
                 .host
-                .capture_component_meta_inputs(&self.canonical, view);
+                .capture_component_meta_inputs(&self.canonical, view)
+                .await;
             return view.clone();
         }
 
@@ -269,10 +274,11 @@ where
             // as a coherent warm-peek snapshot even if the external
             // fingerprint happens to match.
             let snapshot_fp = self.host.current_view_supersession_fingerprint();
-            let (view, is_current) = self.host.snapshot_store_view_read();
+            let (view, is_current) = self.host.snapshot_store_view_read().await;
             let captured_inputs = self
                 .host
-                .capture_component_meta_inputs(&self.canonical, &view);
+                .capture_component_meta_inputs(&self.canonical, &view)
+                .await;
             if is_current && self.host.current_view_supersession_fingerprint() == snapshot_fp {
                 self.last_snapshot_supersession_fp = Some(snapshot_fp);
                 self.captured_inputs = captured_inputs;
@@ -293,10 +299,11 @@ where
         // the result is returned-only, never promoted. The same condition
         // also forbids the warm preflight hit (`snapshot_view_current`).
         let snapshot_fp = self.host.current_view_supersession_fingerprint();
-        let (view, is_current) = self.host.snapshot_store_view_read();
+        let (view, is_current) = self.host.snapshot_store_view_read().await;
         self.captured_inputs = self
             .host
-            .capture_component_meta_inputs(&self.canonical, &view);
+            .capture_component_meta_inputs(&self.canonical, &view)
+            .await;
         self.last_snapshot_supersession_fp = Some(snapshot_fp);
         let coherent =
             is_current && self.host.current_view_supersession_fingerprint() == snapshot_fp;
@@ -438,7 +445,42 @@ where
 /// stable bypass — a result computed against a now-stale (or non-current)
 /// fixed view is returned to the caller but not promoted. `None` runs the
 /// per-attempt snapshot-coherence path.
+///
+/// Driven here to its answer; production callers await
+/// [`run_component_meta_request_pollable`].
+#[cfg(test)]
 pub(crate) fn run_component_meta_request<H>(
+    host: &H,
+    singleflight: &SingleflightGroup<
+        ResolutionNodeKey,
+        StableExecutionValue<Option<H::Resolution>>,
+        (),
+    >,
+    canonical: &str,
+    mode: H::Mode,
+    fixed_store_view: Option<(&H::View, u64, bool)>,
+    max_attempts: usize,
+) -> ComponentMetaRequestResult<H::Resolution, H::AdmissionProof>
+where
+    H: ComponentMetaRequestHost,
+{
+    let _task = verter_execution::tasks::ExecutionScope::enter(singleflight.task_registry());
+    verter_execution::blocking::drive_pending(
+        verter_execution::blocking::WaitFamily::ResolverFlight,
+        std::pin::pin!(run_component_meta_request_pollable(
+            host,
+            singleflight,
+            canonical,
+            mode,
+            fixed_store_view,
+            max_attempts,
+        )),
+    )
+}
+
+/// [`run_component_meta_request`] as a pollable computation: the capture of
+/// its inputs and the flight it joins suspend it instead of parking.
+pub(crate) async fn run_component_meta_request_pollable<H>(
     host: &H,
     singleflight: &SingleflightGroup<
         ResolutionNodeKey,
@@ -456,8 +498,12 @@ where
     let mut executor =
         ComponentMetaRequestExecutor::new(host, canonical.to_string(), mode, max_attempts)
             .with_fixed_view(fixed_store_view);
-    let request = run_stable_request(singleflight, &mut executor)
-        .expect("component-meta request execution is infallible");
+    let driven = &mut executor;
+    let request = verter_execution::blocking::on_heap(move || {
+        run_stable_request_pollable(singleflight, driven)
+    })
+    .await
+    .expect("component-meta request execution is infallible");
     ComponentMetaRequestResult {
         request,
         admission: executor.last_admission,
@@ -563,7 +609,7 @@ mod tests {
 
         // Owns no `StoreViewManager`; after applying the synthetic churn
         // below, the returned stub view itself is current by construction.
-        fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+        async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
             // Model a concurrent external mutation landing DURING the
             // snapshot: the live fingerprint advances as the view is taken,
             // so any pre/post comparison straddling this build diverges.
@@ -584,7 +630,7 @@ mod tests {
             self.live_fp.get()
         }
 
-        fn capture_component_meta_inputs(
+        async fn capture_component_meta_inputs(
             &self,
             _canonical: &str,
             _store_view: &Self::View,

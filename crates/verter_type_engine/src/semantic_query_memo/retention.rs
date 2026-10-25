@@ -283,7 +283,8 @@ impl SemanticGraphStore {
     /// Charge the allocations a delivery hands its caller to that caller:
     /// pinned, never refused, and shared with every other holder of the
     /// same allocation — each carries its own charge, so a clone the caller
-    /// keeps past the delivery keeps it charged.
+    /// keeps past the delivery keeps it charged. This is the SETTLED
+    /// phase: a delivery that goes straight to its caller.
     pub(super) fn pin_delivered_allocations(
         &self,
         delivered: &super::delivery_lease::DeliveredAllocations<'_>,
@@ -295,6 +296,50 @@ impl SemanticGraphStore {
             rail.pin(self.charge_ctx());
         }
         result_handles(delivered.result).pin(self.charge_ctx());
+    }
+
+    /// Charge the allocations a delivery hands its caller as that
+    /// computation's IN-FLIGHT payload: ACTIVE — charged unconditionally,
+    /// never refused, shared with every other holder of the same
+    /// allocation — until the publication of a candidate that delivers
+    /// them adopts the charge into retention, or the delivery reaches its
+    /// caller handoff without one and the charge transfers to a pin
+    /// ([`Self::hand_off_delivered_allocations`]). Each allocation keeps
+    /// its one charge however it was first charged, so a clone the caller
+    /// keeps past the delivery keeps it charged.
+    pub(super) fn charge_delivered_in_flight(
+        &self,
+        delivered: &super::delivery_lease::DeliveredAllocations<'_>,
+    ) {
+        if let Some(diagnostics) = delivered.diagnostics.and_then(|list| list.owned()) {
+            diagnostics.charge_in_flight(self.charge_ctx());
+        }
+        if let Some(rail) = delivered.dep_signature.and_then(|rail| rail.owned()) {
+            rail.charge_in_flight(self.charge_ctx());
+        }
+        result_handles(delivered.result).charge_in_flight(self.charge_ctx());
+    }
+
+    /// Settle the still-in-flight charges of a delivery at its caller
+    /// handoff: the delivery is complete and its callers hold it, so each
+    /// [`verter_session_query::retention::ChargeClass::Active`] charge —
+    /// the delivered allocations' own and the lease's metadata — becomes
+    /// a pin. A publication that already adopted them (retained), or a
+    /// hold that was never in flight (pinned), keeps its class: the
+    /// handoff settles only what is still in flight.
+    pub(super) fn hand_off_delivered_allocations(
+        &self,
+        delivered: &super::delivery_lease::DeliveredAllocations<'_>,
+        lease: &super::delivery_lease::SemanticDeliveryLease,
+    ) {
+        if let Some(diagnostics) = delivered.diagnostics.and_then(|list| list.owned()) {
+            diagnostics.hand_off_in_flight();
+        }
+        if let Some(rail) = delivered.dep_signature.and_then(|rail| rail.owned()) {
+            rail.hand_off_in_flight();
+        }
+        result_handles(delivered.result).hand_off_in_flight();
+        lease.hand_off_in_flight();
     }
 
     /// Where this store's self-charged allocations are charged: its

@@ -417,13 +417,22 @@ defineProps<{ foo: string }>()
         .unwrap();
 
     let original_props = vec!["foo".to_string()];
-    let view = <VerterHost as ComponentMetaRequestHost>::snapshot_store_view_read(project.host()).0;
-    let captured = <VerterHost as ComponentMetaRequestHost>::capture_component_meta_inputs(
-        project.host(),
-        "/src/App.vue",
-        &view,
-    )
-    .expect("captured component-meta inputs should exist");
+    let view = project
+        .host()
+        .drive_for_tests(
+            <VerterHost as ComponentMetaRequestHost>::snapshot_store_view_read(project.host()),
+        )
+        .0;
+    let captured = project
+        .host()
+        .drive_for_tests(
+            <VerterHost as ComponentMetaRequestHost>::capture_component_meta_inputs(
+                project.host(),
+                "/src/App.vue",
+                &view,
+            ),
+        )
+        .expect("captured component-meta inputs should exist");
 
     project
         .upsert_base(

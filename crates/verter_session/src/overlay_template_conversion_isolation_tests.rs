@@ -173,7 +173,7 @@ fn overlay_meta_capture_serves_the_overlay_template_and_never_populates_the_base
     let view = overlay_view(&host);
 
     let captured = host
-        .capture_component_meta_inputs_with_view(CANONICAL, &view)
+        .drive_for_tests(host.capture_component_meta_inputs_with_view(CANONICAL, &view))
         .expect("the overlay capture lane must capture inputs");
 
     assert!(

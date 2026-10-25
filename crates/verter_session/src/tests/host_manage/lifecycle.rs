@@ -274,7 +274,7 @@ fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries()
     assert!(host.ensure_indexed_ready_serve(canonical).is_some());
     let base_store = host.resolver_store_view_read().into_owned_view();
     assert!(host
-        .capture_component_meta_inputs(canonical, &base_store)
+        .drive_for_tests(host.capture_component_meta_inputs(canonical, &base_store))
         .is_some());
     assert!(host.routed_shallow_state(canonical).is_some());
 
@@ -301,7 +301,7 @@ fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries()
 
     assert!(ctx.ensure_indexed_ready_serve(canonical).is_none());
     assert!(host
-        .capture_component_meta_inputs_with_view(canonical, &view)
+        .drive_for_tests(host.capture_component_meta_inputs_with_view(canonical, &view))
         .is_none());
     assert!(host
         .routed_shallow_state_with_view(canonical, Some(&view))
@@ -322,7 +322,7 @@ fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries()
 
     assert!(host.ensure_indexed_ready_serve(canonical).is_some());
     assert!(host
-        .capture_component_meta_inputs(canonical, &base_store)
+        .drive_for_tests(host.capture_component_meta_inputs(canonical, &base_store))
         .is_some());
     assert!(host.routed_shallow_state(canonical).is_some());
 

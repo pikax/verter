@@ -4134,3 +4134,52 @@ fn a_released_self_evaluating_operand_is_refused() {
         "the refusal is partial and never cached: {completeness:?}"
     );
 }
+
+#[test]
+fn a_warm_deferred_operand_needs_no_continuation_or_new_cost() {
+    use verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests;
+    use verter_type_engine::project_semantic_dispatch::evaluate::deferred_evaluation_frame_starts_for_tests;
+
+    let host = make_host();
+    let graph = host.project_type_store().semantic_graph();
+    let _scope = graph.enter_node_root_scope();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let object = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::semantic_query::SurfaceView::from_members(Vec::new(), None),
+    ));
+    let operand = graph.intern_node(SemanticNodeData::Alias(object));
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let operand_context = context.into_structural_transit_with_mode(ProjectionMode::Navigate);
+    assert_eq!(
+        dispatch.evaluate_deferred_outcome_for_tests(operand, operand_context),
+        (
+            object,
+            verter_type_engine::semantic_query::ResultCompleteness::Complete,
+            false
+        ),
+    );
+    let parent = graph.intern_node(SemanticNodeData::KeyOf { base: operand });
+    let before = deferred_evaluation_frame_starts_for_tests();
+    let (cold, cold_cost) = with_connected_work_capture_for_tests(|| {
+        dispatch.evaluate_deferred_outcome_for_tests(parent, context)
+    });
+    assert_primitive(&host, cold.0, PrimitiveKind::Never);
+    assert_eq!(
+        cold.1,
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
+    );
+    assert!(!cold.2);
+    assert_eq!(
+        deferred_evaluation_frame_starts_for_tests() - before,
+        1,
+        "only the cold parent needs a continuation; its operand already has a validated proof",
+    );
+    let (warm, warm_cost) = with_connected_work_capture_for_tests(|| {
+        dispatch.evaluate_deferred_outcome_for_tests(parent, context)
+    });
+    assert_eq!(warm, cold);
+    assert_eq!(
+        warm_cost, cold_cost,
+        "serving an operand preserves its logical cost"
+    );
+}

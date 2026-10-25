@@ -116,6 +116,58 @@ fn counted_only_global_primitive_vocabulary_is_permanent() {
     assert_eq!(arena.live_len(), 12);
 }
 
+/// Releasing the vocabulary hold destroys the vocabulary nobody holds,
+/// leaves a held vocabulary node and every other owned node readable, and
+/// an intern afterwards re-establishes permanence — on a fresh node and on
+/// the held one alike.
+#[test]
+fn released_vocabulary_drains_unheld_and_keeps_held_nodes() {
+    use crate::semantic_query::PrimitiveKind::*;
+    let arena = NodeArena::default();
+    drop(arena.intern_owned(SemanticNodeData::Primitive(String), NodeScopeId::Global));
+    let unheld = arena.intern_owned(SemanticNodeData::Primitive(Boolean), NodeScopeId::Global);
+    let unheld_id = unheld.id();
+    drop(unheld);
+    let held = arena.intern_owned(SemanticNodeData::Primitive(Number), NodeScopeId::Global);
+    let literal = arena.intern_owned(
+        SemanticNodeData::Literal(LiteralValue::String("kept".into())),
+        NodeScopeId::Global,
+    );
+    assert_eq!(arena.ownership_counts().permanent_nodes, 3);
+    assert_eq!(arena.live_len(), 4);
+
+    assert_eq!(arena.release_vocabulary(), 3);
+    assert_eq!(arena.ownership_counts().permanent_nodes, 0);
+    assert_eq!(arena.live_len(), 2, "only the held nodes survive");
+    assert!(arena.live_payload(unheld_id).is_none());
+    assert!(matches!(
+        arena.live_payload(held.id()).as_deref(),
+        Some(SemanticNodeData::Primitive(Number))
+    ));
+    assert!(arena.live_payload(literal.id()).is_some());
+    assert_eq!(
+        arena.release_vocabulary(),
+        0,
+        "nothing is permanent any more"
+    );
+
+    // A fresh intern of released vocabulary is a new permanent node.
+    let again = arena.intern_owned(SemanticNodeData::Primitive(Boolean), NodeScopeId::Global);
+    assert_ne!(again.id(), unheld_id, "ids are never reused");
+    drop(again);
+    assert_eq!(arena.ownership_counts().permanent_nodes, 1);
+    // An intern finding the held node makes it permanent again, so it
+    // outlives its holder; without the intern it dies with the holder.
+    let held_id = held.id();
+    drop(arena.intern_owned(SemanticNodeData::Primitive(Number), NodeScopeId::Global));
+    drop(held);
+    assert!(arena.live_payload(held_id).is_some());
+    assert_eq!(arena.ownership_counts().permanent_nodes, 2);
+    assert_eq!(arena.release_vocabulary(), 2);
+    drop(literal);
+    assert_eq!(arena.live_len(), 0);
+}
+
 #[test]
 fn counted_stale_child_is_refused_before_allocating_parent() {
     let arena = NodeArena::default();

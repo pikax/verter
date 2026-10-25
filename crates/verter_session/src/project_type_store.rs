@@ -20,7 +20,6 @@
 //! subsequent phases of the project-global overhaul — this module introduces
 //! the foundation without rewiring the hot path yet.
 
-use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -250,29 +249,34 @@ pub struct IndexedReady {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SourceParseKey(std::sync::OnceLock<Option<verter_language::ParseKey>>);
 
-impl IndexedReady {
-    pub(crate) fn cached_source_parse_key(&self) -> Option<Option<verter_language::ParseKey>> {
-        self.source_parse_key.0.get().cloned()
+impl SourceParseKey {
+    /// An identity already derived for the artifact's exact source revision
+    /// (its source snapshot's, [`crate::host_executor::HostSourceData::source_parse_key`]),
+    /// so the artifact never hashes its source for it. `None` records the
+    /// same refusal a derivation would reach.
+    pub(crate) fn derived(parse_key: Option<verter_language::ParseKey>) -> Self {
+        Self(std::sync::OnceLock::from(parse_key))
     }
+}
 
+impl IndexedReady {
     /// The exact parse identity of this artifact's source under its
     /// runtime language: its framework parse's key, or a plain script's,
-    /// derived from the whole source the first time it is asked for. The
-    /// same identity [`verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity`]
+    /// derived from the whole source the first time it is asked for unless
+    /// the artifact was seeded with it. The identity
+    /// [`verter_session_query::source::framework_parse::exact_source_parse_key`]
     /// derives (`None` where that refuses).
     pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
         self.source_parse_key
             .0
             .get_or_init(|| {
-                verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
-                    Arc::from(""),
-                    self.whole_hash,
+                verter_session_query::source::framework_parse::exact_source_parse_key(
                     self.raw_source.as_ref(),
-                    self.file_language.clone(),
-                    self.framework_parse.as_deref(),
-                    self.parse_env_hash,
+                    &self.file_language,
+                    self.framework_parse
+                        .as_deref()
+                        .map(crate::parse::carrier_parse_key),
                 )
-                .map(|key| key.parse_key)
             })
             .clone()
     }
@@ -1021,12 +1025,6 @@ pub struct ProjectTypeStore {
     /// transitive-only use; by it folds into the shared route /
     /// semantic-query layer.
     imported_roots: Arc<ImportedRootDb>,
-    /// Host-owned semantic-query memo table + node arena. Shared across
-    /// every consumer that resolves a `SemanticQueryKey` through the
-    /// shared query API.
-    semantic_graph: Arc<SemanticGraphStore>,
-    /// The construction lane of `semantic_graph`, minted with it.
-    construction: verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
     /// Owner direct-import surface cache. Direct owner imports
     /// resolve exactly once per owner version and every downstream stage
     /// reads the same entry.
@@ -1179,6 +1177,14 @@ pub struct ProjectTypeStore {
     close_stats: parking_lot::Mutex<SemanticCloseStats>,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
+    /// The construction lane of `semantic_graph`, minted with it.
+    construction: verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
+    /// Host-owned semantic-query memo table + node arena. Shared across
+    /// every consumer that resolves a `SemanticQueryKey` through the
+    /// shared query API. Declared last: every cache above that holds its
+    /// nodes, and its construction lane, drop first, so the graph's
+    /// teardown finds no holder beside its own caches.
+    semantic_graph: Arc<SemanticGraphStore>,
 }
 
 impl std::fmt::Debug for ProjectTypeStore {
@@ -1311,7 +1317,7 @@ impl ProjectTypeStore {
                 provenance.map(|provenance| Arc::clone(&provenance.engine)),
                 store_account,
                 &counters.component_meta_cache_live,
-                task_registry,
+                task_registry.clone(),
                 memo_family_bound,
             );
         // The production semantic context is a process-permanent record.
@@ -1342,7 +1348,7 @@ impl ProjectTypeStore {
             indexed,
             analysis,
             routes: Arc::new(RouteDb::new()),
-            imported_roots: Arc::new(ImportedRootDb::new()),
+            imported_roots: Arc::new(ImportedRootDb::with_task_registry(task_registry)),
             semantic_graph,
             construction,
             owner_import_surfaces,

@@ -90,12 +90,17 @@ import type its specifier and ten, then each qualifier name and separator; a typ
 alone. A part with no checker type (an `Opaque` error carrier) is cut. Generic mapped types count their key constraint, parameter name, remap and template
 in builder order, then ten bytes for the mapping. Closed mappings, spread
 alternatives and anonymous peer-merged declarations are prepared by the consumer
-before display; display itself never evaluates. Generic spreads separate closed
-property groups, each evaluated by the shared spread producer, and print their
-ordered intersection with the type parameters. Repeated generic operands are
-deduplicated before splitting closed groups, preserving subsequent overwrite
-semantics. A spread of `any` retains the ordinary dynamic relation rather than
-being rejected as an object against a primitive. Open positive evidence is never
+before display; display itself never evaluates. The shared spread evaluator
+composes each nested construction's evaluated type before its parent. Generic
+spreads print ordered intersections with closed property groups. Canonical
+intersection construction deduplicates repeated generic operands across nested
+intersections; a non-generic right operand merges only with the left
+intersection's final non-generic group, through the shared spread producer.
+Independent generic right operands retain their own groups, including property
+conflicts. The canonical discriminant reduction recognizes `boolean` as the
+implicit union of literal types, so conflicting groups can reduce to `never`.
+Primitive-target relations read the same evaluated type, preserving bottom
+assignability. A spread of `any` retains the ordinary dynamic relation. Open positive evidence is never
 interned as a closed object. An authored `infer` constraint
 prints with `extends` unless its position already infers that constraint (a
 template span, rest element/parameter, mapped key or a mapped value matched

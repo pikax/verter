@@ -492,6 +492,12 @@ pub struct DeclBodyMemo {
     /// Arena-free, no lowered types; built once through the retained
     /// snapshot on first Flow demand.
     function_index: Arc<FunctionIndexDemand>,
+    /// The retained snapshot's macro field-address table, built on the
+    /// first field-payload demand and read by every later one, so a
+    /// component's `N` field payloads replay the macro assembly once, not
+    /// `N` times. Content-free spans and ordinals, valid exactly as long as
+    /// the snapshot this memo's key names.
+    macro_field_addresses: Arc<OnceLock<Arc<verter_semantic::analysis::MacroFieldAddressTable>>>,
     raw_surfaces:
         crate::per_file_map::PerFileMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
     /// Transient body parts a batched demand ([`prime_type_bodies`]) kept
@@ -583,6 +589,7 @@ impl DeclBodyMemo {
             aug_value_entries: crate::per_file_map::per_file_map(),
             whole_env: OnceLock::new(),
             function_index,
+            macro_field_addresses: Arc::default(),
             raw_surfaces: crate::per_file_map::per_file_map(),
             primed_type_parts: parking_lot::Mutex::new(Vec::new()),
         }
@@ -645,6 +652,7 @@ impl DeclBodyMemo {
             aug_value_entries: crate::per_file_map::per_file_map(),
             whole_env: OnceLock::new(),
             function_index,
+            macro_field_addresses: Arc::default(),
             raw_surfaces: crate::per_file_map::per_file_map(),
             primed_type_parts: parking_lot::Mutex::new(Vec::new()),
         };
@@ -2934,10 +2942,11 @@ impl DeclBodyMemo {
     /// [`MacroPayloadPosition::Field`] deref source. Lease-only; same
     /// outcome semantics as [`Self::transient_type_parts`].
     ///
-    /// The position replays the analyzer's OWN macro assembly
-    /// ([`verter_semantic::analysis::lower_macro_field_payload_at`] — one
+    /// The position is read from the analyzer's OWN macro assembly
+    /// ([`verter_semantic::analysis::MacroFieldAddressTable`] — one
     /// macro-ordinal / field-ordinal addressing engine, mint side and deref
-    /// side cannot drift) over THIS memo's retained snapshot. The yielded
+    /// side cannot drift), replayed over THIS memo's retained snapshot once
+    /// and shared by every field demand. The yielded
     /// [`MacroFieldPayloadLowering`] keeps the authored absences typed
     /// (`Unauthored` / `NoField`) so the deref maps each to its exact
     /// fail-closed error — never a fabricated body.
@@ -2955,15 +2964,33 @@ impl DeclBodyMemo {
         };
         self.ensure_lease();
         let owner_table = Arc::clone(&self.owner_table);
+        let addresses = Arc::clone(&self.macro_field_addresses);
+        let counters = Arc::clone(&self.counters);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
+            let addresses = addresses.get_or_init(|| {
+                let table = verter_semantic::analysis::MacroFieldAddressTable::build(
+                    program,
+                    source,
+                    owner_table.as_ref(),
+                );
+                counters
+                    .macro_field_address_builds
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(feature = "semantic-observe")]
+                counters
+                    .macro_field_address_work
+                    .fetch_add(table.work(), std::sync::atomic::Ordering::Relaxed);
+                Arc::new(table)
+            });
             Some(
                 verter_semantic::analysis::lower_macro_field_payload_at_with_owners(
                     program,
                     source,
                     owner_table.as_ref(),
+                    addresses,
                     owner,
                     macro_index,
                     field_index,

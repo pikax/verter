@@ -744,6 +744,42 @@ pub(crate) fn framework_parse_facts(
     facts
 }
 
+/// The parse identity a carrier's framework parse recorded, with the
+/// adapter and carrier language that recorded it, borrowed from the
+/// artifact. (The borrowed key type lives in `verter_session_query`, which
+/// may not depend on the compiler crate that owns the artifact, so the
+/// projection lives here.)
+pub(crate) fn carrier_parse_key(
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+) -> verter_session_query::source::framework_parse::CarrierParseKey<'_> {
+    verter_session_query::source::framework_parse::CarrierParseKey {
+        adapter_id: artifact.adapter_id(),
+        language_id: artifact.language_id(),
+        parse_key: artifact.parse_key(),
+    }
+}
+
+/// The exact parse identity of `source` read as a file of `file_language`,
+/// with no parse of it in hand: a carrier's is the identity its
+/// registered-grammar publication records (delimiters and custom elements
+/// included), so it equals the key a carrier parse of the same bytes
+/// records; any other file's is its default-options identity. `None` where
+/// the language has no such identity.
+pub(crate) fn source_parse_key_for(
+    source: &str,
+    file_language: &verter_language::FileLanguage,
+) -> Option<verter_language::ParseKey> {
+    if file_language.is_framework_carrier() {
+        crate::carrier_publication_store::registered_carrier_parse_key(source, file_language)
+    } else {
+        verter_session_query::source::framework_parse::exact_source_parse_key(
+            source,
+            file_language,
+            None,
+        )
+    }
+}
+
 /// The parser-owned non-script mode inputs carried by a neutral parse artifact.
 ///
 /// Svelte captures `<svelte:options runes={...}>` during its single carrier

@@ -7,6 +7,17 @@ use std::sync::Arc;
 use super::arena::NodeArenaCore;
 use crate::semantic_query::{QueryError, SemanticNodeId};
 
+#[cfg(test)]
+thread_local! {
+    static ROOT_OWNER_CONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Actual shared root-owner allocations constructed on this thread.
+#[cfg(test)]
+pub(crate) fn root_owner_constructions_for_tests() -> usize {
+    ROOT_OWNER_CONSTRUCTIONS.with(std::cell::Cell::get)
+}
+
 struct RootOwner {
     arena: Arc<NodeArenaCore>,
     ids: RootIds,
@@ -158,6 +169,18 @@ impl NodeRootSet {
         self.capture_in_scope();
     }
 
+    /// An internal memo's delivery of these roots. It follows the same
+    /// task, carrier and nested-scope lifetime as a public delivery without
+    /// allocating another owner around an already shared root owner.
+    pub(crate) fn retain_for_delivery(&self) {
+        if self.0.is_some() {
+            NodeRootScope::capture_construction_delivery(
+                ConstructionDelivery::Roots(self.clone()),
+                self.arena_identity(),
+            );
+        }
+    }
+
     fn arena(&self) -> Option<Arc<NodeArenaCore>> {
         self.0.as_ref().map(|owner| Arc::clone(&owner.arena))
     }
@@ -185,8 +208,45 @@ impl NodeRootSet {
             return Ok(Self::default());
         }
         arena.retain(&ids)?;
+        #[cfg(test)]
+        ROOT_OWNER_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
         Ok(Self(Some(
             verter_session_query::retention::owned::Owned::new(RootOwner { arena, ids }),
+        )))
+    }
+
+    /// Validate the input and result atomically, sharing the existing
+    /// input owner and acquiring only a distinct result. The receipt keeps
+    /// its input; this result owner never enters the receipt.
+    pub(crate) fn retain_evaluation_result(
+        &self,
+        graph: &super::SemanticGraphStore,
+        input: SemanticNodeId,
+        result: SemanticNodeId,
+    ) -> Result<Self, QueryError> {
+        if !self.belongs_to(&graph.arena.core) {
+            return Err(QueryError::ForeignSemanticOperand);
+        }
+        self.node_ref(input)?;
+        let acquire = if input == result {
+            &[][..]
+        } else {
+            std::slice::from_ref(&result)
+        };
+        graph
+            .arena
+            .core
+            .retain_validated(&[input, result], acquire)?;
+        if input == result {
+            return Ok(self.clone());
+        }
+        #[cfg(test)]
+        ROOT_OWNER_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+        Ok(Self(Some(
+            verter_session_query::retention::owned::Owned::new(RootOwner {
+                arena: Arc::clone(&graph.arena.core),
+                ids: smallvec::smallvec![result],
+            }),
         )))
     }
 
@@ -288,6 +348,8 @@ impl NodeRoot {
         Self { id, roots }
     }
     pub(crate) fn adopt(arena: Arc<NodeArenaCore>, id: SemanticNodeId) -> Self {
+        #[cfg(test)]
+        ROOT_OWNER_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
         Self {
             id,
             roots: NodeRootSet(Some(verter_session_query::retention::owned::Owned::new(
@@ -538,7 +600,7 @@ struct ConstructionOwners {
     /// arena: each holds the one count its intern took, released together
     /// when the owner closes.
     constructed: Vec<SemanticNodeId>,
-    deliveries: Vec<super::delivery_lease::SemanticDeliveryLease>,
+    deliveries: Vec<ConstructionDelivery>,
     /// Result carriers handed to this owner ([`Constructed::into_value_in`]),
     /// kept until it closes.
     held: Vec<ConstructionHold>,
@@ -546,6 +608,40 @@ struct ConstructionOwners {
     /// of one delivery names the same owner, so an owner keeps it once
     /// however often it is read or cloned under this owner.
     delivered: DeliveredOwners,
+}
+
+/// The owner a construction consumes: a full public delivery, or the
+/// counted roots an internal node-only memo already owns. Both use the
+/// same capture and promotion protocol.
+enum ConstructionDelivery {
+    Lease(super::delivery_lease::SemanticDeliveryLease),
+    Roots(NodeRootSet),
+}
+
+impl ConstructionDelivery {
+    fn owner_identity(&self) -> Option<usize> {
+        match self {
+            Self::Lease(lease) => lease.owner_identity(),
+            Self::Roots(roots) => roots
+                .0
+                .as_ref()
+                .map(verter_session_query::retention::owned::Owned::addr),
+        }
+    }
+
+    fn share(&self) -> Self {
+        match self {
+            Self::Lease(lease) => Self::Lease(lease.share()),
+            Self::Roots(roots) => Self::Roots(roots.clone()),
+        }
+    }
+
+    fn roots(&self) -> &[SemanticNodeId] {
+        match self {
+            Self::Lease(lease) => lease.roots(),
+            Self::Roots(roots) => roots.operands(),
+        }
+    }
 }
 
 impl Drop for ConstructionOwners {
@@ -622,10 +718,7 @@ impl ConstructionOwners {
 
     /// Keep `lease` unless this owner already holds its delivery; a
     /// repeat is handed back for the caller to drop.
-    fn adopt(
-        &mut self,
-        lease: super::delivery_lease::SemanticDeliveryLease,
-    ) -> Option<super::delivery_lease::SemanticDeliveryLease> {
+    fn adopt(&mut self, lease: ConstructionDelivery) -> Option<ConstructionDelivery> {
         match lease.owner_identity() {
             Some(owner) if !self.delivered.insert(owner) => Some(lease),
             _ => {
@@ -883,6 +976,10 @@ impl NodeRootScope {
         lease: super::delivery_lease::SemanticDeliveryLease,
         arena: Option<usize>,
     ) {
+        Self::capture_construction_delivery(ConstructionDelivery::Lease(lease), arena);
+    }
+
+    fn capture_construction_delivery(lease: ConstructionDelivery, arena: Option<usize>) {
         let mut lease = Some(lease);
         SCOPES.with(|scopes| {
             let mut scopes = scopes.borrow_mut();

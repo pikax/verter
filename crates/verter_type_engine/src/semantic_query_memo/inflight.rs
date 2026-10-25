@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{DepSignature, QueryError, QueryResult, SemanticQueryValue};
@@ -20,17 +20,19 @@ use super::prepared::PreparedKeyHandle;
 
 /// Same-key production cell for one in-flight semantic query.
 ///
-/// The inner mutex guards `state` exclusively; `ready` is signalled when
-/// the winner publishes. Joiners wait on `ready` via `wait_while`, so they
-/// do not busy-retry. Ownership is released when the cell is retired from
-/// the store's flight table after completion, abort, or panic.
+/// The inner mutex guards `state` exclusively. A joiner registers its waker
+/// in `state` while the flight is unresolved, and the winner wakes every
+/// registration once it publishes or aborts, so joiners do not busy-retry.
+/// Ownership is released when the cell is retired from the store's flight
+/// table after completion, abort, or panic.
 pub struct FlightCell {
     pub(super) site: crate::semantic_query::checker_policy::TupleSplicePosition,
     pub(super) state: Mutex<InflightState>,
-    pub(super) ready: Condvar,
-    /// The cell's block and its slot in the flight table, pinned for as
+    /// The cell's block and its slot in the flight table, charged for as
     /// long as the cell lives — through every subscriber that still holds
-    /// it after the flight retires. A flight is live work, never refused.
+    /// it after the flight retires. A flight is in-flight computation the
+    /// dispatcher already admitted: its storage is charged ACTIVE, never
+    /// refused, and the charge falls when the last holder drops the cell.
     _storage: Option<verter_session_query::retention::RetentionCharge>,
 }
 
@@ -128,26 +130,25 @@ pub(super) struct InflightState {
 
 impl FlightCell {
     /// Wake every subscriber after the flight resolved (completed or
-    /// aborted) under its lock: the blocking ones on the condvar, the
-    /// polling ones through their registered wakers. A poll registers its
-    /// waker only after finding the flight unresolved under the same lock,
-    /// so every waker registered before the resolution is taken here and
-    /// none is registered after it.
+    /// aborted) under its lock, through their registered wakers. A
+    /// subscriber, polling or blocking, registers its waker only after
+    /// finding the flight unresolved under the same lock, so every waker
+    /// registered before the resolution is taken here and none is
+    /// registered after it.
     pub(super) fn wake_subscribers(&self) {
-        self.ready.notify_all();
         let wakers = self.state.lock().wakers.take();
         wakers.wake();
     }
 
-    /// An unclaimed cell whose storage is pinned against `account`.
+    /// An unclaimed cell whose storage is charged as in-flight work
+    /// against `account`.
     pub(super) fn charged(
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
             site: Default::default(),
             state: Mutex::new(InflightState::default()),
-            ready: Condvar::new(),
-            _storage: Some(account.pin(flight_storage_bytes())),
+            _storage: Some(account.reserve_in_flight(flight_storage_bytes())),
         }
     }
 
@@ -159,7 +160,6 @@ impl FlightCell {
         Self {
             site: Default::default(),
             state: Mutex::new(InflightState::default()),
-            ready: Condvar::new(),
             _storage: None,
         }
     }
@@ -322,8 +322,9 @@ pub struct InlineMemberFlight {
     /// The member's decided value, owned from the moment its component
     /// closes until the batched publish stages it: the construction scope
     /// that computed it may close first.
-    /// The root set's own block is pinned against the store's retention
-    /// account for as long as it is held.
+    /// The root set's own block is charged as in-flight work against the
+    /// store's retention account for as long as it is held — ACTIVE
+    /// until the batched publish or the abort ends the hold.
     held: Option<(
         super::node_roots::NodeRootSet,
         verter_session_query::retention::shared::CallerHold,
@@ -362,7 +363,7 @@ impl InlineMemberFlight {
         }
         match graph.root_nodes(nodes) {
             Ok(roots) => {
-                let charge = verter_session_query::retention::shared::CallerHold::pin(
+                let charge = verter_session_query::retention::shared::CallerHold::in_flight(
                     graph.retention_account(),
                     roots.heap_bytes(),
                 );
@@ -503,7 +504,7 @@ pub struct FlightRendezvousObservation {
 pub(super) struct FlightRendezvousShared {
     key: crate::semantic_query::SemanticQueryKey,
     state: Mutex<FlightRendezvousState>,
-    changed: Condvar,
+    changed: parking_lot::Condvar,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
@@ -832,7 +833,7 @@ impl super::SemanticGraphStore {
         let shared = Arc::new(FlightRendezvousShared {
             key,
             state: Mutex::new(FlightRendezvousState::default()),
-            changed: Condvar::new(),
+            changed: parking_lot::Condvar::new(),
         });
         self.flight_rendezvous.lock().push(Arc::clone(&shared));
         self.flight_rendezvous_armed

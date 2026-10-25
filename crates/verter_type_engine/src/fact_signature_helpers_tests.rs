@@ -228,3 +228,77 @@ fn cacheability_probe_preserves_mutation_and_provenance_refusals() {
         FactReadSetFinalise::MutationUnstable
     ));
 }
+
+#[test]
+fn a_completed_structural_carrier_shares_its_whole_file_name() {
+    let canonical: Arc<str> = Arc::from("/shared-name.ts");
+    let facts: Arc<[FactVersionRef]> = Arc::from([FactVersionRef::FileWholeHash {
+        canonical_id: Arc::clone(&canonical),
+        hash: [9; 16],
+    }]);
+    let (served, roots) = shared_completed_carrier_rooting_traced_files(&[], &facts)
+        .expect("one canonical whole-file fact completes the carrier");
+    assert!(Arc::ptr_eq(&served, &facts));
+    assert_eq!(roots.len(), 1);
+    assert!(
+        Arc::ptr_eq(&roots[0], &canonical),
+        "completion must share the fact's allocation for its self-root name"
+    );
+}
+
+#[test]
+fn sealed_structural_completion_reuses_order_proof_and_name_allocations() {
+    let signature = verter_session_query::facts::fact_read_set::seal_fact_signature(
+        (0..32)
+            .map(|index| FactVersionRef::FileWholeHash {
+                canonical_id: Arc::from(format!("/shared-{index:03}.ts")),
+                hash: [6; 16],
+            })
+            .collect(),
+    );
+    let before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
+    let raw = shared_completed_structural_carrier(&[], signature.as_arc(), &[]).unwrap();
+    let raw_work = verter_session_query::facts::fact_read_set::signature_work_for_tests() - before;
+    let before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
+    let sealed = shared_completed_structural_carrier_sealed(&[], &signature, &[]).unwrap();
+    let sealed_work =
+        verter_session_query::facts::fact_read_set::signature_work_for_tests() - before;
+    assert_eq!(raw, sealed);
+    assert_eq!(raw_work - sealed_work, signature.len() - 1);
+
+    let completed = shared_completed_carrier_rooting_sealed_files(&[], &signature).unwrap();
+    assert_eq!(completed.1.len(), signature.len());
+    for (fact, root) in signature.iter().zip(completed.1.iter()) {
+        let FactVersionRef::FileWholeHash { canonical_id, .. } = fact else {
+            panic!("the fixture has only whole-file facts");
+        };
+        assert!(Arc::ptr_eq(canonical_id, root));
+    }
+}
+
+#[test]
+fn sealed_root_completion_still_rejects_conflicting_observed_versions() {
+    let canonical = verter_type_expr::OwnedStr::from("/conflict.ts");
+    let signature = verter_session_query::facts::fact_read_set::seal_fact_signature(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: Arc::from("/conflict.ts"),
+            hash: [1; 16],
+        },
+        FactVersionRef::FileWholeHash {
+            canonical_id: Arc::from("/conflict.ts"),
+            hash: [2; 16],
+        },
+    ]);
+    assert!(shared_completed_carrier_rooting_sealed_files(&[], &signature).is_none());
+    let signature = verter_session_query::facts::fact_read_set::seal_fact_signature(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: Arc::from("/conflict.ts"),
+            hash: [1; 16],
+        },
+    ]);
+    assert!(shared_completed_carrier_rooting_sealed_files(
+        &[(canonical.clone(), [1; 16]), (canonical, [2; 16])],
+        &signature,
+    )
+    .is_none());
+}

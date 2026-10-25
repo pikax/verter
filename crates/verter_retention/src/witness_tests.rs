@@ -8,7 +8,6 @@ use crate::{RetentionLimits, SemanticRetentionAccount};
 fn account() -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: 1 << 30,
-        active_ceiling_bytes: 1 << 30,
         max_entry_bytes: 1 << 30,
         pin_threshold_bytes: 1 << 30,
     })

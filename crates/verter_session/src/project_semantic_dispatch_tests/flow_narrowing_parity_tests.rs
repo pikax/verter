@@ -3236,6 +3236,12 @@ declare const k: "a";
 enum E {{ A = "a", N = 1 }}
 export function repeated<T extends object>(x: T) {{ const y = {{ ...x, a: 1, ...x, b: true }}; return one(y); }}
 export function overwritten<T extends object>(x: T) {{ const a = {{ p: 1 }}; const b = {{ p: true }}; const y = {{ ...x, ...a, ...x, ...b }}; return one(y); }}
+export function nested_repeated<T extends object,U extends object>(x:T,z:U) {{ const a={{q:1,...x,a:1,...z}}; const y={{...z,b:1,...a,c:true}}; return one(y); }}
+export function nested_disjoint<T extends object>(x:T) {{ const y={{...{{...x,p:1}},...{{...x,q:true}}}}; return one(y); }}
+export function nested_conflict<T extends object>(x:T) {{ const a={{...x,p:1}}; const b={{...x,p:true}}; const y={{...a,...b}}; return one(y); }}
+export function nested_bounded<T extends object>(x:T) {{ const y={{...x,...{{p:1}},...{{...x,p:true}}}}; return one(y); }}
+export function nested_nondiscriminant<T extends object>(x:T) {{ const a={{...x,p:1}}; const b={{...x,p:"s"}}; const y={{...a,...b}}; return one(y); }}
+export function nested_overwrite<T extends object>(x:T) {{ const a={{...x,p:1}}; const y={{...a,p:true}}; return one(y); }}
 export function literal(x: {{ [k]: number }}) {{ return one(x); }}
 export function enumeration(x: {{ [E.A]: number; [E.N]: string }}) {{ return one(x); }}
 export function wide(x: {{ padding: "{padding}"; [k]: number; tail: boolean; last: string }}) {{ return one(x); }}
@@ -3255,6 +3261,21 @@ export function enum_wide(x: {{ padding: "{padding}"; [E.A]: number; tail: boole
             Some("T & { a: number; b: boolean; }".to_owned()),
         ),
         ("overwritten", Some("T & { p: boolean; }".to_owned())),
+        (
+            "nested_repeated",
+            Some("U & { b: number; } & { q: number; } & T & { a: number; c: boolean; }".to_owned()),
+        ),
+        (
+            "nested_disjoint",
+            Some("T & { p: number; } & { q: boolean; }".to_owned()),
+        ),
+        ("nested_conflict", None),
+        ("nested_bounded", None),
+        (
+            "nested_nondiscriminant",
+            Some("T & { p: number; } & { p: string; }".to_owned()),
+        ),
+        ("nested_overwrite", Some("T & { p: boolean; }".to_owned())),
         ("literal", Some("{ a: number; }".to_owned())),
         ("enumeration", Some("{ a: number; 1: string; }".to_owned())),
         (

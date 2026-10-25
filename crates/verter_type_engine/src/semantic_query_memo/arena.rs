@@ -68,10 +68,20 @@
 //! children lose the edge it held and are destroyed in turn when that was
 //! their last owner — so a node lives exactly as long as something that
 //! can still read it. The twelve `Global` primitive vocabulary nodes are the
-//! only permanent slots; provenance and the per-node sidecars own nothing.
+//! only permanent slots: the store's own hold on them, which a host close
+//! gives up once its caches are released (`release_vocabulary`) and the next
+//! intern re-establishes. Provenance and the per-node sidecars own nothing.
 //! There is no canonical sweep: a document close evicts the CACHE owners
 //! bound to the closed content (`release.rs`), and a node a caller still
 //! holds stays readable until that caller drops it.
+//!
+//! **A store's teardown releases its graph at once.** While the owning
+//! store drops its caches, their root releases are deferred
+//! ([`ArenaTeardown`]); once every cache is gone, an arena no one else holds
+//! drops whole — its storage charge, every payload and the dedup index go
+//! together, with no per-node release — and an arena a reader still holds
+//! releases the deferred roots as they would have released, so what that
+//! reader can reach, and only that, stays live and charged.
 //!
 //! The id space is append-only — a `SemanticNodeId` is a raw `u64` index
 //! with no generation tag, so an id is NEVER reused: a stale ordinal
@@ -133,6 +143,12 @@ pub const UNALLOCATABLE_ID_FLOOR: u64 = 1 << 62;
 pub struct NodePayload {
     data: SemanticNodeData,
     release: OnceLock<Box<HeldRelease>>,
+    /// The construction (by id, zero for the settled storage pin) this
+    /// payload's block and heap were charged to when the arena allocated
+    /// them: the payload's eventual release pays THAT owner, so an older
+    /// allocation freed during a later construction never pays the open
+    /// construction's ACTIVE charge.
+    charge_owner: std::sync::atomic::AtomicU64,
 }
 
 /// What the last holder of a released payload gives back: its block and
@@ -140,13 +156,140 @@ pub struct NodePayload {
 struct HeldRelease {
     charges: Arc<parking_lot::Mutex<ArenaCharges>>,
     scope: NodeScopeId,
+    /// The freed payload's charging owner
+    /// ([`NodePayload::charge_owner`]).
+    owner: u64,
 }
 
 impl Drop for NodePayload {
     fn drop(&mut self) {
         if let Some(held) = self.release.take() {
-            held.charges.lock().release_payload(&self.data, &held.scope);
+            held.charges
+                .lock()
+                .release_payload(&self.data, &held.scope, held.owner);
         }
+    }
+}
+
+/// Identity of the next construction ownership opened on any arena: unique
+/// among every live scope, so a guard closes exactly its own.
+fn next_construction_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// One construction a thread opened, stacked with the constructions its
+/// thread encloses: the token names the arena — by its charge lock's
+/// identity — and the construction, so an allocation on that thread charges
+/// the construction ITS OWN producer opened, never whichever construction
+/// any thread on the shared arena opened last.
+#[derive(Clone, Copy)]
+struct ConstructionToken {
+    charges: usize,
+    id: u64,
+}
+
+std::thread_local! {
+    /// The constructions open on this thread, innermost last.
+    static OPEN_CONSTRUCTIONS: std::cell::RefCell<Vec<ConstructionToken>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The construction the CURRENT thread opened on the arena whose charges
+/// are identified by `charges`, innermost first.
+fn current_thread_construction(charges: usize) -> Option<u64> {
+    OPEN_CONSTRUCTIONS.with(|open| {
+        open.borrow()
+            .iter()
+            .rev()
+            .find(|token| token.charges == charges)
+            .map(|token| token.id)
+    })
+}
+
+/// Record `token`'s construction as open on this thread.
+fn open_thread_construction(token: ConstructionToken) {
+    OPEN_CONSTRUCTIONS.with(|open| open.borrow_mut().push(token));
+}
+
+/// Remove this thread's record of the construction `token` names, wherever
+/// it sits in the thread's stack.
+fn close_thread_construction(token: &ConstructionToken) {
+    OPEN_CONSTRUCTIONS.with(|open| {
+        open.borrow_mut()
+            .retain(|held| held.charges != token.charges || held.id != token.id);
+    });
+}
+
+/// Construction ownership over the arena's freshly allocated storage: the
+/// payload blocks, their heap and the slot storage this arena allocates
+/// while the guard is open — on the OPENING THREAD, whose allocations the
+/// guard's construction owns — are charged as the opening computation's
+/// IN-FLIGHT payload — [`ChargeClass::Active`], charged unconditionally —
+/// instead of joining the settled storage pin, so a cold construction owns
+/// its fresh graph bytes exactly once before its delivery settles them.
+///
+/// Dropping the guard settles the construction: its remaining charge hands
+/// off ACTIVE→PINNED into the arena's storage pin, in one transition per
+/// granule, and the owned payload cells it charged in flight settle with
+/// it — so the bytes stay charged throughout, never released, never
+/// doubled, however the producer ends (publication, caller handoff,
+/// cancellation, failure or panic).
+///
+/// [`ChargeClass::Active`]: verter_session_query::retention::ChargeClass::Active
+pub(crate) struct ConstructionChargeGuard {
+    charges: Arc<parking_lot::Mutex<ArenaCharges>>,
+    token: ConstructionToken,
+}
+
+impl Drop for ConstructionChargeGuard {
+    fn drop(&mut self) {
+        close_thread_construction(&self.token);
+        let mut charges = self.charges.lock();
+        let Some(open) = charges.construction.remove(&self.token.id) else {
+            return;
+        };
+        let pin = charges.storage.get_or_insert_with(|| {
+            verter_session_query::retention::granular::GranularPin::new(
+                &open.account,
+                ARENA_STORAGE_GRANULE,
+            )
+        });
+        open.charge.settle_into(pin);
+        for handles in &open.handles {
+            handles.hand_off_in_flight();
+        }
+    }
+}
+
+impl NodeArenaCore {
+    /// Open a construction ownership over this arena's fresh allocations:
+    /// while the returned guard is open, every payload block, payload heap
+    /// and slot storage this arena allocates ON THIS THREAD is charged
+    /// ACTIVE against `account` as the opening computation's in-flight
+    /// payload, and the guard's drop settles the remainder into the arena's
+    /// storage pin.
+    pub(crate) fn open_construction_charge(
+        &self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> ConstructionChargeGuard {
+        let charges = self.inner.read().charges.clone();
+        let token = ConstructionToken {
+            charges: Arc::as_ptr(&charges) as usize,
+            id: next_construction_id(),
+        };
+        charges.lock().construction.insert(
+            token.id,
+            OpenConstruction {
+                account: Arc::clone(account),
+                charge: verter_session_query::retention::granular::GranularInFlight::new(
+                    ARENA_STORAGE_GRANULE,
+                ),
+                handles: Vec::new(),
+            },
+        );
+        open_thread_construction(token);
+        ConstructionChargeGuard { charges, token }
     }
 }
 
@@ -161,6 +304,7 @@ impl NodeData {
         Self(Arc::new(NodePayload {
             data,
             release: OnceLock::new(),
+            charge_owner: std::sync::atomic::AtomicU64::new(0),
         }))
     }
 
@@ -591,6 +735,10 @@ struct Chunk {
     /// Each live slot's dedup fingerprint, recorded when it was interned:
     /// a release finds the slot's bucket without hashing its payload again.
     fingerprints: Box<[u64]>,
+    /// The construction (zero for the settled storage pin) this chunk's
+    /// storage was charged to when it was created: the chunk's drop pays
+    /// that owner.
+    charge_owner: u64,
     /// Slots of this chunk still holding a payload; the chunk is dropped
     /// when it reaches zero.
     live: usize,
@@ -607,6 +755,7 @@ impl Chunk {
                 .map(|_| std::sync::atomic::AtomicBool::new(false))
                 .collect(),
             fingerprints: vec![0; CHUNK_LEN].into_boxed_slice(),
+            charge_owner: 0,
             live: 0,
         }
     }
@@ -837,19 +986,57 @@ struct ArenaCharges {
     /// reaches, keyed by address: a payload, or an enclosing shared
     /// allocation. An allocation is charged when it gains its first owner
     /// and released with its last, so one shared between many payloads
-    /// (`PayloadArray::share`) is charged once.
-    shared_heap: rustc_hash::FxHashMap<usize, usize>,
+    /// (`PayloadArray::share`) is charged once — by the owner that first
+    /// charged it, which its last owner's release pays back.
+    shared_heap: rustc_hash::FxHashMap<usize, SharedHeapCharge>,
+    /// Every construction open on this arena, keyed by id: an allocation
+    /// charges the construction the ALLOCATING THREAD's producer opened
+    /// ([`current_thread_construction`]) — ACTIVE, unconditionally — by
+    /// key, never by scanning, because a deep recursion keeps one
+    /// construction open per level and the hot allocation path must not
+    /// pay the depth. A release pays the owner recorded at charge time, so
+    /// concurrent producers on the shared arena own their fresh storage
+    /// separately and a freed allocation never pays another owner's
+    /// charge. A construction's settlement hands its remainder to the
+    /// storage pin (see [`ConstructionChargeGuard`]).
+    construction: rustc_hash::FxHashMap<u64, OpenConstruction>,
+}
+
+/// One shared allocation in the arena's heap ledger: how many charged
+/// payloads reach it, and the construction (zero for the settled storage
+/// pin) that first charged it — the owner its last owner's release pays.
+struct SharedHeapCharge {
+    owners: usize,
+    charged_to: u64,
+}
+
+/// One open construction ownership over this arena's freshly allocated
+/// storage, keyed by its id in [`ArenaCharges::construction`].
+struct OpenConstruction {
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    charge: verter_session_query::retention::granular::GranularInFlight,
+    /// The owned payload cells this construction charged in flight —
+    /// ACTIVE, by their own cells — settled with the construction at its
+    /// guard's drop. Appended per fresh allocation without dedup: a cell
+    /// charges once and the settle hands a still-ACTIVE charge off
+    /// idempotently, so a repeated cell costs one no-op entry, never the
+    /// quadratic scan a growing dedup would take.
+    handles: Vec<verter_session_query::retention::owned::OwnedHandles>,
 }
 
 /// Bytes one bucket of the arena's shared-heap table holds: its key, its
-/// owner count and its control byte.
-const SHARED_HEAP_BUCKET_BYTES: usize = std::mem::size_of::<(usize, usize)>() + 1;
+/// owner record and its control byte.
+const SHARED_HEAP_BUCKET_BYTES: usize = std::mem::size_of::<(usize, SharedHeapCharge)>() + 1;
 
 /// Charges the heap a payload gains as it becomes live, counting each shared
 /// allocation once arena-wide.
 struct ChargeHeap<'a> {
-    shared: &'a mut rustc_hash::FxHashMap<usize, usize>,
+    shared: &'a mut rustc_hash::FxHashMap<usize, SharedHeapCharge>,
     bytes: usize,
+    /// The owner every allocation this measurement first-charges belongs
+    /// to: the allocating thread's construction, zero for the settled
+    /// storage pin.
+    owner: u64,
     /// The owned allocations the payload reaches: charged by their own
     /// cells, which the payload's handles keep alive.
     handles: verter_session_query::retention::allocation::AliasSet,
@@ -861,9 +1048,12 @@ impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for Charg
     }
 
     fn shared(&mut self, key: usize, bytes: usize) -> bool {
-        let owners = self.shared.entry(key).or_insert(0);
-        *owners += 1;
-        let first = *owners == 1;
+        let charge = self.shared.entry(key).or_insert_with(|| SharedHeapCharge {
+            owners: 0,
+            charged_to: self.owner,
+        });
+        charge.owners += 1;
+        let first = charge.owners == 1;
         if first {
             self.bytes += bytes;
         }
@@ -880,27 +1070,34 @@ impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for Charg
 }
 
 /// Releases the heap a payload held as its slot is freed: a shared
-/// allocation is released with its last owner.
+/// allocation is released with its last owner, paying the owner that first
+/// charged it.
 struct ReleaseHeap<'a> {
-    shared: &'a mut rustc_hash::FxHashMap<usize, usize>,
-    bytes: usize,
+    shared: &'a mut rustc_hash::FxHashMap<usize, SharedHeapCharge>,
+    /// Bytes of allocations only this payload owned: paid by the payload's
+    /// own charging owner.
+    owned: usize,
+    /// Bytes of shared allocations losing their last owner, each with the
+    /// owner that first charged it.
+    freed: Vec<(usize, u64)>,
 }
 
 impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for ReleaseHeap<'_> {
     fn owned(&mut self, bytes: usize) {
-        self.bytes += bytes;
+        self.owned += bytes;
     }
 
     fn shared(&mut self, key: usize, bytes: usize) -> bool {
-        let owners = self
+        let charge = self
             .shared
             .get_mut(&key)
             .expect("a live payload's shared allocation has an owner record");
-        *owners -= 1;
-        let last = *owners == 0;
+        charge.owners -= 1;
+        let last = charge.owners == 0;
         if last {
+            let charged_to = charge.charged_to;
             self.shared.remove(&key);
-            self.bytes += bytes;
+            self.freed.push((bytes, charged_to));
         }
         last
     }
@@ -914,11 +1111,33 @@ impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for Relea
 }
 
 impl ArenaCharges {
-    fn add(
+    /// The owner this thread's next allocation on the arena identified by
+    /// `charges` belongs to: the construction this thread's producer opened
+    /// while it is still open, or zero for the settled storage pin.
+    fn current_owner(&self, charges: usize) -> u64 {
+        current_thread_construction(charges)
+            .filter(|id| self.construction.contains_key(id))
+            .unwrap_or(0)
+    }
+
+    /// Charge `bytes` of freshly allocated storage to `owner` — an open
+    /// construction's IN-FLIGHT charge, ACTIVE and unconditional, or the
+    /// settled storage pin for zero.
+    fn charge(
         &mut self,
+        owner: u64,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
         bytes: usize,
     ) {
+        if bytes == 0 {
+            return;
+        }
+        if owner != 0 {
+            if let Some(construction) = self.construction.get_mut(&owner) {
+                construction.charge.add(account, bytes);
+                return;
+            }
+        }
         self.storage
             .get_or_insert_with(|| {
                 verter_session_query::retention::granular::GranularPin::new(
@@ -929,7 +1148,19 @@ impl ArenaCharges {
             .add(bytes);
     }
 
-    fn sub(&mut self, bytes: usize) {
+    /// Release `bytes` charged to `owner`: the construction that charged
+    /// them while it is still open, else — once its settlement folded its
+    /// remainder into the storage pin — the pin. Zero names the pin.
+    fn sub(&mut self, owner: u64, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        if owner != 0 {
+            if let Some(construction) = self.construction.get_mut(&owner) {
+                construction.charge.sub(bytes);
+                return;
+            }
+        }
         if let Some(storage) = self.storage.as_mut() {
             storage.sub(bytes);
         }
@@ -940,9 +1171,9 @@ impl ArenaCharges {
     }
 
     /// Give back a payload no slot keeps any more and no reader holds.
-    fn release_payload(&mut self, payload: &SemanticNodeData, scope: &NodeScopeId) {
-        let freed = payload_block_bytes() + self.release_payload_heap(payload, scope);
-        self.sub(freed);
+    fn release_payload(&mut self, payload: &SemanticNodeData, scope: &NodeScopeId, owner: u64) {
+        self.sub(owner, payload_block_bytes());
+        self.release_payload_heap(payload, scope, owner);
     }
 
     /// The shared-heap table's bucket bytes.
@@ -951,54 +1182,87 @@ impl ArenaCharges {
     }
 
     /// The heap `payload` and `scope` reach that is not charged yet, now
-    /// owned by one more charged payload, plus the table growth recording it.
+    /// owned by one more charged payload, plus the table growth recording
+    /// it: charged to `owner`, with the table's own storage — the ledger
+    /// itself, outliving any construction — charged to the settled pin.
+    /// The payload's owned allocations are charged by their own cells:
+    /// IN-FLIGHT under the opening construction — collected for its
+    /// settlement — and pinned like the graph storage otherwise, shared
+    /// with every other holder of the same allocation.
     fn charge_payload_heap(
         &mut self,
+        owner: u64,
         payload: &SemanticNodeData,
         scope: &NodeScopeId,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
-    ) -> usize {
+    ) {
         use crate::semantic_query::node_payload_footprint::PayloadHeap as _;
         let table_before = self.shared_heap_table_bytes();
-        let mut visitor = ChargeHeap {
-            shared: &mut self.shared_heap,
-            bytes: 0,
-            handles: verter_session_query::retention::allocation::AliasSet::new(),
+        let (bytes, handles) = {
+            let mut visitor = ChargeHeap {
+                shared: &mut self.shared_heap,
+                bytes: 0,
+                owner,
+                handles: verter_session_query::retention::allocation::AliasSet::new(),
+            };
+            payload.visit_payload_heap(&mut visitor);
+            scope.visit_payload_heap(&mut visitor);
+            (visitor.bytes, visitor.handles.take_handles())
         };
-        payload.visit_payload_heap(&mut visitor);
-        scope.visit_payload_heap(&mut visitor);
-        let bytes = visitor.bytes;
-        // The payload's owned allocations are charged by their own cells —
-        // pinned, like the graph storage that keeps them — and shared with
-        // every other holder of the same allocation.
-        visitor
-            .handles
-            .take_handles()
-            .pin(verter_session_query::retention::owned::ChargeCtx::new(
+        self.charge(owner, account, bytes);
+        let growth = self.shared_heap_table_bytes() - table_before;
+        self.charge(0, account, growth);
+        if owner != 0 {
+            if let Some(construction) = self.construction.get_mut(&owner) {
+                handles.charge_in_flight(verter_session_query::retention::owned::ChargeCtx::new(
+                    &construction.account,
+                ));
+                construction.handles.push(handles);
+            }
+        } else {
+            handles.pin(verter_session_query::retention::owned::ChargeCtx::new(
                 account,
             ));
-        bytes + (self.shared_heap_table_bytes() - table_before)
+        }
     }
 
     /// The heap a freed `payload` and `scope` held that no other charged
-    /// payload reaches, and the table backing given back with it.
-    fn release_payload_heap(&mut self, payload: &SemanticNodeData, scope: &NodeScopeId) -> usize {
+    /// payload reaches, paid by the owners that charged it, and the table
+    /// backing given back with it.
+    fn release_payload_heap(
+        &mut self,
+        payload: &SemanticNodeData,
+        scope: &NodeScopeId,
+        owner: u64,
+    ) {
         use crate::semantic_query::node_payload_footprint::PayloadHeap as _;
         let table_before = self.shared_heap_table_bytes();
-        let mut visitor = ReleaseHeap {
-            shared: &mut self.shared_heap,
-            bytes: 0,
+        let (owned, freed) = {
+            let mut visitor = ReleaseHeap {
+                shared: &mut self.shared_heap,
+                owned: 0,
+                freed: Vec::new(),
+            };
+            payload.visit_payload_heap(&mut visitor);
+            scope.visit_payload_heap(&mut visitor);
+            (visitor.owned, visitor.freed)
         };
-        payload.visit_payload_heap(&mut visitor);
-        scope.visit_payload_heap(&mut visitor);
-        let bytes = visitor.bytes;
         let len = self.shared_heap.len();
         if len == 0 {
             self.shared_heap = rustc_hash::FxHashMap::default();
         } else if len * 4 <= self.shared_heap.capacity() {
             self.shared_heap.shrink_to(len * 2);
         }
-        bytes + (table_before - self.shared_heap_table_bytes())
+        let shrink = table_before - self.shared_heap_table_bytes();
+        if shrink > 0 {
+            if let Some(storage) = self.storage.as_mut() {
+                storage.sub(shrink);
+            }
+        }
+        self.sub(owner, owned);
+        for (bytes, charged_to) in freed {
+            self.sub(charged_to, bytes);
+        }
     }
 }
 
@@ -1043,7 +1307,10 @@ impl ArenaInner {
     }
 
     /// Hand out the next id for `(payload, scope)`, charging its storage
-    /// to `account`.
+    /// to `account` — the block, its heap and any fresh chunk to the
+    /// construction this thread's producer opened (ACTIVE), or the settled
+    /// storage pin, with the owner recorded on the allocation so its
+    /// release pays exactly it.
     fn allocate(
         &mut self,
         payload: NodeData,
@@ -1053,17 +1320,28 @@ impl ArenaInner {
     ) -> SemanticNodeId {
         let id = SemanticNodeId(self.next_id);
         self.next_id += 1;
-        {
+        let charges_identity = Arc::as_ptr(&self.charges) as usize;
+        let owner = {
             let mut charges = self.charges.lock();
+            let owner = charges.current_owner(charges_identity);
             if self.chunks.get(&(id.0 >> CHUNK_BITS)).is_none() {
-                charges.add(account, chunk_storage_bytes());
+                charges.charge(owner, account, chunk_storage_bytes());
             }
-            charges.add(account, payload_block_bytes());
-            let heap = charges.charge_payload_heap(&payload, &scope, account);
-            charges.add(account, heap);
-        }
+            charges.charge(owner, account, payload_block_bytes());
+            charges.charge_payload_heap(owner, &payload, &scope, account);
+            payload
+                .0
+                .charge_owner
+                .store(owner, std::sync::atomic::Ordering::Relaxed);
+            owner
+        };
         let chunk = self.chunks.get_or_insert_empty(id.0 >> CHUNK_BITS);
         let index = (id.0 & CHUNK_MASK) as usize;
+        // A chunk with no live slot is the one this allocation just created:
+        // it carries the owner its storage charged.
+        if chunk.live == 0 {
+            chunk.charge_owner = owner;
+        }
         chunk.nodes[index] = Some(payload);
         chunk.scopes[index] = Some(scope);
         chunk.fingerprints[index] = fingerprint;
@@ -1080,6 +1358,8 @@ impl ArenaInner {
         let chunk = self.chunks.get_mut(&key)?;
         let index = (id.0 & CHUNK_MASK) as usize;
         let payload = chunk.nodes[index].take()?;
+        #[cfg(test)]
+        SLOT_RELEASES.with(|releases| releases.set(releases.get() + 1));
         let scope = chunk.scopes[index]
             .take()
             .expect("a live slot has its scope");
@@ -1089,18 +1369,28 @@ impl ArenaInner {
         chunk.live -= 1;
         self.live -= 1;
         if chunk.live == 0 {
+            let charge_owner = chunk.charge_owner;
             self.chunks.remove(&key);
-            self.charges.lock().sub(chunk_storage_bytes());
+            self.charges.lock().sub(charge_owner, chunk_storage_bytes());
         }
+        let payload_owner = payload
+            .0
+            .charge_owner
+            .load(std::sync::atomic::Ordering::Relaxed);
         match Arc::try_unwrap(payload.0) {
             // The slot held the last handle: the payload goes now.
-            Ok(payload) => self.charges.lock().release_payload(&payload.data, &scope),
+            Ok(payload) => {
+                self.charges
+                    .lock()
+                    .release_payload(&payload.data, &scope, payload_owner)
+            }
             // A reader still holds the payload: it stays allocated, so it
             // stays charged until its last holder lets go.
             Err(payload) => {
                 let _ = payload.release.set(Box::new(HeldRelease {
                     charges: Arc::clone(&self.charges),
                     scope,
+                    owner: payload_owner,
                 }));
             }
         }
@@ -1369,6 +1659,68 @@ pub(crate) struct NodeArenaCore {
     /// The account the arena's storage is pinned against: the owning
     /// store's, bound before the first allocation, or the process-local one.
     retention: OnceLock<Arc<verter_session_query::retention::SemanticRetentionAccount>>,
+    /// Whether the owning store is tearing down: set from the start of its
+    /// drop to the end ([`ArenaTeardown`]). The lock-free check of every
+    /// root release; [`Self::deferred_releases`] is its authority.
+    tearing_down: std::sync::atomic::AtomicBool,
+    /// The root releases deferred while the owning store tears down, in
+    /// release order; `None` outside a teardown.
+    deferred_releases: parking_lot::Mutex<Option<Vec<SemanticNodeId>>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Slots this thread released one by one.
+    static SLOT_RELEASES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Slots this thread has released one by one so far.
+#[cfg(test)]
+pub(super) fn slot_releases_for_tests() -> usize {
+    SLOT_RELEASES.with(std::cell::Cell::get)
+}
+
+/// The owning store's teardown of its arena: [`Self::begin`] at the start
+/// of the store's drop, this guard's own drop after every other field of the
+/// store has dropped. Between the two, the store's caches release their
+/// roots into a deferred list instead of releasing node by node. At the end,
+/// an arena only this guard still holds drops whole; one a reader still
+/// holds releases the deferred roots in order, so the graph that reader can
+/// reach is exactly the graph a node-by-node teardown leaves.
+pub(super) struct ArenaTeardown(Arc<NodeArenaCore>);
+
+impl ArenaTeardown {
+    pub(super) fn of(arena: &NodeArena) -> Self {
+        Self(Arc::clone(&arena.core))
+    }
+
+    /// Start deferring root releases.
+    pub(super) fn begin(&self) {
+        *self.0.deferred_releases.lock() = Some(Vec::new());
+        self.0
+            .tearing_down
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for ArenaTeardown {
+    fn drop(&mut self) {
+        let deferred = {
+            let mut deferred = self.0.deferred_releases.lock();
+            self.0
+                .tearing_down
+                .store(false, std::sync::atomic::Ordering::Release);
+            deferred.take()
+        };
+        // A reader that still holds the arena keeps reading it: release
+        // what the caches held, as they would have. With no reader, the
+        // arena drops with this guard, and everything with it.
+        if Arc::strong_count(&self.0) > 1 {
+            if let Some(ids) = deferred {
+                self.0.release_roots(&ids);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1404,6 +1756,8 @@ impl Default for NodeArena {
                     crate::semantic_query::QueryError::Miss,
                 )),
                 retention: OnceLock::new(),
+                tearing_down: std::sync::atomic::AtomicBool::new(false),
+                deferred_releases: parking_lot::Mutex::new(None),
             }),
             provenance: None,
         }
@@ -1637,12 +1991,21 @@ impl NodeArenaCore {
         &self,
         ids: &[SemanticNodeId],
     ) -> Result<(), crate::semantic_query::QueryError> {
+        self.retain_validated(ids, ids)
+    }
+
+    /// Validate both reused and newly acquired operands under the same arena
+    /// hold, before changing any ownership count.
+    pub(super) fn retain_validated(
+        &self,
+        validate: &[SemanticNodeId],
+        retain: &[SemanticNodeId],
+    ) -> Result<(), crate::semantic_query::QueryError> {
         let mut inner = self.inner.write();
-        // Index loops: every rooted delivery retains here, and a debug
-        // build runs them without an iterator call per id.
+        // Validation finishes before any ownership count changes.
         let mut index = 0;
-        while index < ids.len() {
-            match inner.slot(ids[index]) {
+        while index < validate.len() {
+            match inner.slot(validate[index]) {
                 Slot::Live(..) => {}
                 Slot::Released => {
                     return Err(crate::semantic_query::QueryError::StaleSemanticOperand)
@@ -1654,8 +2017,8 @@ impl NodeArenaCore {
             index += 1;
         }
         let mut index = 0;
-        while index < ids.len() {
-            let id = ids[index];
+        while index < retain.len() {
+            let id = retain[index];
             match inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) {
                 Some(chunk) => chunk.owners[(id.0 & CHUNK_MASK) as usize] += 1,
                 None => unreachable!("a live slot's chunk is held"),
@@ -1677,7 +2040,42 @@ impl NodeArenaCore {
         }
     }
 
+    /// Give up the store's hold on its primitive vocabulary: every
+    /// permanent slot becomes an ordinary counted node, destroyed now when
+    /// nothing else owns it and with its last owner otherwise. A host close
+    /// calls this once its caches have released their owners, so the first
+    /// workload's vocabulary is not left behind as residue; the next intern
+    /// of a vocabulary node makes it permanent again. Returns the slots
+    /// unpinned.
+    pub(super) fn release_vocabulary(&self) -> usize {
+        let mut held = Vec::new();
+        {
+            let mut inner = self.inner.write();
+            let keys: Vec<u64> = inner.chunks.keys().collect();
+            for key in keys {
+                let chunk = inner.chunks.get_mut(&key).expect("a listed chunk is live");
+                for index in 0..CHUNK_LEN {
+                    if chunk.permanent[index] {
+                        chunk.permanent[index] = false;
+                        // Take one count so the release below runs the
+                        // ordinary last-owner path, whoever else holds it.
+                        chunk.owners[index] += 1;
+                        held.push(SemanticNodeId((key << CHUNK_BITS) | index as u64));
+                    }
+                }
+            }
+        }
+        self.release_roots(&held);
+        held.len()
+    }
+
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
+        if self.tearing_down.load(std::sync::atomic::Ordering::Acquire) {
+            if let Some(deferred) = self.deferred_releases.lock().as_mut() {
+                deferred.extend_from_slice(ids);
+                return;
+            }
+        }
         // Most releases only drop a count; the stack of dying nodes' children
         // and the retired list allocate only once a node reaches zero.
         let mut pending: Vec<SemanticNodeId> = Vec::new();
@@ -1883,6 +2281,11 @@ impl NodeArena {
             0
         };
         let shard_idx = (fingerprint & SHARD_MASK) as usize;
+        // The global primitive vocabulary is permanent while the store
+        // holds it; an intern after a close re-establishes the hold
+        // (`release_vocabulary`).
+        let vocabulary =
+            matches!(data, SemanticNodeData::Primitive(_)) && scope == NodeScopeId::Global;
 
         // Sharded dedup hot path. The fingerprint routes to its shard and
         // the bucket scan checks for an existing id; the miss path acquires
@@ -1914,8 +2317,10 @@ impl NodeArena {
                 .inspect(|id| {
                     #[cfg(test)]
                     self.race_event(ArenaRaceEvent::BeforeDedupRetain);
-                    inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
-                        [(id.0 & CHUNK_MASK) as usize] += 1;
+                    let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
+                    let index = (id.0 & CHUNK_MASK) as usize;
+                    chunk.owners[index] += 1;
+                    chunk.permanent[index] |= vocabulary;
                 });
             drop(inner);
             if let Some(existing) = hit {
@@ -1945,11 +2350,10 @@ impl NodeArena {
                     matches!(inner.slot(id), Slot::Live(..))
                 }) {
                     // Another thread beat us to it.
-                    inner
-                        .chunks
-                        .get_mut(&(existing.0 >> CHUNK_BITS))
-                        .unwrap()
-                        .owners[(existing.0 & CHUNK_MASK) as usize] += 1;
+                    let chunk = inner.chunks.get_mut(&(existing.0 >> CHUNK_BITS)).unwrap();
+                    let index = (existing.0 & CHUNK_MASK) as usize;
+                    chunk.owners[index] += 1;
+                    chunk.permanent[index] |= vocabulary;
                     (existing, false)
                 } else {
                     // The id this payload would take. Ids are monotonic and
@@ -1993,8 +2397,7 @@ impl NodeArena {
                     let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
                     let index = (id.0 & CHUNK_MASK) as usize;
                     chunk.owners[index] = 1;
-                    chunk.permanent[index] = scope == NodeScopeId::Global
-                        && matches!(&*payload, SemanticNodeData::Primitive(_));
+                    chunk.permanent[index] = vocabulary;
                     drop(inner);
                     shard.insert_candidate(
                         self.retention_account(),

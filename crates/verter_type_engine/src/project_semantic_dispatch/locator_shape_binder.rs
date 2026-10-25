@@ -249,7 +249,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             } else {
                 None
             };
-            let binder = if bound_free {
+            // Without authored bounds the predeclared shell is already
+            // the final binder, held by this construction scope. Reuse it
+            // instead of hashing and acquiring the identical node again.
+            let binder = if bound_free || (!spec.has_constraint && !spec.has_default) {
                 shells[index].1
             } else {
                 let (decl, param_index) = mint_identity(&spec.name, index);
@@ -304,6 +307,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
         (frame, finals)
+    }
+
+    /// Exercise the shared constructor without authored-bound reads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unbounded_header_binder_for_tests(&self) -> SemanticNodeId {
+        use crate::project_semantic_dispatch::locator_shape::{
+            BinderIdentityMode, LocatorShapeCtx, TypeParamBinderSpec,
+        };
+        let owner = OwnedStr::from("UnboundedHeaderFixture");
+        let scope = NodeScopeId::Global;
+        let base = LocatorShapeCtx::new(&scope, &[], None, None);
+        let (_, built) = self.build_type_param_binder_frame(
+            &base,
+            BinderIdentityMode::DeclHeader {
+                owner_symbol: &owner,
+            },
+            &[TypeParamBinderSpec {
+                name: Arc::from("T"),
+                has_constraint: false,
+                has_default: false,
+            }],
+            verter_type_expr::locators::TypeParamVisibility::Body,
+            |_, _, _| panic!("an unbounded parameter must not lower a bound"),
+        );
+        built[0].binder
     }
 
     /// Cold build for [`SemanticQueryKey::LowerLocator`] — the SESSION
