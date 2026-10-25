@@ -247,7 +247,15 @@ fn insert_into(slot: &mut Arc<Node>, fact: FactVersionRef) -> Option<Arc<Node>> 
     if let Body::Leaf(facts) = &slot.body {
         if facts.len() >= LEAF_CAP {
             let (left, right) = split_leaf(facts, fact);
-            *slot = Node::leaf(left);
+            // A leaf this edit built and holds alone keeps its node; a
+            // shared one is replaced by a fresh left half.
+            match Arc::get_mut(slot) {
+                Some(node) if node.charge.lock().is_none() => {
+                    node.len = left.len();
+                    node.body = Body::Leaf(left);
+                }
+                _ => *slot = Node::leaf(left),
+            }
             return Some(Node::leaf(right));
         }
     }
