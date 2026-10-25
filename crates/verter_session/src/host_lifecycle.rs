@@ -778,6 +778,8 @@ impl VerterHost {
         HostReleaseCompletion {
             host: self,
             parse: self.decl_lowering.release_completion(),
+            #[cfg(not(target_arch = "wasm32"))]
+            stage_tasks: self.scheduler.stage_task_boundary(),
         }
     }
 
@@ -1600,13 +1602,16 @@ impl VerterHost {
 pub struct HostReleaseCompletion<'host> {
     host: &'host VerterHost,
     parse: verter_semantic_source::decl_lowering::ParseReleaseCompletion,
+    #[cfg(not(target_arch = "wasm32"))]
+    stage_tasks: verter_scheduler::StageTaskBoundary,
 }
 
 impl HostReleaseCompletion<'_> {
     /// Block until every decl-lowering worker has applied the parse
     /// releases recorded before the boundary opened and every scheduler
-    /// stage task has dropped the file nodes and snapshots it captured,
-    /// then give back the storage released owners left behind.
+    /// stage task submitted before it has dropped the file nodes and
+    /// snapshots it captured, then give back the storage released owners
+    /// left behind.
     ///
     /// # Errors
     ///
@@ -1615,7 +1620,9 @@ impl HostReleaseCompletion<'_> {
     pub fn wait(self) -> Result<(), crate::ParseReleaseError> {
         self.parse.wait()?;
         #[cfg(not(target_arch = "wasm32"))]
-        self.host.scheduler.wait_stage_tasks_finished();
+        self.host
+            .scheduler
+            .wait_stage_tasks_before(self.stage_tasks);
         self.host.reclaim_released_storage();
         Ok(())
     }

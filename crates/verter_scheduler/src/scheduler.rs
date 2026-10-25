@@ -394,7 +394,7 @@ pub struct Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     /// Stage tasks this scheduler submitted to either pool that have not
-    /// finished dropping their captures ([`Self::wait_stage_tasks_finished`]).
+    /// finished dropping their captures ([`Self::wait_stage_tasks_before`]).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) stage_tasks: Arc<crate::execution::pool::StageTasksInFlight>,
     /// Deferred blocker IDs for files whose node was at generation 0 when
@@ -1514,14 +1514,22 @@ impl Scheduler {
         start
     }
 
-    /// Block until every stage task this scheduler submitted has finished,
-    /// including dropping the file node and snapshots its closure captured:
-    /// a task wakes its waiters before it returns, so what it retained can
-    /// outlive the answer it delivered. Never call from scheduler stage
-    /// work.
+    /// The boundary after every stage task this scheduler has submitted so
+    /// far, for [`Self::wait_stage_tasks_before`].
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn wait_stage_tasks_finished(&self) {
-        self.stage_tasks.wait();
+    pub fn stage_task_boundary(&self) -> crate::execution::pool::StageTaskBoundary {
+        self.stage_tasks.boundary()
+    }
+
+    /// Block until every stage task submitted before `boundary` has
+    /// finished, including dropping the file node and snapshots its closure
+    /// captured: a task wakes its waiters before it returns, so what it
+    /// retained can outlive the answer it delivered. Tasks submitted after
+    /// the boundary are not waited for, so a busy scheduler cannot hold the
+    /// wait open. Never call from scheduler stage work.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn wait_stage_tasks_before(&self, boundary: crate::execution::pool::StageTaskBoundary) {
+        self.stage_tasks.wait_before(boundary);
     }
 
     /// Drain and discard all pending inbox submissions. Used by `close()`

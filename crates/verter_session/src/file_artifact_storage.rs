@@ -99,9 +99,9 @@ pub(super) fn chain_entry<K: Hash + Eq + HeapSize, A: Array>(
 /// publication callback can legitimately hold one of their write guards.
 ///
 /// The table's fixed shell (its shard array and this record's capacity
-/// slice) is charged together with its buckets, while any shard holds
-/// bucket storage: an empty table — a fresh or fully reclaimed store —
-/// keeps nothing charged, as the shared-allocation registry's table does.
+/// slice) stays allocated for the table's whole life, empty or not, so it
+/// stays charged from [`TableStorage::initialize`] until the table drops;
+/// bucket storage is charged on top of it.
 pub(super) struct TableStorage {
     state: parking_lot::Mutex<TableCharge>,
 }
@@ -109,24 +109,15 @@ pub(super) struct TableStorage {
 struct TableCharge {
     backing: GranularPin,
     capacities: Box<[usize]>,
-    shell: usize,
-    buckets: usize,
 }
 
 impl TableCharge {
     fn set_shard(&mut self, shard: usize, bytes: usize) {
-        self.buckets = self.buckets - self.capacities[shard] + bytes;
-        self.capacities[shard] = bytes;
-        let target = if self.buckets == 0 {
-            0
+        let old = std::mem::replace(&mut self.capacities[shard], bytes);
+        if bytes > old {
+            self.backing.add(bytes - old);
         } else {
-            self.buckets + self.shell
-        };
-        let used = self.backing.used();
-        if target > used {
-            self.backing.add(target - used);
-        } else {
-            self.backing.sub(used - target);
+            self.backing.sub(old - bytes);
         }
     }
 }
@@ -137,8 +128,6 @@ impl Default for TableStorage {
             state: parking_lot::Mutex::new(TableCharge {
                 backing: GranularPin::new(PinContext::default().account(), 1024),
                 capacities: Box::new([]),
-                shell: 0,
-                buckets: 0,
             }),
         }
     }
@@ -148,8 +137,10 @@ impl TableStorage {
     pub fn initialize<K: Hash + Eq, V>(&self, map: &DashMap<K, V>) {
         let mut state = self.state.lock();
         let capacities = vec![0; map.shards().len()].into_boxed_slice();
-        state.shell = heap_block_bytes(std::mem::size_of_val(map.shards()))
-            + heap_block_bytes(std::mem::size_of_val(&*capacities));
+        state.backing.add(
+            heap_block_bytes(std::mem::size_of_val(map.shards()))
+                + heap_block_bytes(std::mem::size_of_val(&*capacities)),
+        );
         state.capacities = capacities;
     }
 
@@ -193,4 +184,60 @@ fn shard_bytes<K: Hash + Eq, V>(map: &DashMap<K, V>, shard: usize) -> usize {
         map.shards()[shard].read().capacity(),
         std::mem::size_of::<(K, V)>(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verter_retention::{RetentionLimits, SemanticRetentionAccount};
+
+    /// A table's shard array and capacity record are allocated for its whole
+    /// life, so they stay charged while it is empty — fresh, or drained and
+    /// reclaimed — and only its drop gives them back.
+    #[test]
+    fn an_empty_tables_allocated_shell_stays_charged_until_it_drops() {
+        let context = PinContext::new(SemanticRetentionAccount::new(RetentionLimits::defaults()));
+        let _scope = context.enter_for_test();
+        let pinned = || context.account().snapshot().pinned_bytes;
+        let baseline = pinned();
+
+        let map: DashMap<u64, [u64; 8]> = DashMap::new();
+        let storage = TableStorage::default();
+        storage.initialize(&map);
+        let shell = heap_block_bytes(std::mem::size_of_val(map.shards()))
+            + heap_block_bytes(map.shards().len() * std::mem::size_of::<usize>());
+        let fresh = pinned() - baseline;
+        assert!(
+            fresh >= shell,
+            "a fresh empty table charges its {shell}-byte shell, not {fresh}"
+        );
+
+        for key in 0..256 {
+            map.insert(key, [key; 8]);
+            storage.settle(&map, &key);
+        }
+        let populated = pinned() - baseline;
+        let buckets: usize = (0..map.shards().len())
+            .map(|shard| shard_bytes(&map, shard))
+            .sum();
+        assert!(
+            populated >= shell + buckets,
+            "a populated table charges its shell and {buckets} bucket bytes, not {populated}"
+        );
+
+        map.clear();
+        storage.reclaim(&map);
+        assert_eq!(
+            pinned() - baseline,
+            fresh,
+            "a drained, reclaimed table charges exactly what it did fresh"
+        );
+
+        drop(storage);
+        assert_eq!(
+            pinned(),
+            baseline,
+            "dropping the table gives its shell back"
+        );
+    }
 }

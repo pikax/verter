@@ -133,7 +133,7 @@ pub use execution::owner_command::{Cpu, Io, OwnerCommand, Provider};
 #[cfg(not(target_arch = "wasm32"))]
 pub use execution::pool::{
     CpuPool, SchedulerCpuPool, SchedulerIoPool, SchedulerPoolSubmitError,
-    SchedulerPoolSubmitResult, SchedulerPoolTask,
+    SchedulerPoolSubmitResult, SchedulerPoolTask, StageTaskBoundary,
 };
 pub use scheduler::Admission;
 

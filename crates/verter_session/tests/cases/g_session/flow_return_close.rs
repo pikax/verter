@@ -542,6 +542,9 @@ fn held_readers_survive_close_and_release_in_either_order() {
             drop(last);
             drain(&host);
             assert_at_baseline_beside_live_host(&host, &baseline, &context);
+            // The account is process-wide: the closed host's own tables stay
+            // allocated, and charged, until it drops.
+            drop(host);
 
             assert_eq!(
                 answer(&unrelated, &unrelated_reader),

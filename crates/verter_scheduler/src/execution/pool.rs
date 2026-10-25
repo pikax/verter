@@ -59,6 +59,13 @@ use crossbeam_channel::{bounded, Sender, TrySendError};
 #[cfg(not(target_arch = "wasm32"))]
 pub type SchedulerPoolTask = Box<dyn FnOnce() + Send + 'static>;
 
+/// A point in one scheduler's stage-task submission order
+/// ([`Scheduler::stage_task_boundary`](crate::scheduler::Scheduler::stage_task_boundary)):
+/// waiting on it covers the tasks submitted before it, never later ones.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StageTaskBoundary(u64);
+
 /// Stage tasks one scheduler handed to its pools that have not finished,
 /// counting a task as finished only once everything its closure captured
 /// (the file node, its snapshots) is dropped. A task's waiter is woken
@@ -67,8 +74,25 @@ pub type SchedulerPoolTask = Box<dyn FnOnce() + Send + 'static>;
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 pub(crate) struct StageTasksInFlight {
-    count: parking_lot::Mutex<usize>,
+    ledger: parking_lot::Mutex<StageTaskLedger>,
     finished: parking_lot::Condvar,
+}
+
+/// Submission tickets in order; `in_flight` holds the unfinished ones.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct StageTaskLedger {
+    next: u64,
+    in_flight: std::collections::BTreeSet<u64>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StageTaskLedger {
+    fn pending_before(&self, boundary: StageTaskBoundary) -> bool {
+        self.in_flight
+            .first()
+            .is_some_and(|&ticket| ticket < boundary.0)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -76,35 +100,69 @@ impl StageTasksInFlight {
     /// `task`, counted in flight until it has run (or been dropped unrun)
     /// and its captures are gone.
     pub(crate) fn track(self: &std::sync::Arc<Self>, task: SchedulerPoolTask) -> SchedulerPoolTask {
-        *self.count.lock() += 1;
-        let finished = StageTaskFinished(std::sync::Arc::clone(self));
+        let ticket = {
+            let mut ledger = self.ledger.lock();
+            let ticket = ledger.next;
+            ledger.next += 1;
+            ledger.in_flight.insert(ticket);
+            ticket
+        };
+        let tracked = TrackedStageTask {
+            task,
+            finished: StageTaskFinished {
+                tracker: std::sync::Arc::clone(self),
+                ticket,
+            },
+        };
         Box::new(move || {
-            // Declared first, dropped last: after `task` consumed and
-            // dropped its captures.
-            let _finished = finished;
+            let TrackedStageTask { task, finished } = tracked;
+            // Running `task` consumes and drops its captures before the
+            // task counts as finished.
             task();
+            drop(finished);
         })
     }
 
-    /// Block until every tracked task has finished.
-    pub(crate) fn wait(&self) {
-        let mut count = self.count.lock();
-        while *count > 0 {
-            self.finished.wait(&mut count);
+    /// The boundary after every task tracked so far.
+    pub(crate) fn boundary(&self) -> StageTaskBoundary {
+        StageTaskBoundary(self.ledger.lock().next)
+    }
+
+    /// Block until every task tracked before `boundary` has finished.
+    /// Tasks tracked after it are not waited for.
+    pub(crate) fn wait_before(&self, boundary: StageTaskBoundary) {
+        let mut ledger = self.ledger.lock();
+        while ledger.pending_before(boundary) {
+            self.finished.wait(&mut ledger);
         }
     }
 }
 
+/// A tracked task and its completion guard. Fields drop in declaration
+/// order, so a task dropped unrun (a `Full`/`Closed` submit, a pool
+/// shutting down) releases its captures before it counts as finished,
+/// exactly as a task that ran.
 #[cfg(not(target_arch = "wasm32"))]
-struct StageTaskFinished(std::sync::Arc<StageTasksInFlight>);
+struct TrackedStageTask {
+    task: SchedulerPoolTask,
+    finished: StageTaskFinished,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct StageTaskFinished {
+    tracker: std::sync::Arc<StageTasksInFlight>,
+    ticket: u64,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for StageTaskFinished {
     fn drop(&mut self) {
-        let mut count = self.0.count.lock();
-        *count -= 1;
-        if *count == 0 {
-            self.0.finished.notify_all();
+        let mut ledger = self.tracker.ledger.lock();
+        let oldest = ledger.in_flight.first() == Some(&self.ticket);
+        ledger.in_flight.remove(&self.ticket);
+        // Only the oldest unfinished task can move a waiter's boundary.
+        if oldest {
+            self.tracker.finished.notify_all();
         }
     }
 }
@@ -474,6 +532,71 @@ mod tests {
     }
     fn io(task: SchedulerPoolTask) -> OwnerCommand<crate::execution::owner_command::Io> {
         OwnerCommand::io(task)
+    }
+
+    /// A tracked task's captures are released while it still counts in
+    /// flight, whether it runs or is dropped unrun, so a waiter cannot
+    /// observe "finished" before the captured owners are gone.
+    #[test]
+    fn a_tracked_task_releases_its_captures_before_it_counts_as_finished() {
+        struct Capture {
+            tracker: Arc<StageTasksInFlight>,
+            in_flight_at_drop: Arc<AtomicUsize>,
+        }
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                let in_flight = self.tracker.ledger.lock().in_flight.len();
+                self.in_flight_at_drop.store(in_flight, Ordering::SeqCst);
+            }
+        }
+
+        for runs in [true, false] {
+            let tracker = Arc::new(StageTasksInFlight::default());
+            let in_flight_at_drop = Arc::new(AtomicUsize::new(usize::MAX));
+            let capture = Capture {
+                tracker: Arc::clone(&tracker),
+                in_flight_at_drop: Arc::clone(&in_flight_at_drop),
+            };
+            let task = tracker.track(Box::new(move || {
+                let _capture = &capture;
+            }));
+            if runs {
+                task();
+            } else {
+                drop(task);
+            }
+            assert_eq!(
+                in_flight_at_drop.load(Ordering::SeqCst),
+                1,
+                "runs={runs}: the capture must drop while its task is still in flight"
+            );
+            assert!(
+                tracker.ledger.lock().in_flight.is_empty(),
+                "runs={runs}: the task finished"
+            );
+        }
+    }
+
+    /// A boundary covers the tasks tracked before it: an older task still in
+    /// flight holds it, a newer one does not.
+    #[test]
+    fn a_stage_task_boundary_waits_only_for_tasks_tracked_before_it() {
+        let tracker = Arc::new(StageTasksInFlight::default());
+        let older = tracker.track(Box::new(|| {}));
+        let boundary = tracker.boundary();
+        let newer = tracker.track(Box::new(|| {}));
+        assert!(
+            tracker.ledger.lock().pending_before(boundary),
+            "an older task in flight holds the boundary"
+        );
+        drop(older);
+        assert!(
+            !tracker.ledger.lock().pending_before(boundary),
+            "a newer task in flight does not hold the boundary"
+        );
+        tracker.wait_before(boundary);
+        newer();
+        assert!(tracker.ledger.lock().in_flight.is_empty());
     }
 
     #[test]
