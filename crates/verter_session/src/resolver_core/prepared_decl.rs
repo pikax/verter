@@ -277,6 +277,7 @@ pub(crate) fn prepare_local_type_decl_outcome(
         import_canonicalization,
         None,
         interner,
+        None,
     )
 }
 
@@ -286,6 +287,11 @@ pub(crate) fn prepare_local_type_decl_outcome(
 /// cache, which builds the base once per bundle) shares it via `Arc` across
 /// every non-namespaced decl of the file; `None` builds the table fresh —
 /// the pre-split per-call behavior for standalone entry points.
+///
+/// `kept`, when given, receives the body parts of the lowering that
+/// registered the declaration's facts, when this preparation lowered them
+/// (an owner's own global-augmentation declaration keeps none).
+#[allow(clippy::too_many_arguments)]
 fn prepare_local_type_decl_outcome_with_base(
     canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
@@ -295,6 +301,7 @@ fn prepare_local_type_decl_outcome_with_base(
     import_canonicalization: &ImportCanonicalization,
     shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
+    kept: Option<&mut Option<verter_semantic_source::decl_body_memo::KeptTypeBody>>,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
     use verter_session_query::declarations::AugmentationScopeKind;
     // An owner's global-augmentation scope addresses the owner's own
@@ -346,7 +353,12 @@ fn prepare_local_type_decl_outcome_with_base(
     };
     let (lowered, deps, origin): (Arc<LoweredTypeDecl>, _, Option<&AugmentationScopeKind>) =
         if state.has_type_symbol_in(owner, symbol_name) {
-            match state.type_decl_outcome_in(owner, symbol_name) {
+            let (outcome, body) =
+                state.type_decl_outcome_keeping_in(owner, symbol_name, kept.is_some());
+            if let Some(kept) = kept {
+                *kept = body;
+            }
+            match outcome {
                 DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
                 DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
                 DemandOutcome::Ready(Some(lowered)) => {
@@ -354,7 +366,16 @@ fn prepare_local_type_decl_outcome_with_base(
                 }
             }
         } else {
-            match state.augmentation_type_decl_outcome_in(&fallback_scope, owner, symbol_name) {
+            let (outcome, body) = state.augmentation_type_decl_outcome_keeping_in(
+                &fallback_scope,
+                owner,
+                symbol_name,
+                kept.is_some(),
+            );
+            if let Some(kept) = kept {
+                *kept = body;
+            }
+            match outcome {
                 DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
                 DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
                 DemandOutcome::Ready(Some(lowered)) => {
@@ -1027,15 +1048,15 @@ impl PreparedTypeDeclCache {
         self.get_in_keeping(owner, symbol_name, None)
     }
 
-    /// [`Self::get_in`], handing `keep` the transient body parts a cold
-    /// preparation of a file-scope type declaration lowers with its facts
-    /// ([`verter_semantic_source::decl_body_memo::prime_type_body`]), for
-    /// the body read that follows the preparation.
+    /// [`Self::get_in`], handing `keep` the body parts a cold preparation
+    /// kept from the lowering that registered the declaration's facts, for
+    /// the body read that follows it. Only a preparation that succeeds
+    /// hands its parts over; a failed or lease-missed one drops them.
     fn get_in_keeping(
         &self,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-        keep: Option<&dyn Fn(verter_semantic_source::decl_body_memo::PrimedTypeBodies)>,
+        keep: Option<&dyn Fn(verter_semantic_source::decl_body_memo::KeptTypeBody)>,
     ) -> Result<Option<CachedValue<PreparedTypeDecl>>, PreparationFailure> {
         let key = verter_type_expr::DeclBindingKey::new(owner, symbol_name);
         let Some(slot) = self.slots.get(&key) else {
@@ -1052,17 +1073,6 @@ impl PreparedTypeDeclCache {
         let _gate = slot.build_gate.lock();
         if let Some(cached) = slot.committed() {
             return Ok(cached);
-        }
-        if let Some(keep) = keep {
-            if self.state.has_type_symbol_in(owner, symbol_name) {
-                if let Some(primed) = verter_semantic_source::decl_body_memo::prime_type_body(
-                    self.state.decl_bodies(),
-                    owner,
-                    symbol_name,
-                ) {
-                    keep(primed);
-                }
-            }
         }
         // A broken decl-body lease pin surfaces the DISTINCT `LeaseMiss` — fail
         // CLOSED via ReturnOnly: leave `value` VACANT (release the gate without
@@ -1089,6 +1099,7 @@ impl PreparedTypeDeclCache {
                 &self.interner,
             )
         })?;
+        let mut kept = None;
         match prepare_local_type_decl_outcome_with_base(
             &self.canonical_id,
             self.state.as_ref(),
@@ -1098,6 +1109,7 @@ impl PreparedTypeDeclCache {
             &self.import_canonicalization,
             Some(&name_resolution_base),
             &self.interner,
+            keep.map(|_| &mut kept),
         ) {
             PreparedDeclOutcome::LeaseMiss => {
                 // Broken decl-body lease: leave the write-once slot VACANT
@@ -1109,7 +1121,12 @@ impl PreparedTypeDeclCache {
                 );
                 Ok(None)
             }
-            PreparedDeclOutcome::Ready(value) => Ok(slot.commit(value, &self.account)),
+            PreparedDeclOutcome::Ready(value) => {
+                if let (Some(keep), Some(kept), true) = (keep, kept, value.is_some()) {
+                    keep(kept);
+                }
+                Ok(slot.commit(value, &self.account))
+            }
             PreparedDeclOutcome::Failed(failure) => Err(failure),
         }
     }
@@ -1136,7 +1153,7 @@ impl PreparedTypeDeclCache {
         &self,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-        keep: Option<&dyn Fn(verter_semantic_source::decl_body_memo::PrimedTypeBodies)>,
+        keep: Option<&dyn Fn(verter_semantic_source::decl_body_memo::KeptTypeBody)>,
     ) -> PreparedTypeDeclResolution {
         let root_identity = ResolvedRootIdentity::new_in_owner(
             self.canonical_id.clone(),

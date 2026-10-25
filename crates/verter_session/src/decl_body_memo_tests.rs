@@ -2850,26 +2850,50 @@ fn indexed_expression_endpoint_macro_reuses_parse_and_refuses_broken_pin() {
     );
 }
 
-/// The body a type declaration's priming kept serves only that declaration
-/// in that scope: a same-named `declare global` declaration and another
-/// declaration of the file each read their own body, while the primed
-/// declarations read the bodies kept for them.
+/// The body parts a type demand keeps serve only that declaration in that
+/// scope of that source: a same-named `declare global` declaration, another
+/// declaration and another source each read their own body. A request
+/// releases a kept body, and its retention charge, as soon as a read takes
+/// it, and holds no more than its capacity.
 #[test]
-fn a_primed_type_body_serves_only_its_own_declaration_and_scope() {
-    let (memo, _) = memo_for(
-        "type K = \"file\";\ntype A = \"a\";\ntype B = \"b\";\ndeclare global {\n  type K = \"global\";\n}\nexport {};\n",
-    );
+fn a_kept_type_body_serves_only_its_own_declaration_scope_and_source() {
+    let source = "type K = \"file\";
+type A = \"a\";
+declare global {
+  type K = \"global\";
+}
+export {};
+";
+    let (memo, _) = memo_for(source);
+    let (other, _) = memo_for_canonical("/other.ts", source);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
-    let primed: Vec<PrimedTypeBodies> = ["K", "B"]
-        .into_iter()
-        .map(|name| prime_type_body(&memo, owner, name).expect("its facts are not lowered yet"))
-        .collect();
+    let (outcome, kept) = memo.type_decl_outcome_keeping_in(owner, "K", true);
+    assert!(matches!(outcome, DemandOutcome::Ready(Some(_))));
+    let kept = kept.expect("the demand that lowered K keeps its body");
+    assert!(kept.serves(&memo, owner, "K", None));
+    assert!(!kept.serves(&memo, owner, "K", Some(&AugmentationScopeKind::Global)));
+    assert!(!kept.serves(&memo, owner, "A", None));
+    assert!(!kept.serves(&other, owner, "K", None));
+    let (_, again) = memo.type_decl_outcome_keeping_in(owner, "K", true);
+    assert!(again.is_none(), "a demand of lowered facts keeps nothing");
+
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits::defaults(),
+    );
+    let request = parking_lot::Mutex::new(
+        crate::resolver_core::request_store_view::KeptTypeBodies::default(),
+    );
+    request.lock().keep(kept, &account);
     assert!(
-        prime_type_body(&memo, owner, "K").is_none(),
-        "K's facts are lowered: there is nothing left to prime"
+        account.snapshot().active_bytes > 0,
+        "a kept body is charged while it waits"
     );
     let read = |locator: AuthoredBodyLocator| {
-        let derefed = memo.deref_locator_body(&locator).expect("the body derefs");
+        let derefed = memo
+            .deref_locator_body_with(&locator, &|owner, name, scope| {
+                request.lock().take(&memo, owner, name, scope)
+            })
+            .expect("the body derefs");
         format!("{:?}", single(&derefed))
     };
     let global = read(aug_type_locator(
@@ -2883,9 +2907,63 @@ fn a_primed_type_body_serves_only_its_own_declaration_and_scope() {
     );
     let a = read(type_body_locator("A", Vec::new()));
     assert!(a.contains("\"a\""), "A reads its own body: {a}");
+    assert!(
+        account.snapshot().active_bytes > 0,
+        "K's body still waits for its read"
+    );
     let k = read(type_body_locator("K", Vec::new()));
-    assert!(k.contains("file"), "the file's K reads its own body: {k}");
-    let b = read(type_body_locator("B", Vec::new()));
-    assert!(b.contains("\"b\""), "B reads its own body: {b}");
-    drop(primed);
+    assert!(k.contains("file"), "the file's K reads its kept body: {k}");
+    assert_eq!(
+        account.snapshot().active_bytes,
+        0,
+        "the read released the kept body"
+    );
+}
+
+/// A declaration that names a JSDoc `@typedef` keeps no body parts: its
+/// typedef body is read by its own lowering.
+#[test]
+fn a_jsdoc_typedef_declaration_keeps_no_body() {
+    let (memo, _) = memo_for(
+        "/** @typedef {{ a: 1 }} T */
+export {};
+",
+    );
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let (_, kept) = memo.type_decl_outcome_keeping_in(owner, "T", true);
+    assert!(kept.is_none());
+}
+
+/// A request's kept type bodies stay within its byte budget: keeping a
+/// body past it releases the oldest, whose charge goes with it.
+#[test]
+fn kept_type_bodies_release_the_oldest_past_their_budget() {
+    let members: String = (0..2000)
+        .map(|i| format!("\"m{i:05}\""))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let source: String = (0..3)
+        .map(|i| format!("type L{i} = {members};\n"))
+        .collect::<String>()
+        + "export {};\n";
+    let (memo, _) = memo_for(&source);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits::defaults(),
+    );
+    let mut request = crate::resolver_core::request_store_view::KeptTypeBodies::default();
+    let mut charged = Vec::new();
+    for name in ["L0", "L1", "L2"] {
+        let (_, kept) = memo.type_decl_outcome_keeping_in(owner, name, true);
+        request.keep(kept.expect("the demand lowered it"), &account);
+        charged.push(account.snapshot().active_bytes);
+    }
+    assert!(
+        charged[1] > charged[0] && charged[2] == charged[1],
+        "the third body released the first: {charged:?}"
+    );
+    assert!(request.take(&memo, owner, "L0", None).is_none());
+    assert!(request.take(&memo, owner, "L2", None).is_some());
+    assert!(request.take(&memo, owner, "L1", None).is_some());
+    assert_eq!(account.snapshot().active_bytes, 0);
 }

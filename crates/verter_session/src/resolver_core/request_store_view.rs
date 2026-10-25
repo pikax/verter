@@ -935,11 +935,9 @@ pub(crate) struct RequestStoreView<'a> {
     /// The project environment this request read per canonical (see
     /// [`RequestProjectEnv`]).
     project_env: RequestProjectEnv,
-    /// The declaration bodies this request lowered with their facts and
-    /// kept for the body reads that follow; dropped, with every body no
-    /// read took, when the request ends.
-    primed_type_bodies:
-        parking_lot::Mutex<Vec<verter_semantic_source::decl_body_memo::PrimedTypeBodies>>,
+    /// The type declaration bodies this request's preparations kept for the
+    /// body reads that follow them ([`KeptTypeBodies`]).
+    kept_type_bodies: parking_lot::Mutex<KeptTypeBodies>,
     /// The request's ownership of the base's captured content generation in
     /// the workspace freshness history: from the moment the view is built,
     /// retiring history cannot raise the transition floor past the
@@ -953,6 +951,75 @@ pub(crate) struct RequestStoreView<'a> {
     /// Test-only: how many facts that are not receipts this view validated.
     #[cfg(test)]
     leaf_validations: AtomicUsize,
+}
+
+/// The estimated bytes of kept type bodies one request holds at most.
+const KEPT_TYPE_BODY_BUDGET_BYTES: usize = 1 << 20;
+
+/// The bytes a kept type body is charged per byte of its declarations'
+/// authored source: an estimate of the owned typed IR lowered from it.
+const KEPT_TYPE_BODY_BYTES_PER_SOURCE_BYTE: usize = 16;
+
+/// The type declaration bodies one request's preparations kept for the
+/// body reads that follow them. Each is charged to the retention account
+/// as the request's in-flight work while it waits, and released as soon as
+/// its read takes it. Together they hold at most
+/// [`KEPT_TYPE_BODY_BUDGET_BYTES`] of estimated bytes: keeping one past
+/// that releases the oldest (whose read then lowers its body again), and a
+/// body larger than the whole budget is not kept. The rest are released
+/// when the request ends. Only this request's reads take them.
+#[derive(Default)]
+pub(crate) struct KeptTypeBodies {
+    bodies: std::collections::VecDeque<(
+        verter_semantic_source::decl_body_memo::KeptTypeBody,
+        verter_session_query::retention::RetentionCharge,
+        usize,
+    )>,
+    bytes: usize,
+}
+
+impl KeptTypeBodies {
+    /// Keep `body`, charged to `account`, releasing the oldest kept bodies
+    /// while the request holds more than its budget.
+    pub(crate) fn keep(
+        &mut self,
+        body: verter_semantic_source::decl_body_memo::KeptTypeBody,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) {
+        let bytes = body
+            .source_bytes()
+            .saturating_mul(KEPT_TYPE_BODY_BYTES_PER_SOURCE_BYTE);
+        if bytes > KEPT_TYPE_BODY_BUDGET_BYTES {
+            return;
+        }
+        while self.bytes + bytes > KEPT_TYPE_BODY_BUDGET_BYTES {
+            let Some((_, _, released)) = self.bodies.pop_front() else {
+                break;
+            };
+            self.bytes -= released;
+        }
+        self.bodies
+            .push_back((body, account.reserve_in_flight(bytes), bytes));
+        self.bytes += bytes;
+    }
+
+    /// Take, and release, the kept body parts of `name` declared by
+    /// `owner` in `scope` (the file scope when `None`) of `memo`'s source.
+    pub(crate) fn take(
+        &mut self,
+        memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        scope: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Option<Arc<verter_session_query::source::transient_parts::TransientTypeParts>> {
+        let position = self
+            .bodies
+            .iter()
+            .position(|(body, _, _)| body.serves(memo, owner, name, scope))?;
+        let (body, _charge, bytes) = self.bodies.remove(position)?;
+        self.bytes -= bytes;
+        Some(body.into_parts())
+    }
 }
 
 /// A settled validation answer: the answer itself, given at one exact
@@ -1237,12 +1304,27 @@ impl ReceiptVerdicts {
 }
 
 impl<'a> RequestStoreView<'a> {
-    /// Keep `primed` until this request ends.
-    pub(crate) fn keep_primed_type_bodies(
+    /// Keep `body` for the body read this request makes next, charged to
+    /// `account` ([`KeptTypeBodies::keep`]).
+    pub(crate) fn keep_type_body(
         &self,
-        primed: verter_semantic_source::decl_body_memo::PrimedTypeBodies,
+        body: verter_semantic_source::decl_body_memo::KeptTypeBody,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) {
-        self.primed_type_bodies.lock().push(primed);
+        self.kept_type_bodies.lock().keep(body, account);
+    }
+
+    /// Take the kept body parts of `name` declared by `owner` in `scope` of
+    /// `memo`'s source, if this request keeps them
+    /// ([`KeptTypeBodies::take`]).
+    pub(crate) fn take_kept_type_body(
+        &self,
+        memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        scope: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Option<Arc<verter_session_query::source::transient_parts::TransientTypeParts>> {
+        self.kept_type_bodies.lock().take(memo, owner, name, scope)
     }
 
     /// Construct a wrapper over `(base, overlay)` rooted on a
@@ -1257,7 +1339,7 @@ impl<'a> RequestStoreView<'a> {
             receipt_verdicts: ReceiptVerdicts::default(),
             signature_verdicts: SignatureVerdicts::default(),
             project_env: RequestProjectEnv::default(),
-            primed_type_bodies: parking_lot::Mutex::default(),
+            kept_type_bodies: parking_lot::Mutex::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
             validation_step_hook: None,
@@ -1289,7 +1371,7 @@ impl<'a> RequestStoreView<'a> {
             receipt_verdicts: ReceiptVerdicts::default(),
             signature_verdicts: SignatureVerdicts::default(),
             project_env: RequestProjectEnv::default(),
-            primed_type_bodies: parking_lot::Mutex::default(),
+            kept_type_bodies: parking_lot::Mutex::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
             validation_step_hook: None,

@@ -543,11 +543,67 @@ impl KeptParts {
 }
 
 /// One primed transient body: the demanded declaration, its scope (`None`
-/// for the file scope) and the parts lowered for it.
+/// for the file scope), the parts lowered for it, and the token of the
+/// [`PrimedTypeBodies`] guard that releases it.
 struct PrimedTypeParts {
     scope: Option<AugmentationScopeKind>,
     key: DeclBindingKey,
     parts: Arc<TransientTypeParts>,
+    token: u64,
+}
+
+/// The source of [`PrimedTypeParts::token`]s: unique per primed entry for
+/// the process's lifetime.
+static PRIMED_TYPE_PARTS_TOKENS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The parts a body read takes, when its caller kept them, for a type name
+/// declared by an owner in a scope (the file scope when `None`)
+/// ([`DeclBodyMemo::deref_locator_body_with`]).
+pub type KeptTypeParts<'a> = dyn Fn(TopLevelOwnerId, &str, Option<&AugmentationScopeKind>) -> Option<Arc<TransientTypeParts>>
+    + 'a;
+
+/// The transient body parts of one type declaration, kept by the demand
+/// that lowered its facts for the body read its caller makes next. Its
+/// holder owns it: nothing in the memo keeps it, and only a body read the
+/// holder passes it to takes it ([`DeclBodyMemo::deref_locator_body_with`]).
+pub struct KeptTypeBody {
+    snapshot: SnapshotKey,
+    key: DeclBindingKey,
+    scope: Option<AugmentationScopeKind>,
+    parts: Arc<TransientTypeParts>,
+    source_bytes: usize,
+}
+
+impl KeptTypeBody {
+    /// The length of the declaration's authored source, which its lowered
+    /// parts grow with: the size estimate a holder charges them by.
+    #[must_use]
+    pub fn source_bytes(&self) -> usize {
+        self.source_bytes
+    }
+
+    /// Whether these are the parts of `name` declared by `owner` in
+    /// `scope` (the file scope when `None`) of `memo`'s source.
+    #[must_use]
+    pub fn serves(
+        &self,
+        memo: &DeclBodyMemo,
+        owner: TopLevelOwnerId,
+        name: &str,
+        scope: Option<&AugmentationScopeKind>,
+    ) -> bool {
+        self.snapshot == memo.key
+            && self.key.owner == owner
+            && self.key.name.as_ref() == name
+            && self.scope.as_ref() == scope
+    }
+
+    /// The kept parts.
+    #[must_use]
+    pub fn into_parts(self) -> Arc<TransientTypeParts> {
+        self.parts
+    }
 }
 
 impl std::fmt::Debug for DeclBodyMemo {
@@ -907,6 +963,19 @@ impl DeclBodyMemo {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
+        self.type_decl_outcome_keeping_in(owner, name, false).0
+    }
+
+    /// [`Self::type_decl_outcome_in`], keeping the declaration's body parts
+    /// from the lowering that answers it when `keep` is set and this demand
+    /// is the one that lowers it. A declaration that names a JSDoc
+    /// `@typedef` keeps none: its typedef body is read by its own lowering.
+    pub fn type_decl_outcome_keeping_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+        keep: bool,
+    ) -> (DemandOutcome<LoweredTypeDecl>, Option<KeptTypeBody>) {
         let key = DeclBindingKey::new(owner, name);
         let Some((contributors, jsdoc_typedef)) = self
             .header_index
@@ -915,19 +984,24 @@ impl DeclBodyMemo {
         else {
             // Not inventoried: a genuine, cacheable absence — never a
             // lease-miss.
-            return DemandOutcome::Ready(None);
+            return (DemandOutcome::Ready(None), None);
+        };
+        let kept = if keep && jsdoc_typedef.is_none() {
+            KeptParts::FileScopeType
+        } else {
+            KeptParts::Nothing
         };
         let cell = self.type_entries.entry(key.clone()).or_default().clone();
         // Backfill runs OUTSIDE the cell commit — see [`Self::backfill`]. The
         // initializing caller receives the batch and backfills siblings after
         // its own cell is committed; a lease-miss evicts the cell and commits
         // nothing.
-        let (outcome, batch, _) = self.demand_and_commit(
+        let (outcome, batch, parts) = self.demand_and_commit(
             &cell,
             &key,
             &contributors,
             jsdoc_typedef,
-            KeptParts::Nothing,
+            kept,
             |batch| {
                 batch
                     .types
@@ -943,7 +1017,29 @@ impl DeclBodyMemo {
         if let Some(batch) = batch {
             self.backfill(batch, &contributors, Some((SymbolSpace::Type, &key)), None);
         }
-        outcome
+        let kept = parts.map(|parts| self.kept_type_body(key, None, &contributors, parts));
+        (outcome, kept)
+    }
+
+    /// The parts of `key` in `scope` one demand kept, with the size of its
+    /// contributors' authored source.
+    fn kept_type_body(
+        &self,
+        key: DeclBindingKey,
+        scope: Option<AugmentationScopeKind>,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        parts: TransientTypeParts,
+    ) -> KeptTypeBody {
+        KeptTypeBody {
+            snapshot: self.key.clone(),
+            key,
+            scope,
+            parts: Arc::new(parts),
+            source_bytes: contributors
+                .iter()
+                .map(|contributor| contributor.declaration_span.len() as usize)
+                .sum(),
+        }
     }
 
     /// Demand the lowered body of one file-scope VALUE symbol.
@@ -1146,25 +1242,44 @@ impl DeclBodyMemo {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
+        self.augmentation_type_decl_outcome_keeping_in(scope, owner, name, false)
+            .0
+    }
+
+    /// [`Self::augmentation_type_decl_outcome_in`], keeping the
+    /// declaration's body parts from the lowering that answers it when
+    /// `keep` is set and this demand is the one that lowers it.
+    pub fn augmentation_type_decl_outcome_keeping_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+        keep: bool,
+    ) -> (DemandOutcome<LoweredTypeDecl>, Option<KeptTypeBody>) {
         let key = DeclBindingKey::new(owner, name);
         let Some(contributors) = self
             .header_index
             .augmentation_type_header_in(scope, owner, name)
             .map(|header| header.contributors.clone())
         else {
-            return DemandOutcome::Ready(None);
+            return (DemandOutcome::Ready(None), None);
+        };
+        let kept = if keep {
+            KeptParts::AugmentationType(scope.clone())
+        } else {
+            KeptParts::Nothing
         };
         let cell = self
             .aug_type_entries
             .entry((scope.clone(), key.clone()))
             .or_default()
             .clone();
-        let (outcome, batch, _) = self.demand_and_commit(
+        let (outcome, batch, parts) = self.demand_and_commit(
             &cell,
             &key,
             &contributors,
             None,
-            KeptParts::Nothing,
+            kept,
             |batch| {
                 batch
                     .aug_types
@@ -1189,7 +1304,9 @@ impl DeclBodyMemo {
                 Some((scope, SymbolSpace::Type, &key)),
             );
         }
-        outcome
+        let kept =
+            parts.map(|parts| self.kept_type_body(key, Some(scope.clone()), &contributors, parts));
+        (outcome, kept)
     }
 
     /// Demand the lowered body of one augmentation-scoped VALUE symbol.
@@ -2340,17 +2457,13 @@ pub struct TypeBodyDemand<'a> {
 /// releases every one no body read has taken yet.
 #[must_use = "dropping the guard releases the primed bodies before they are read"]
 pub struct PrimedTypeBodies {
-    kept: Vec<(
-        Arc<DeclBodyMemo>,
-        Option<AugmentationScopeKind>,
-        DeclBindingKey,
-    )>,
+    kept: Vec<(Arc<DeclBodyMemo>, u64)>,
 }
 
 impl Drop for PrimedTypeBodies {
     fn drop(&mut self) {
-        for (memo, scope, key) in self.kept.drain(..) {
-            let _ = memo.take_primed_type_parts(&key, scope.as_ref());
+        for (memo, token) in self.kept.drain(..) {
+            memo.release_primed_type_parts(token);
         }
     }
 }
@@ -2472,63 +2585,19 @@ pub fn prime_type_bodies(demands: &[TypeBodyDemand<'_>]) -> PrimedTypeBodies {
                 }
             }
             if let Some(parts) = transient {
+                let token =
+                    PRIMED_TYPE_PARTS_TOKENS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 pending.memo.primed_type_parts.lock().push(PrimedTypeParts {
-                    scope: pending.scope.clone(),
-                    key: pending.key.clone(),
+                    scope: pending.scope,
+                    key: pending.key,
                     parts: Arc::new(parts),
+                    token,
                 });
-                kept.push((Arc::clone(pending.memo), pending.scope, pending.key));
+                kept.push((Arc::clone(pending.memo), token));
             }
         }
     }
     PrimedTypeBodies { kept }
-}
-
-/// Lower the file-scope type declaration `name` of `owner` in `memo` when
-/// its facts are not lowered yet, keeping its body's transient parts for
-/// the body read that follows: the single-demand counterpart of
-/// [`prime_type_bodies`], committed through the declaration's cell as any
-/// demand is. `None` when the file declares no such type or its facts are
-/// already lowered: a body read then lowers its parts as it always does.
-pub fn prime_type_body(
-    memo: &Arc<DeclBodyMemo>,
-    owner: TopLevelOwnerId,
-    name: &str,
-) -> Option<PrimedTypeBodies> {
-    let key = DeclBindingKey::new(owner, name);
-    let (contributors, jsdoc_typedef, cell) = memo.type_demand_target(&key, None)?;
-    if cell.get().is_some() {
-        return None;
-    }
-    let (_, batch, parts) = memo.demand_and_commit(
-        &cell,
-        &key,
-        &contributors,
-        jsdoc_typedef,
-        KeptParts::FileScopeType,
-        |batch| {
-            batch
-                .types
-                .iter()
-                .find(|(candidate, _)| candidate == &key)
-                .map(|(_, decl)| Arc::new(decl.clone()))
-        },
-        |poisoned| {
-            memo.type_entries
-                .remove_if(&key, |_, existing| Arc::ptr_eq(existing, poisoned));
-        },
-    );
-    if let Some(batch) = batch {
-        memo.backfill(batch, &contributors, Some((SymbolSpace::Type, &key)), None);
-    }
-    memo.primed_type_parts.lock().push(PrimedTypeParts {
-        scope: None,
-        key: key.clone(),
-        parts: Arc::new(parts?),
-    });
-    Some(PrimedTypeBodies {
-        kept: vec![(Arc::clone(memo), None, key)],
-    })
 }
 
 /// Union one contributor's header type parameters into the transient list,
@@ -2556,6 +2625,14 @@ impl DeclBodyMemo {
             .iter()
             .position(|entry| &entry.key == key && entry.scope.as_ref() == scope)?;
         Some(primed.swap_remove(position).parts)
+    }
+
+    /// Release the primed entry `token` names, if no body read took it.
+    fn release_primed_type_parts(&self, token: u64) {
+        let mut primed = self.primed_type_parts.lock();
+        if let Some(position) = primed.iter().position(|entry| entry.token == token) {
+            primed.swap_remove(position);
+        }
     }
 
     /// The header contributors (and JSDoc typedef, file scope only) of the
