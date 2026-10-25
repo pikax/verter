@@ -75,6 +75,15 @@ pub struct HostSourceData {
     /// `framework_parse` key). `None` for carriers, and for a language
     /// with no default parse identity.
     pub(crate) script_parse_key: Option<verter_language::ParseKey>,
+    /// This revision's bytes read under ANOTHER language than their own
+    /// ([`snapshot_parse_key_under`]), derived on first demand. One cell
+    /// suffices: the other language is the one the file is analysed under
+    /// (a runtime script's declaration companion's), one per revision; a
+    /// read under yet another language derives without caching.
+    pub(crate) analysis_parse_key: verter_retention::pinned_heap::PinnedOnce<(
+        FileLanguage,
+        Option<verter_language::ParseKey>,
+    )>,
     /// Sole registered envelope owner for carrier sources.
     pub(crate) structure: Option<crate::carrier_publication_store::RegisteredFileStructure>,
     #[heap_size(inline)]
@@ -97,6 +106,31 @@ pub struct HostSourceData {
     pub(crate) parse_duration_ms: f64,
 }
 
+/// The exact parse identity of `snapshot`'s own bytes read as a file of
+/// `file_language`: the snapshot's identity under its own language,
+/// otherwise [`crate::parse::source_parse_key_for`] over the snapshot's
+/// bytes, derived once per revision ([`HostSourceData::analysis_parse_key`]).
+/// It takes the snapshot, never separate bytes, so the cell can only ever
+/// hold the identity of the revision that owns it.
+pub(crate) fn snapshot_parse_key_under(
+    snapshot: &verter_scheduler::node::SourceSnapshot,
+    file_language: &FileLanguage,
+) -> Option<verter_language::ParseKey> {
+    let hd = snapshot.downcast_data::<HostSourceData>()?;
+    if *file_language == hd.file_language {
+        return hd.source_parse_key();
+    }
+    let derive = || crate::parse::source_parse_key_for(&snapshot.source, file_language);
+    let (language, parse_key) = hd
+        .analysis_parse_key
+        .get_or_init(|| (file_language.clone(), derive()));
+    if language == file_language {
+        parse_key.clone()
+    } else {
+        derive()
+    }
+}
+
 impl SnapshotData for HostSourceData {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -110,6 +144,43 @@ impl HostSourceData {
             verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
             &Default::default(),
         );
+    }
+
+    /// The exact parse identity of this source revision under its runtime
+    /// language, without a pass over its bytes: a carrier's is the key its
+    /// framework parse recorded, a plain script's the one derived once with
+    /// this snapshot ([`Self::script_parse_key`]). The identity
+    /// [`verter_session_query::source::framework_parse::exact_source_parse_key`]
+    /// derives from the snapshot's source (`None` where that refuses).
+    pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
+        match self.framework_parse.as_deref() {
+            Some(artifact) => {
+                verter_session_query::source::framework_parse::carrier_source_parse_key(
+                    &self.file_language,
+                    crate::parse::carrier_parse_key(artifact),
+                )
+            }
+            None => self.script_parse_key.clone(),
+        }
+    }
+
+    /// The exact artifact key of this source revision for `canonical` under
+    /// `parse_env_hash`, built from the snapshot's own content hash, language
+    /// and parse identity: one snapshot, no pass over the source.
+    pub(crate) fn artifact_key(
+        &self,
+        canonical: Arc<str>,
+        parse_env_hash: verter_session_query::analysis::types::Hash16,
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
+        self.source_parse_key().map(|parse_key| {
+            verter_session_query::source::artifact_key::FileArtifactKey::for_parse_identity(
+                canonical,
+                self.parse.whole_hash,
+                parse_key,
+                self.file_language.clone(),
+                parse_env_hash,
+            )
+        })
     }
 }
 
@@ -251,6 +322,8 @@ impl SnapshotData for HostArtifactData {
 /// Analysis and Artifact stages delegate back to the host facade (the scheduler
 /// provides coordination, the host provides domain logic).
 pub struct HostStageExecutor {
+    #[cfg(any(test, feature = "test-support"))]
+    pin_context: verter_retention::pinned_heap::PinContext,
     pub config: HostConfig,
     pub workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
     /// Host-owned provenance counters. The executor bumps `sfc_parses`
@@ -294,6 +367,8 @@ impl HostStageExecutor {
         >,
     ) -> Self {
         Self {
+            #[cfg(any(test, feature = "test-support"))]
+            pin_context: Default::default(),
             config,
             workspace,
             provenance,
@@ -317,6 +392,8 @@ impl HostStageExecutor {
         generation: u64,
         incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _pin_scope = self.pin_context.enter_for_test();
         // Every ingress names this host's scheduler node object as well as
         // its generation: a removed or reset file's successor restarts its
         // generation sequence, so the generation alone could repeat a
@@ -427,20 +504,19 @@ impl HostStageExecutor {
                 // carrier language. A miss (unregistered carrier, or a
                 // row without a grammar fact) fails closed — never
                 // another framework's grammar.
-                let grammar_config =
-                    verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
-                            adapter_id,
-                            carrier_language_id,
-                        )
-                        .ok_or_else(|| StageError {
-                            message: format!(
-                                "registered frontend for framework language adapter \
+                let grammar_config = crate::carrier_publication_store::registered_carrier_grammar(
+                    adapter_id,
+                    carrier_language_id,
+                )
+                .ok_or_else(|| StageError {
+                    message: format!(
+                        "registered frontend for framework language adapter \
                                  '{adapter_id}' carries no registered grammar fact"
-                            ),
-                            kind: StageErrorKind::UnsupportedLanguage {
-                                adapter_id: adapter_id.clone(),
-                            },
-                        })?;
+                    ),
+                    kind: StageErrorKind::UnsupportedLanguage {
+                        adapter_id: adapter_id.clone(),
+                    },
+                })?;
                 let accepted = self
                     .grammar_authority
                     .accept_registered_source(&self.source_authority, &registered, grammar_config)
@@ -515,6 +591,7 @@ impl HostStageExecutor {
                     parse: parse_snapshot,
                     framework_parse: Some(framework_parse),
                     script_parse_key: None,
+                    analysis_parse_key: Default::default(),
                     structure: Some(structure),
                     revision_token,
                     file_language,
@@ -533,10 +610,14 @@ impl HostStageExecutor {
             refuse_unparsed(&parse_snapshot)?;
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type = imported_eval_source_type(&file_language, None);
+            // The one derivation of this revision's parse identity: every
+            // artifact key read afterwards reuses it.
             let script_parse_key =
-                verter_language::default_parse_identity_for(&content, &file_language)
-                    .ok()
-                    .map(|(_, parse_key)| parse_key);
+                verter_session_query::source::framework_parse::exact_source_parse_key(
+                    &content,
+                    &file_language,
+                    None,
+                );
             SourceSnapshot {
                 source: Arc::clone(&content),
                 whole_hash: parse_snapshot.whole_hash,
@@ -548,6 +629,7 @@ impl HostStageExecutor {
                     parse: parse_snapshot,
                     framework_parse: None,
                     script_parse_key,
+                    analysis_parse_key: Default::default(),
                     structure: None,
                     revision_token,
                     file_language,
@@ -703,6 +785,8 @@ impl StageExecutor for HostStageExecutor {
         source: &SourceSnapshot,
         generation: u64,
     ) -> Result<AnalysisSnapshot, StageError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _pin_scope = self.pin_context.enter_for_test();
         // `AnalysisScope::NONE` deliberately carries no analysis payload.
         // Avoid materialising the Arc-wrapped read views for the empty
         // snapshot: bundler/stateless hosts still cross the scheduler's

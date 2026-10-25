@@ -112,22 +112,31 @@ pub fn exact_source_parse_key(
     carrier: Option<CarrierParseKey<'_>>,
 ) -> Option<ParseKey> {
     match carrier {
-        Some(carrier) => {
-            if carrier.adapter_id != file_language.adapter_id()?
-                || Some(carrier.language_id) != file_language.carrier_language_id()
-            {
-                return None;
-            }
-            Some(carrier.parse_key.clone())
-        }
+        Some(carrier) => carrier_source_parse_key(file_language, carrier),
         None => {
             #[cfg(feature = "test-support")]
-            SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
+            count_source_parse_identity_derivation_for_tests();
             verter_language::default_parse_identity_for(source, file_language)
                 .ok()
                 .map(|(_, parse_key)| parse_key)
         }
     }
+}
+
+/// The parse identity a carrier's framework parse recorded, provided the
+/// recording adapter and carrier language are the ones `file_language`
+/// names; a mismatch is `None`. It reads the recorded key and never passes
+/// over the source.
+pub fn carrier_source_parse_key(
+    file_language: &FileLanguage,
+    carrier: CarrierParseKey<'_>,
+) -> Option<ParseKey> {
+    if carrier.adapter_id != file_language.adapter_id()?
+        || Some(carrier.language_id) != file_language.carrier_language_id()
+    {
+        return None;
+    }
+    Some(carrier.parse_key.clone())
 }
 
 #[cfg(feature = "test-support")]
@@ -138,9 +147,33 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// Count one parse identity derived by hashing a whole source, on this
+/// thread and in this process. Every whole-source derivation records itself
+/// here: [`exact_source_parse_key`]'s, and a carrier's under its registered
+/// grammar, which the host derives.
+#[cfg(feature = "test-support")]
+pub fn count_source_parse_identity_derivation_for_tests() {
+    SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
+    SOURCE_PARSE_IDENTITY_DERIVATIONS_IN_PROCESS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// How many parse identities this thread derived from a plain script's whole
 /// source text so far.
 #[cfg(feature = "test-support")]
 pub fn source_parse_identity_derivations_for_tests() -> usize {
     SOURCE_PARSE_IDENTITY_DERIVATIONS.with(std::cell::Cell::get)
+}
+
+/// How many parse identities every thread of this process derived by
+/// hashing a whole source through [`exact_source_parse_key`].
+#[cfg(feature = "test-support")]
+static SOURCE_PARSE_IDENTITY_DERIVATIONS_IN_PROCESS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many parse identities every thread of this process derived from a
+/// whole source text so far: the scheduler's workers included, so a test
+/// that reads it owns its process.
+#[cfg(feature = "test-support")]
+pub fn source_parse_identity_derivations_in_process_for_tests() -> usize {
+    SOURCE_PARSE_IDENTITY_DERIVATIONS_IN_PROCESS.load(std::sync::atomic::Ordering::Relaxed)
 }

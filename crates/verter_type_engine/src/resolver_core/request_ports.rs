@@ -465,6 +465,22 @@ impl CancellationCheckpoint {
         cancelled
     }
 
+    /// The token [`Self::is_cancelled`] selects on this thread now, for a
+    /// pending poll to subscribe to its cancellation: the job token when it
+    /// accepted a request owner, else the installed request's token, else
+    /// the ownerless job token. `None` when nothing can cancel the work.
+    #[must_use]
+    pub fn selected_token() -> Option<verter_execution::cancellation::CancellationToken> {
+        verter_execution::cancellation::with_current_job_cancellation_token(|job| {
+            if let Some(token) = job {
+                if token.has_registered_owners() {
+                    return Some(token.clone());
+                }
+            }
+            crate::request_context::current_request_cancellation_token().or_else(|| job.cloned())
+        })
+    }
+
     /// The selection [`Self::is_cancelled`] makes, given the job token
     /// installed on this thread. Written as plain matches: every semantic
     /// checkpoint runs it, and a debug build calls out for each combinator.

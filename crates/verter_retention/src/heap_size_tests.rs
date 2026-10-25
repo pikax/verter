@@ -140,3 +140,33 @@ fn an_iterative_tree_measures_a_deep_chain_on_a_small_stack() {
     });
     assert_eq!(measured, expected);
 }
+
+#[test]
+fn pinned_iterative_tree_measures_a_deep_chain_on_a_small_stack() {
+    use crate::pinned_heap::{PinContext, PinnedHeap};
+    let context = PinContext::new(SemanticRetentionAccount::new(RetentionLimits::defaults()));
+    let mut chain = Chain {
+        text: String::with_capacity(8),
+        next: None,
+    };
+    for _ in 0..50_000 {
+        chain = Chain {
+            text: String::with_capacity(8),
+            next: Some(Arc::new(chain)),
+        };
+    }
+    let expected = footprint(&chain).bytes;
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn_scoped(scope, || {
+                let pin = PinnedHeap::measure(&chain, 0, &context);
+                assert!(context.account().snapshot().pinned_bytes >= expected);
+                drop(pin);
+                assert_eq!(context.account().snapshot().total_bytes(), 0);
+            })
+            .unwrap()
+            .join()
+            .expect("pinned walk and teardown stay iterative");
+    });
+}

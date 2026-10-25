@@ -48,8 +48,13 @@ impl OverlayStore {
 
     /// Check if a file has an overlay set.
     pub fn has_overlay(&self, canonical_id: &str) -> bool {
-        let key = canonicalize_path(canonical_id);
-        self.entries.contains_key(&key)
+        // Nothing to find: answer before spelling the lookup key. An id that
+        // is already canonical is looked up as it is, without a copy.
+        if self.entries.is_empty() {
+            return false;
+        }
+        let key = crate::canonical_path::canonicalize_path_cow(canonical_id);
+        self.entries.contains_key(key.as_ref())
     }
 
     /// Number of active overlays.

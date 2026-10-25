@@ -14,7 +14,6 @@ const CANONICAL_LEN: usize = 12_000;
 fn unbounded_account() -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: usize::MAX,
-        active_ceiling_bytes: usize::MAX,
         max_entry_bytes: usize::MAX,
         pin_threshold_bytes: usize::MAX,
     })
@@ -174,7 +173,6 @@ fn a_refused_candidate_keeps_no_charge_and_no_registration() {
     let (carrier, roots) = oversized_carrier();
     let account = SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: CANONICAL_LEN,
-        active_ceiling_bytes: CANONICAL_LEN,
         max_entry_bytes: CANONICAL_LEN,
         pin_threshold_bytes: CANONICAL_LEN,
     });

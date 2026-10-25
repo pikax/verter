@@ -90,9 +90,14 @@ pub struct ImportedRootDb {
 
 impl ImportedRootDb {
     pub fn new() -> Self {
+        Self::with_task_registry(verter_execution::tasks::TaskRegistry::default())
+    }
+
+    /// A database whose flights are led and joined by tasks of `tasks`.
+    pub fn with_task_registry(tasks: verter_execution::tasks::TaskRegistry) -> Self {
         Self {
             roots: ValidatedFactCache::default(),
-            singleflight: SingleflightGroup::default(),
+            singleflight: SingleflightGroup::with_task_registry(tasks),
         }
     }
 

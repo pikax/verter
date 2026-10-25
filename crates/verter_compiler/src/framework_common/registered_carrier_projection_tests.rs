@@ -78,13 +78,16 @@ fn registered_parse_storage_charges_geometry_and_shares_source_and_reader_alloca
         verter_language::FileLanguage::vue(),
         verter_language::FileLanguage::svelte(),
     ] {
+        let context = PinContext::new(verter_retention::SemanticRetentionAccount::new(
+            verter_retention::RetentionLimits::defaults(),
+        ));
+        let _scope = context.enter_for_test();
         let source = format!(
             "<script lang=\"ts\">export let value: string;</script>{}",
             "<div class=\"large\">text</div>".repeat(512)
         );
         let (_, _, accepted) = accepted("/retained-component", language, &source);
         let artifact = project(&accepted);
-        let context = PinContext::default();
         let baseline = context.account().snapshot().pinned_bytes;
         let source_pin = PinnedHeap::measure(artifact.carrier_source(), 0, &context);
         let source_bytes = context.account().snapshot().pinned_bytes;

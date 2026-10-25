@@ -174,12 +174,15 @@ is an owned cell charged by itself. A terminal output
 unwrap hands the caller either the sole cell's own tree or an unshared
 copy, never an alias of a retained payload.
 
-## Declared carve-outs
+## Parse artifact ownership
 
 - **Parse artifacts and scheduler snapshots.** These are pinned on the same
   account, including lazy declaration-body growth and shared shallow-state
   ownership. Their allocation and field inventory is
   [the artifact accounting inventory](SKR-OWN-ACCOUNT-ARTIFACTS.md).
+
+## Declared carve-outs
+
 - **Persistent export structure.** The module-export HAMT is a third-party
   structure whose node layout is not observable; its backing is charged by
   the declared per-written-slot path-copy convention above.

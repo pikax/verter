@@ -13,7 +13,6 @@
 //! Every interleaving is forced by the resolution phase hooks and channels;
 //! nothing depends on timing.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -92,10 +91,12 @@ fn hold_a_write_open(
 }
 
 /// Resolve `MAIN`'s `./dep` through an operation `cancelled` can cancel.
-fn resolve_cancellable(workspace: &MemoryWorkspace, cancelled: &AtomicBool) -> ResolutionOutcome {
+fn resolve_cancellable(
+    workspace: &MemoryWorkspace,
+    cancelled: &verter_execution::cancellation::CancellationToken,
+) -> ResolutionOutcome {
     let mut ledger =
         crate::resolver::InputResolutionLedger::new(workspace.engine.input_resolution_budgets);
-    let is_cancelled = || cancelled.load(Ordering::SeqCst);
     workspace
         .engine
         .resolve_import_outcome_for_published_in_operation(
@@ -104,7 +105,7 @@ fn resolve_cancellable(workspace: &MemoryWorkspace, cancelled: &AtomicBool) -> R
             MAIN,
             "./dep",
             CONTEXT,
-            ResolutionOperation::unpinned(&mut ledger, &|| true).cancelled_by(&is_cancelled),
+            ResolutionOperation::unpinned(&mut ledger, &|| true).cancelled_by(cancelled),
         )
 }
 
@@ -160,11 +161,11 @@ fn a_request_cancelled_while_it_waits_on_the_publication_gate_publishes_nothing_
     let workspace = workspace(&[(MAIN, "export {}\n")]);
     let (release, writer) = hold_a_write_open(&workspace, add_dep());
 
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = verter_execution::cancellation::CancellationToken::new();
     let (waiting_tx, waiting_rx) = mpsc::channel();
     let request = {
         let workspace = Arc::clone(&workspace);
-        let cancelled = Arc::clone(&cancelled);
+        let cancelled = cancelled.clone();
         std::thread::spawn(move || {
             resolution_test_hooks::with_hook(
                 ResolutionPhase::PublicationGateWait,
@@ -176,7 +177,7 @@ fn a_request_cancelled_while_it_waits_on_the_publication_gate_publishes_nothing_
     waiting_rx
         .recv_timeout(WAIT)
         .expect("the request waits on the publication gate");
-    cancelled.store(true, Ordering::SeqCst);
+    cancelled.cancel();
     release.send(()).unwrap();
     writer.join().expect("the writer completes");
 
@@ -194,9 +195,9 @@ fn a_request_cancelled_between_capture_and_admission_publishes_nothing_stale() {
         "export {}
 ",
     )]);
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = verter_execution::cancellation::CancellationToken::new();
     let hook_workspace = Arc::clone(&workspace);
-    let hook_cancelled = Arc::clone(&cancelled);
+    let hook_cancelled = cancelled.clone();
     let mut landed = false;
     let outcome = resolution_test_hooks::with_every_phase_hook(
         move |phase| {
@@ -206,7 +207,7 @@ fn a_request_cancelled_between_capture_and_admission_publishes_nothing_stale() {
             landed = true;
             // Captured and resolved (a miss); now cancelled, and the file
             // appears before the admission check.
-            hook_cancelled.store(true, Ordering::SeqCst);
+            hook_cancelled.cancel();
             let workspace = Arc::clone(&hook_workspace);
             std::thread::spawn(move || {
                 workspace.apply_changes(add_dep());
@@ -216,7 +217,7 @@ fn a_request_cancelled_between_capture_and_admission_publishes_nothing_stale() {
         },
         || resolve_cancellable(&workspace, &cancelled),
     );
-    assert!(cancelled.load(Ordering::SeqCst), "the interleaving ran");
+    assert!(cancelled.is_cancelled(), "the interleaving ran");
     assert_cancelled_publishes_nothing_stale(&outcome);
     assert_the_retry_is_current(&workspace);
 }
@@ -230,14 +231,14 @@ fn a_request_cancelled_between_capture_and_admission_publishes_nothing_stale() {
 #[test]
 fn a_cancelled_subscriber_poisons_neither_its_sibling_nor_the_retry() {
     let workspace = workspace(&[(MAIN, "export {}\n")]);
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = verter_execution::cancellation::CancellationToken::new();
     let subscriber_outcome = Arc::new(Mutex::new(None));
     let sibling_outcome = Arc::new(Mutex::new(None));
     let threads = Arc::new(Mutex::new(Vec::new()));
     let writer_release = Arc::new(Mutex::new(None));
 
     let hook_workspace = Arc::clone(&workspace);
-    let hook_cancelled = Arc::clone(&cancelled);
+    let hook_cancelled = cancelled.clone();
     let hook_subscriber = Arc::clone(&subscriber_outcome);
     let hook_sibling = Arc::clone(&sibling_outcome);
     let hook_threads = Arc::clone(&threads);
@@ -252,7 +253,7 @@ fn a_cancelled_subscriber_poisons_neither_its_sibling_nor_the_retry() {
                 stage = 1;
                 {
                     let workspace = Arc::clone(&hook_workspace);
-                    let cancelled = Arc::clone(&hook_cancelled);
+                    let cancelled = hook_cancelled.clone();
                     let outcome = Arc::clone(&hook_subscriber);
                     hook_threads
                         .lock()
@@ -282,7 +283,7 @@ fn a_cancelled_subscriber_poisons_neither_its_sibling_nor_the_retry() {
             // release the writer.
             (1, ResolutionPhase::PublicationGateWait) => {
                 stage = 2;
-                hook_cancelled.store(true, Ordering::SeqCst);
+                hook_cancelled.cancel();
                 let deadline = Instant::now() + WAIT;
                 while hook_subscriber.lock().unwrap().is_none() {
                     assert!(

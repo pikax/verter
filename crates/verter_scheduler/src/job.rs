@@ -367,6 +367,9 @@ impl<T: Clone> CompletionSender<T> {
 impl<T: Clone> CompletionHandle<T> {
     /// Block until the handle resolves to a terminal state.
     pub fn wait(&self) -> CompletionState<T> {
+        verter_execution::blocking::enter_wait(
+            verter_execution::blocking::WaitFamily::SchedulerCompletion,
+        );
         let mut slot = self.inner.slot.lock();
         while slot.state.is_none() {
             self.inner.condvar.wait(&mut slot);

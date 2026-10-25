@@ -549,43 +549,67 @@ thread_local! {
 }
 
 #[cfg(feature = "semantic-observe")]
-/// RAII guard returned by [`begin_request_audit`]. Drops the
-/// corresponding entry from the `ACTIVE_REQUEST_AUDIT` TLS stack on
-/// scope exit.
-pub struct RequestAuditGuard {
+/// The phase audit of one request, returned by [`begin_request_audit`]
+/// and owned by the request across its suspensions. The request's phases
+/// record into it only while it is installed on the running thread's
+/// `ACTIVE_REQUEST_AUDIT` stack ([`Self::install`]).
+pub struct RequestAudit {
     request_id: u64,
+    audit: RequestPhaseAudit,
 }
 
 #[cfg(feature = "semantic-observe")]
-impl RequestAuditGuard {
-    /// Snapshot the phase-audit state for this request without
-    /// removing it from the stack.
+impl RequestAudit {
+    /// Push the audit on this thread's stack until the returned
+    /// installation drops, unwinding included.
+    pub fn install(&mut self) -> RequestAuditInstall<'_> {
+        let audit = std::mem::take(&mut self.audit);
+        ACTIVE_REQUEST_AUDIT.with(|stack| stack.borrow_mut().push((self.request_id, audit)));
+        RequestAuditInstall { owner: self }
+    }
+
+    /// The phase-audit state this request recorded so far.
     pub fn snapshot(&self) -> RequestPhaseAudit {
-        ACTIVE_REQUEST_AUDIT.with(|stack| {
-            stack
-                .borrow()
-                .iter()
-                .rev()
-                .find(|(request_id, _)| *request_id == self.request_id)
-                .map(|(_, audit)| audit.clone())
-                .unwrap_or_default()
-        })
+        self.audit.clone()
     }
 }
 
 #[cfg(feature = "semantic-observe")]
-impl Drop for RequestAuditGuard {
+/// One installation of a [`RequestAudit`]; dropping it takes the audit off
+/// the thread's stack and back into its request.
+pub struct RequestAuditInstall<'a> {
+    owner: &'a mut RequestAudit,
+}
+
+#[cfg(feature = "semantic-observe")]
+impl Drop for RequestAuditInstall<'_> {
     fn drop(&mut self) {
-        ACTIVE_REQUEST_AUDIT.with(|stack| {
+        let request_id = self.owner.request_id;
+        let removed = ACTIVE_REQUEST_AUDIT.with(|stack| {
             let mut stack = stack.borrow_mut();
-            if let Some(position) = stack
+            stack
                 .iter()
-                .rposition(|(request_id, _)| *request_id == self.request_id)
-            {
-                stack.remove(position);
-            }
+                .rposition(|(id, _)| *id == request_id)
+                .map(|position| stack.remove(position).1)
         });
+        if let Some(audit) = removed {
+            self.owner.audit = audit;
+        }
     }
+}
+
+#[cfg(feature = "semantic-observe")]
+/// Run `computation` with `audit`, when there is one, installed for each of
+/// its polls.
+pub fn within_request_audit<'a, F: std::future::Future + 'a>(
+    mut audit: Option<&'a mut RequestAudit>,
+    computation: F,
+) -> impl std::future::Future<Output = F::Output> + 'a {
+    let mut computation = Box::pin(computation);
+    std::future::poll_fn(move |cx| {
+        let _installed = audit.as_deref_mut().map(RequestAudit::install);
+        computation.as_mut().poll(cx)
+    })
 }
 
 #[cfg(feature = "semantic-observe")]
@@ -794,15 +818,13 @@ fn ns_to_ms(ns: u64) -> f64 {
 }
 
 #[cfg(feature = "semantic-observe")]
-/// Push a new [`RequestPhaseAudit`] entry for `request_id` onto the
-/// TLS stack and return the RAII guard that removes it on drop.
-pub fn begin_request_audit(request_id: u64) -> RequestAuditGuard {
-    ACTIVE_REQUEST_AUDIT.with(|stack| {
-        stack
-            .borrow_mut()
-            .push((request_id, RequestPhaseAudit::default()));
-    });
-    RequestAuditGuard { request_id }
+/// A fresh [`RequestPhaseAudit`] for `request_id`, recorded into while it
+/// is installed ([`RequestAudit::install`]).
+pub fn begin_request_audit(request_id: u64) -> RequestAudit {
+    RequestAudit {
+        request_id,
+        audit: RequestPhaseAudit::default(),
+    }
 }
 
 /// Accumulate `elapsed_ms` into the current request's imported-root

@@ -6,7 +6,6 @@ use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use verter_compiler::framework_common::FrameworkParseArtifact;
@@ -356,10 +355,22 @@ fn base64url_32(bytes: [u8; 32]) -> String {
 }
 
 #[derive(verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct FrameworkArtifactEnvelope {
+    storage: verter_retention::pinned_heap::StoragePin,
     id: FrameworkArtifactId,
     source: RegisteredSourceSnapshot,
     artifact: Arc<FrameworkParseArtifact>,
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for FrameworkArtifactEnvelope {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
 }
 
 impl std::fmt::Debug for FrameworkArtifactEnvelope {
@@ -730,9 +741,6 @@ impl PublicationLane {
     }
 }
 
-/// How often a lane waiter observes its request's cancellation.
-const LANE_CANCELLATION_SLICE: Duration = Duration::from_millis(5);
-
 /// The waiters polling one lane for its outcome.
 ///
 /// A waiter registers only while it holds the lane's state lock and finds
@@ -1077,44 +1085,51 @@ impl CarrierPublicationStore {
             );
             drop(state);
             let mut wait = LaneWait::new(&lane.waiters);
-            verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
-                if request.cancellation.is_cancelled() {
-                    self.audit.push(
-                        &request,
-                        &artifact_id,
-                        PublicationAuditKind::WaiterDetachedCancelled,
-                    );
-                    return Poll::Ready(PublicationOutcome::Cancelled);
-                }
-                let state = lane
-                    .state
-                    .lock()
-                    .expect("publication lane lock poisoned by a worker panic");
-                match &*state {
-                    LaneState::Terminal(outcome) => {
-                        if self
-                            .grammar_authority
-                            .validate_accepted_current(&self.source_authority, accepted)
-                            .is_err()
-                        {
-                            return Poll::Ready(PublicationOutcome::Superseded(
-                                CurrentSourceEvidence {
-                                    current_source: None,
-                                },
-                            ));
+            // The request's cancellation wakes the waiter as the lane's
+            // outcome does; it registers before the lane is checked.
+            let mut stop = request.cancellation.subscribe();
+            verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::CarrierPublication,
+                None,
+                |waker| {
+                    if stop.poll(waker).is_ready() {
+                        self.audit.push(
+                            &request,
+                            &artifact_id,
+                            PublicationAuditKind::WaiterDetachedCancelled,
+                        );
+                        return Poll::Ready(PublicationOutcome::Cancelled);
+                    }
+                    let state = lane
+                        .state
+                        .lock()
+                        .expect("publication lane lock poisoned by a worker panic");
+                    match &*state {
+                        LaneState::Terminal(outcome) => {
+                            if self
+                                .grammar_authority
+                                .validate_accepted_current(&self.source_authority, accepted)
+                                .is_err()
+                            {
+                                return Poll::Ready(PublicationOutcome::Superseded(
+                                    CurrentSourceEvidence {
+                                        current_source: None,
+                                    },
+                                ));
+                            }
+                            Poll::Ready(
+                                outcome
+                                    .outcome()
+                                    .unwrap_or(PublicationOutcome::RetryExhausted),
+                            )
                         }
-                        Poll::Ready(
-                            outcome
-                                .outcome()
-                                .unwrap_or(PublicationOutcome::RetryExhausted),
-                        )
+                        LaneState::Vacant | LaneState::Producing => {
+                            wait.register(waker);
+                            Poll::Pending
+                        }
                     }
-                    LaneState::Vacant | LaneState::Producing => {
-                        wait.register(waker);
-                        Poll::Pending
-                    }
-                }
-            })
+                },
+            )
         }
     }
 
@@ -1250,6 +1265,7 @@ impl CarrierPublicationStore {
                     }
                 };
                 let envelope = Arc::new(FrameworkArtifactEnvelope {
+                    storage: Default::default(),
                     id: artifact_id.clone(),
                     source: accepted.source().clone(),
                     artifact: Arc::new(artifact),
@@ -1408,35 +1424,42 @@ impl CarrierPublicationStore {
         artifact_id: &FrameworkArtifactId,
     ) -> StableShared {
         let mut wait = LaneWait::new(&lane.waiters);
-        verter_execution::blocking::block_on(Some(LANE_CANCELLATION_SLICE), |waker| {
-            if request.cancellation.is_cancelled() {
-                self.audit.push(
-                    request,
-                    artifact_id,
-                    PublicationAuditKind::WaiterDetachedCancelled,
-                );
-                return Poll::Ready(StableShared::Done(PublicationOutcome::Cancelled));
-            }
-            let state = lane
-                .state
-                .lock()
-                .expect("stable-parse lane lock poisoned by a worker panic");
-            match &*state {
-                StableParseState::Ready(outcome) => Poll::Ready(match outcome.clone() {
-                    StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
-                    StableParseOutcome::Rejected(reject) => StableShared::Done(
-                        PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
-                    ),
-                    StableParseOutcome::Panicked => {
-                        StableShared::Done(PublicationOutcome::WinnerPanicked)
-                    }
-                }),
-                StableParseState::Producing => {
-                    wait.register(waker);
-                    Poll::Pending
+        // The request's cancellation wakes the waiter as the lane's outcome
+        // does; it registers before the lane is checked.
+        let mut stop = request.cancellation.subscribe();
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::CarrierPublication,
+            None,
+            |waker| {
+                if stop.poll(waker).is_ready() {
+                    self.audit.push(
+                        request,
+                        artifact_id,
+                        PublicationAuditKind::WaiterDetachedCancelled,
+                    );
+                    return Poll::Ready(StableShared::Done(PublicationOutcome::Cancelled));
                 }
-            }
-        })
+                let state = lane
+                    .state
+                    .lock()
+                    .expect("stable-parse lane lock poisoned by a worker panic");
+                match &*state {
+                    StableParseState::Ready(outcome) => Poll::Ready(match outcome.clone() {
+                        StableParseOutcome::Parsed(artifact) => StableShared::Parsed(artifact),
+                        StableParseOutcome::Rejected(reject) => StableShared::Done(
+                            PublicationOutcome::Failed(CarrierParseFailure::ParserRejected(reject)),
+                        ),
+                        StableParseOutcome::Panicked => {
+                            StableShared::Done(PublicationOutcome::WinnerPanicked)
+                        }
+                    }),
+                    StableParseState::Producing => {
+                        wait.register(waker);
+                        Poll::Pending
+                    }
+                }
+            },
+        )
     }
 
     fn finish_stable_parse(
@@ -1597,6 +1620,7 @@ impl CarrierPublicationStore {
             }
         };
         let envelope = Arc::new(FrameworkArtifactEnvelope {
+            storage: Default::default(),
             id: artifact_id.clone(),
             source: accepted.source().clone(),
             artifact: rehomed,
@@ -1633,16 +1657,58 @@ impl CarrierPublicationStore {
 }
 
 fn parse_key_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseKey {
+    carrier_parse_key_under(
+        accepted.source().bytes(),
+        accepted.source().resolved_file_language(),
+        accepted.grammar().canonical_config(),
+    )
+    .expect("accepted carrier source has a supported parse identity")
+}
+
+/// The parse identity a carrier publication records for `source` of
+/// `file_language` under the carrier's registered grammar: the same
+/// derivation as an accepted source's ([`parse_key_for_accepted`]), its
+/// delimiters and custom elements included, without registering the
+/// source. `None` for a carrier with no registered grammar.
+pub(crate) fn registered_carrier_parse_key(
+    source: &str,
+    file_language: &verter_language::FileLanguage,
+) -> Option<ParseKey> {
+    let grammar = registered_carrier_grammar(
+        file_language.adapter_id()?,
+        file_language.carrier_language_id()?,
+    )?;
+    carrier_parse_key_under(source, file_language, grammar)
+}
+
+/// The registered grammar a carrier of `adapter_id` × `carrier_language_id`
+/// is accepted and keyed under: the one lookup every carrier parse, its
+/// publication key and its read key go through. `None` for a carrier with
+/// no registered grammar fact.
+pub(crate) fn registered_carrier_grammar(
+    adapter_id: &FrameworkAdapterId,
+    carrier_language_id: &LanguageId,
+) -> Option<&'static verter_language::carrier_grammar::CarrierGrammarConfig> {
+    verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+        adapter_id,
+        carrier_language_id,
+    )
+}
+
+/// The parse identity of carrier `source` under `grammar`'s parse options.
+fn carrier_parse_key_under(
+    source: &str,
+    file_language: &verter_language::FileLanguage,
+    grammar: &verter_language::carrier_grammar::CarrierGrammarConfig,
+) -> Option<ParseKey> {
     use verter_language::carrier_grammar::CarrierGrammarConfig;
-    let options = match accepted.grammar().canonical_config() {
+    let options = match grammar {
         CarrierGrammarConfig::Vue { delimiters, .. } => verter_language::ParseOptions {
             delimiters: (
                 delimiters.open().to_string(),
                 delimiters.close().to_string(),
             ),
-            custom_elements: accepted
-                .grammar()
-                .canonical_config()
+            custom_elements: grammar
                 .custom_element_names()
                 .into_iter()
                 .map(str::to_string)
@@ -1652,15 +1718,14 @@ fn parse_key_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseKe
         CarrierGrammarConfig::Svelte => verter_language::ParseOptions::default(),
     };
     // The language crate owns the (language, options) → compatibility
-    // domain/epoch selection: an accepted carrier of any adapter keys under
-    // its OWN domain, never another framework's.
-    let (_, parse_key) = verter_language::parse_identity_for(
-        accepted.source().bytes(),
-        accepted.source().resolved_file_language(),
-        &options,
-    )
-    .expect("accepted carrier source has a supported parse identity");
-    parse_key
+    // domain/epoch selection: a carrier of any adapter keys under its OWN
+    // domain, never another framework's.
+    #[cfg(any(test, feature = "test-support"))]
+    verter_session_query::source::framework_parse::count_source_parse_identity_derivation_for_tests(
+    );
+    verter_language::parse_identity_for(source, file_language, &options)
+        .ok()
+        .map(|(_, parse_key)| parse_key)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

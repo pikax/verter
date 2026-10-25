@@ -504,8 +504,8 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         self.inner.cache_key(canonical, mode)
     }
 
-    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-        self.inner.snapshot_store_view_read()
+    async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+        self.inner.snapshot_store_view_read().await
     }
 
     fn resolution_completeness(
@@ -519,13 +519,14 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         self.inner.current_view_supersession_fingerprint()
     }
 
-    fn capture_component_meta_inputs(
+    async fn capture_component_meta_inputs(
         &self,
         canonical: &str,
         store_view: &Self::View,
     ) -> Option<Self::CapturedInputs> {
         self.inner
             .capture_component_meta_inputs(canonical, store_view)
+            .await
     }
 
     fn try_get_cached_component_meta(
@@ -667,7 +668,10 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
         overlay: Arc::new(CanonicalCompletionOverlay::new()),
     };
     let key = probe_host.cache_key(&canonical, mode);
-    let token = probe_host.snapshot_store_view_read().0.compat_token();
+    let token = host
+        .drive_for_tests(probe_host.snapshot_store_view_read())
+        .0
+        .compat_token();
 
     let sf = host.resolver_runtime().component_meta.singleflight();
     let follower_parked = sf.subscribe_joiner_park();
@@ -1556,8 +1560,8 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
             self.inner.cache_key(canonical, mode)
         }
-        fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-            self.inner.snapshot_store_view_read()
+        async fn snapshot_store_view_read(&self) -> (Self::View, bool) {
+            self.inner.snapshot_store_view_read().await
         }
         fn resolution_completeness(
             &self,
@@ -1568,13 +1572,14 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         fn current_view_supersession_fingerprint(&self) -> u64 {
             self.inner.current_view_supersession_fingerprint()
         }
-        fn capture_component_meta_inputs(
+        async fn capture_component_meta_inputs(
             &self,
             canonical: &str,
             store_view: &Self::View,
         ) -> Option<Self::CapturedInputs> {
             self.inner
                 .capture_component_meta_inputs(canonical, store_view)
+                .await
         }
         fn try_get_cached_component_meta(
             &self,
@@ -2200,7 +2205,6 @@ mod cached_result_footprint {
         let account = verter_session_query::retention::SemanticRetentionAccount::new(
             verter_session_query::retention::RetentionLimits {
                 aggregate_ceiling_bytes: usize::MAX,
-                active_ceiling_bytes: usize::MAX,
                 max_entry_bytes: usize::MAX,
                 pin_threshold_bytes: usize::MAX,
             },

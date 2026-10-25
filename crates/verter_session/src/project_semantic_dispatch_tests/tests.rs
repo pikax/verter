@@ -1578,6 +1578,84 @@ fn nested_nonbinding_relation_frame_registers_the_store_owned_family_flight() {
 }
 
 #[test]
+fn relation_publication_rejects_conflicting_root_and_queued_member_versions() {
+    relation_publication_checks_observed_versions(true);
+}
+
+#[test]
+fn relation_publication_rejects_conflicting_versions_between_queued_members() {
+    relation_publication_checks_observed_versions(false);
+}
+
+fn relation_publication_checks_observed_versions(scoped_root: bool) {
+    for edited in [false, true] {
+        let host = host();
+        let canonical = "/w/relation-versions.ts";
+        upsert_ts(&host, canonical, "export type Value = number[];");
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        // Keep the old operand alive across the edit, as a held answer can.
+        let _builder = graph.enter_node_root_scope();
+        let scope = || NodeScopeId::File {
+            canonical_id: canonical.into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: host.ensure_indexed_ready(canonical).unwrap().whole_hash,
+            local_scope: None,
+        };
+        let number = primitive(&graph, PrimitiveKind::Number);
+        let array = || SemanticNodeData::Array {
+            element: number,
+            readonly: false,
+        };
+        let old_array = graph.intern_node_with_scope(array(), scope());
+        if edited {
+            upsert_ts(&host, canonical, "export type Value = string[];");
+        }
+        let current_scope = scope();
+        let current_array = graph.intern_node_with_scope(array(), current_scope.clone());
+        let target_array = graph.intern_node(array());
+        let (source, target) = if scoped_root {
+            let object = simple_object(&graph, &[("x", old_array)]);
+            let data = graph.node_data(object).unwrap();
+            let SemanticNodeData::Object(surface) = data.as_ref() else {
+                panic!("object fixture")
+            };
+            (
+                graph.intern_node_with_scope(
+                    SemanticNodeData::Object(surface.copy_for_tests()),
+                    current_scope,
+                ),
+                simple_object(&graph, &[("x", target_array)]),
+            )
+        } else {
+            (
+                simple_object(&graph, &[("x", current_array), ("y", old_array)]),
+                simple_object(&graph, &[("x", target_array), ("y", target_array)]),
+            )
+        };
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        assert!(matches!(
+            dispatch.execute_relate_pair_as_result_for_tests(source, target),
+            verter_type_engine::semantic_query::RelationResult::Assignable { .. }
+        ));
+        for key in [
+            dispatch.relate_key_for(source, target),
+            dispatch.relate_key_for(old_array, target_array),
+        ] {
+            assert_eq!(
+                graph.relation_published_carrier(&key).is_some(),
+                !edited,
+                "a torn component must publish neither root nor inline member: {key:?}"
+            );
+            assert_eq!(
+                graph.get_relation_payload(&host, &key).is_some(),
+                !edited,
+                "only a same-version component may serve warm: {key:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn scc_root_and_members_share_complete_self_root_union_and_invalidation() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -17296,11 +17374,13 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
             surface_member("tag", string, false, false),
         ],
     );
+    // A non-discriminant mismatch keeps the intersection from reducing to
+    // never before relation descent can exercise projection rollback.
     let losing_source_arm = intern_object_with_members(
         &graph,
         vec![
             surface_member("capture", number, false, false),
-            surface_member("tag", boolean, false, false),
+            surface_member("tag", number, false, false),
         ],
     );
     let winning_source_arm = intern_object_with_members(

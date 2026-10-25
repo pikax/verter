@@ -124,11 +124,13 @@ impl HostResolverState {
     fn new(
         routes: Arc<crate::resolver_core::RouteDb>,
         imported_roots: Arc<crate::resolver_core::ImportedRootDb>,
+        tasks: verter_execution::tasks::TaskRegistry,
     ) -> Self {
         Self {
             runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
                 routes,
                 imported_roots,
+                tasks,
             ),
         }
     }
@@ -504,6 +506,8 @@ impl VerterHost {
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
+        // Scoped cache producers and semantic producers share one cycle authority.
+        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
@@ -555,13 +559,15 @@ impl VerterHost {
                         Arc::clone(&worker_pools.scheduler_io_pool),
                     ),
                 };
-                let scheduler = verter_scheduler::scheduler::Scheduler::with_executor(
-                    scheduler_config,
-                    loader,
-                    executor,
-                    scheduler_cpu_pool,
-                    scheduler_io_pool,
-                );
+                let scheduler =
+                    verter_scheduler::scheduler::Scheduler::with_executor_and_task_registry(
+                        scheduler_config,
+                        loader,
+                        executor,
+                        scheduler_cpu_pool,
+                        scheduler_io_pool,
+                        task_registry.clone(),
+                    );
                 platform_services
                     .verify_scheduling_route(
                         crate::platform_services::ServiceRoute::ThreadedSchedulerPools,
@@ -575,10 +581,11 @@ impl VerterHost {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                let scheduler = verter_scheduler::scheduler::Scheduler::new_sync_with_executor(
+                let scheduler = verter_scheduler::scheduler::Scheduler::new_sync_with_executor_and_task_registry(
                     scheduler_config,
                     loader,
                     executor,
+                    task_registry.clone(),
                 );
                 platform_services
                     .verify_scheduling_route(
@@ -594,11 +601,10 @@ impl VerterHost {
         // another shares — and composes the project store over it. The
         // engine grants stay here: the root lends them to the request
         // attachment alone.
-        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let (project_type_store, engine_grants) =
             crate::project_type_store::ProjectTypeStore::compose(
                 Arc::clone(&provenance),
-                task_registry,
+                task_registry.clone(),
                 memo_family_bound,
             );
         let project_type_store = Arc::new(project_type_store);
@@ -696,6 +702,7 @@ impl VerterHost {
                 envelope_ingest: registered_envelope_ingest,
             },
             block_content: crate::block_content::BlockContentHostLane::default(),
+            task_registry: task_registry.clone(),
             language_classifier,
             workspace: workspace_lock,
             workspace_services,
@@ -711,7 +718,11 @@ impl VerterHost {
             platform_services,
             cooperative_drive,
             provenance,
-            resolver: HostResolverState::new(routes_handle, imported_roots_handle),
+            resolver: HostResolverState::new(
+                routes_handle,
+                imported_roots_handle,
+                task_registry.clone(),
+            ),
             query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),

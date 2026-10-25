@@ -7,6 +7,17 @@ use std::sync::Arc;
 use super::arena::NodeArenaCore;
 use crate::semantic_query::{QueryError, SemanticNodeId};
 
+#[cfg(test)]
+thread_local! {
+    static ROOT_OWNER_CONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Actual shared root-owner allocations constructed on this thread.
+#[cfg(test)]
+pub(crate) fn root_owner_constructions_for_tests() -> usize {
+    ROOT_OWNER_CONSTRUCTIONS.with(std::cell::Cell::get)
+}
+
 struct RootOwner {
     arena: Arc<NodeArenaCore>,
     ids: RootIds,
@@ -197,8 +208,45 @@ impl NodeRootSet {
             return Ok(Self::default());
         }
         arena.retain(&ids)?;
+        #[cfg(test)]
+        ROOT_OWNER_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
         Ok(Self(Some(
             verter_session_query::retention::owned::Owned::new(RootOwner { arena, ids }),
+        )))
+    }
+
+    /// Validate the input and result atomically, sharing the existing
+    /// input owner and acquiring only a distinct result. The receipt keeps
+    /// its input; this result owner never enters the receipt.
+    pub(crate) fn retain_evaluation_result(
+        &self,
+        graph: &super::SemanticGraphStore,
+        input: SemanticNodeId,
+        result: SemanticNodeId,
+    ) -> Result<Self, QueryError> {
+        if !self.belongs_to(&graph.arena.core) {
+            return Err(QueryError::ForeignSemanticOperand);
+        }
+        self.node_ref(input)?;
+        let acquire = if input == result {
+            &[][..]
+        } else {
+            std::slice::from_ref(&result)
+        };
+        graph
+            .arena
+            .core
+            .retain_validated(&[input, result], acquire)?;
+        if input == result {
+            return Ok(self.clone());
+        }
+        #[cfg(test)]
+        ROOT_OWNER_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+        Ok(Self(Some(
+            verter_session_query::retention::owned::Owned::new(RootOwner {
+                arena: Arc::clone(&graph.arena.core),
+                ids: smallvec::smallvec![result],
+            }),
         )))
     }
 
@@ -300,6 +348,8 @@ impl NodeRoot {
         Self { id, roots }
     }
     pub(crate) fn adopt(arena: Arc<NodeArenaCore>, id: SemanticNodeId) -> Self {
+        #[cfg(test)]
+        ROOT_OWNER_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
         Self {
             id,
             roots: NodeRootSet(Some(verter_session_query::retention::owned::Owned::new(

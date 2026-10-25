@@ -972,7 +972,6 @@ fn a_refused_or_return_only_artifact_value_is_charged_to_its_caller() {
         } else {
             RetentionLimits {
                 aggregate_ceiling_bytes: 0,
-                active_ceiling_bytes: 0,
                 max_entry_bytes: 0,
                 pin_threshold_bytes: 0,
             }

@@ -1362,7 +1362,6 @@ mod refusal_ledger_tests {
     fn a_held_recovery_keeps_the_retention_charge_after_invalidation() {
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: 10_000_000,
-            active_ceiling_bytes: 10_000_000,
             max_entry_bytes: 10_000_000,
             pin_threshold_bytes: 10_000_000,
         });
@@ -1411,7 +1410,6 @@ mod refusal_ledger_tests {
 
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: 10_000_000,
-            active_ceiling_bytes: 10_000_000,
             max_entry_bytes: 2_048,
             pin_threshold_bytes: 10_000_000,
         });

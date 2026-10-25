@@ -51,6 +51,11 @@ intern_domain!(ResolveCallKey {
 });
 
 impl InternedRelateKey {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn roots_for_tests(&self) -> &super::node_roots::NodeRootSet {
+        &self.1 .0
+    }
+
     /// Intern `key`; its operands are owned in `arena`, the graph that
     /// issued them, or not at all when `None` (a lookup witness).
     pub(super) fn intern(arena: Option<&IssuingArena>, key: RelateMemoKey) -> Self {
@@ -81,6 +86,11 @@ impl InternedRelateKey {
 }
 
 impl InternedResolveCallKey {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn roots_for_tests(&self) -> &super::node_roots::NodeRootSet {
+        &self.1 .0
+    }
+
     /// Intern `key`; its operands are owned in `arena`, the graph that
     /// issued them, or not at all when `None` (a lookup witness).
     pub(super) fn intern(arena: Option<&IssuingArena>, key: ResolveCallKey) -> Self {

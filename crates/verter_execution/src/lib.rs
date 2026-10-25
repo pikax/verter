@@ -14,6 +14,8 @@
 //!   construction.
 //! - [`request_context`]: the opaque request-context carrier, its TLS slots
 //!   and the installation/restoration guards.
+//! - [`sync_cell`]: checked borrows and typed scalar cells for request
+//!   state a suspended computation carries between polling threads.
 //! - [`wake`]: the per-subscriber waker registrations a producer keeps for
 //!   the pollable computations waiting on it.
 //!
@@ -29,5 +31,6 @@ pub mod blocking;
 pub mod cancellation;
 pub mod pool_size;
 pub mod request_context;
+pub mod sync_cell;
 pub mod tasks;
 pub mod wake;

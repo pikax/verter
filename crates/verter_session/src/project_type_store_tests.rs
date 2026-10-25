@@ -8,10 +8,87 @@
 
 use super::project_type_store::ProjectTypeStore;
 
+fn isolated_artifact_pins() -> (
+    verter_retention::pinned_heap::PinContext,
+    verter_retention::pinned_heap::TestPinScope,
+) {
+    let context = verter_retention::pinned_heap::PinContext::new(
+        verter_retention::SemanticRetentionAccount::new(
+            verter_retention::RetentionLimits::defaults(),
+        ),
+    );
+    let scope = context.enter_for_test();
+    (context, scope)
+}
+
+#[test]
+fn indexed_input_parse_identity_growth_is_charged_after_cold_publication() {
+    let (context, _scope) = isolated_artifact_pins();
+    let account = context.account();
+    let baseline = account.snapshot().pinned_bytes;
+    let mut artifact = super::project_type_store::IndexedReady::new_for_test([42; 16]);
+    artifact.raw_source = std::sync::Arc::from("export type A = string");
+    artifact.eval_source = artifact.raw_source.clone();
+    assert!(artifact.cached_source_parse_key().is_none());
+    let cold = account.snapshot().pinned_bytes;
+    let input = artifact.input_record();
+    let key = input.source_parse_key().expect("script identity");
+    let warm = account.snapshot().pinned_bytes;
+    assert!(
+        warm > cold,
+        "lazy identity storage must be charged at initialization"
+    );
+    assert_eq!(input.source_parse_key(), Some(key));
+    assert_eq!(account.snapshot().pinned_bytes, warm);
+    drop(artifact);
+    assert!(
+        account.snapshot().pinned_bytes > baseline,
+        "the escaping input owns its charge"
+    );
+    drop(input);
+    assert_eq!(account.snapshot().pinned_bytes, baseline);
+}
+
+#[test]
+fn declaration_reader_keeps_its_payload_charged_after_memo_teardown() {
+    fn exercise<D: verter_retention::heap_size::HeapSize + Send + Sync + 'static>(
+        build: impl FnOnce() -> D,
+    ) {
+        let (context, _scope) = isolated_artifact_pins();
+        let account = context.account();
+        let value = build();
+        // A cloned declaration retains nested self-charged fact handles.
+        let nested = account.snapshot().pinned_bytes;
+        let cell = verter_retention::pinned_heap::PinnedOnce::from(std::sync::Arc::new(value));
+        let body = cell.get().expect("published body").clone();
+        let payload_bytes = verter_retention::heap_size::footprint(body.as_ref()).bytes;
+        assert!(payload_bytes > 0);
+        drop(cell);
+        assert!(
+            account.snapshot().pinned_bytes >= nested + payload_bytes,
+            "reader keeps the lowered payload charged"
+        );
+        drop(body);
+        assert_eq!(account.snapshot().pinned_bytes, 0);
+    }
+    exercise(|| {
+        let state = crate::resolver_core::ShallowFileState::service_backed_for_test(
+            "export interface Kept { nested: string; other: number }",
+        );
+        (*state.type_decl("Kept").expect("lowered type declaration")).clone()
+    });
+    exercise(|| {
+        let state = crate::resolver_core::ShallowFileState::service_backed_for_test(
+            "export function Kept(value: string): number { return 1; }",
+        );
+        (*state.value_decl("Kept").expect("lowered value declaration")).clone()
+    });
+}
+
 #[test]
 fn lazy_declaration_growth_is_pinned_once_and_released_with_its_memo() {
-    use verter_retention::SemanticRetentionAccount;
-    let account = SemanticRetentionAccount::process_local();
+    let (context, _scope) = isolated_artifact_pins();
+    let account = context.account();
     let baseline = account.snapshot().pinned_bytes;
     let members = (0..128)
         .map(|index| format!("field_{index}: {{ nested_{index}: string }};"))
@@ -38,9 +115,8 @@ fn lazy_declaration_growth_is_pinned_once_and_released_with_its_memo() {
 fn artifact_sources_stay_charged_until_the_last_artifact_reader_drops() {
     use crate::project_type_store::IndexedReady;
     use std::sync::Arc;
-    use verter_retention::SemanticRetentionAccount;
-
-    let account = SemanticRetentionAccount::process_local();
+    let (context, _scope) = isolated_artifact_pins();
+    let account = context.account();
     let baseline = account.snapshot().pinned_bytes;
     let mut indexed = IndexedReady::new_for_test([19; 16]);
     let source: Arc<str> = Arc::from(" ".repeat(2 * 1024 * 1024));
@@ -72,11 +148,11 @@ fn prepared_bundles_and_artifacts_share_the_shallow_pin_in_both_release_orders()
     use crate::project_type_store::IndexedReady;
     use crate::resolver_core::prepared_decl::{build_prepared_decl_bundle, ImportCanonicalization};
     use std::sync::Arc;
-    use verter_retention::SemanticRetentionAccount;
     use verter_session_query::inputs::shallow::ExportTarget;
 
     for artifact_first in [true, false] {
-        let account = SemanticRetentionAccount::process_local();
+        let (context, _scope) = isolated_artifact_pins();
+        let account = context.account();
         let baseline = account.snapshot().pinned_bytes;
         let mut artifact = IndexedReady::new_for_test([20; 16]);
         Arc::make_mut(&mut artifact.shallow_state).exports.insert(
@@ -128,9 +204,8 @@ fn prepared_bundles_and_artifacts_share_the_shallow_pin_in_both_release_orders()
 fn artifact_replacement_and_removal_release_only_unheld_payloads() {
     use crate::project_type_store::IndexedReady;
     use std::sync::Arc;
-    use verter_retention::SemanticRetentionAccount;
-
-    let account = SemanticRetentionAccount::process_local();
+    let (context, _scope) = isolated_artifact_pins();
+    let account = context.account();
     let baseline = account.snapshot().pinned_bytes;
     let store = crate::file_artifact_store::FileArtifactStore::default();
     let make = |hash| {
@@ -150,6 +225,225 @@ fn artifact_replacement_and_removal_release_only_unheld_payloads() {
     assert!(account.snapshot().pinned_bytes >= baseline + 1024 * 1024);
     drop(held);
     assert_eq!(account.snapshot().pinned_bytes, baseline);
+}
+
+#[test]
+fn artifact_lru_eviction_keeps_retired_root_charges_until_reclamation() {
+    use std::sync::Arc;
+    let (context, _scope) = isolated_artifact_pins();
+    let account = context.account();
+    let store = crate::file_artifact_store::FileArtifactStore::default();
+    let baseline = account.snapshot().pinned_bytes;
+    let mut artifact = crate::project_type_store::IndexedReady::new_for_test([73; 16]);
+    artifact.raw_source = Arc::from(" ".repeat(2 * 1024 * 1024));
+    artifact.eval_source = artifact.raw_source.clone();
+    store.insert(Arc::from("/retired.ts"), Arc::new(artifact));
+    let root = store.capture_root();
+    let key = store
+        .artifact_keys_at_root(&root, "/retired.ts")
+        .pop()
+        .expect("published key");
+    store.evict_lru(0);
+    assert_eq!(store.live_artifact_count(), 0);
+    assert!(
+        store.reclaim_retired_versions() == 0,
+        "root still reaches retired data"
+    );
+    assert!(store.indexed_at_root(&root, &key).is_some());
+    assert!(account.snapshot().pinned_bytes >= baseline + 2 * 1024 * 1024);
+    drop(root);
+    assert!(store.reclaim_retired_versions() > 0);
+    assert!(
+        account.snapshot().pinned_bytes < baseline + 1024 * 1024,
+        "source is released before store backing"
+    );
+    drop((key, store));
+    assert_eq!(account.snapshot().pinned_bytes, 0);
+}
+
+#[test]
+fn host_file_removal_releases_snapshot_artifact_bundle_and_memo_charges() {
+    use crate::resolver_core::prepared_decl::{build_prepared_decl_bundle, ImportCanonicalization};
+    use std::sync::Arc;
+    let (context, _scope) = isolated_artifact_pins();
+    let account = context.account();
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    let baseline = account.snapshot().pinned_bytes;
+    let text = format!(
+        "/*{}*/ export interface CloseTarget {{ name: string; nested: {{ value: number }} }}",
+        " ".repeat(2 * 1024 * 1024)
+    );
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: "/close.ts".into(),
+            source: Arc::from(text),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("open source");
+    let artifact = host.ensure_indexed_ready("/close.ts").expect("indexed");
+    let cold = account.snapshot().pinned_bytes;
+    let body = artifact
+        .shallow_state
+        .type_decl("CloseTarget")
+        .expect("demand body");
+    assert!(account.snapshot().pinned_bytes > cold);
+    let interner =
+        Arc::new(verter_type_engine::identity_interner::IdentityInterner::new(account.clone()));
+    let bundle = build_prepared_decl_bundle(
+        "/close.ts",
+        artifact.shallow_state.clone(),
+        Default::default(),
+        Default::default(),
+        ImportCanonicalization::default(),
+        &interner,
+    );
+    let source = host.scheduler_source("/close.ts").expect("source snapshot");
+    let analysis = host
+        .scheduler_analysis("/close.ts")
+        .expect("analysis snapshot");
+    host.remove("/close.ts")
+        .expect("close the file through the host");
+    assert!(host.scheduler_source("/close.ts").is_none());
+    assert!(
+        account.snapshot().pinned_bytes >= baseline + 2 * 1024 * 1024,
+        "held readers survive close"
+    );
+    drop((body, bundle, artifact, source, analysis, interner));
+    host.project_type_store()
+        .indexed()
+        .reclaim_retired_versions();
+    drop(host);
+    assert_eq!(account.snapshot().pinned_bytes, 0);
+}
+
+#[test]
+fn scheduler_snapshots_charge_variable_payloads_and_share_artifact_sources() {
+    use crate::host_executor::{HostAnalysisData, HostSourceData};
+    use std::sync::Arc;
+    for carrier in [false, true] {
+        let (context, _scope) = isolated_artifact_pins();
+        let account = context.account();
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let baseline = account.snapshot().pinned_bytes;
+        let declarations = (0..128)
+            .map(|i| format!("export const name_{i} = {i};\n"))
+            .collect::<String>();
+        let script = format!("/*{}*/{declarations}", " ".repeat(2 * 1024 * 1024));
+        let text = if carrier {
+            format!("<script lang=\"ts\">{script}</script><template><div class=\"large\" /></template><style>.large {{ color: red; }}</style>")
+        } else {
+            script
+        };
+        let canonical = if carrier {
+            "/snapshots.vue"
+        } else {
+            "/snapshots.ts"
+        };
+        let language = if carrier {
+            crate::FileLanguage::vue()
+        } else {
+            crate::FileLanguage::script_ts()
+        };
+        let source_len = text.len();
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: canonical.into(),
+                source: Arc::from(text),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .expect("stages complete");
+        let source = host.scheduler_source(canonical).expect("source");
+        let analysis = host.scheduler_analysis(canonical).expect("analysis");
+        let source_data = source
+            .downcast_data::<HostSourceData>()
+            .expect("host source data");
+        let analysis_data = analysis
+            .downcast_data::<HostAnalysisData>()
+            .expect("host analysis data");
+        assert!(!source_data.parse.export_signatures.is_empty());
+        assert_eq!(!analysis_data.style_analyses.is_empty(), carrier);
+        assert!(!analysis_data.export_signatures.is_empty());
+        let charged = account.snapshot().pinned_bytes;
+        assert!(
+            charged
+                >= baseline
+                    + source_len
+                    + verter_retention::heap_size::footprint(&analysis_data.export_signatures)
+                        .bytes,
+            "source and nonempty analysis backing are charged"
+        );
+        let analysis_language = crate::FileLanguage::script(verter_language::ScriptSourceType::Js(
+            verter_language::JsModuleKind::Module,
+        ));
+        let analysis_key =
+            crate::host_executor::snapshot_parse_key_under(&source, &analysis_language);
+        assert!(analysis_key.is_some());
+        let with_analysis_key = account.snapshot().pinned_bytes;
+        assert!(
+            with_analysis_key > charged,
+            "a lazily cached analysis-language identity owns its pin"
+        );
+        assert_eq!(
+            crate::host_executor::snapshot_parse_key_under(&source, &analysis_language),
+            analysis_key
+        );
+        assert_eq!(account.snapshot().pinned_bytes, with_analysis_key);
+        let charged = with_analysis_key;
+        // A second analysis stage shares source-owned fields but owns new export
+        // and view backing. It must pay for that independently of the source pin.
+        let executor = crate::host_executor::HostStageExecutor::new(
+            host.config.clone(),
+            Arc::clone(&host.workspace),
+            Arc::clone(&host.provenance),
+            Arc::clone(&host.carrier_publication.source_authority),
+            Arc::clone(&host.carrier_publication.grammar_authority),
+            Arc::clone(&host.carrier_publication.publication_store),
+            crate::carrier_publication_store::HostInstanceId::new(host.instance_id),
+            Arc::clone(&host.carrier_publication.envelope_ingest),
+        );
+        let extra = verter_scheduler::execution::executor::StageExecutor::execute_analysis(
+            &executor,
+            canonical,
+            &source,
+            source.generation,
+        )
+        .expect("independent analysis publication");
+        assert!(
+            account.snapshot().pinned_bytes
+                >= charged
+                    + verter_retention::heap_size::footprint(&analysis_data.export_signatures)
+                        .bytes,
+            "independently allocated analysis payload is charged"
+        );
+        drop(extra);
+        assert_eq!(account.snapshot().pinned_bytes, charged);
+        drop(executor);
+        let indexed = host
+            .ensure_indexed_ready(canonical)
+            .expect("same revision artifact");
+        assert!(Arc::ptr_eq(&indexed.raw_source, &source.source));
+        let added = account.snapshot().pinned_bytes - charged;
+        assert!(
+            added < source_len,
+            "publishing the artifact cannot charge the source allocation twice: {added}"
+        );
+        let structure = host.registered_file_structure(canonical);
+        assert_eq!(structure.is_some(), carrier);
+        host.close();
+        drop((host, source, analysis, indexed));
+        if carrier {
+            assert!(
+                account.snapshot().pinned_bytes >= source_len,
+                "registered reader owns its source after scheduler teardown"
+            );
+        }
+        drop(structure);
+        assert_eq!(account.snapshot().pinned_bytes, 0);
+    }
 }
 
 #[test]

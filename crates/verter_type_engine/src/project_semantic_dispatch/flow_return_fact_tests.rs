@@ -26,8 +26,8 @@ fn abandoned_read_observations_restore_the_degraded_counter() {
     use crate::request_context::{
         ColdComputeCompletenessScope, DeferredPartialStickyScope, ExecutionValidityScope,
     };
-    let degraded = std::cell::Cell::new(3);
-    let frames = std::cell::RefCell::new(smallvec::SmallVec::new());
+    let degraded = verter_execution::sync_cell::SyncU32::new(3);
+    let frames = verter_execution::sync_cell::SyncRefCell::new(smallvec::SmallVec::new());
     let scope = || super::ReadObservationScope {
         validity: ExecutionValidityScope::enter(),
         sticky: DeferredPartialStickyScope::enter(),

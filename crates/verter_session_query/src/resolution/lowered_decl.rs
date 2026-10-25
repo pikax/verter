@@ -34,7 +34,9 @@ use verter_type_expr::facts::{
 /// lowering machinery; this memo stores the content-free mirror facts
 /// only.
 #[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct LoweredTypeDecl {
+    pub storage: verter_retention::pinned_heap::FactStoragePin,
     pub kind: TypeDeclKind,
     /// Content-free facts retained per exact source contributor. Member return
     /// inference is addressed through its producer-emitted origin only.
@@ -201,7 +203,9 @@ impl ValueBodyHashFact {
 /// content-free locators inside the facts, lowered on demand through the
 /// shared dispatch.
 #[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct LoweredValueDecl {
+    pub storage: verter_retention::pinned_heap::FactStoragePin,
     pub kind: ValueDeclKind,
     /// The narrowed annotation FACT: classification
     /// (`Absent`/`Direct`/`TypeOfAlias`), the precomputed single-hop
@@ -255,4 +259,24 @@ pub struct LoweredValueDecl {
     /// is independent of this stored diagnostic bit (see
     /// [`ValueBodyHashFact::budget_exceeded`]).
     pub body_hash: ValueBodyHashFact,
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for LoweredTypeDecl {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for LoweredValueDecl {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
 }

@@ -11,6 +11,8 @@
 
 use std::sync::Arc;
 
+use verter_session_query::facts::fact_read_set::CanonicalFactReadSetFinalise;
+#[cfg(any(test, feature = "test-support"))]
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
 use super::ProjectSemanticDispatch;
@@ -558,14 +560,15 @@ fn clone_index_key(index: &IndexKey) -> IndexKey {
 /// is the only way its observations reach them.
 fn deliver_evaluation_facts<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
     tracers: &mut [crate::fact_signature_helpers::StepwiseFactTracer<'_, W>],
-    finalise: &FactReadSetFinalise,
+    finalise: &CanonicalFactReadSetFinalise,
 ) {
-    let (FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts)) = finalise
+    let (CanonicalFactReadSetFinalise::Ok(facts)
+    | CanonicalFactReadSetFinalise::NonCacheable(facts)) = finalise
     else {
         return;
     };
     let _scope = tracers.last_mut().map(|parent| parent.install());
-    crate::fact_tracing::tracing::observe_fan_out_canonical(facts);
+    crate::fact_tracing::tracing::observe_fan_out_sealed(facts);
 }
 
 /// Deliver the facts every unfinished frame of a stopped evaluation
@@ -732,7 +735,7 @@ struct CompositeReduction {
 /// a later demand on the same union replays its roots instead of reducing
 /// it again: a distributive conditional demands its `extends` operand once
 /// per member. The outermost dispatch operation releases the table.
-pub(super) type CompositeFixedPoints = std::cell::RefCell<
+pub(super) type CompositeFixedPoints = verter_execution::sync_cell::SyncRefCell<
     rustc_hash::FxHashMap<SemanticNodeId, Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>>,
 >;
 
@@ -2312,18 +2315,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         mut frame: DeferredEvaluationFrame,
         result: SemanticNodeId,
-        finalise: FactReadSetFinalise,
+        finalise: impl Into<CanonicalFactReadSetFinalise>,
     ) -> EvaluateDeferredOutcome {
-        let mutation_unstable = matches!(&finalise, FactReadSetFinalise::MutationUnstable);
+        let finalise = finalise.into();
+        let mutation_unstable = matches!(&finalise, CanonicalFactReadSetFinalise::MutationUnstable);
         let evidence = match finalise {
-            FactReadSetFinalise::Ok(facts) => {
+            CanonicalFactReadSetFinalise::Ok(facts) => {
                 use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef};
 
                 let mut roots = self.observed_self_roots_from_nodes([frame.entry_node, result]);
                 // This memo has no single file owner. Every consumed
                 // declaration and augmentation contributor is a strict root,
                 // including whole-file facts retained on evidence pages.
-                crate::fact_signature_helpers::shared_completed_carrier_rooting_traced_files(
+                crate::fact_signature_helpers::shared_completed_carrier_rooting_sealed_files(
                     &roots, &facts,
                 )
                 .map(Ok)
@@ -2334,12 +2338,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                         _ => None,
                     }));
-                    self.ctx.complete_graph_signature(&roots, facts.to_vec())
+                    self.ctx
+                        .complete_graph_signature(&roots, facts.to_vec())
+                        .and_then(|raw| {
+                            crate::fact_signature_helpers::CompletedStructuralEvidence::verify(raw)
+                                .ok_or(
+                                    crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                                )
+                        })
                 })
                 .ok()
             }
-            FactReadSetFinalise::NonCacheable(_) => None,
-            FactReadSetFinalise::MutationUnstable => {
+            CanonicalFactReadSetFinalise::NonCacheable(_) => None,
+            CanonicalFactReadSetFinalise::MutationUnstable => {
                 crate::request_context::observe_execution_abort(
                     crate::semantic_query::ExecutionAbort::Superseded,
                 );
@@ -2400,13 +2411,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let (true, false, Some(receipt), Some(evidence)) =
             (complete, frame.cache_suppress, receipt, evidence)
         {
-            self.graph().evaluate_deferred_memo_publish(
-                frame.entry_node,
-                frame.context,
-                frame.demand,
-                result,
-                receipt,
-                evidence,
+            self.graph().evaluate_deferred_memo_publish_completed(
+                crate::semantic_query_memo::CompletedDeferredEvaluation::new(
+                    frame.entry_node,
+                    frame.context,
+                    frame.demand,
+                    result,
+                    receipt,
+                    evidence,
+                ),
             );
         }
         let availability = if !frame.completeness.is_partial() {

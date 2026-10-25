@@ -259,7 +259,7 @@ fn cooperative_return_only_not_shared_to_joiners() {
         .expect("Cacheable admission arm must exist");
     let return_only_arm_window = &ca_src[return_only_arm_idx..];
     assert!(
-        return_only_arm_window.contains("state.non_cacheable_winner = true;"),
+        return_only_arm_window.contains("state.non_cacheable_winner = true"),
         "the ReturnOnly admission arm must mark the slot \
          `non_cacheable_winner` so cooperative joiners fork and \
          cold-recompute for their own view — a carrier-less ReturnOnly \

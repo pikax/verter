@@ -293,7 +293,11 @@ impl SlotJoin {
     /// Wait for the slot to complete: [`Self::poll`] driven by the
     /// external blocking driver, for the synchronous admission entries.
     pub(super) fn wait(mut self) {
-        verter_execution::blocking::block_on(None, |waker| self.poll(waker));
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::CacheFlight,
+            None,
+            |waker| self.poll(waker),
+        );
     }
 }
 

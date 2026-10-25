@@ -48,7 +48,15 @@ holds only weak payload references. Lookup checks the candidate's live slot and
 acquires its root under the arena lock while holding the dedup shard lock; a dead
 external payload cannot hide an equal live peer. Last release processes a
 worklist, releases outgoing occurrences and retires weak entries iteratively.
-Only the twelve global primitive vocabulary nodes are permanent.
+Only the twelve global primitive vocabulary nodes are permanent, and only
+while the store holds them: permanence is the store's own hold, established by
+the first intern of a vocabulary node (or an intern that finds a live one) and
+given up by `SemanticGraphStore::release_vocabulary` — the host close calls it
+after its caches have released their owners. Giving it up turns each permanent
+slot into an ordinary counted node: one nothing owns is destroyed at once, with
+its chunk and sidecars; one a reader still holds stays readable and dies with
+its last owner. Live owners are never revoked
+(`released_vocabulary_drains_unheld_and_keeps_held_nodes`).
 
 Arena ordinals are never reused: a destroyed id reads as the shared
 `Opaque(Miss)` placeholder and refuses every root acquisition as
@@ -140,8 +148,10 @@ checks that repeated discovery does not accumulate roots, records or charged
 backing, and that both release orders restore the declared baseline.
 
 **Host close reclaims drained storage, never live nodes.** A host close
-(`VerterHost::close`) invalidates the whole memo, then calls
-`SemanticGraphStore::release_drained_storage`: it drains the destroyed-node
+(`VerterHost::close`) invalidates the whole memo, clears the flow-slice
+substrate (`FlowSliceStores::clear_all`: graph bundles, slice plans, lowered
+slices), releases the store's vocabulary hold (`release_vocabulary`, above),
+then calls `SemanticGraphStore::release_drained_storage`: it drains the destroyed-node
 sidecar log, sweeps the dependency-rail interner, and releases the dedup table
 (and its granule charge) of every arena shard that indexes no node
 (`NodeArenaCore::release_idle_dedup_tables`) — a shard table otherwise keeps the
@@ -149,7 +159,11 @@ capacity of its busiest moment and one charged granule after its candidates are
 gone. A shard still indexing a live node keeps its table, and no step destroys
 or revokes a node: a result a caller holds across the close keeps reading it.
 The same reclamation runs when the host release boundary completes, so readers
-dropped after the close leave no sidecar or table history behind. Its rows are
+dropped after the close leave no sidecar or table history behind. A fresh,
+unprimed host's first flow returns — a diagnostic-bearing call, an array
+literal, conditional object literals, a fresh literal — therefore close back to
+the footprint read before any demand, through every release order of readers
+held across the close (`tests/cases/g_session/flow_return_close.rs`). Its rows are
 classified in
 [`SKR-OWN-CLOSE.md`](../../../../crates/verter_session/observe-inventory/SKR-OWN-CLOSE.md).
 

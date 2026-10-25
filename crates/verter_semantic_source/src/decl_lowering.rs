@@ -1046,6 +1046,13 @@ pub struct DeclLoweringCounters {
     /// per lowering. A cold body demanded for its facts and then for its
     /// body lowers each contributing statement ONCE.
     pub decl_statements_lowered: verter_audit::observe::ObservedU64,
+    /// Whole-file macro assemblies replayed to address macro field
+    /// payloads (`MacroFieldAddressTable` builds): at most one per retained
+    /// snapshot, however many of its fields are demanded.
+    pub macro_field_address_builds: verter_audit::observe::ObservedU64,
+    /// Units of macro field-address work those builds performed
+    /// (`MacroFieldAddressTable::work`): linear in the file's macro surface.
+    pub macro_field_address_work: verter_audit::observe::ObservedU64,
     /// Class elements lowered by selective class-body lowering: one per raw
     /// `ClassBody.body` element a member demand lowered. A demand for one
     /// class member lowers only the elements declaring it, never the
@@ -1227,7 +1234,12 @@ impl DeclLoweringService {
         source_type: oxc_span::SourceType,
     ) -> LeaseOutcome {
         let mut handoff = self.begin_acquire_lease(key, source, source_type);
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker)).0
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
+        .0
     }
 
     /// [`Self::acquire_lease`] as a pollable handoff to the worker owning
@@ -1271,7 +1283,11 @@ impl DeclLoweringService {
         R: Send + 'static,
     {
         let mut handoff = self.begin_acquire_lease_and_run(key, source, source_type, job);
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker))
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
     }
 
     /// [`Self::acquire_lease_and_run`] as a pollable handoff to the worker
@@ -1406,6 +1422,30 @@ impl DeclLoweringService {
     }
 
     /// Caller-blocking worker rendezvous performed so far (see the field).
+    /// Hold every owner shard's worker on a job of its own until the returned
+    /// hold is released or dropped, so a demand made meanwhile is queued
+    /// behind it and its handoff stays pending.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use = "the workers are held until the hold is released"]
+    pub fn hold_workers_for_tests(&self) -> HeldWorkersForTests {
+        let mut releases = Vec::new();
+        for worker in self.workers() {
+            let (started_tx, started) = crossbeam_channel::bounded::<()>(1);
+            let (release, released) = crossbeam_channel::bounded::<()>(1);
+            let hold: WorkerJob = Box::new(move |_| {
+                let _ = started_tx.send(());
+                let _ = released.recv();
+            });
+            worker
+                .jobs
+                .send(hold)
+                .expect("a live worker takes the holding job");
+            started.recv().expect("the worker starts the holding job");
+            releases.push(release);
+        }
+        HeldWorkersForTests(releases)
+    }
+
     /// Bytes every retained parse snapshot pins against the account, read on
     /// the owning workers. An observation that retains nothing and changes
     /// no refcount.
@@ -1640,7 +1680,11 @@ impl DeclLoweringService {
         R: Send + 'static,
     {
         let mut handoff = self.begin_run_leased(key, job);
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker))
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
     }
 
     /// [`Self::run_leased`] as a pollable handoff to the worker owning
@@ -1725,7 +1769,11 @@ impl DeclLoweringService {
         R: Send + 'static,
     {
         let mut handoff = self.begin_run_leased_batch(jobs);
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker))
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
     }
 
     /// [`Self::run_leased_batch`] as one pollable handoff per occupied
@@ -1857,7 +1905,13 @@ impl<R> LeaseHandoff<R> {
     pub fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<(LeaseOutcome, Option<R>)> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let answer = std::task::ready!(self.handoff.poll(waker));
+            let polled = self.handoff.poll(waker);
+            if polled.is_pending() {
+                verter_execution::blocking::note_pending(
+                    verter_execution::blocking::WaitFamily::DeclLowering,
+                );
+            }
+            let answer = std::task::ready!(polled);
             #[cfg(feature = "semantic-observe")]
             if let (Some((stats, submitted)), Some((started, finished))) =
                 (self.profile.as_ref(), answer.timing)
@@ -1919,7 +1973,13 @@ impl<R> LeasedRunHandoff<R> {
     pub fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<Option<R>> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let answer = std::task::ready!(self.handoff.poll(waker));
+            let polled = self.handoff.poll(waker);
+            if polled.is_pending() {
+                verter_execution::blocking::note_pending(
+                    verter_execution::blocking::WaitFamily::DeclLowering,
+                );
+            }
+            let answer = std::task::ready!(polled);
             // A lease miss and a panicking job still record their op — the
             // caller paid the full rendezvous either way.
             #[cfg(feature = "semantic-observe")]
@@ -1994,6 +2054,9 @@ impl<R> LeasedBatchHandoff<R> {
                 }
             }
             if outstanding {
+                verter_execution::blocking::note_pending(
+                    verter_execution::blocking::WaitFamily::DeclLowering,
+                );
                 return std::task::Poll::Pending;
             }
             if let Some(payload) = self.panic_payload.take() {
@@ -2823,3 +2886,26 @@ mod release_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "decl_lowering_handoff_tests.rs"]
 mod handoff_tests;
+
+/// Every owner shard's worker held on a job of its own
+/// ([`DeclLoweringService::hold_workers_for_tests`]); releasing or dropping
+/// the hold lets them run what queued behind it.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+pub struct HeldWorkersForTests(Vec<crossbeam_channel::Sender<()>>);
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+impl HeldWorkersForTests {
+    /// Let the held workers go.
+    pub fn release(&mut self) {
+        for release in self.0.drain(..) {
+            let _ = release.send(());
+        }
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+impl Drop for HeldWorkersForTests {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
