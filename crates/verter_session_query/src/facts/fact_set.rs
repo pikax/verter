@@ -136,6 +136,14 @@ impl FactSet {
         Self(Repr::Flat(Arc::from(facts)))
     }
 
+    /// The set of `facts`, already strictly increasing, copied into one
+    /// shared slice.
+    #[must_use]
+    pub fn from_canonical_slice(facts: &[FactVersionRef]) -> Self {
+        debug_assert!(facts.windows(2).all(|pair| pair[0] < pair[1]));
+        Self(Repr::Flat(Arc::from(facts)))
+    }
+
     /// How many facts the set holds.
     #[inline]
     #[must_use]
@@ -472,8 +480,13 @@ impl FactSetEdit {
     fn work_mut(&mut self) -> &mut Work {
         if matches!(self.work, Work::Unchanged) {
             self.work = match &self.base.0 {
+                // Room for the insertions an edit usually makes, up to the
+                // width at which the set becomes a tree.
                 Repr::Flat(facts) if facts.len() <= FACT_SET_INLINE_WIDTH => {
-                    Work::Flat(facts.to_vec())
+                    let room = (facts.len() * 2).clamp(8, FACT_SET_INLINE_WIDTH + 1);
+                    let mut copy = Vec::with_capacity(room);
+                    copy.extend_from_slice(facts);
+                    Work::Flat(copy)
                 }
                 // A wide slice extended for the first time: the new set is a
                 // tree built from it; every set built from that tree shares

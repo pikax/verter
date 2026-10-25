@@ -108,12 +108,20 @@ impl Node {
     }
 
     /// The same node, unsealed, sharing its children (or copying its facts).
-    fn shallow_copy(&self) -> Node {
+    /// A leaf's copy has room for `extra` more facts, so an insertion's copy
+    /// is allocated once, at the length it seals at, never grown and trimmed
+    /// again; a branch grows only when a child splits.
+    fn shallow_copy(&self, extra: usize) -> Node {
+        fn copy<T: Clone>(items: &[T], extra: usize) -> Vec<T> {
+            let mut copy = Vec::with_capacity(items.len() + extra);
+            copy.extend_from_slice(items);
+            copy
+        }
         Node {
             len: self.len,
             body: match &self.body {
-                Body::Leaf(facts) => Body::Leaf(facts.clone()),
-                Body::Branch(children) => Body::Branch(children.clone()),
+                Body::Leaf(facts) => Body::Leaf(copy(facts, extra)),
+                Body::Branch(children) => Body::Branch(copy(children, 0)),
             },
             charge: parking_lot::Mutex::new(None),
             claimed: AtomicBool::new(false),
@@ -227,14 +235,15 @@ pub(crate) fn contains(node: &Node, fact: &FactVersionRef) -> bool {
 }
 
 /// The node in `slot`, mutable: in place when this edit built it and holds
-/// it alone, otherwise a fresh unsealed copy put in its place.
-fn make_mut(slot: &mut Arc<Node>) -> &mut Node {
+/// it alone, otherwise a fresh unsealed copy, with room for `extra` more
+/// entries, put in its place.
+fn make_mut(slot: &mut Arc<Node>, extra: usize) -> &mut Node {
     let in_place = match Arc::get_mut(slot) {
         Some(node) => node.charge.get_mut().is_none(),
         None => false,
     };
     if !in_place {
-        *slot = Arc::new(slot.shallow_copy());
+        *slot = Arc::new(slot.shallow_copy(extra));
     }
     Arc::get_mut(slot).expect("an unsealed copy is held alone")
 }
@@ -242,7 +251,7 @@ fn make_mut(slot: &mut Arc<Node>) -> &mut Node {
 /// Insert `fact`, absent from the tree under `slot`. Answers the right
 /// half when the node split.
 fn insert_into(slot: &mut Arc<Node>, fact: FactVersionRef) -> Option<Arc<Node>> {
-    let node = make_mut(slot);
+    let node = make_mut(slot, 1);
     node.len += 1;
     match &mut node.body {
         Body::Leaf(facts) => {
@@ -284,7 +293,7 @@ pub(crate) fn insert(root: &mut Option<Arc<Node>>, fact: FactVersionRef) {
 
 /// Remove `fact`, present in the tree under `slot`.
 fn remove_from(slot: &mut Arc<Node>, fact: &FactVersionRef) {
-    let node = make_mut(slot);
+    let node = make_mut(slot, 0);
     node.len -= 1;
     match &mut node.body {
         Body::Leaf(facts) => {
@@ -386,7 +395,7 @@ pub(crate) fn seal(slot: &mut Arc<Node>) {
 /// Every node under `root` no earlier admission claimed, each once:
 /// the walk stops at a claimed node, whose subtree is claimed.
 pub(crate) fn unclaimed_nodes<'a>(root: &'a Arc<Node>, out: &mut Vec<&'a Arc<Node>>) {
-    let mut stack = vec![root];
+    let mut stack: smallvec::SmallVec<[&'a Arc<Node>; 16]> = smallvec::smallvec![root];
     while let Some(node) = stack.pop() {
         if node.is_claimed() || out.iter().any(|seen| Arc::ptr_eq(seen, node)) {
             continue;

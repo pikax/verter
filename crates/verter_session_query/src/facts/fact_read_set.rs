@@ -752,10 +752,16 @@ impl FactReadSet {
         let runs = std::mem::take(&mut self.canonical_runs);
         let mut edit = if runs.is_empty() {
             // Nothing absorbed: the local observations are the whole set.
-            let mut local = std::mem::take(&mut self.observations).into_vec();
+            // Observations held inline are copied straight into the set's
+            // one slice; spilled ones hand their vector over.
+            let mut local = std::mem::take(&mut self.observations);
             sort_fact_refs(&mut local);
             local.dedup();
-            FactSet::from_canonical_vec(local).edit()
+            if local.spilled() {
+                FactSet::from_canonical_vec(local.into_vec()).edit()
+            } else {
+                FactSet::from_canonical_slice(&local).edit()
+            }
         } else {
             // The widest absorbed run is the base, shared; every other run
             // and every local observation is inserted into it, so the set

@@ -3056,6 +3056,13 @@ pub fn semantic_graph_carrier(
         }
     }
 
+    // Each root's canonical is interned once, for the probes below and the
+    // carrier's own strict roots.
+    let self_root_canonicals: Vec<Arc<str>> = self_root_hashes
+        .iter()
+        .map(|(canonical, _)| Arc::<str>::from(canonical.as_str()))
+        .collect();
+
     // Every traced `FileWholeHash` for a self-root canonical MUST agree
     // with the observed hash (else the dependency rail and the observed
     // self-root disagree on the keyed file's version — a torn read). A
@@ -3063,21 +3070,19 @@ pub fn semantic_graph_carrier(
     // the rail, so a torn root has nowhere to hide.
     // The traced set is read in place: one file's whole-file facts sit side
     // by side in canonical order, so each root reads only its own.
-    if !self_root_hashes.is_empty() {
-        for (canonical, observed) in &self_root_hashes {
-            let from = FactVersionRef::FileWholeHash {
-                canonical_id: Arc::from(canonical.as_str()),
-                hash: [0; 16],
-            };
-            let traced_root = traced.iter_from(&from).take_while(|fact| {
-                matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. }
-                    if **canonical_id == *canonical.as_str())
-            });
-            for fact in traced_root.chain(extra.iter()) {
-                if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-                    if **canonical_id == *canonical.as_str() && hash != observed {
-                        return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
-                    }
+    for ((_, observed), canonical) in self_root_hashes.iter().zip(&self_root_canonicals) {
+        let from = FactVersionRef::FileWholeHash {
+            canonical_id: Arc::clone(canonical),
+            hash: [0; 16],
+        };
+        let traced_root = traced.iter_from(&from).take_while(|fact| {
+            matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. }
+                if **canonical_id == **canonical)
+        });
+        for fact in traced_root.chain(extra.iter()) {
+            if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+                if **canonical_id == **canonical && hash != observed {
+                    return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
                 }
             }
         }
@@ -3089,25 +3094,15 @@ pub fn semantic_graph_carrier(
     // preserved. A traced `FileWholeHash` for a self-root canonical already
     // is that fact — the check above proved its hash the observed one — so
     // only the roots the traced set does not name are added.
-    let mut named = smallvec::SmallVec::<[bool; 4]>::from_elem(false, self_root_hashes.len());
-    for (index, (canonical, observed)) in self_root_hashes.iter().enumerate() {
-        let fact = FactVersionRef::FileWholeHash {
-            canonical_id: Arc::from(canonical.as_str()),
-            hash: *observed,
-        };
-        named[index] = traced.contains(&fact) || extra.contains(&fact);
-    }
     let mut facts = extra;
-    let mut self_root_canonicals: Vec<Arc<str>> = Vec::with_capacity(self_root_hashes.len());
-    for (index, (canonical, observed_hash)) in self_root_hashes.iter().enumerate() {
-        let canonical = Arc::<str>::from(*canonical);
-        if !named[index] {
-            facts.push(FactVersionRef::FileWholeHash {
-                canonical_id: Arc::clone(&canonical),
-                hash: *observed_hash,
-            });
+    for ((_, observed_hash), canonical) in self_root_hashes.iter().zip(&self_root_canonicals) {
+        let fact = FactVersionRef::FileWholeHash {
+            canonical_id: Arc::clone(canonical),
+            hash: *observed_hash,
+        };
+        if !traced.contains(&fact) && !facts.contains(&fact) {
+            facts.push(fact);
         }
-        self_root_canonicals.push(canonical);
     }
     crate::fact_signature_helpers::bound_completed_structural_carrier(
         view,
