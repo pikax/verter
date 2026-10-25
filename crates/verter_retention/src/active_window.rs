@@ -101,6 +101,12 @@ fn open_windows() -> &'static parking_lot::Mutex<HashMap<ThreadId, Vec<OpenWindo
 /// reserves with: the innermost open window's owner when that window
 /// measures this account, and UNKNOWN otherwise.
 pub(crate) fn current_window_owner(account: &Arc<SemanticRetentionAccount>) -> Provenance {
+    // A window this thread has open on `account` is counted open on it from
+    // before its registration until after its removal, so an account with
+    // none open attributes nothing, without the registry's lock.
+    if account.active_windows.open.load(Ordering::Relaxed) == 0 {
+        return Provenance::UNKNOWN;
+    }
     let thread = std::thread::current().id();
     let windows = open_windows().lock();
     windows

@@ -38,6 +38,50 @@ fn nested_aggregate_subscription_probing_delivers_after_unlock() {
     nested_cancellation_probe(true);
 }
 
+fn probes_opened() -> u64 {
+    PROBES_OPENED.with(std::cell::Cell::get)
+}
+
+/// Every semantic checkpoint asks a request token: it answers from its flag
+/// alone, before and after it latches. Only an unlatched aggregate opens a
+/// probe of its owners; a latched one answers from its flag too.
+#[test]
+fn only_an_unlatched_aggregate_opens_a_probe() {
+    let request = CancellationToken::new();
+    let before = probes_opened();
+    assert!(!request.is_cancelled());
+    request.cancel();
+    assert!(request.is_cancelled());
+    assert_eq!(
+        probes_opened() - before,
+        0,
+        "a request token opens no probe"
+    );
+
+    let owner_request = CancellationToken::new();
+    let aggregate = CancellationToken::aggregate();
+    let owner = aggregate
+        .register_owner(Some(owner_request.clone()))
+        .unwrap();
+    let before = probes_opened();
+    assert!(!aggregate.is_cancelled());
+    assert_eq!(
+        probes_opened() - before,
+        1,
+        "a live aggregate probes its owners"
+    );
+    owner_request.cancel();
+    assert!(aggregate.is_cancelled());
+    let before = probes_opened();
+    assert!(aggregate.is_cancelled());
+    assert_eq!(
+        probes_opened() - before,
+        0,
+        "a latched aggregate answers from its flag"
+    );
+    drop(owner);
+}
+
 #[test]
 fn new_token_is_not_cancelled() {
     assert!(!CancellationToken::new().is_cancelled());

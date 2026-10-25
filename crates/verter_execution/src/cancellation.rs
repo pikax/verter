@@ -82,6 +82,12 @@ impl CancellationState {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Probes [`CancellationToken::is_cancelled`] opened on this thread.
+    static PROBES_OPENED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Probes may traverse nested aggregates while owner or subscription locks
 /// are held. Latch immediately, but deliver every discovered cancellation
 /// only after the outermost probe releases all of those locks.
@@ -90,6 +96,10 @@ struct ProbedCancellations(Vec<Arc<CancellationState>>);
 
 impl Drop for ProbedCancellations {
     fn drop(&mut self) {
+        // Nearly every probe latches nothing: skip the drain machinery.
+        if self.0.is_empty() {
+            return;
+        }
         for state in self.0.drain(..) {
             let taken = state.wakers.lock().take();
             state.deliver(taken);
@@ -388,8 +398,21 @@ impl CancellationToken {
     }
 
     /// Returns whether the token has been cancelled.
+    ///
+    /// Every semantic checkpoint asks this. A latched token and a request
+    /// token (which has no owners to probe) answer from the flag alone;
+    /// only an unlatched aggregate opens a probe, whose discoveries are
+    /// delivered once it releases its locks.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
+        if self.state.cancelled.load(Ordering::Acquire) {
+            return true;
+        }
+        if self.state.owners.is_none() {
+            return false;
+        }
+        #[cfg(test)]
+        PROBES_OPENED.with(|opened| opened.set(opened.get() + 1));
         self.probe(&mut ProbedCancellations::default())
     }
 

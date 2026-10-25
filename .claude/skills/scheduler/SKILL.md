@@ -528,8 +528,10 @@ is a future sub-block.
 `CancellationToken` (`cancellation.rs`, LANDED) is a cheap, clonable,
 thread-safe one-shot latch — a transparent `Arc<AtomicBool>`. `clone()`
 is a refcount bump, `cancel()` a single `Release` store, `is_cancelled()`
-a single `Acquire` load; all clones share one flag and `cancel()` is
-idempotent. It is the substrate the un-landed DAG design uses for
+a single `Acquire` load for a request token and for a latched aggregate;
+only an unlatched aggregate token opens a probe of its owners (every
+semantic checkpoint asks, so the request-token path builds no probe
+state). All clones share one flag and `cancel()` is idempotent. It is the substrate the un-landed DAG design uses for
 per-node cancellation propagation
 (`CacheNodeDagNode.cancellation_token`), but on the current tree it is
 UNWIRED — no submission path or work node carries one yet.
