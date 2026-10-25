@@ -79,7 +79,7 @@ pub(in crate::project_semantic_dispatch) enum TupleElementContext {
     /// The element types of a middle range of the tuple — its rest
     /// element's, and those of the fixed elements the literal cannot
     /// place — shared by every literal element that reads the same range.
-    Middle(Arc<TupleMiddle>),
+    Middle(Arc<[SemanticNodeId]>),
 }
 
 impl TupleElementContext {
@@ -94,68 +94,29 @@ impl TupleElementContext {
     }
 }
 
-/// The element types of one middle range of a contextual tuple, and their
-/// union under the nullability policy that asked for it last.
-pub(in crate::project_semantic_dispatch) struct TupleMiddle {
-    contexts: Arc<[SemanticNodeId]>,
-    union: parking_lot::Mutex<
-        Option<(
-            verter_session_query::flow::policy::NullabilityPolicy,
-            SemanticNodeId,
-        )>,
-    >,
-}
-
-impl TupleMiddle {
-    /// The element types of the range.
-    pub(in crate::project_semantic_dispatch) fn contexts(&self) -> &[SemanticNodeId] {
-        &self.contexts
-    }
-
-    /// The union of the range's element types under `nullability`, built
-    /// by `union` once per policy in a row.
-    pub(in crate::project_semantic_dispatch) fn union_under(
-        &self,
-        nullability: verter_session_query::flow::policy::NullabilityPolicy,
-        union: impl FnOnce(&[SemanticNodeId]) -> SemanticNodeId,
-    ) -> SemanticNodeId {
-        if let Some((policy, node)) = *self.union.lock() {
-            if policy == nullability {
-                return node;
-            }
-        }
-        let node = union(&self.contexts);
-        *self.union.lock() = Some((nullability, node));
-        node
-    }
-}
+/// How many contextual tuples, and how many middle ranges, one dispatcher
+/// keeps at most; reading one more starts both afresh.
+const TUPLE_CONTEXTS_CAPACITY: usize = 4096;
 
 /// The contextual tuples one dispatcher has read array literal elements
-/// against, by tuple node, and the middle ranges of them it has read, by
-/// tuple node and range.
+/// against, by tuple node, and the element types of the middle ranges of
+/// them it has read, by tuple node and range. Each is derived from its
+/// tuple node's payload alone, and a node id is never reused, so an entry
+/// answers for its node for as long as that node is read. Neither map holds
+/// more than [`TUPLE_CONTEXTS_CAPACITY`] entries.
 #[derive(Default)]
 pub(in crate::project_semantic_dispatch) struct TupleContexts {
     tuples: FxHashMap<SemanticNodeId, ContextualTuple>,
-    middles: FxHashMap<(SemanticNodeId, usize, usize), Arc<TupleMiddle>>,
+    middles: FxHashMap<(SemanticNodeId, usize, usize), Arc<[SemanticNodeId]>>,
 }
 
 /// The element type of a tuple's rest element `rest`: the element type of
-/// its array type, through transparent aliases. `None` when it is not a
-/// settled array (an open carrier, a generic).
-pub(in crate::project_semantic_dispatch) fn tuple_rest_element(
-    nodes: &impl NodeRead,
-    rest: SemanticNodeId,
-) -> Option<SemanticNodeId> {
-    let mut current = rest;
-    // bounded-loop: at most 8 transparent Alias hops.
-    for _ in 0..8 {
-        match nodes.node_data(current).as_deref() {
-            Some(SemanticNodeData::Alias(target)) => current = *target,
-            Some(SemanticNodeData::Array { element, .. }) => return Some(*element),
-            _ => return None,
-        }
+/// its array type. `None` when it is no array.
+fn tuple_rest_element(nodes: &impl NodeRead, rest: SemanticNodeId) -> Option<SemanticNodeId> {
+    match nodes.node_data(rest).as_deref() {
+        Some(SemanticNodeData::Array { element, .. }) => Some(*element),
+        _ => None,
     }
-    None
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
@@ -170,10 +131,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return tuple.clone();
         }
         let tuple = ContextualTuple::new(node, elements);
-        self.tuple_contexts
-            .borrow_mut()
-            .tuples
-            .insert(node, tuple.clone());
+        let mut contexts = self.tuple_contexts.borrow_mut();
+        if contexts.tuples.len() >= TUPLE_CONTEXTS_CAPACITY {
+            contexts.tuples.clear();
+        }
+        contexts.tuples.insert(node, tuple.clone());
         tuple
     }
 
@@ -217,7 +179,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let key = (tuple.node, start, end);
         let known = self.tuple_contexts.borrow().middles.get(&key).cloned();
         let middle = known.unwrap_or_else(|| self.tuple_middle(tuple, key));
-        if middle.contexts.is_empty() {
+        if middle.is_empty() {
             TupleElementContext::None
         } else {
             TupleElementContext::Middle(middle)
@@ -230,7 +192,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         tuple: &ContextualTuple,
         key: (SemanticNodeId, usize, usize),
-    ) -> Arc<TupleMiddle> {
+    ) -> Arc<[SemanticNodeId]> {
         let (_, start, end) = key;
         let graph = self.graph();
         let contexts: Arc<[SemanticNodeId]> = tuple.elements[start..end]
@@ -244,14 +206,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             })
             .collect();
-        let middle = Arc::new(TupleMiddle {
-            contexts,
-            union: parking_lot::Mutex::new(None),
-        });
-        self.tuple_contexts
-            .borrow_mut()
-            .middles
-            .insert(key, Arc::clone(&middle));
-        middle
+        let mut known = self.tuple_contexts.borrow_mut();
+        if known.middles.len() >= TUPLE_CONTEXTS_CAPACITY {
+            known.middles.clear();
+        }
+        known.middles.insert(key, Arc::clone(&contexts));
+        contexts
     }
 }

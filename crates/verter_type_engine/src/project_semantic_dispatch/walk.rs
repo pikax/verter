@@ -3606,7 +3606,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// array — an open carrier, a generic — returns `None` so the caller
     /// aborts rather than dropping the contribution.
     fn rest_element_item_type(&self, value: SemanticNodeId) -> Option<SemanticNodeId> {
-        super::contextual_tuple::tuple_rest_element(&self.graph(), value)
+        let mut current = value;
+        // Transparent Alias unwrap, mirroring peek_special's redirect budget.
+        // bounded-loop: at most 8 transparent Alias hops.
+        for _ in 0..8 {
+            match self.graph().node_data(current).as_deref() {
+                Some(SemanticNodeData::Alias(target)) => current = *target,
+                Some(SemanticNodeData::Array { element, .. }) => return Some(*element),
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// Extract the declaration identity `(canonical_id, name)` from a

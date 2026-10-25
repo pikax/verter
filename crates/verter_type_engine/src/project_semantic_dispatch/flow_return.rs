@@ -15954,7 +15954,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         Some(self.union(&[element]))
                     }
                     super::contextual_tuple::TupleElementContext::Middle(middle) => {
-                        Some(middle.union_under(self.nullability, |types| self.union(types)))
+                        Some(self.union(&middle))
                     }
                 }
             }

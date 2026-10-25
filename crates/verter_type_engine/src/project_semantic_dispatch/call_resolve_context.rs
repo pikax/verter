@@ -1210,7 +1210,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 TupleElementContext::None => {}
                 TupleElementContext::Element(element) => contexts.scratch.push(*element),
                 TupleElementContext::Middle(middle) => {
-                    contexts.scratch.extend_from_slice(middle.contexts());
+                    contexts.scratch.extend_from_slice(middle);
                 }
             }
         }
