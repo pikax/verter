@@ -492,6 +492,10 @@ impl FrameProducer<'_> {
 
 /// What a drive's chain waits on outside its execution: another task's
 /// producer of a demand, or the load of a file a frame reads next.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "an execution holds at most one outside wait, inline beside its frames; boxing the claim would allocate on every wait for another task's producer"
+)]
 pub(super) enum PendingWait<'p> {
     Claim(PendingClaim<'p>),
     /// Resolved, the waiting frame steps again and reads the file.
