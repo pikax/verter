@@ -64,7 +64,10 @@ at host construction. NAPI/WASM export `captureAvailability()`, and their
 record readers plus the LSP audit methods fail with an error naming the
 missing feature. Tests that read a captured record carry
 `#[cfg(feature = "semantic-observe")]` and run in the instrumentation lane
-(`node scripts/observe-lane.mjs run`, CI `rust-observe`); keep a default-build
+(`node scripts/observe-lane.mjs run`, nightly `rust-observe`). Pull-request
+`rust-observe` runs `node scripts/observe-lane.mjs smoke`, a host-backed compile
+that verifies real output and stored capture with an audit-disabled control;
+the full record-reading suites remain nightly. Keep a default-build
 test per public surface proving it reports unavailable capture. It is the only
 measurement feature: the former `attribution`, `currency_probe` and `hotpath`
 features are folded into it (the work-attribution table compiles under the
