@@ -2725,7 +2725,7 @@ mod semantic_poll_contract {
             UNLOADED_OWNER.to_owned(),
             Arc::from("export interface Props { a: string }\n"),
         );
-        Arc::new(crate::VerterHost::new_with_scheduler_config(
+        Arc::new(crate::VerterHost::new(
             crate::types::HostConfig {
                 analysis_level: crate::types::AnalysisLevel::Full,
                 audit_enabled: true,
@@ -2733,10 +2733,6 @@ mod semantic_poll_contract {
                 ..crate::types::HostConfig::default()
             },
             workspace,
-            verter_scheduler::scheduler::SchedulerConfig {
-                cpu_threads: 1,
-                ..verter_scheduler::scheduler::SchedulerConfig::default()
-            },
         ))
     }
 

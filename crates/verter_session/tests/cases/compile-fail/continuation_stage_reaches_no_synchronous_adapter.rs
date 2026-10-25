@@ -3,12 +3,11 @@
 //! every such dependency is a step its driver answers.
 use verter_type_engine::project_semantic_dispatch::ContinuationStage;
 use verter_type_engine::resolver_core::ResolverCapabilities;
-use verter_type_engine::semantic_query::SemanticQueryKey;
 
-fn stage<C: ResolverCapabilities>(cx: &ContinuationStage<'_, '_, C>, key: SemanticQueryKey) {
+fn stage<C: ResolverCapabilities>(cx: &ContinuationStage<'_, '_, C>) {
     let _ = &cx.dispatch;
-    let _ = cx.dispatch().execute_read(key.clone());
-    let _ = cx.execute_read(key);
+    let _ = cx.dispatch().execute_read(());
+    let _ = cx.execute_read(());
     let _ = cx.ensure_indexed_ready_serve("/a.ts");
 }
 
