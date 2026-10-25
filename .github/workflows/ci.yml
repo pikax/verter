@@ -491,6 +491,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
+          package-manager-cache: false
       - name: Check the instrumentation runner
         run: node --test scripts/observe-lane.test.mjs
       - name: Verify host output and audit capture
