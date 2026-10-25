@@ -101,6 +101,20 @@ enum BundleMaterialization {
     SurfaceEmpty { serve_published: bool },
 }
 
+/// How a prepared bundle's materialization settles one import's dep edge
+/// ([`VerterHost::route_dep_edge_plan`]).
+enum RouteDepEdgePlan {
+    /// The owner's import resolution is refused: the bundle has no dep
+    /// edges at all.
+    Refused,
+    /// The owner's retained import resolution delivers the edge (or proves
+    /// a miss); nothing is loaded for it.
+    Delivered(Option<String>),
+    /// The edge resolves through the route-edge authority, which loads a
+    /// target with no current content.
+    RouteEdge,
+}
+
 /// A prepared-decl bundle read together with the
 /// [`ReuseClass`](verter_session_query::facts::reuse::ReuseClass) of the value
 /// that produced it.
@@ -1105,40 +1119,18 @@ impl VerterHost {
                 continue;
             }
 
-            let cached_resolution = self.cached_import_route_resolution::<M>(
-                verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+            let resolved = match self.route_dep_edge_plan::<M>(
+                ctx,
                 canonical_id,
                 target.source_specifier.as_str(),
-            );
-            let resolved: Option<String> = if let Some(resolution) = cached_resolution.as_ref() {
-                let preferred = match self.prefer_type_dependency_target_from_resolution(
-                    canonical_id,
-                    target.source_specifier.as_str(),
-                    resolution,
-                ) {
-                    verter_workspace::ResolutionPublication::Refused(_) => return None,
-                    // The bundle roots on the owner's import-route witness,
-                    // which an unretained resolution leaves unrootable, so
-                    // the edge serves this build and is never retained.
-                    publication => publication.into_delivered().flatten(),
-                };
-                preferred.or_else(|| {
-                    if Self::import_route_is_known_miss(resolution) {
-                        None
-                    } else {
-                        self.resolve_route_type_edge_with_context(
-                            ctx,
-                            canonical_id,
-                            target.source_specifier.as_str(),
-                        )
-                    }
-                })
-            } else {
-                self.resolve_route_type_edge_with_context(
+            ) {
+                RouteDepEdgePlan::Refused => return None,
+                RouteDepEdgePlan::Delivered(resolved) => resolved,
+                RouteDepEdgePlan::RouteEdge => self.resolve_route_type_edge_with_context(
                     ctx,
                     canonical_id,
                     target.source_specifier.as_str(),
-                )
+                ),
             };
             let Some(resolved) = resolved else {
                 continue;
@@ -1148,6 +1140,104 @@ impl VerterHost {
         }
 
         Some(dep_edges)
+    }
+
+    /// How [`Self::prepared_decl_bundle_route_dep_edges_with_context`]
+    /// settles the dep edge of one import specifier: refused, delivered by
+    /// the owner's retained import resolution, or resolved through
+    /// [`Self::resolve_route_type_edge_with_context`], which loads the
+    /// target when it has no current content.
+    fn route_dep_edge_plan<M: verter_audit::observe::ObserveExec>(
+        &self,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities<M>,
+        >,
+        canonical_id: &str,
+        source_specifier: &str,
+    ) -> RouteDepEdgePlan {
+        let Some(resolution) = self.cached_import_route_resolution::<M>(
+            verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+            canonical_id,
+            source_specifier,
+        ) else {
+            return RouteDepEdgePlan::RouteEdge;
+        };
+        match self.prefer_type_dependency_target_from_resolution(
+            canonical_id,
+            source_specifier,
+            &resolution,
+        ) {
+            verter_workspace::ResolutionPublication::Refused(_) => RouteDepEdgePlan::Refused,
+            // The bundle roots on the owner's import-route witness, which
+            // an unretained resolution leaves unrootable, so the edge serves
+            // this build and is never retained.
+            publication => match publication.into_delivered().flatten() {
+                Some(preferred) => RouteDepEdgePlan::Delivered(Some(preferred)),
+                None if Self::import_route_is_known_miss(&resolution) => {
+                    RouteDepEdgePlan::Delivered(None)
+                }
+                None => RouteDepEdgePlan::RouteEdge,
+            },
+        }
+    }
+
+    /// Begin the loads materializing the prepared declaration bundle of
+    /// `canonical_id` would perform, instead of performing them: the import
+    /// targets [`Self::prepared_decl_bundle_route_dep_edges_with_context`]
+    /// would load, in the order it loads them, past every file in
+    /// `awaited`. The first one `begin` reports still loading is returned
+    /// with its owned load; `None` once none is. The owner's own indexed
+    /// input is read only when it is already current, so the probe loads
+    /// nothing itself.
+    pub(crate) fn begin_prepared_bundle_route_load<'p, M: verter_audit::observe::ObserveExec>(
+        &self,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities<M>,
+        >,
+        canonical_id: &str,
+        awaited: &[std::sync::Arc<str>],
+        begin: impl Fn(&str) -> verter_type_engine::resolver_core::request_ports::IndexedReadiness<'p>,
+    ) -> Option<verter_type_engine::resolver_core::request_ports::PendingLoad<'p>> {
+        use verter_type_engine::resolver_core::request_ports::{IndexedReadiness, PendingLoad};
+        if ctx
+            .authoritative_current_content_hash(canonical_id)
+            .is_none()
+        {
+            return None;
+        }
+        let serve = ctx.ensure_indexed_ready_serve(canonical_id)?;
+        let route_canonical = self.normalized_analysis_canonical(canonical_id);
+        let route_canonical = route_canonical.as_ref();
+        let mut seen_sources = rustc_hash::FxHashSet::default();
+        for target in serve.indexed.shallow_state.owner_import_targets.values() {
+            let specifier = target.source_specifier.as_str();
+            if !seen_sources.insert(specifier) {
+                continue;
+            }
+            match self.route_dep_edge_plan::<M>(ctx, route_canonical, specifier) {
+                RouteDepEdgePlan::Refused => return None,
+                RouteDepEdgePlan::Delivered(_) => continue,
+                RouteDepEdgePlan::RouteEdge => {}
+            }
+            let Some(resolved) = ctx.resolve_type_dependency_canonical(route_canonical, specifier)
+            else {
+                continue;
+            };
+            if ctx
+                .authoritative_current_content_hash(resolved.as_str())
+                .is_some()
+                || awaited.iter().any(|file| file.as_ref() == resolved)
+            {
+                continue;
+            }
+            if let IndexedReadiness::Loading(load) = begin(resolved.as_str()) {
+                return Some(PendingLoad {
+                    canonical: std::sync::Arc::from(resolved),
+                    load,
+                });
+            }
+        }
+        None
     }
 
     /// Record each import binding's DIRECT-hop identity for DEMAND-DRIVEN

@@ -2718,13 +2718,17 @@ mod semantic_poll_contract {
 
     /// A host whose workspace holds [`UNLOADED_OWNER`], unloaded.
     fn unloaded_owner_host() -> Arc<crate::VerterHost> {
+        unloaded_files_host(&[(UNLOADED_OWNER, "export interface Props { a: string }\n")])
+    }
+
+    /// A host whose workspace holds `files`, none of them loaded.
+    fn unloaded_files_host(files: &[(&str, &str)]) -> Arc<crate::VerterHost> {
         let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
-        workspace.inject_file(
-            UNLOADED_OWNER.to_owned(),
-            Arc::from("export interface Props { a: string }\n"),
-        );
+        for (path, source) in files {
+            workspace.inject_file((*path).to_owned(), Arc::from(*source));
+        }
         Arc::new(crate::VerterHost::new(
             crate::types::HostConfig {
                 analysis_level: crate::types::AnalysisLevel::Full,
@@ -2877,6 +2881,222 @@ mod semantic_poll_contract {
         let read = dispatch.execute_via_cold_build_helper(payload);
         assert_eq!(read_summary(&dispatch, &read), synchronous);
         assert!(graph.resident_flight_keys_for_tests().is_empty());
+    }
+
+    /// A file declaring a value of an interface type, unloaded.
+    const UNLOADED_VALUE: &str = "/semantic-task/value.ts";
+
+    const UNLOADED_VALUE_SOURCE: &str = "export const value = { a: \"x\" };\n";
+
+    /// A loaded file whose value is typed by an interface it imports from
+    /// [`UNLOADED_VALUE`].
+    const IMPORTING_FILE: &str = "/semantic-task/importer.ts";
+
+    const IMPORTING_SOURCE: &str =
+        "import { value } from \"./value\";\nexport const copy = value;\n";
+
+    /// The instantiation of the `Props` [`UNLOADED_OWNER`] declares.
+    fn unloaded_props_key(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(
+                UNLOADED_OWNER,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Props",
+            ),
+            Arc::from([]),
+            dispatch.instantiate_context_for(
+                UNLOADED_OWNER,
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ),
+        ))
+    }
+
+    /// The `typeof` of the value `name` that `canonical` declares.
+    fn file_typeof_key(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        canonical: &str,
+        name: &str,
+    ) -> SemanticQueryKey {
+        dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    canonical,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: verter_type_expr::OwnedStr::from(name),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        )
+    }
+
+    /// The instantiations `host` built.
+    fn instantiations(host: &crate::VerterHost) -> u64 {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .instantiate_count
+    }
+
+    /// The load contract of a frame's dependency on a file still loading.
+    /// The synchronous entry loads `held` in place. The polled entry, with
+    /// the scheduler's source read of `held` held, returns `Pending` instead
+    /// of driving or waiting out the load, leaves the file unloaded, and its
+    /// `Send` task stays pending on another thread. Once the read goes on,
+    /// the completed load wakes the root, which delivers exactly what the
+    /// synchronous entry reads on a fresh host — answer, fact status,
+    /// diagnostics and receipt, logical work included — having built each
+    /// instantiation as often as the synchronous entry did, with nothing
+    /// left open.
+    fn assert_frame_waits_on_a_loading_file(
+        host: impl Fn() -> Arc<crate::VerterHost>,
+        held: &str,
+        key: impl Fn(
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        ) -> SemanticQueryKey,
+        answer: &str,
+    ) {
+        let synchronous = {
+            let host = host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let read = dispatch.execute_via_cold_build_helper(key(&dispatch));
+            assert!(
+                host.scheduler.try_get_source(held).is_some(),
+                "the synchronous entry loads {held} in place"
+            );
+            (read_summary(&dispatch, &read), instantiations(&host))
+        };
+        assert_eq!(synchronous.0 .0, answer, "{synchronous:?}");
+        assert!(
+            !synchronous.0 .3 && synchronous.0 .5.is_some(),
+            "the read is complete and priced: {synchronous:?}"
+        );
+
+        let host = host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let gate = Arc::clone(&host.test_force.source_load_gate);
+        gate.hold(held);
+        let guard = HeldSource(&gate);
+        let mut entry = dispatch.poll_query(key(&dispatch));
+        let counter = Arc::new(CountingWaker::default());
+        let counting = Waker::from(Arc::clone(&counter));
+        let first = entry.poll(&counting).is_pending();
+        let loaded_while_held = host.scheduler.try_get_source(held).is_some();
+        let elsewhere = entry.task().map(|task| {
+            assert_send(task);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| task.poll(&counting).is_pending())
+                    .join()
+                    .expect("the pending poll returns")
+            })
+        });
+        drop(guard);
+        assert!(first, "the root yields while {held} loads");
+        assert!(
+            !loaded_while_held,
+            "the source read of {held} is still held"
+        );
+        assert_eq!(elsewhere, Some(true), "its task stays pending elsewhere");
+        let read = poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the completed load wakes the waiting poll"
+        );
+        assert_eq!(
+            (read_summary(&dispatch, &read), instantiations(&host)),
+            synchronous,
+            "the polled root reads what the synchronous entry reads, building nothing again"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+    }
+
+    /// An instantiation whose declaring file is still loading waits on the
+    /// load before its build begins.
+    #[test]
+    fn an_instantiation_whose_declaring_file_is_loading_yields_and_reads_it_once_loaded() {
+        assert_frame_waits_on_a_loading_file(
+            unloaded_owner_host,
+            UNLOADED_OWNER,
+            unloaded_props_key,
+            "{ a: string }",
+        );
+    }
+
+    /// A `typeof` whose value's file is still loading waits on the load
+    /// before its build begins.
+    #[test]
+    fn a_typeof_whose_value_file_is_loading_yields_and_reads_it_once_loaded() {
+        assert_frame_waits_on_a_loading_file(
+            || unloaded_files_host(&[(UNLOADED_VALUE, UNLOADED_VALUE_SOURCE)]),
+            UNLOADED_VALUE,
+            |dispatch| file_typeof_key(dispatch, UNLOADED_VALUE, "value"),
+            "{ a: string }",
+        );
+    }
+
+    /// A `typeof` in a loaded file whose initializer names a value imported
+    /// from a file still loading: before its build begins, the importing
+    /// frame waits on the load its file's prepared declarations route that
+    /// import to, instead of the bundle loading it in place.
+    #[test]
+    fn a_typeof_reading_an_import_from_a_loading_file_yields_and_reads_it_once_loaded() {
+        let host = || {
+            let host = unloaded_files_host(&[
+                (UNLOADED_VALUE, UNLOADED_VALUE_SOURCE),
+                (IMPORTING_FILE, IMPORTING_SOURCE),
+            ]);
+            assert!(host.ensure_loaded(IMPORTING_FILE), "the importer is loaded");
+            assert!(
+                host.scheduler.try_get_source(UNLOADED_VALUE).is_none(),
+                "loading the importer leaves its import unloaded"
+            );
+            host
+        };
+        assert_frame_waits_on_a_loading_file(
+            host,
+            UNLOADED_VALUE,
+            |dispatch| file_typeof_key(dispatch, IMPORTING_FILE, "copy"),
+            "{ a: string }",
+        );
+    }
+
+    /// An instantiation released while its declaring file loads withdraws
+    /// only its own wait: nothing stays open, the load goes on for the next
+    /// demand, and the request then reads what the synchronous entry reads.
+    #[test]
+    fn an_instantiation_released_while_its_declaring_file_loads_leaves_nothing_open() {
+        let synchronous = {
+            let host = unloaded_owner_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let read = dispatch.execute_via_cold_build_helper(unloaded_props_key(&dispatch));
+            read_summary(&dispatch, &read)
+        };
+        let host = unloaded_owner_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let gate = Arc::clone(&host.test_force.source_load_gate);
+        gate.hold(UNLOADED_OWNER);
+        let guard = HeldSource(&gate);
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let mut entry = dispatch.poll_query(unloaded_props_key(&dispatch));
+        let first = entry.poll(&waker).is_pending();
+        drop(entry);
+        let open = dispatch.open_request_state_for_tests();
+        let waits = graph.wait_graph_counts_for_tests().1;
+        let flights = graph.resident_flight_keys_for_tests();
+        drop(guard);
+        assert!(first, "the instantiation yields while its file loads");
+        assert_eq!(open, NOTHING_OPEN);
+        assert_eq!(waits, 0, "the released root holds no wait");
+        assert!(flights.is_empty(), "the released root leaves no flight");
+        let read = dispatch.execute_via_cold_build_helper(unloaded_props_key(&dispatch));
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
     }
 
     /// A macro payload released while it waits on its payload operation

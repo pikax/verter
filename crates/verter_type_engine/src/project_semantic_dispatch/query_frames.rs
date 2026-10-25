@@ -465,6 +465,9 @@ pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapa
     recording: bool,
     /// The edit clocks the frame's build computes under.
     computed_at: super::WorkspaceEdit,
+    /// The files the frame waited on before its build began
+    /// ([`ProjectSemanticDispatch::frame_source_load`]).
+    awaited_loads: Vec<Arc<str>>,
 }
 
 /// What produces a frame's demand: the family memo's producer lease, or —
@@ -1483,6 +1486,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
             depth: self.child_depth,
             recording: false,
             computed_at: self.dispatch.workspace_edit(),
+            awaited_loads: Vec::new(),
         }))
     }
 }
@@ -2560,6 +2564,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The next load a frame's build would perform as it begins, when the
+    /// frame runs on a production poll's drive: its own file — an
+    /// instantiation's declaring file, a `typeof`'s value file — while it
+    /// loads, then each file that file's prepared declaration bundle loads
+    /// as it routes an import. `None` once none of them is loading, for a
+    /// key naming no file, or on the synchronous entry's drive, whose build
+    /// performs those loads in place as its external driver.
+    ///
+    /// Each file waited on joins `awaited` and is never waited on again: a
+    /// load that failed leaves the build to read the file as a synchronous
+    /// build reads it after its own failed load. What the check reads is
+    /// observed in a scope of its own and dropped; the build observes what
+    /// it reads itself.
+    fn frame_source_load(
+        &self,
+        key: &SemanticQueryKey,
+        awaited: &mut Vec<Arc<str>>,
+        suspends_loads: bool,
+    ) -> Option<Box<dyn IndexedLoad + Send + 'a>> {
+        if !suspends_loads {
+            return None;
+        }
+        let canonical: &str = match key {
+            SemanticQueryKey::Instantiate(key) => key.base().defining_canonical.as_ref(),
+            SemanticQueryKey::TypeOf { value_root, .. } => {
+                value_root.root.scope.canonical_id.as_ref()
+            }
+            _ => return None,
+        };
+        if crate::semantic_query::is_non_file_base(canonical) {
+            return None;
+        }
+        if !awaited.iter().any(|file| file.as_ref() == canonical) {
+            if let IndexedReadiness::Loading(load) = self.ctx.begin_indexed_load(canonical) {
+                awaited.push(Arc::from(canonical));
+                return Some(load);
+            }
+        }
+        let tracer = crate::resolver_core::resolver_context::OwnedFactTracer::new(
+            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx).live_basis(),
+        );
+        let pending = {
+            let _tracer = tracer.install();
+            self.observe_read(|| self.ctx.begin_prepared_bundle_load(canonical, awaited))
+                .discard()
+                .ok()
+                .flatten()
+        }?;
+        awaited.push(pending.canonical);
+        Some(pending.load)
+    }
+
     /// One step of an instantiation's frame: its taint frame and tracer
     /// installed, it begins or resumes its build and runs it until the
     /// build needs another instantiation or completes.
@@ -2573,6 +2629,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         'a: 'p,
     {
         let _site = self.checking_site_scope(frame.site);
+        // A build whose files are still loading waits on each load before
+        // it begins: nothing of it has run, so the step the last load
+        // restarts begins it once, over loaded files.
+        if frame.build.is_none() {
+            if let Some(load) =
+                self.frame_source_load(&frame.key, &mut frame.awaited_loads, suspends_loads)
+            {
+                return EvalStep::Await(PendingWait::Load(load));
+            }
+        }
         if !frame.recording {
             let identity = frame
                 .producer
@@ -2646,113 +2712,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     suspends_loads,
                 )
             }
-            None => {
-                self.open_cold_build(None);
-                // A frame produces its key as a synchronous build does.
-                #[cfg(any(test, feature = "test-support"))]
-                if let Some(hook) = self.graph().produce_hook_for_tests() {
-                    hook(&frame.key, &|nested| {
-                        let _ = self.execute_via_cold_build_helper(nested);
-                    });
-                }
-                match &frame.key {
-                    SemanticQueryKey::Instantiate(key) => {
-                        let refusal = self
-                            .cold_build_budget_refusal(&frame.key)
-                            .or_else(|| self.instantiation_budget_refusal(frame.depth));
-                        let begun = match refusal {
-                            Some(refusal) => InstantiateStart::Done(Box::new(refusal)),
-                            None => self.begin_instantiate(
-                                key.base(),
-                                key.args(),
-                                key.source(),
-                                key.context(),
-                                true,
-                            ),
-                        };
-                        match begun {
-                            InstantiateStart::Done(output) => InstantiatePoll::Done(output).into(),
-                            InstantiateStart::Build(build) => {
-                                frame.active =
-                                    Some((build.active_identity.clone(), Arc::clone(&build.args)));
-                                let FrameBuild::Instantiate(build) =
-                                    frame.build.insert(FrameBuild::Instantiate(build))
-                                else {
-                                    unreachable!("the build was just inserted")
-                                };
-                                self.drain_instantiate(build, None).into()
-                            }
-                        }
-                    }
-                    SemanticQueryKey::TypeOf {
-                        value_root,
-                        path,
-                        context,
-                    } => {
-                        let begun = match self.cold_build_budget_refusal(&frame.key) {
-                            Some(refusal) => TypeofStart::Done(Box::new(refusal)),
-                            None => self.begin_typeof(
-                                &value_root.root,
-                                path,
-                                context.projection_reduction,
-                            ),
-                        };
-                        match begun {
-                            TypeofStart::Done(output) => InstantiatePoll::Done(output).into(),
-                            TypeofStart::Build(build) => {
-                                let FrameBuild::Typeof(build) =
-                                    frame.build.insert(FrameBuild::Typeof(build))
-                                else {
-                                    unreachable!("the build was just inserted")
-                                };
-                                self.drain_typeof(build, None).into()
-                            }
-                        }
-                    }
-                    SemanticQueryKey::Conditional { .. } => {
-                        match self.cold_build_budget_refusal(&frame.key) {
-                            Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
-                            None => {
-                                let FrameBuild::Conditional(build) =
-                                    frame.build.insert(FrameBuild::Conditional(Box::default()))
-                                else {
-                                    unreachable!("the build was just inserted")
-                                };
-                                self.drain_conditional(&frame.key, build, None, frame.depth + 1)
-                                    .into()
-                            }
-                        }
-                    }
-                    SemanticQueryKey::ResolveCall(_) => {
-                        match self.cold_build_budget_refusal(&frame.key) {
-                            Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
-                            None => {
-                                let FrameBuild::Call(build) =
-                                    frame.build.insert(FrameBuild::Call(Box::default()))
-                                else {
-                                    unreachable!("the build was just inserted")
-                                };
-                                self.drain_call(&frame.key, build, None, frame.depth + 1)
-                            }
-                        }
-                    }
-                    SemanticQueryKey::FlowReturn(_) => {
-                        let FrameBuild::Flow(build) =
-                            frame.build.insert(FrameBuild::Flow(Box::default()))
-                        else {
-                            unreachable!("the build was just inserted")
-                        };
-                        self.drain_flow(&frame.key, build, None, frame.depth + 1)
-                    }
-                    // A family built as a continuation needs each query its
-                    // stages read; any other dependency of a family without
-                    // frames of its own — a read a decision or flow
-                    // evaluation joined at its seam whose producer went away
-                    // before the join answered — builds in one step, as its
-                    // synchronous producer builds it.
-                    _ => self.start_family_frame(&frame.key, &mut frame.build, suspends_loads),
-                }
-            }
+            None => self.begin_frame_build(
+                &frame.key,
+                frame.depth,
+                &mut frame.active,
+                &mut frame.build,
+                suspends_loads,
+            ),
         };
         let step = crate::request_context::current_cold_compute_completeness();
         if step.is_partial() {
@@ -2776,6 +2742,115 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 frame.active = None;
                 EvalStep::Complete(self.complete_instantiate_frame(frame, *output))
             }
+        }
+    }
+
+    /// The first step of a frame's build: it opens as a synchronous cold
+    /// build opens and begins the build its key names.
+    fn begin_frame_build(
+        &self,
+        frame_key: &SemanticQueryKey,
+        depth: u32,
+        active: &mut Option<(super::InstantiateIdentity, Arc<[SemanticNodeId]>)>,
+        frame_build: &mut Option<FrameBuild>,
+        suspends_loads: bool,
+    ) -> FramePoll<'a> {
+        self.open_cold_build(None);
+        // A frame produces its key as a synchronous build does.
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hook) = self.graph().produce_hook_for_tests() {
+            hook(frame_key, &|nested| {
+                let _ = self.execute_via_cold_build_helper(nested);
+            });
+        }
+        match frame_key {
+            SemanticQueryKey::Instantiate(key) => {
+                let refusal = self
+                    .cold_build_budget_refusal(frame_key)
+                    .or_else(|| self.instantiation_budget_refusal(depth));
+                let begun = match refusal {
+                    Some(refusal) => InstantiateStart::Done(Box::new(refusal)),
+                    None => self.begin_instantiate(
+                        key.base(),
+                        key.args(),
+                        key.source(),
+                        key.context(),
+                        true,
+                    ),
+                };
+                match begun {
+                    InstantiateStart::Done(output) => InstantiatePoll::Done(output).into(),
+                    InstantiateStart::Build(build) => {
+                        *active = Some((build.active_identity.clone(), Arc::clone(&build.args)));
+                        let FrameBuild::Instantiate(build) =
+                            frame_build.insert(FrameBuild::Instantiate(build))
+                        else {
+                            unreachable!("the build was just inserted")
+                        };
+                        self.drain_instantiate(build, None).into()
+                    }
+                }
+            }
+            SemanticQueryKey::TypeOf {
+                value_root,
+                path,
+                context,
+            } => {
+                let begun = match self.cold_build_budget_refusal(frame_key) {
+                    Some(refusal) => TypeofStart::Done(Box::new(refusal)),
+                    None => self.begin_typeof(&value_root.root, path, context.projection_reduction),
+                };
+                match begun {
+                    TypeofStart::Done(output) => InstantiatePoll::Done(output).into(),
+                    TypeofStart::Build(build) => {
+                        let FrameBuild::Typeof(build) =
+                            frame_build.insert(FrameBuild::Typeof(build))
+                        else {
+                            unreachable!("the build was just inserted")
+                        };
+                        self.drain_typeof(build, None).into()
+                    }
+                }
+            }
+            SemanticQueryKey::Conditional { .. } => {
+                match self.cold_build_budget_refusal(frame_key) {
+                    Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
+                    None => {
+                        let FrameBuild::Conditional(build) =
+                            frame_build.insert(FrameBuild::Conditional(Box::default()))
+                        else {
+                            unreachable!("the build was just inserted")
+                        };
+                        self.drain_conditional(frame_key, build, None, depth + 1)
+                            .into()
+                    }
+                }
+            }
+            SemanticQueryKey::ResolveCall(_) => match self.cold_build_budget_refusal(frame_key) {
+                Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
+                None => {
+                    let FrameBuild::Call(build) =
+                        frame_build.insert(FrameBuild::Call(Box::default()))
+                    else {
+                        unreachable!("the build was just inserted")
+                    };
+                    self.drain_call(frame_key, build, None, depth + 1)
+                }
+            },
+            SemanticQueryKey::FlowReturn(_) => {
+                let FrameBuild::Flow(build) = frame_build.insert(FrameBuild::Flow(Box::default()))
+                else {
+                    unreachable!("the build was just inserted")
+                };
+                self.drain_flow(frame_key, build, None, depth + 1)
+            }
+            // A family built as a continuation needs each query its
+            // stages read; any other dependency of a family without
+            // frames of its own — a read a decision or flow
+            // evaluation joined at its seam whose producer went away
+            // before the join answered — builds in one step, as its
+            // synchronous producer builds it.
+            _ => self.start_family_frame(frame_key, frame_build, suspends_loads),
         }
     }
 

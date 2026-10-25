@@ -38,6 +38,14 @@ pub trait IndexedLoad {
     fn poll(&mut self, waker: &std::task::Waker) -> std::task::Poll<()>;
 }
 
+/// The load of a file another read would perform, begun instead
+/// ([`IndexedInputs::begin_prepared_bundle_load`]): the file, and its owned
+/// load to wait on.
+pub struct PendingLoad<'p> {
+    pub canonical: Arc<str>,
+    pub load: Box<dyn IndexedLoad + Send + 'p>,
+}
+
 /// The declaration namespace an ambient global read consumes.
 #[derive(Debug, Clone, Copy)]
 pub enum AmbientSymbolSpace {
@@ -220,6 +228,19 @@ pub trait IndexedInputs {
     /// thread and integrates the file when it completes, exactly as
     /// [`Self::ensure_loaded`] would; it never drives the loading stages.
     fn begin_indexed_load(&self, canonical_id: &str) -> IndexedReadiness<'_>;
+
+    /// Begin the loads [`Self::prepared_decl_bundle`] of `canonical_id`
+    /// would perform while materializing the bundle — the files it routes
+    /// an import to that have no current content — instead of performing
+    /// them: the first, past every file in `awaited`, that is still
+    /// loading, in the order the materialization loads them, or `None` once
+    /// none is. It materializes nothing and loads nothing itself; it reads
+    /// `canonical_id` only when that file is already current.
+    fn begin_prepared_bundle_load(
+        &self,
+        canonical_id: &str,
+        awaited: &[Arc<str>],
+    ) -> Option<PendingLoad<'_>>;
 
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>>;
 
