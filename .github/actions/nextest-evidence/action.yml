@@ -8,6 +8,11 @@ description: >-
   as it was; no required check reads it.
 
 inputs:
+  junit-path:
+    description: >-
+      Path of the junit.xml, when the workflow already located it. Leave empty
+      to have the action locate the nextest `ci` profile report itself.
+    default: ""
   name:
     description: Stable artifact name for this job and partition.
     required: true
@@ -42,11 +47,6 @@ inputs:
     description: Comma-separated tools whose versions are recorded.
     default: rustc,cargo,cargo-nextest,node,pnpm
 
-outputs:
-  junit-path:
-    description: Path of the located junit.xml.
-    value: ${{ steps.locate.outputs.path }}
-
 runs:
   using: composite
   steps:
@@ -54,8 +54,13 @@ runs:
       id: locate
       if: always()
       shell: bash
+      env:
+        PROVIDED_JUNIT: ${{ inputs.junit-path }}
       run: |
-        found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
+        found="$PROVIDED_JUNIT"
+        if [ -z "$found" ]; then
+          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
+        fi
         if [ -z "$found" ]; then
           echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
           find target -type d -name nextest -print 2>/dev/null || true

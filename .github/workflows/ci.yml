@@ -442,22 +442,34 @@ jobs:
           nextest_argv=(nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER")
           echo "argv=$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${nextest_argv[@]}")" >> "$GITHUB_OUTPUT"
           cargo "${nextest_argv[@]}"
+      - name: Locate nextest JUnit report
+        if: always()
+        id: junit
+        run: |
+          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
+          if [ -z "$found" ]; then
+            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
+            find target -type d -name nextest -print 2>/dev/null || true
+            exit 1
+          fi
+          echo "path=$found" >> "$GITHUB_OUTPUT"
+          echo "JUnit report: $found"
       # The JUnit report plus its metadata document, under a stable name per shard.
       - name: Nextest JUnit evidence
-        id: junit
         if: always()
         uses: ./.github/actions/nextest-evidence
         with:
+          junit-path: ${{ steps.junit.outputs.path }}
           name: nextest-evidence-rust-test-core-${{ matrix.shard }}-of-4
           env-snapshot: ${{ runner.temp }}/nextest-env.json
           argv-json: ${{ steps.nextest.outputs.argv }}
           matrix-json: ${{ toJSON(matrix) }}
       - name: Test report
-        if: always() && steps.junit.outputs.junit-path != ''
+        if: always() && steps.junit.outputs.path != ''
         uses: dorny/test-reporter@v3
         with:
           name: Rust Core Test Results (${{ matrix.shard }}/4)
-          path: ${{ steps.junit.outputs.junit-path }}
+          path: ${{ steps.junit.outputs.path }}
           reporter: java-junit
           fail-on-error: false
 
@@ -500,20 +512,30 @@ jobs:
           argv="$(node scripts/observe-lane.mjs args)"
           echo "argv=$argv" >> "$GITHUB_OUTPUT"
           node scripts/observe-lane.mjs run
-      - name: Nextest JUnit evidence
+      - name: Locate nextest JUnit report
+        if: always()
         id: junit
+        run: |
+          found=$(find target -type f -path '*/nextest/ci/junit.xml' -print -quit)
+          if [ -z "$found" ]; then
+            echo "::error::nextest ci junit.xml not found — the test report would be silently empty"
+            exit 1
+          fi
+          echo "path=$found" >> "$GITHUB_OUTPUT"
+      - name: Nextest JUnit evidence
         if: always()
         uses: ./.github/actions/nextest-evidence
         with:
+          junit-path: ${{ steps.junit.outputs.path }}
           name: nextest-evidence-rust-observe
           env-snapshot: ${{ runner.temp }}/nextest-env.json
           argv-json: ${{ steps.nextest.outputs.argv }}
       - name: Test report
-        if: always() && steps.junit.outputs.junit-path != ''
+        if: always() && steps.junit.outputs.path != ''
         uses: dorny/test-reporter@v3
         with:
           name: Rust Instrumentation Test Results
-          path: ${{ steps.junit.outputs.junit-path }}
+          path: ${{ steps.junit.outputs.path }}
           reporter: java-junit
           fail-on-error: false
 
