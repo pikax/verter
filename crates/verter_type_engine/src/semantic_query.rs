@@ -6565,11 +6565,14 @@ pub struct SemanticGraphStats {
     /// builds, and collapsing the counters would hide exactly the
     /// cross-family aliasing the separation exists to prevent.
     pub async_return_payload_count: u64,
-    /// First stages of macro payload resolutions: the owning file read and
-    /// the fence seeded once per cold build. A resolution resumed with its
-    /// payload operation's read finishes from what that stage retained, so
-    /// a count above the cold builds means a stage ran again.
-    pub macro_payload_owner_reads: u64,
+    /// Family builds begun as owned continuations: one first stage per cold
+    /// build, whichever driver steps it. A continuation resumed after a
+    /// read finishes from what its stages retained, so a count above the
+    /// cold builds means a first stage ran again.
+    pub continuation_builds_begun: u64,
+    /// Later stages of those continuations: one per query read a build
+    /// named. A count above the reads means a stage ran again.
+    pub continuation_stages_resumed: u64,
     // ── Path-length histogram percentiles (reservoir-sampled by the
     // `ProjectPath` builder).
     pub path_length_p50: u32,

@@ -129,6 +129,10 @@ pub mod cycle_gate;
 pub mod enum_type;
 pub(crate) mod enumerate;
 pub mod evaluate;
+// Family builds written as owned sequential continuations, driven in
+// place by the synchronous producer and by needs on the continuation
+// runtime.
+mod family_continuation;
 pub mod locator_shape;
 pub mod locator_view;
 pub mod locator_view_worklist;

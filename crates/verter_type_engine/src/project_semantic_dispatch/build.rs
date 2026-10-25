@@ -16,6 +16,7 @@ use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_session_query::type_solver::PreparedTypeDecl;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
+use super::family_continuation::{FamilyBuild, FamilyStep};
 use super::signature_discovery::PositionalArgument;
 use super::walk::PathWalker;
 use super::{empty_signature, utility_param_names, ProjectSemanticDispatch, SessionDispatchHost};
@@ -18389,54 +18390,114 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             purpose: crate::semantic_query::IntersectionPurpose,
             context: crate::semantic_query::SemanticContextId,
         ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            verter_audit::attribute!(ReduceIntersection);
-            let reduce = |members: &[SemanticNodeId]| match purpose {
-                crate::semantic_query::IntersectionPurpose::CheckerReduction => {
-                    super::canonical_algebra::intern_ordered_intersection_charged(
-                        self.graph(),
-                        members,
-                        self.construction_meter(),
-                    )
+            self.drive_family_in_place(self.begin_reduce_intersection(input, purpose, context))
+        }
+    }
+
+    /// The first stage of an ordered intersection reduction: the operands
+    /// up to the first nested subgroup, whose reduction it reads next, or
+    /// the reduction itself when no subgroup remains
+    /// ([`Self::advance_reduce_intersection`]).
+    #[inline(never)]
+    pub(super) fn begin_reduce_intersection(
+        &self,
+        input: crate::semantic_query::IntersectionInputRef,
+        purpose: crate::semantic_query::IntersectionPurpose,
+        context: crate::semantic_query::SemanticContextId,
+    ) -> FamilyStep {
+        verter_audit::attribute!(ReduceIntersection);
+        self.graph().record_continuation_begun();
+        let Some(steps) = input.as_steps() else {
+            let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
+            return FamilyStep::Done(Box::new(self.build_normalize_composite(
+                &members,
+                self.reduce_intersection_members(purpose, &members),
+            )));
+        };
+        let members = Vec::with_capacity(steps.len());
+        self.advance_reduce_intersection(ReduceIntersectionBuild {
+            input,
+            purpose,
+            context,
+            next: 0,
+            members,
+        })
+    }
+
+    /// Resume an intersection reduction with the read of the nested
+    /// subgroup it waited on: a reduced subgroup joins the operands, a
+    /// failed one contributes none.
+    #[inline(never)]
+    pub(super) fn resume_reduce_intersection(
+        &self,
+        mut build: ReduceIntersectionBuild,
+        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> FamilyStep {
+        match read.value {
+            QueryResult::Value(node) | QueryResult::Recursive(node) => build.members.push(node),
+            QueryResult::Error(_) => {}
+        }
+        self.advance_reduce_intersection(build)
+    }
+
+    /// Take the reduction's operands from its next step on: each value
+    /// joins as it is, the first nested subgroup is read next with what was
+    /// taken so far retained, and once every step is taken the operands
+    /// reduce in their order.
+    fn advance_reduce_intersection(&self, mut build: ReduceIntersectionBuild) -> FamilyStep {
+        let steps = build
+            .input
+            .as_steps()
+            .expect("a stepped reduction keeps its recipe");
+        while let Some(step) = steps.get(build.next) {
+            build.next += 1;
+            match step {
+                crate::semantic_query::IntersectionTerm::Value(id) => build.members.push(*id),
+                crate::semantic_query::IntersectionTerm::EvaluateSubgroup {
+                    input: nested,
+                    purpose,
+                } => {
+                    let nested = SemanticQueryKey::ReduceIntersection {
+                        input: nested.clone(),
+                        purpose: *purpose,
+                        context: build.context.clone(),
+                    };
+                    return FamilyStep::Need(
+                        nested,
+                        Box::new(FamilyBuild::ReduceIntersection(build)),
+                    );
                 }
-                crate::semantic_query::IntersectionPurpose::WrittenTypeNode(nullability) => {
-                    super::canonical_algebra::intern_written_intersection_charged(
-                        self.graph(),
-                        members,
-                        nullability,
-                        self.construction_meter(),
-                    )
-                }
-            };
-            if let Some(steps) = input.as_steps() {
-                let mut members: Vec<SemanticNodeId> = Vec::with_capacity(steps.len());
-                for step in steps.iter() {
-                    match step {
-                        crate::semantic_query::IntersectionTerm::Value(id) => members.push(*id),
-                        crate::semantic_query::IntersectionTerm::EvaluateSubgroup {
-                            input: nested,
-                            purpose,
-                        } => {
-                            let nested_key =
-                                crate::semantic_query::SemanticQueryKey::ReduceIntersection {
-                                    input: nested.clone(),
-                                    purpose: *purpose,
-                                    context: context.clone(),
-                                };
-                            match self.execute_read(nested_key).value {
-                                crate::semantic_query::QueryResult::Value(node) => members.push(node),
-                                crate::semantic_query::QueryResult::Recursive(node) => {
-                                    members.push(node)
-                                }
-                                crate::semantic_query::QueryResult::Error(_) => {}
-                            }
-                        }
-                    }
-                }
-                let members: Arc<[SemanticNodeId]> = Arc::from(members.into_boxed_slice());
-                self.build_normalize_composite(&members, reduce(&members))
-            } else {
-                let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
-                self.build_normalize_composite(&members, reduce(&members))
+            }
+        }
+        let members: Arc<[SemanticNodeId]> = Arc::from(std::mem::take(&mut build.members));
+        FamilyStep::Done(Box::new(self.build_normalize_composite(
+            &members,
+            self.reduce_intersection_members(build.purpose, &members),
+        )))
+    }
+
+    /// The canonical intersection of `members` under `purpose`: a derived
+    /// intersection's checker reduction, or a written type node's.
+    fn reduce_intersection_members(
+        &self,
+        purpose: crate::semantic_query::IntersectionPurpose,
+        members: &[SemanticNodeId],
+    ) -> super::canonical_algebra::CanonicalComposite {
+        match purpose {
+            crate::semantic_query::IntersectionPurpose::CheckerReduction => {
+                super::canonical_algebra::intern_ordered_intersection_charged(
+                    self.graph(),
+                    members,
+                    self.construction_meter(),
+                )
+            }
+            crate::semantic_query::IntersectionPurpose::WrittenTypeNode(nullability) => {
+                super::canonical_algebra::intern_written_intersection_charged(
+                    self.graph(),
+                    members,
+                    nullability,
+                    self.construction_meter(),
+                )
             }
         }
     }
@@ -20961,15 +21022,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         type_args: &Arc<[SemanticNodeId]>,
         mode: ProjectionMode,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        match self.begin_resolve_macro_payload(owner, macro_index, macro_kind, type_args, mode) {
-            MacroPayloadStep::Done(output) => *output,
-            // A producer evaluated in place reads its payload operation in
-            // place, as every nested read of a synchronous build is made.
-            MacroPayloadStep::Need(build) => {
-                let read = self.execute_read(build.payload().clone());
-                self.finish_resolve_macro_payload(*build, read)
-            }
-        }
+        self.drive_family_in_place(self.begin_resolve_macro_payload(
+            owner,
+            macro_index,
+            macro_kind,
+            type_args,
+            mode,
+        ))
     }
 
     /// The first stage of a macro payload's resolution: the owning file's
@@ -20977,6 +21036,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// or the one payload operation the value is read from — the props
     /// intersection, or the emits / slots / model projection — retained with
     /// everything read so far for [`Self::finish_resolve_macro_payload`].
+    #[inline(never)]
     pub(super) fn begin_resolve_macro_payload(
         &self,
         owner: &crate::semantic_query::ResolvedDeclSlotIdentity,
@@ -20984,9 +21044,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
         type_args: &Arc<[SemanticNodeId]>,
         mode: ProjectionMode,
-    ) -> MacroPayloadStep {
+    ) -> FamilyStep {
         use verter_session_query::analysis::types::AnalyzedMacroKind;
-        self.graph().record_macro_payload_owner_read();
+        self.graph().record_continuation_begun();
 
         // R6 / R20: the key is content-free. Re-source the owning
         // SFC's content version from the live indexed view at
@@ -21057,7 +21117,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             type_args: Arc::clone(type_args),
         };
         let answered = |rooting, result, local_fence| {
-            MacroPayloadStep::Done(Box::new(self.macro_payload_output(
+            FamilyStep::Done(Box::new(self.macro_payload_output(
                 rooting,
                 local_fence,
                 result,
@@ -21113,11 +21173,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if owner_indexed.is_none() {
                             out.cache_suppress = true;
                         }
-                        return MacroPayloadStep::Done(Box::new(out));
+                        return FamilyStep::Done(Box::new(out));
                     }
                 };
                 if snapshot.macros.get(macro_index).is_none() {
-                    return MacroPayloadStep::Done(Box::new(
+                    return FamilyStep::Done(Box::new(
                         (
                             QueryResult::Error(QueryError::Miss),
                             fence_to_dep_signature(local_fence),
@@ -21154,11 +21214,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return answered(rooting, result, local_fence);
             }
         };
-        MacroPayloadStep::Need(Box::new(MacroPayloadBuild {
-            rooting,
-            local_fence,
+        FamilyStep::Need(
             payload,
-        }))
+            Box::new(FamilyBuild::MacroPayload(MacroPayloadBuild {
+                rooting,
+                local_fence,
+            })),
+        )
     }
 
     /// The last stage of a macro payload's resolution: the payload
@@ -21170,6 +21232,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `read.value`-only extraction here would drop both via
     /// `QueryBuildOutput::from`'s default-false, letting a budget-tripped
     /// nested read's partial warm the component-meta result.
+    #[inline(never)]
     pub(super) fn finish_resolve_macro_payload(
         &self,
         build: MacroPayloadBuild,
@@ -21178,7 +21241,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let MacroPayloadBuild {
             rooting,
             mut local_fence,
-            ..
         } = build;
         crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
             &mut local_fence,
@@ -22222,15 +22284,6 @@ pub(super) enum InstantiateStart {
     Build(Box<InstantiateBuild>),
 }
 
-/// Where a macro payload's resolution stands after its first stage
-/// ([`ProjectSemanticDispatch::begin_resolve_macro_payload`]).
-pub(super) enum MacroPayloadStep {
-    /// The payload is answered.
-    Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>),
-    /// The payload is read from its payload operation.
-    Need(Box<MacroPayloadBuild>),
-}
-
 /// A macro payload's resolution while its payload operation is read: what
 /// its first stage read of the owning file and the fence it seeded, kept so
 /// the operation's read finishes the resolution without reading the owner
@@ -22238,14 +22291,18 @@ pub(super) enum MacroPayloadStep {
 pub(super) struct MacroPayloadBuild {
     rooting: MacroPayloadRooting,
     local_fence: Vec<crate::semantic_query::DepEntry>,
-    payload: SemanticQueryKey,
 }
 
-impl MacroPayloadBuild {
-    /// The payload operation the value is read from.
-    pub(super) fn payload(&self) -> &SemanticQueryKey {
-        &self.payload
-    }
+/// An ordered intersection reduction while it reads a nested subgroup's
+/// reduction: its input and the operands its steps before that subgroup
+/// gave, so the read resumes it at the step after the subgroup.
+pub(super) struct ReduceIntersectionBuild {
+    input: crate::semantic_query::IntersectionInputRef,
+    purpose: crate::semantic_query::IntersectionPurpose,
+    context: crate::semantic_query::SemanticContextId,
+    /// The next step to take.
+    next: usize,
+    members: Vec<SemanticNodeId>,
 }
 
 /// What a macro payload's output is rooted on: the owning file at the

@@ -2468,12 +2468,14 @@ mod semantic_poll_contract {
         (payload, intersection)
     }
 
-    /// The first stages of macro payload resolutions `host` ran.
-    fn macro_payload_owner_reads(host: &crate::VerterHost) -> u64 {
-        host.project_type_store()
-            .semantic_graph()
-            .stats_snapshot()
-            .macro_payload_owner_reads
+    /// The family continuation stages `host` ran: builds begun, and later
+    /// stages resumed with a read.
+    fn continuation_stages(host: &crate::VerterHost) -> (u64, u64) {
+        let stats = host.project_type_store().semantic_graph().stats_snapshot();
+        (
+            stats.continuation_builds_begun,
+            stats.continuation_stages_resumed,
+        )
     }
 
     /// A macro payload — the metadata root's own query — whose payload
@@ -2493,7 +2495,11 @@ mod semantic_poll_contract {
             let dispatch = ProjectSemanticDispatch::new(&*host);
             let (payload, _) = props_payload_keys(&dispatch);
             let read = dispatch.execute_via_cold_build_helper(payload);
-            assert_eq!(macro_payload_owner_reads(&host), 1);
+            assert_eq!(
+                continuation_stages(&host),
+                (2, 1),
+                "the payload and its intersection each begin once; the payload resumes once"
+            );
             read_summary(&dispatch, &read)
         };
         assert!(
@@ -2544,9 +2550,9 @@ mod semantic_poll_contract {
         };
         drop(entry);
         assert_eq!(
-            macro_payload_owner_reads(&host),
-            1,
-            "the owner stage is never run again"
+            continuation_stages(&host),
+            (2, 1),
+            "no stage runs again: the owner is read once and the payload resumes once"
         );
         assert_eq!(read_summary(&dispatch, &read), synchronous);
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
@@ -2564,9 +2570,137 @@ mod semantic_poll_contract {
             read_summary(&dispatch, &warm_sync)
         );
         assert_eq!(
-            macro_payload_owner_reads(&host),
-            1,
+            continuation_stages(&host),
+            (2, 1),
             "a warm payload runs no stage"
+        );
+        drop(other);
+    }
+
+    /// `string & ("a" & string) & string`, its middle operand a nested
+    /// subgroup the reduction reads, and that subgroup's own reduction.
+    fn stepped_intersection_keys(
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        use verter_type_engine::semantic_query::{
+            IntersectionInputRef, IntersectionPurpose, IntersectionTerm, LiteralValue,
+            SemanticContextId,
+        };
+        let graph = dispatch.graph_arc();
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let literal =
+            graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
+        let subgroup = IntersectionInputRef::from_operands(graph, &[literal, string]);
+        let purpose = IntersectionPurpose::CheckerReduction;
+        let reduction = SemanticQueryKey::ReduceIntersection {
+            input: IntersectionInputRef::from_steps(
+                graph,
+                &[
+                    IntersectionTerm::Value(string),
+                    IntersectionTerm::EvaluateSubgroup {
+                        input: subgroup.clone(),
+                        purpose,
+                    },
+                    IntersectionTerm::Value(string),
+                ],
+            ),
+            purpose,
+            context: SemanticContextId::production(),
+        };
+        let nested = SemanticQueryKey::ReduceIntersection {
+            input: subgroup,
+            purpose,
+            context: SemanticContextId::production(),
+        };
+        (reduction, nested)
+    }
+
+    /// An intersection reduction whose nested subgroup another task is
+    /// reducing returns `Pending` at the polled entry with the operands it
+    /// took before the subgroup retained, instead of waiting that producer
+    /// out; its `Send` task stays pending on another thread while the
+    /// producer holds. Once the producer goes away the reduction takes the
+    /// subgroup's answer and its remaining operands, running no stage again,
+    /// and delivers exactly what the synchronous entry — which drives the
+    /// same continuation in place — reads on a fresh host: answer, fact
+    /// status, diagnostics and receipt, logical work included.
+    #[test]
+    fn an_intersection_reduction_waiting_on_a_nested_subgroup_yields_and_resumes_after_it() {
+        let synchronous = {
+            let host = chain_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let _builder = dispatch.enter_construction_scope();
+            let (reduction, _) = stepped_intersection_keys(&dispatch);
+            let read = dispatch.execute_via_cold_build_helper(reduction);
+            assert_eq!(
+                continuation_stages(&host),
+                (2, 1),
+                "the reduction and its subgroup each begin once; the reduction resumes once: {:?}",
+                read_summary(&dispatch, &read)
+            );
+            read_summary(&dispatch, &read)
+        };
+        assert_eq!(synchronous.0, "\"a\"", "{synchronous:?}");
+        assert!(synchronous.5.is_some(), "the reduction is priced");
+
+        let host = chain_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (reduction, nested) = stepped_intersection_keys(&dispatch);
+        let (other, lease) = hold_producer(&host, graph, nested);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut entry = dispatch.poll_query(reduction.clone());
+        let (first, held_stages, elsewhere) = while_held(lease, || {
+            let first = entry.poll(&waker).is_pending();
+            let held_stages = continuation_stages(&host);
+            let elsewhere = entry.task().map(|task| {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| task.poll(&waker).is_pending())
+                        .join()
+                        .expect("the pending poll returns")
+                })
+            });
+            (first, held_stages, elsewhere)
+        });
+        assert!(
+            first,
+            "the reduction yields while another task reduces its subgroup"
+        );
+        assert_eq!(
+            held_stages,
+            (1, 0),
+            "the reduction's first stage ran once and holds its operands"
+        );
+        assert_eq!(elsewhere, Some(true));
+        assert!(counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the woken reduction reduces its subgroup itself"),
+        };
+        drop(entry);
+        assert_eq!(continuation_stages(&host), (2, 1), "no stage runs again");
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+
+        let mut warm = dispatch.poll_query(reduction.clone());
+        let Poll::Ready(warm_read) = warm.poll(&waker) else {
+            panic!("a warm reduction answers on its first poll");
+        };
+        drop(warm);
+        let warm_sync = dispatch.execute_via_cold_build_helper(reduction);
+        assert_eq!(
+            read_summary(&dispatch, &warm_read),
+            read_summary(&dispatch, &warm_sync)
+        );
+        assert_eq!(
+            continuation_stages(&host),
+            (2, 1),
+            "a warm read runs no stage"
         );
         drop(other);
     }

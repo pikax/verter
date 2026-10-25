@@ -61,11 +61,9 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::build::{
-    InstantiateBuild, InstantiatePoll, InstantiateStart, MacroPayloadBuild, MacroPayloadStep,
-    TypeofBuild, TypeofStart,
-};
+use super::build::{InstantiateBuild, InstantiatePoll, InstantiateStart, TypeofBuild, TypeofStart};
 use super::cost_receipt::Nesting;
+use super::family_continuation::{FamilyBuild, FamilyStep};
 use super::{BuildLocalTaint, CarrierNormalizationPrelude, ProjectSemanticDispatch};
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::semantic_execution::{EvalStep, External, Outcome, Program, SemanticExecution, Start};
@@ -147,15 +145,15 @@ pub(super) enum QueryFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities
 
 /// The build a frame carries between its steps: an instantiation's, a
 /// `typeof`'s whose value's annotation is lowering, a conditional type's
-/// decision, a call's resolution, a function's flow return, or a macro
-/// payload's resolution waiting on its payload operation.
+/// decision, a call's resolution, a function's flow return, or a family
+/// build written as a continuation, between two of its stages.
 pub(super) enum FrameBuild {
     Instantiate(Box<InstantiateBuild>),
     Typeof(Box<TypeofBuild>),
     Conditional(Box<ConditionalBuild>),
     Call(Box<CallBuild>),
     Flow(Box<FlowBuild>),
-    MacroPayload(Box<MacroPayloadBuild>),
+    Family(Box<FamilyBuild>),
 }
 
 /// A function's flow return between its steps: the answers to the reads
@@ -1187,7 +1185,7 @@ impl<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> SemanticQueryPol
     /// when the root is answered at its admission.
     fn start(&mut self, key: SemanticQueryKey) -> Option<ValueRead> {
         let lender = self.lender;
-        if lender.drives_on_the_runtime(&key) {
+        if lender.polls_on_the_runtime(&key) {
             let operation = (!matches!(key, SemanticQueryKey::FlowReturn(_)))
                 .then(|| lender.enter_operation(false));
             let start = match operation {
@@ -1839,6 +1837,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !self.key_reads_apparent_signatures(key)
     }
 
+    /// Whether a polled root of `key` runs on the continuation runtime:
+    /// every root the synchronous entry drives there, and a root of a family
+    /// built as a continuation whose entry admits the key as it is — the
+    /// synchronous entry builds such a family in place, through the same
+    /// continuation, and a polled root's frame needs each query the
+    /// continuation reads instead of waiting another task's producer out.
+    pub(super) fn polls_on_the_runtime(&self, key: &SemanticQueryKey) -> bool {
+        self.drives_on_the_runtime(key)
+            || (super::family_continuation::builds_as_continuation(key)
+                && self.reads_as_frame_need(key)
+                && !crate::semantic_execution::drive_running()
+                && self.active_operand_evidence.borrow().is_empty())
+    }
+
     /// Whether `key` runs on the continuation runtime when it is evaluated
     /// outside any drive: an instantiation, a `typeof` or a macro payload
     /// read for its value alone, or a conditional/call evaluated as a
@@ -1852,7 +1864,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let family = match key {
             SemanticQueryKey::Instantiate(_)
             | SemanticQueryKey::TypeOf { .. }
-            | SemanticQueryKey::ResolveMacroPayload { .. } => true,
+            | SemanticQueryKey::ResolveMacroPayload { .. }
+            | SemanticQueryKey::ReduceIntersection { .. } => true,
             SemanticQueryKey::Conditional { .. } | SemanticQueryKey::ResolveCall(_) => {
                 self.dispatch_txn.borrow().obligations.decides_root()
             }
@@ -2434,6 +2447,72 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.suspended_decision_read()
     }
 
+    /// Begin a family's build in its frame: as a continuation, its first
+    /// stage, or — for a family that builds in one step — its whole build.
+    /// The build is refused as the synchronous producer refuses it when the
+    /// request's budget is spent.
+    #[inline(never)]
+    fn start_family_frame(
+        &self,
+        key: &SemanticQueryKey,
+        build: &mut Option<FrameBuild>,
+    ) -> FramePoll {
+        if !super::family_continuation::builds_as_continuation(key) {
+            return FramePoll::Done(Box::new(self.build_cold_query_family(key)));
+        }
+        if let Some(refusal) = self.cold_build_budget_refusal(key) {
+            return InstantiatePoll::Done(Box::new(refusal)).into();
+        }
+        let step = self
+            .begin_family_build(key)
+            .expect("a continuation family begins its build");
+        self.advance_family_frame(build, step)
+    }
+
+    /// Resume a family's build with the delivery of the read it waited on.
+    #[inline(never)]
+    fn resume_family_frame(
+        &self,
+        build: &mut Option<FrameBuild>,
+        depth: u32,
+        delivery: QueryDelivery,
+    ) -> FramePoll {
+        let Some(FrameBuild::Family(family)) = build.take() else {
+            unreachable!("a family frame resumes its own build")
+        };
+        let read = super::narrow_value_cache_read(self.read_frame_delivery(FrameDelivery {
+            delivery,
+            depth: depth + 1,
+        }));
+        let step = self.resume_family_build(*family, read);
+        self.advance_family_frame(build, step)
+    }
+
+    /// Carry a family build on from `step`: its output, or the query it
+    /// reads next as the frame's need, the build retained by the frame. A
+    /// read whose entry first normalizes its subject keeps the prelude that
+    /// entry records, which a need does not carry: it is read where the
+    /// synchronous build reads it, and the build goes on.
+    fn advance_family_frame(
+        &self,
+        build: &mut Option<FrameBuild>,
+        mut step: FamilyStep,
+    ) -> FramePoll {
+        loop {
+            match step {
+                FamilyStep::Done(output) => return InstantiatePoll::Done(output).into(),
+                FamilyStep::Need(key, family) if self.reads_as_frame_need(&key) => {
+                    *build = Some(FrameBuild::Family(family));
+                    return FramePoll::Need(key);
+                }
+                FamilyStep::Need(key, family) => {
+                    let read = self.execute_read(key);
+                    step = self.resume_family_build(*family, read);
+                }
+            }
+        }
+    }
+
     /// One step of an instantiation's frame: its taint frame and tracer
     /// installed, it begins or resumes its build and runs it until the
     /// build needs another instantiation or completes.
@@ -2502,21 +2581,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(FrameBuild::Flow(build)) => {
                 self.drain_flow(&frame.key, build, delivery, frame.depth + 1)
             }
-            // A macro payload finishes with its payload operation's read and
-            // what its first stage retained; the owner is not read again.
-            Some(FrameBuild::MacroPayload(_)) => {
-                let Some(FrameBuild::MacroPayload(build)) = frame.build.take() else {
-                    unreachable!("the build was just matched")
-                };
-                let delivery =
-                    delivery.expect("a macro payload resumes with its payload operation's read");
-                let read =
-                    super::narrow_value_cache_read(self.read_frame_delivery(FrameDelivery {
-                        delivery,
-                        depth: frame.depth + 1,
-                    }));
-                InstantiatePoll::Done(Box::new(self.finish_resolve_macro_payload(*build, read)))
-                    .into()
+            // A family continuation resumes from the stage it retained with
+            // the read it waited on; no completed stage runs again.
+            Some(FrameBuild::Family(_)) => {
+                let delivery = delivery.expect("a family build resumes with the read it named");
+                self.resume_family_frame(&mut frame.build, frame.depth, delivery)
             }
             None => {
                 self.open_cold_build(None);
@@ -2616,48 +2685,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         };
                         self.drain_flow(&frame.key, build, None, frame.depth + 1)
                     }
-                    // A macro payload reads its owner, then needs the payload
-                    // operation its value is read from, holding what it read.
-                    SemanticQueryKey::ResolveMacroPayload {
-                        owner,
-                        macro_index,
-                        macro_kind,
-                        type_args,
-                        context,
-                    } => match self.cold_build_budget_refusal(&frame.key) {
-                        Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
-                        None => match self.begin_resolve_macro_payload(
-                            owner,
-                            *macro_index,
-                            *macro_kind,
-                            type_args,
-                            context.mode,
-                        ) {
-                            MacroPayloadStep::Done(output) => InstantiatePoll::Done(output).into(),
-                            MacroPayloadStep::Need(build)
-                                if self.reads_as_frame_need(build.payload()) =>
-                            {
-                                let need = build.payload().clone();
-                                frame.build = Some(FrameBuild::MacroPayload(build));
-                                FramePoll::Need(need)
-                            }
-                            // A payload whose entry normalizes its subject first
-                            // is read where the synchronous build reads it.
-                            MacroPayloadStep::Need(build) => {
-                                let read = self.execute_read(build.payload().clone());
-                                InstantiatePoll::Done(Box::new(
-                                    self.finish_resolve_macro_payload(*build, read),
-                                ))
-                                .into()
-                            }
-                        },
-                    },
-                    // A dependency of a family without frames of its own: a
-                    // read a decision or flow evaluation joined at its seam
-                    // whose producer went away before the join answered.
-                    // It builds in one step, as its synchronous producer
-                    // builds it.
-                    _ => FramePoll::Done(Box::new(self.build_cold_query_family(&frame.key))),
+                    // A family built as a continuation needs each query its
+                    // stages read; any other dependency of a family without
+                    // frames of its own — a read a decision or flow
+                    // evaluation joined at its seam whose producer went away
+                    // before the join answered — builds in one step, as its
+                    // synchronous producer builds it.
+                    _ => self.start_family_frame(&frame.key, &mut frame.build),
                 }
             }
         };

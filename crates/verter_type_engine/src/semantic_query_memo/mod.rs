@@ -1838,11 +1838,18 @@ impl SemanticGraphStore {
             .async_return_payload_count
             .fetch_add(1, Ordering::Relaxed);
     }
-    /// Bumped by the first stage of a macro payload's resolution, once
-    /// per cold build.
-    pub fn record_macro_payload_owner_read(&self) {
+    /// Bumped by the first stage of a family continuation, once per cold
+    /// build.
+    pub fn record_continuation_begun(&self) {
         self.stats
-            .macro_payload_owner_reads
+            .continuation_builds_begun
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped by each later stage of a family continuation, once per read
+    /// it resumes with.
+    pub fn record_continuation_resumed(&self) {
+        self.stats
+            .continuation_stages_resumed
             .fetch_add(1, Ordering::Relaxed);
     }
     pub fn record_conditional_decided(&self) {
