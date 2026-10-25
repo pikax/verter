@@ -248,12 +248,23 @@ them.
 ## Interior state a suspended computation shares
 
 `ProjectSemanticDispatch` keeps its request state in
-`verter_execution::sync_cell::{SyncRefCell, SyncCell}`, which keep the borrow
-discipline of `RefCell` and `Cell` — a conflicting borrow panics, it never
-waits — with an atomic flag, so the dispatcher is `Sync` and a computation
-that suspends while it holds a shared reference to it is `Send`. Borrow
-guards are not `Send`: a borrow held across a suspension point does not
-compile. The session pins the dispatcher's `Sync` bound.
+`verter_execution::sync_cell`. `SyncRefCell` preserves `RefCell` borrow
+rules: conflicting borrows panic instead of waiting, and its guards are
+not `Send`, so a borrow cannot span a suspension. `SyncCell<T>` stores an
+arbitrary `Copy` value under a mutex. `SyncBool`, `SyncUsize`, `SyncU16`,
+`SyncU32` and `SyncU64` use the corresponding typed atomics where the target
+supports that width, falling back to `SyncCell` otherwise. Reads acquire, writes
+release and replacement acquires and releases; wide values are always
+read and replaced whole. No generic value is reinterpreted as atomic bytes.
+
+The connected-demand ledger uses scalar cells for its flags, work and byte
+counts, limits and query depth. Refusal reasons use their explicit `u32`
+bit encoding; structured request effects remain mutex-backed. The dispatcher's
+operation depth, degraded-read counter and evidence/budget epochs use the same
+typed scalar cells. The dispatcher is `Sync`, allowing a `Send`
+computation to resume on another thread, but each computation still has one
+driver: compound updates and two-cell swaps are not atomic transactions.
+Cancellation, sticky refusal and logical charging remain ledger operations.
 
 ## Cancellation subscriptions
 

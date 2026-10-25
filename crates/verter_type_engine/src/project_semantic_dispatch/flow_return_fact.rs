@@ -74,7 +74,7 @@ pub(super) struct ReadObservationScope<'a> {
 }
 
 struct DegradedCounterScope<'a> {
-    counter: &'a verter_execution::sync_cell::SyncCell<u32>,
+    counter: &'a verter_execution::sync_cell::SyncU32,
     before: u32,
 }
 

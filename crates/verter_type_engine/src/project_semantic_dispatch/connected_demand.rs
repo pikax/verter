@@ -24,7 +24,9 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
-use verter_execution::sync_cell::{SyncCell, SyncRefCell};
+use verter_execution::sync_cell::{
+    SyncBool, SyncCell, SyncRefCell, SyncU16, SyncU32, SyncU64, SyncUsize,
+};
 
 use rustc_hash::FxHashSet;
 
@@ -291,6 +293,28 @@ impl<'a> DemandCancellation<'a> {
     }
 }
 
+/// The reason set's explicit bit representation, read and replaced whole.
+/// Structured request effects keep their arbitrary-Copy cell.
+struct PartialReasonCell(SyncU32);
+
+impl PartialReasonCell {
+    fn new(value: PartialReasonSet) -> Self {
+        Self(SyncU32::new(value.to_bits()))
+    }
+
+    fn get(&self) -> PartialReasonSet {
+        PartialReasonSet::from_bits(self.0.get())
+    }
+
+    fn set(&self, value: PartialReasonSet) {
+        self.0.set(value.to_bits());
+    }
+
+    fn swap(&self, other: &Self) {
+        self.0.swap(&other.0);
+    }
+}
+
 /// Operational budget ledger for one dispatcher's connected demands.
 ///
 /// Holds the live counters plus the configured caps. Every field is private
@@ -299,32 +323,32 @@ impl<'a> DemandCancellation<'a> {
 /// only outside a demand) are enforced by the operations, not by convention.
 pub struct ConnectedDemandLedger<'a> {
     cancellation: DemandCancellation<'a>,
-    active: SyncCell<bool>,
-    work_used: SyncCell<usize>,
-    work_limit: SyncCell<usize>,
+    active: SyncBool,
+    work_used: SyncUsize,
+    work_limit: SyncUsize,
     /// Every construction byte the demand charged: the bytes it reserved
     /// and the advisory footprint (`advisory_bytes_used`).
-    bytes_used: SyncCell<u64>,
+    bytes_used: SyncU64,
     /// The part of `bytes_used` charged while the advisory
     /// construction-byte rail is off: accounted, never enforced, so no
     /// later reservation is refused for it.
-    advisory_bytes_used: SyncCell<u64>,
-    bytes_limit: SyncCell<u64>,
+    advisory_bytes_used: SyncU64,
+    bytes_limit: SyncU64,
     /// Whether a canonical construction's footprint
     /// ([`Self::charge_construction`]) may be refused at `bytes_limit`: the
     /// advisory construction-byte rail, off unless explicitly enabled. Off,
     /// the footprint is still charged to `bytes_used`, as advisory bytes.
-    construction_byte_refusal: SyncCell<bool>,
-    query_depth: SyncCell<u16>,
-    query_depth_limit: SyncCell<u16>,
+    construction_byte_refusal: SyncBool,
+    query_depth: SyncU16,
+    query_depth_limit: SyncU16,
     instantiation_depth_limit: u32,
     tail_steps_limit: u32,
-    tripped: SyncCell<PartialReasonSet>,
+    tripped: PartialReasonCell,
     /// The cold computations recording their exclusive cost, innermost
     /// last; `scope_open` mirrors "the stack is not empty" so a charge
     /// taken outside any recording pays one flag read.
     scopes: SyncRefCell<Vec<CostScope>>,
-    scope_open: SyncCell<bool>,
+    scope_open: SyncBool,
     /// The computations whose receipt, and its whole prerequisite closure,
     /// this connected demand has paid.
     paid: SyncRefCell<CostIdentitySet>,
@@ -335,7 +359,7 @@ pub struct ConnectedDemandLedger<'a> {
     /// carrier another task's schedule decided — a cross-task wait cycle,
     /// or a joined producer's own re-entry: the demand went on without work
     /// it alone would have done, so where it stopped is not its own.
-    schedule_cut: SyncCell<bool>,
+    schedule_cut: SyncBool,
 }
 
 /// What one connected demand did to its request
@@ -365,6 +389,8 @@ pub(crate) struct ComponentMetaSpan {
 thread_local! {
     static COMPONENT_META_SPANS: RefCell<Vec<ComponentMetaSpan>> = const { RefCell::new(Vec::new()) };
     static COMPONENT_META_SPAN_OPEN: Cell<bool> = const { Cell::new(false) };
+    #[cfg(test)]
+    static SCOPE_CHARGE_WRITES: Cell<usize> = const { Cell::new(0) };
 }
 
 /// The component-meta span of one compute, which the compute owns across
@@ -511,27 +537,20 @@ impl Drop for TaskSpanInstall<'_> {
     }
 }
 
-fn remember_work(n: usize) {
-    if n == 0 || !span_open() {
+/// Record one charge on every open span, including its advisory footprint.
+fn remember_usage(work: usize, bytes: u64, advisory: u64) {
+    if (work == 0 && bytes == 0) || !span_open() {
         return;
     }
     COMPONENT_META_SPANS.with(|spans| {
         for span in spans.borrow_mut().iter_mut() {
-            span.work = span.work.saturating_add(n);
-        }
-    });
-}
-
-/// Record `n` construction bytes on every open span, `advisory` of them
-/// advisory footprint.
-fn remember_bytes(n: u64, advisory: u64) {
-    if n == 0 || !span_open() {
-        return;
-    }
-    COMPONENT_META_SPANS.with(|spans| {
-        for span in spans.borrow_mut().iter_mut() {
-            span.bytes = span.bytes.saturating_add(n);
-            span.advisory_bytes = span.advisory_bytes.saturating_add(advisory);
+            if work != 0 {
+                span.work = span.work.saturating_add(work);
+            }
+            if bytes != 0 {
+                span.bytes = span.bytes.saturating_add(bytes);
+                span.advisory_bytes = span.advisory_bytes.saturating_add(advisory);
+            }
         }
     });
 }
@@ -648,22 +667,22 @@ impl<'a> ConnectedDemandLedger<'a> {
     pub(super) fn new(cancellation: DemandCancellation<'a>) -> Self {
         Self {
             cancellation,
-            active: SyncCell::new(false),
-            work_used: SyncCell::new(0),
+            active: SyncBool::new(false),
+            work_used: SyncUsize::new(0),
             #[cfg(not(any(test, feature = "test-support")))]
-            work_limit: SyncCell::new(MAX_CONNECTED_PROJECTION_WORK),
+            work_limit: SyncUsize::new(MAX_CONNECTED_PROJECTION_WORK),
             #[cfg(any(test, feature = "test-support"))]
-            work_limit: SyncCell::new(
+            work_limit: SyncUsize::new(
                 WORK_FOR_TESTS
                     .with(Cell::get)
                     .unwrap_or(MAX_CONNECTED_PROJECTION_WORK),
             ),
-            bytes_used: SyncCell::new(0),
-            advisory_bytes_used: SyncCell::new(0),
-            bytes_limit: SyncCell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
-            construction_byte_refusal: SyncCell::new(false),
-            query_depth: SyncCell::new(0),
-            query_depth_limit: SyncCell::new(MAX_CONNECTED_QUERY_DEPTH),
+            bytes_used: SyncU64::new(0),
+            advisory_bytes_used: SyncU64::new(0),
+            bytes_limit: SyncU64::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
+            construction_byte_refusal: SyncBool::new(false),
+            query_depth: SyncU16::new(0),
+            query_depth_limit: SyncU16::new(MAX_CONNECTED_QUERY_DEPTH),
             #[cfg(not(any(test, feature = "test-support")))]
             instantiation_depth_limit: MAX_CONNECTED_INSTANTIATION_DEPTH,
             #[cfg(any(test, feature = "test-support"))]
@@ -676,12 +695,12 @@ impl<'a> ConnectedDemandLedger<'a> {
             tail_steps_limit: TAIL_STEPS_FOR_TESTS
                 .with(Cell::get)
                 .unwrap_or(MAX_CONNECTED_TAIL_STEPS),
-            tripped: SyncCell::new(PartialReasonSet::empty()),
+            tripped: PartialReasonCell::new(PartialReasonSet::empty()),
             scopes: SyncRefCell::new(Vec::new()),
-            scope_open: SyncCell::new(false),
+            scope_open: SyncBool::new(false),
             paid: SyncRefCell::new(CostIdentitySet::default()),
             request_effects: SyncCell::new(RequestEffects::default()),
-            schedule_cut: SyncCell::new(false),
+            schedule_cut: SyncBool::new(false),
         }
     }
 
@@ -825,7 +844,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             return Err(self.record_trip(PartialReasonSet::PROJECTION_WORK_LIMIT));
         }
         self.work_used.set(work_used + 1);
-        remember_work(1);
+        remember_usage(1, 0, 0);
         self.accrue(1, 0, 0);
         Ok(())
     }
@@ -886,6 +905,8 @@ impl<'a> ConnectedDemandLedger<'a> {
             return;
         }
         if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+            #[cfg(test)]
+            SCOPE_CHARGE_WRITES.with(|count| count.set(count.get() + 1));
             scope.exclusive.work = scope.exclusive.work.saturating_add(work as u64);
             scope.exclusive.bytes = scope.exclusive.bytes.saturating_add(bytes);
             scope.exclusive.advisory_bytes =
@@ -916,15 +937,25 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// [`Self::work_available`].
     #[inline(always)]
     pub(crate) fn commit(&self, consumed: usize) {
-        if consumed == 0 {
+        self.commit_usage(consumed, 0, 0);
+    }
+
+    /// Commit an admitted charge once to the ledger, span and open receipt.
+    fn commit_usage(&self, work: usize, bytes: u64, advisory: u64) {
+        if work == 0 && bytes == 0 {
             return;
         }
         verter_debug_assert!(self.active.get());
-        let work_used = self.work_used.get();
-        verter_debug_assert!(work_used.saturating_add(consumed) <= self.work_limit.get());
-        self.work_used.set(work_used + consumed);
-        remember_work(consumed);
-        self.accrue(consumed, 0, 0);
+        if work != 0 {
+            let work_used = self.work_used.get();
+            verter_debug_assert!(work_used.saturating_add(work) <= self.work_limit.get());
+            self.work_used.set(work_used + work);
+        }
+        if bytes != 0 {
+            self.charge_bytes(bytes, advisory);
+        }
+        remember_usage(work, bytes, advisory);
+        self.accrue(work, bytes, advisory);
     }
 
     /// Reserve `bytes` of construction before building what they hold,
@@ -948,7 +979,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         match self.enforced_bytes().checked_add(bytes) {
             Some(enforced) if enforced <= self.bytes_limit.get() => {
                 self.charge_bytes(bytes, 0);
-                remember_bytes(bytes, 0);
+                remember_usage(0, bytes, 0);
                 self.accrue(0, bytes, 0);
                 Ok(())
             }
@@ -969,18 +1000,18 @@ impl<'a> ConnectedDemandLedger<'a> {
         units: usize,
         bytes: usize,
     ) -> Result<(), PartialReasonSet> {
-        self.charge_units(units)?;
+        let available = self.work_available()?;
+        if units > available {
+            return Err(self.record_trip(PartialReasonSet::PROJECTION_WORK_LIMIT));
+        }
         if self.construction_byte_refusal.get() {
+            // Work is paid before an enforced byte reservation, including
+            // when the reservation refuses or observes cancellation.
+            self.commit(units);
             return self.reserve_bytes(bytes);
         }
-        verter_debug_assert!(
-            self.active.get(),
-            "construction bytes must be charged inside a connected-demand guard"
-        );
         let bytes = bytes as u64;
-        self.charge_bytes(bytes, bytes);
-        remember_bytes(bytes, bytes);
-        self.accrue(0, bytes, bytes);
+        self.commit_usage(units, bytes, bytes);
         Ok(())
     }
 
@@ -1529,8 +1560,7 @@ impl ConnectedDemandLedger<'_> {
         let replayed_bytes = total.bytes;
         self.work_used.set(self.work_used.get() + replayed_work);
         self.charge_bytes(replayed_bytes, total.advisory_bytes);
-        remember_work(replayed_work);
-        remember_bytes(replayed_bytes, total.advisory_bytes);
+        remember_usage(replayed_work, replayed_bytes, total.advisory_bytes);
         self.paid.borrow_mut().extend(unpaid);
         // Within `comparison_room`, so within `u32`.
         Ok(u32::try_from(total.comparisons).unwrap_or(u32::MAX))
@@ -1675,8 +1705,7 @@ impl ConnectedDemandLedger<'_> {
         self.work_used
             .set(self.work_used.get().saturating_add(work));
         self.charge_bytes(bytes, advisory);
-        remember_work(work);
-        remember_bytes(bytes, advisory);
+        remember_usage(work, bytes, advisory);
         self.record_trip(trip);
     }
 
@@ -1932,9 +1961,23 @@ mod advisory_bytes_tests {
             let (_guard, trip) = ledger.enter(false);
             assert!(trip.is_none());
             ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([7])));
-            ledger
-                .charge_construction(1, 1_000)
-                .expect("the rail is off: the footprint never refuses");
+            SCOPE_CHARGE_WRITES.with(|count| count.set(0));
+            let (charged, usage) =
+                with_connected_work_capture_for_tests(|| ledger.charge_construction(1, 1_000));
+            charged.expect("the rail is off: the footprint never refuses");
+            assert_eq!(
+                usage,
+                DemandUsage {
+                    work: 1,
+                    bytes: 1_000
+                }
+            );
+            let writes = SCOPE_CHARGE_WRITES.with(Cell::get);
+            eprintln!("construction_scope_writes={writes}");
+            assert_eq!(
+                writes, 1,
+                "one construction records its combined charge once"
+            );
             ledger
                 .reserve_bytes(100)
                 .expect("the whole allowance remains after the advisory footprint");
@@ -1947,6 +1990,7 @@ mod advisory_bytes_tests {
                 .seal_cost_scope(None)
                 .expect("a complete computation")
         };
+        assert_eq!(receipt.exclusive().work, 1);
         assert_eq!(receipt.exclusive().bytes, 1_100);
         assert_eq!(receipt.exclusive().advisory_bytes, 1_000);
 

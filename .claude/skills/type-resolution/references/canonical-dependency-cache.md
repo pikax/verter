@@ -219,6 +219,21 @@ Eviction cannot revoke that scope's nodes, and the root owner's charge stays
 pinned until its last reader releases it. No public delivery wrapper is
 constructed for an internal evaluation serve.
 
+The connected-demand ledger keeps scalar accounting in typed
+`verter_execution::sync_cell` cells: supported scalar widths use acquire/release
+atomics, with whole-value mutex fallbacks on unsupported targets. Structured
+request-effect values keep `SyncCell<T>` storage; refusal reasons use their
+explicit `PartialReasonSet` bit encoding in `SyncU32`. The dispatcher's depth,
+degraded-read and evidence/budget epoch counters use the same scalar cells.
+Computations remain exclusively driven across thread resumptions; these cells do not make
+compound charging, scope changes or ledger swaps concurrent transactions.
+Logical charges, sticky refusal and receipt replay retain the ledger as their
+single owner. A canonical construction commits work and advisory bytes together,
+updating its receipt and each open span once. With the enforced byte rail enabled,
+work still commits before the byte reservation, preserving charged work when a
+reservation refuses or observes cancellation. See `docs/arch/root-continuations.md`
+for the storage contract.
+
 Each cold heap continuation traces its steps. A warm operand validates and
 replays its existing proof directly into the parent tracer, without starting
 a continuation or sealing another copy of the proof. Both cold and served

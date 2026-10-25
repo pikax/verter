@@ -14,9 +14,8 @@
 //!   construction.
 //! - [`request_context`]: the opaque request-context carrier, its TLS slots
 //!   and the installation/restoration guards.
-//! - [`sync_cell`]: `RefCell`/`Cell` borrow discipline with an atomic
-//!   flag, for request state a suspended computation carries between polling
-//!   threads.
+//! - [`sync_cell`]: checked borrows and typed scalar cells for request
+//!   state a suspended computation carries between polling threads.
 //! - [`wake`]: the per-subscriber waker registrations a producer keeps for
 //!   the pollable computations waiting on it.
 //!

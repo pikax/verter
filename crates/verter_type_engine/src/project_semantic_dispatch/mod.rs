@@ -545,7 +545,7 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// (`ReturnType<typeof C.m>`). REQUEST-SCOPED: it lives and dies with
     /// the dispatch the request builds, and the host flow-return boundary
     /// reads it around its one evaluation.
-    pub(super) degraded_member_reads: verter_execution::sync_cell::SyncCell<u32>,
+    pub(super) degraded_member_reads: verter_execution::sync_cell::SyncU32,
     /// Owned class headers whose signature sources are being published before
     /// their value consumers run. Entries have no enclosing substitution.
     pub(super) signature_source_headers: flow_return_fact::SignatureSourceHeaders,
@@ -630,7 +630,7 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// request that would then skip the deposit — the epoch advancing
     /// across a walk suppresses the publish (and every enclosing
     /// publish, since ancestors observe the same advance).
-    pub canonical_evidence_epoch: verter_execution::sync_cell::SyncCell<u64>,
+    pub canonical_evidence_epoch: verter_execution::sync_cell::SyncU64,
     /// The current semantic demand's checking site, exchanged with a lent
     /// task and explicitly installed by each resumed frame.
     pub(super) checking_site: verter_execution::sync_cell::SyncCell<
@@ -642,7 +642,7 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// a recovery made anywhere under the demand — inside a relation, a
     /// nested build or a canonical construction — leaves the demand a
     /// resource partial even where no read carried the reason to it.
-    pub(super) operation_budget_epoch: verter_execution::sync_cell::SyncCell<u64>,
+    pub(super) operation_budget_epoch: verter_execution::sync_cell::SyncU64,
     /// Operational work/depth/cancellation accounting for the connected
     /// demands rooted at this dispatcher. The dispatcher holds the ledger but
     /// owns none of its logic — see [`connected_demand`].
@@ -702,7 +702,7 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// How many of this dispatcher's operations are open on its thread
     /// ([`DispatchOperation`]). When the outermost one ends, the receipts
     /// the dispatcher held for it are released, whatever owner stays open.
-    operation_depth: verter_execution::sync_cell::SyncCell<u32>,
+    operation_depth: verter_execution::sync_cell::SyncU32,
 }
 
 /// A dispatcher on the thread that created it, holding its share of its
@@ -793,7 +793,7 @@ pub(super) struct InPlaceQuery<'g> {
 /// what the returned carrier owns, what an explicit builder owner the caller
 /// holds keeps, or what a charged cache retains.
 pub(crate) struct DispatchOperation<'g> {
-    depth: &'g verter_execution::sync_cell::SyncCell<u32>,
+    depth: &'g verter_execution::sync_cell::SyncU32,
     self_evaluation_receipts: &'g SelfEvaluationReceipts,
     literal_union_indexes: &'g relation::LiteralUnionIndexes,
     composite_fixed_points: &'g evaluate::CompositeFixedPoints,
@@ -1304,7 +1304,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             homomorphic_aliases: verter_execution::sync_cell::SyncRefCell::new(
                 rustc_hash::FxHashMap::default(),
             ),
-            degraded_member_reads: verter_execution::sync_cell::SyncCell::new(0),
+            degraded_member_reads: verter_execution::sync_cell::SyncU32::new(0),
             signature_source_headers: verter_execution::sync_cell::SyncRefCell::new(Vec::new()),
             active_operand_evidence: verter_execution::sync_cell::SyncRefCell::new(
                 smallvec::SmallVec::new(),
@@ -1325,9 +1325,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             #[cfg(feature = "semantic-observe")]
             relation_explanations: <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
                 .then(|| verter_execution::sync_cell::SyncRefCell::new(Vec::new())),
-            canonical_evidence_epoch: verter_execution::sync_cell::SyncCell::new(0),
+            canonical_evidence_epoch: verter_execution::sync_cell::SyncU64::new(0),
             checking_site: verter_execution::sync_cell::SyncCell::new(Default::default()),
-            operation_budget_epoch: verter_execution::sync_cell::SyncCell::new(0),
+            operation_budget_epoch: verter_execution::sync_cell::SyncU64::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_flags(snapshot.flags()),
             ),
@@ -1345,7 +1345,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             call_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             flow_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             substitution_binder: verter_execution::sync_cell::SyncRefCell::new(None),
-            operation_depth: verter_execution::sync_cell::SyncCell::new(0),
+            operation_depth: verter_execution::sync_cell::SyncU32::new(0),
         }
     }
 
