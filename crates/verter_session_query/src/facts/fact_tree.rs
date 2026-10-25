@@ -189,33 +189,26 @@ fn child_index(children: &[Arc<Node>], fact: &FactVersionRef) -> usize {
 }
 
 /// Cut `items` into `ceil(len / cap)` runs whose lengths differ by at most
-/// one, so every node of a built level is as full as the level allows.
-fn even_runs<T>(items: Vec<T>, cap: usize) -> Vec<Vec<T>> {
+/// one, so every node of a built level is as full as the level allows. Each
+/// run is allocated once, at its length.
+fn even_runs<T: Clone>(items: &[T], cap: usize) -> impl Iterator<Item = Vec<T>> + '_ {
     let count = items.len().div_ceil(cap);
-    let mut runs = Vec::with_capacity(count);
-    let mut rest = items.into_iter();
-    for index in 0..count {
-        let remaining = rest.len();
-        let take = remaining.div_ceil(count - index);
-        runs.push(rest.by_ref().take(take).collect::<Vec<T>>());
-    }
-    runs
+    let mut rest = items;
+    (0..count).map(move |index| {
+        let (run, tail) = rest.split_at(rest.len().div_ceil(count - index));
+        rest = tail;
+        run.to_vec()
+    })
 }
 
 /// A tree of the strictly increasing `facts`, unsealed; `None` when empty.
-pub(crate) fn build(facts: Vec<FactVersionRef>) -> Option<Arc<Node>> {
+pub(crate) fn build(facts: &[FactVersionRef]) -> Option<Arc<Node>> {
     if facts.is_empty() {
         return None;
     }
-    let mut level: Vec<Arc<Node>> = even_runs(facts, LEAF_CAP)
-        .into_iter()
-        .map(Node::leaf)
-        .collect();
+    let mut level: Vec<Arc<Node>> = even_runs(facts, LEAF_CAP).map(Node::leaf).collect();
     while level.len() > 1 {
-        level = even_runs(level, BRANCH_CAP)
-            .into_iter()
-            .map(Node::branch)
-            .collect();
+        level = even_runs(&level, BRANCH_CAP).map(Node::branch).collect();
     }
     level.pop()
 }
@@ -251,22 +244,26 @@ fn make_mut(slot: &mut Arc<Node>, extra: usize) -> &mut Node {
 /// Insert `fact`, absent from the tree under `slot`. Answers the right
 /// half when the node split.
 fn insert_into(slot: &mut Arc<Node>, fact: FactVersionRef) -> Option<Arc<Node>> {
+    if let Body::Leaf(facts) = &slot.body {
+        if facts.len() >= LEAF_CAP {
+            let (left, right) = split_leaf(facts, fact);
+            *slot = Node::leaf(left);
+            return Some(Node::leaf(right));
+        }
+    }
     let node = make_mut(slot, 1);
     node.len += 1;
     match &mut node.body {
         Body::Leaf(facts) => {
             let at = facts.partition_point(|held| *held < fact);
             facts.insert(at, fact);
-            if facts.len() > LEAF_CAP {
-                let right = facts.split_off(facts.len() / 2);
-                node.len = facts.len();
-                return Some(Node::leaf(right));
-            }
             None
         }
         Body::Branch(children) => {
             let at = child_index(children, &fact);
             let split = insert_into(&mut children[at], fact)?;
+            // A branch grows by exactly the one child, the length it seals at.
+            children.reserve_exact(1);
             children.insert(at + 1, split);
             if children.len() > BRANCH_CAP {
                 let right = children.split_off(children.len() / 2);
@@ -276,6 +273,37 @@ fn insert_into(slot: &mut Arc<Node>, fact: FactVersionRef) -> Option<Arc<Node>> 
             None
         }
     }
+}
+
+/// The two halves a full leaf's `facts` and the inserted `fact` split
+/// into, each allocated once at the length it seals at.
+fn split_leaf(
+    facts: &[FactVersionRef],
+    fact: FactVersionRef,
+) -> (Vec<FactVersionRef>, Vec<FactVersionRef>) {
+    let at = facts.partition_point(|held| *held < fact);
+    let total = facts.len() + 1;
+    let left_len = total / 2;
+    let mut left = Vec::with_capacity(left_len);
+    let mut right = Vec::with_capacity(total - left_len);
+    let mut fact = Some(fact);
+    let mut push = |item: FactVersionRef| {
+        if left.len() < left_len {
+            left.push(item);
+        } else {
+            right.push(item);
+        }
+    };
+    for (index, held) in facts.iter().enumerate() {
+        if index == at {
+            push(fact.take().expect("inserted once"));
+        }
+        push(held.clone());
+    }
+    if let Some(fact) = fact {
+        push(fact);
+    }
+    (left, right)
 }
 
 /// Insert `fact`, absent from the tree.

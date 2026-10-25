@@ -492,7 +492,7 @@ impl FactSetEdit {
                 // tree built from it; every set built from that tree shares
                 // it.
                 Repr::Flat(facts) => Work::Tree {
-                    root: fact_tree::build(facts.to_vec()),
+                    root: fact_tree::build(facts),
                     digest: digest_of(facts.iter()),
                     changed: true,
                 },
@@ -575,7 +575,7 @@ impl FactSetEdit {
                     let facts = std::mem::take(facts);
                     let digest = digest_of(facts.iter());
                     self.work = Work::Tree {
-                        root: fact_tree::build(facts),
+                        root: fact_tree::build(&facts),
                         digest,
                         changed: true,
                     };

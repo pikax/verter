@@ -1069,7 +1069,7 @@ fn terminal_tail<'f>(facts: impl DoubleEndedIterator<Item = &'f FactVersionRef>)
 /// [`crate::facts::fact_cache::drop_subsumed_receipts`] on a set under
 /// construction: only its receipts (its tail) are read.
 fn drop_subsumed_receipts_in(edit: &mut FactSetEdit) {
-    let receipts: Vec<crate::facts::receipt::ResultReceipt> = edit
+    let receipts: smallvec::SmallVec<[crate::facts::receipt::ResultReceipt; 2]> = edit
         .iter()
         .rev()
         .map_while(|fact| match fact {
