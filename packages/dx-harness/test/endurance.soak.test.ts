@@ -21,7 +21,7 @@ import {
 const config = loadEnduranceConfig();
 
 for (const lane of ENDURANCE_LANES) {
-  describe.sequential(`endurance: soak [${lane.id}/${config.route}]`, () => {
+  describe(`endurance: soak [${lane.id}/${config.route}]`, { concurrent: false }, () => {
     let rig: EnduranceRig;
     let receipt: EnduranceReceipt | null = null;
     const workspace = soakWorkspace(4, lane);

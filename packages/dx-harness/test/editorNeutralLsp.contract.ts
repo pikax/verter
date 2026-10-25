@@ -127,7 +127,7 @@ async function resolveTypeScript7Compiler(): Promise<{ compiler: string; version
   return { compiler, version: versionText };
 }
 
-describe.sequential("TypeScript >=7 authority control", () => {
+describe("TypeScript >=7 authority control", { concurrent: false }, () => {
   for (const extension of ["jsx", "tsx"] as const) {
     it(`contextually types the plain .${extension} handler as PointerEvent`, async () => {
       try {
@@ -282,7 +282,7 @@ for (const route of ROUTES) {
     );
     if (profileCases.length === 0) continue;
 
-    describe.sequential(`editor-neutral LSP contract [${route}] (${profile})`, () => {
+    describe(`editor-neutral LSP contract [${route}] (${profile})`, { concurrent: false }, () => {
       let driver: RawEditorNeutralLspDriver;
 
       beforeAll(async () => {
