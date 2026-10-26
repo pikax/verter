@@ -290,10 +290,31 @@ export function readPin(root = ROOT) {
   return pin;
 }
 
-/** Every pin site that disagrees with the authority (or cannot be located). */
+/**
+ * Every pin site that disagrees with the authority (or cannot be located),
+ * and the Rust release-line macros when they do not name the pin's line
+ * (`typescript_line!` is its `major.minor`, `typescript_line_ceiling!` the
+ * next minor's `.0`).
+ */
 export function checkPins(root = ROOT) {
   const pin = readPin(root);
   const problems = [];
+  const version = parseVersion(pin);
+  const policy = readFileSync(join(root, POLICY_RS), "utf8");
+  for (const [name, regex, expected] of [
+    ["typescript_line!", LINE_MACROS.line, `${version.major}.${version.minor}`],
+    ["typescript_line_ceiling!", LINE_MACROS.ceiling, `${version.major}.${version.minor + 1}.0`],
+  ]) {
+    const found = regex.exec(policy)?.[1];
+    if (found === undefined) {
+      problems.push({ site: `${POLICY_RS} (${name})`, problem: "macro not found" });
+    } else if (found !== expected) {
+      problems.push({
+        site: `${POLICY_RS} (${name})`,
+        problem: `spells \`${found}\`, expected \`${expected}\``,
+      });
+    }
+  }
   for (const site of PIN_SITES) {
     const where = `${site.path} (${site.json ?? "pattern"})`;
     let located;

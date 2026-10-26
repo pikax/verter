@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -95,6 +95,31 @@ test("--set refuses another release line unless asked, and then moves the line m
     policy,
     new RegExp(`typescript_line_ceiling \\{\\s*\\(\\) => \\{\\s*"${v.major}\\.${v.minor + 2}\\.0"`),
   );
+});
+
+test("--check reports release-line macros that do not name the pin's line", () => {
+  const policyPath = "crates/verter_tsgo_api/src/toolchain/policy.rs";
+  for (const [macro, wrong] of [
+    ["typescript_line", "6.9"],
+    ["typescript_line_ceiling", "9.0.0"],
+  ]) {
+    const root = copyPinTree();
+    const path = join(root, policyPath);
+    const policy = readFileSync(path, "utf8");
+    const moved = policy.replace(
+      new RegExp(`(macro_rules! ${macro} \\{\\s*\\(\\) => \\{\\s*")[^"]+"`),
+      (_, head) => `${head}${wrong}"`,
+    );
+    assert.notEqual(moved, policy, `the ${macro} mutation must apply`);
+    writeFileSync(path, moved);
+    const { problems } = checkPins(root);
+    assert.deepEqual(
+      problems.map((problem) => problem.site),
+      [`${policyPath} (${macro}!)`],
+      JSON.stringify(problems),
+    );
+    assert.match(problems[0].problem, new RegExp(`spells \`${wrong.replace(/\./g, "\\.")}\``));
+  }
 });
 
 test("--set rejects a version that is not strict SemVer", () => {
