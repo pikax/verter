@@ -182,9 +182,14 @@ impl VerterHost {
                 .ensure_populated(&make_key(target), memoised_resolve, None, Some(&|canonical| {
                     let serve = self.ensure_indexed_ready_serve(canonical)?;
                     if !serve.store_published {
+                        // A fenced serve is a VALID complete read: the
+                        // contributor keeps its exact-content identity and
+                        // the fenced note keeps derived values
+                        // non-cacheable; only an unavailable source or
+                        // superseded served content (the identity mismatch
+                        // below) drops the contributor.
                         verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                             verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe);
-                        return None;
                     }
                     let identity = self.authoritative_current_artifact_key(canonical)?;
                     (identity.content_hash == serve.indexed.whole_hash).then_some(identity)

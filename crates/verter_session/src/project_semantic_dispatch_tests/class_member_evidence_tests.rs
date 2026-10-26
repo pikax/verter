@@ -95,6 +95,7 @@ struct FlowReturnRead {
     facts: Vec<FactVersionRef>,
     signature: Vec<FactVersionRef>,
     callable_locations: Vec<Option<verter_span::Span>>,
+    return_identity_hash: Option<[u8; 16]>,
 }
 
 fn leaf_facts(signature: &ReadSetSignature) -> Vec<FactVersionRef> {
@@ -128,33 +129,40 @@ fn read_flow_return_with_mode<M: verter_audit::observe::ObserveExec>(
         crate::resolver_core::HostResolverContext::<'_, M>::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = SemanticQueryKey::FlowReturn(Box::new(flow_return_key(&dispatch, function)));
-    let (ty, diagnostics, complete, callable_locations) = match dispatch.execute(key.clone()) {
-        QueryResult::Value(SemanticQueryOutput {
-            value: SemanticQueryValue::FlowReturn(result),
-            ..
-        }) => (
-            host.project_node_to_type_expr_for_test(result.return_type()),
-            result
-                .checker_diagnostics()
-                .iter()
-                .map(|diagnostic| diagnostic.code().code())
-                .collect(),
-            result.fact().status().is_complete(),
-            match dispatch.graph().node_data(result.return_type()).as_deref() {
-                Some(verter_type_engine::semantic_query::SemanticNodeData::Signature {
-                    params,
-                    signature_span,
-                    return_type_span,
-                    ..
-                }) => std::iter::once(*signature_span)
-                    .chain(std::iter::once(*return_type_span))
-                    .chain(params.iter().map(|param| param.span))
+    let (ty, diagnostics, complete, callable_locations, return_identity_hash) =
+        match dispatch.execute(key.clone()) {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::FlowReturn(result),
+                ..
+            }) => (
+                host.project_node_to_type_expr_for_test(result.return_type()),
+                result
+                    .checker_diagnostics()
+                    .iter()
+                    .map(|diagnostic| diagnostic.code().code())
                     .collect(),
-                _ => Vec::new(),
-            },
-        ),
-        other => panic!("`{function}` produced no flow return: {other:?}"),
-    };
+                result.fact().status().is_complete(),
+                match dispatch.graph().node_data(result.return_type()).as_deref() {
+                    Some(verter_type_engine::semantic_query::SemanticNodeData::Signature {
+                        params,
+                        signature_span,
+                        return_type_span,
+                        ..
+                    }) => std::iter::once(*signature_span)
+                        .chain(std::iter::once(*return_type_span))
+                        .chain(params.iter().map(|param| param.span))
+                        .collect(),
+                    _ => Vec::new(),
+                },
+                match dispatch.graph().node_data(result.return_type()).as_deref() {
+                    Some(verter_type_engine::semantic_query::SemanticNodeData::DeclRef {
+                        identity,
+                    }) => Some(identity.whole_hash),
+                    _ => None,
+                },
+            ),
+            other => panic!("`{function}` produced no flow return: {other:?}"),
+        };
     let self_roots = dispatch
         .graph()
         .entry_self_root_canonicals_for_tests(&key)
@@ -178,6 +186,7 @@ fn read_flow_return_with_mode<M: verter_audit::observe::ObserveExec>(
         facts,
         signature,
         callable_locations,
+        return_identity_hash,
     }
 }
 
@@ -747,6 +756,78 @@ fn imported_member_reference_keeps_target_dependencies_and_reuses_its_owner() {
     assert_ne!(edited.ty, cold.ty, "target content must invalidate");
 }
 
+/// A reference-typed member read (`b.a` typed by an imported interface)
+/// whose only contact with the dependency is the interned carrier
+/// `DeclIdentity` still tracks that dependency's content version: the
+/// version read observes its `FileWholeHash` fact, and every answer the
+/// host serves — cold, recomputed after a dependency edit, or warm —
+/// carries the dependency's live version, never a superseded one.
+#[test]
+fn imported_reference_version_read_is_tracked_across_dependency_edits() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
+    let other = "/ws/class-member-evidence/other.ts";
+    let reader = "import { B } from './c'; export function f(b: B) { return b.a; }";
+    let source = "import { Other } from './other'; export class B { a!: Other; u = 1; }";
+    let host = host_with(source, reader);
+    upsert(&host, other, "export interface Other { value: string; }");
+    let cold = read_flow_return(&host, "f");
+    assert!(cold.complete, "cold answer must be exact");
+    let live = host
+        .authoritative_current_content_hash(other)
+        .expect("the dependency is indexed");
+    assert!(
+        cold.facts.iter().any(|fact| matches!(
+            fact,
+            FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id.as_ref() == other && *hash == live
+        )),
+        "the version interned into the answer's reference must be observed: {:?}",
+        cold.facts
+    );
+    // A comment-only edit changes the dependency's content version without
+    // changing the answer's semantics: the warm entry must miss, and the
+    // recomputed answer must carry the live version.
+    let count = flow_evaluations_for_tests();
+    upsert(
+        &host,
+        other,
+        "// edit\nexport interface Other { value: string; }",
+    );
+    let live_after = host
+        .authoritative_current_content_hash(other)
+        .expect("the edited dependency is indexed");
+    assert_ne!(live_after, live);
+    let edited = read_flow_return(&host, "f");
+    assert_eq!(
+        (
+            edited.complete,
+            edited.diagnostics.as_slice(),
+            edited.ty.as_ref()
+        ),
+        (cold.complete, cold.diagnostics.as_slice(), cold.ty.as_ref()),
+        "a comment-only edit preserves the answer"
+    );
+    assert!(
+        flow_evaluations_for_tests() > count,
+        "a warm answer cannot carry the dependency's superseded version"
+    );
+    assert_eq!(
+        edited.return_identity_hash,
+        Some(live_after),
+        "the answer served after the edit must intern the live version"
+    );
+    // With the dependency unchanged again, the answer reuses warm and still
+    // serves the live version.
+    let steady = flow_evaluations_for_tests();
+    let warm = read_flow_return(&host, "f");
+    assert_eq!(warm.return_identity_hash, Some(live_after));
+    assert_eq!(
+        flow_evaluations_for_tests(),
+        steady,
+        "an unchanged dependency still reuses the warm answer"
+    );
+}
+
 #[test]
 fn precise_member_cosmetic_names_refresh_without_changing_semantic_evidence() {
     use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
@@ -972,6 +1053,48 @@ fn target_population_tracks_unindexed_membership_add_remove_and_retarget() {
             (control.ty, control.complete, control.diagnostics)
         );
     }
+}
+
+/// A fenced augmenter serve is a VALID complete read for the requesting
+/// caller: the augmentation population keeps the contributor — the
+/// served artifact's identity while its content is still current — so a
+/// member only the augmentation supplies keeps answering mid-fence. The
+/// fence turns the enclosing answer non-cacheable (the `FencedServe`
+/// note), never memberless; only an unavailable source or superseded
+/// served content drops the contributor.
+#[test]
+fn fenced_augmenter_serve_keeps_its_contribution() {
+    let aug = "/ws/class-member-evidence/aug.ts";
+    let reader = "import { B } from './c'; import './aug'; export function f(b: B) { return b.z; }";
+    let augmenter = "import './c'; declare module './c' { interface B { z: string } } export {};";
+    let host = host_with("export class B {}", reader);
+    upsert(&host, aug, augmenter);
+    host.ensure_indexed_ready_serve(aug).unwrap();
+    let cold = read_flow_return(&host, "f");
+    assert!(cold.complete, "cold answer must be exact");
+    let rctx =
+        verter_type_engine::request_context::RequestContext::new(1, Arc::from(READER), false, None);
+    let _guard = verter_type_engine::request_context::RequestContextGuard::install(rctx);
+    host.test_force
+        .force_indexed_ready_serve_fence_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let fenced = read_flow_return(&host, "f");
+    host.test_force
+        .force_indexed_ready_serve_fence_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        (
+            fenced.ty.as_ref(),
+            fenced.complete,
+            fenced.diagnostics.as_slice()
+        ),
+        (cold.ty.as_ref(), cold.complete, cold.diagnostics.as_slice()),
+        "a fenced augmenter serve must keep its contribution"
+    );
+    assert!(
+        !verter_type_engine::request_context::current_request_result_is_partial(),
+        "a fenced serve is non-cacheable, NOT partial"
+    );
 }
 
 #[test]

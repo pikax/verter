@@ -798,9 +798,16 @@ macro_rules! owned_lowering_from_source_inputs {
                     Some(&|canonical| {
                         let serve = SourceInputProvider::raw_serve(self, canonical)?;
                         if !serve.store_published {
+                            // A fenced serve is a VALID complete read for
+                            // this request: the contributor stays in the
+                            // population with its exact-content identity,
+                            // and the fenced note keeps the enclosing
+                            // answer non-cacheable. Only a genuinely
+                            // unavailable source (no serve) or superseded
+                            // served content (the identity mismatch below)
+                            // drops the contributor.
                             verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                                 verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe);
-                            return None;
                         }
                         let identity = verter_type_engine::resolver_core::request_ports::IndexedInputs::artifact_key_for_current_content(self, canonical)?;
                         (identity.content_hash == serve.indexed.whole_hash).then_some(identity)

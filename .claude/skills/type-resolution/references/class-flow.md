@@ -56,7 +56,11 @@ method; overload groups and getter/setter pairs keep the general path. Closed
 reusable signatures omit source coordinates while retaining optionality and
 rest flags; imported reference heads are supported only in properties. It preserves method kind, implementation-body flag, optionality,
 visibility and declaring origin. Child declaration references keep their normal
-target identity and scope. Unsupported accessors and body-derived signatures
+target identity and scope, and the member read observes every referenced
+target's current whole hash when it embeds that identity: for a consumer that
+never reads the target's members the interned identity is the answer's only
+contact with the target file, so the observation is what makes a warm answer
+miss and re-intern the live version on the target's next edit. Unsupported accessors and body-derived signatures
 continue to read whole content.
 
 Before using a selected own member, the engine observes the module-augmentation

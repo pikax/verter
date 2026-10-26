@@ -11096,6 +11096,60 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// content path. Imported heads are accepted only from the source port's
     /// exact resolved map; no file-scope fallback runs under Global.
     #[allow(clippy::too_many_arguments)]
+    /// Observe the content version of every imported head the precise
+    /// member path embeds by reference.
+    ///
+    /// The precise read is the class file's exact-member proof, but a
+    /// reference-typed member value interns the target declaration's
+    /// `DeclIdentity` — its live whole hash — into every answer that
+    /// serves the reference, and for a consumer that never reads the
+    /// target's members that identity is the answer's ONLY contact with
+    /// the target file. Fanning the target's `FileWholeHash` here makes
+    /// the embedding tracked: the enclosing computation's read set
+    /// invalidates on the target's next edit, so a warm answer can never
+    /// carry a superseded version while the class file keeps its
+    /// member-fact precision (an unrelated class-file edit still reuses).
+    fn observe_referenced_target_versions<'t>(
+        &self,
+        tys: impl Iterator<Item = &'t verter_type_expr::TypeExpr>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+    ) {
+        let mut pending: Vec<&verter_type_expr::TypeExpr> = tys.collect();
+        let mut observed: Vec<&str> = Vec::new();
+        while let Some(ty) = pending.pop() {
+            match ty {
+                verter_type_expr::TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    let Some(root) = name_resolution.get(name.as_ref()) else {
+                        continue;
+                    };
+                    let canonical = root.canonical_id.as_ref();
+                    if !observed.contains(&canonical) {
+                        observed.push(canonical);
+                        if let Some(hash) = self.ctx.authoritative_current_content_hash(canonical) {
+                            crate::resolver_core::resolver_context::observe_fan_out(
+                                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                                    canonical_id: Arc::from(canonical),
+                                    hash,
+                                },
+                            );
+                        }
+                    }
+                    pending.extend(type_arguments.iter());
+                }
+                verter_type_expr::TypeExpr::Union(arms) => pending.extend(arms.iter()),
+                verter_type_expr::TypeExpr::Parenthesized(inner) => pending.push(inner),
+                verter_type_expr::TypeExpr::Array { element, .. } => pending.push(element),
+                verter_type_expr::TypeExpr::Tuple { elements, .. } => {
+                    pending.extend(elements.iter().map(|element| &element.ty))
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn precise_class_member_read(
         &self,
         canonical: &str,
@@ -11109,6 +11163,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let key = crate::semantic_query::PropertyKey::identifier(Arc::from(name));
         let mut declaring = Vec::new();
+        let mut referenced_tys: Vec<&verter_type_expr::TypeExpr> = Vec::new();
         for member in members.properties.iter() {
             match member {
                 ObjectMember::Property(property) => {
@@ -11118,6 +11173,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if !is_independent_member_type(&property.ty, name_resolution) {
                         return None;
                     }
+                    referenced_tys.push(&property.ty);
                     declaring.push((
                         property.ty.clone(),
                         property.optional,
@@ -11144,6 +11200,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         return None;
                     }
+                    referenced_tys.extend(function.return_type.as_deref());
+                    referenced_tys
+                        .extend(function.parameters.iter().map(|parameter| &parameter.ty));
                     declaring.push((
                         TypeExpr::Function(Arc::new({
                             let mut signature = function.clone();
@@ -11174,6 +11233,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !options.strict_null_checks || options.exact_optional_property_types {
             return None;
         }
+        self.observe_referenced_target_versions(referenced_tys.iter().copied(), name_resolution);
         let context = crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Navigate,
         )
