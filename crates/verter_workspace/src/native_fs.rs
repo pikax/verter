@@ -42,12 +42,28 @@ pub struct NativeFs {
     /// during the lock-free canonicalize window is never clobbered by the
     /// in-flight (now potentially stale) computation.
     realpath_epoch: AtomicU64,
+    /// Test-only: every live disk read, as `(kind, path)`, in order.
+    #[cfg(test)]
+    live_reads: parking_lot::Mutex<Vec<(&'static str, String)>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeFs {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    fn note_live_read(&self, kind: &'static str, path: &str) {
+        self.live_reads
+            .lock()
+            .push((kind, normalize_path_str(path)));
+    }
+
+    /// Test-only: drain the live disk reads made since the last drain.
+    #[cfg(test)]
+    pub(crate) fn take_live_reads_for_test(&self) -> Vec<(&'static str, String)> {
+        std::mem::take(&mut *self.live_reads.lock())
     }
 
     // ── Read operations ──
@@ -65,6 +81,8 @@ impl NativeFs {
     /// retained so a resolution transaction cannot validate uncertainty as an
     /// absent file.
     pub(crate) fn read_file_live(&self, path: &str) -> std::io::Result<Option<Arc<str>>> {
+        #[cfg(test)]
+        self.note_live_read("file", path);
         let os_path = to_os_path(path);
         match std::fs::read_to_string(&os_path) {
             Ok(source) => Ok(Some(Arc::from(source))),
@@ -88,6 +106,8 @@ impl NativeFs {
         path: &str,
         maximum_bytes: u64,
     ) -> std::io::Result<BoundedFileRead> {
+        #[cfg(test)]
+        self.note_live_read("file", path);
         use std::io::Read;
 
         let os_path = to_os_path(path);
@@ -118,6 +138,8 @@ impl NativeFs {
 
     /// Current raw file length through metadata only; no payload is read.
     pub(crate) fn file_len_live(&self, path: &str) -> std::io::Result<Option<u64>> {
+        #[cfg(test)]
+        self.note_live_read("len", path);
         let os_path = to_os_path(path);
         match std::fs::metadata(&os_path) {
             Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
@@ -155,6 +177,8 @@ impl NativeFs {
         &self,
         path: &str,
     ) -> std::io::Result<verter_session_query::resolution::PathProbe> {
+        #[cfg(test)]
+        self.note_live_read("probe", path);
         let os_path = to_os_path(path);
         #[cfg(windows)]
         if let Some(probe) = attribute_probe(&os_path) {
@@ -218,6 +242,8 @@ impl NativeFs {
     /// Canonicalize against current disk state without consulting or updating
     /// the realpath memo.
     pub(crate) fn realpath_live(&self, path: &str) -> std::io::Result<Option<String>> {
+        #[cfg(test)]
+        self.note_live_read("realpath", path);
         let key = normalize_path_str(path);
         let os_path = to_os_path(&key);
         match std::fs::canonicalize(&os_path) {
