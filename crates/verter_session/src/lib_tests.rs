@@ -3900,6 +3900,275 @@ mod upsert_compile_cache_tests {
         );
     }
 
+    /// Callers that race to reload one evicted file share one reload: each
+    /// sees the file loaded as soon as its call returns `true`, every call
+    /// returns `true`, and the scheduler is moved off the pre-eviction
+    /// snapshot once, so no caller's reset supersedes another caller's load
+    /// in flight or discards a load another caller already integrated.
+    #[test]
+    fn racing_ensure_loaded_after_evict_share_one_reload() {
+        const CALLERS: usize = 8;
+        const ROUNDS: usize = 4;
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+        let canonical = "/src/App.vue";
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from("<template><div>v1</div></template>"),
+        );
+        assert!(host.ensure_loaded(canonical));
+        let generation = || {
+            host.registered_source_revision_token(canonical)
+                .expect("a loaded file has a registered revision")
+                .source_version
+                .generation
+        };
+
+        // One caller's reload is the baseline a racing reload must match.
+        let before = generation();
+        host.evict(canonical);
+        assert!(host.ensure_loaded(canonical));
+        let single_caller_advance = generation() - before;
+
+        for round in 0..ROUNDS {
+            let before = generation();
+            host.evict(canonical);
+            let barrier = std::sync::Barrier::new(CALLERS);
+            let outcomes: Vec<(bool, bool)> = std::thread::scope(|scope| {
+                let callers: Vec<_> = (0..CALLERS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            let loaded = host.ensure_loaded(canonical);
+                            (
+                                loaded,
+                                host.registered_source_whole_hash(canonical).is_some(),
+                            )
+                        })
+                    })
+                    .collect();
+                callers
+                    .into_iter()
+                    .map(|caller| caller.join().expect("a reloading caller must not panic"))
+                    .collect()
+            });
+            assert!(
+                outcomes.iter().all(|(loaded, _)| *loaded),
+                "round {round}: every racing caller reloads the evicted file: {outcomes:?}"
+            );
+            assert!(
+                outcomes.iter().all(|(_, registered)| *registered),
+                "round {round}: a caller that returned loaded sees the file registered: \
+                 {outcomes:?}"
+            );
+            assert_eq!(
+                generation() - before,
+                single_caller_advance,
+                "round {round}: racing callers reload one eviction as one caller does"
+            );
+        }
+    }
+
+    /// An eviction that lands while a reload is in flight wins: the reload
+    /// it interrupts never leaves the pre-eviction content behind, and the
+    /// next reload serves the content current after that eviction.
+    #[test]
+    fn an_eviction_during_a_reload_leaves_no_stale_content() {
+        /// Runs its action once, at the first yield point a drive offers:
+        /// between a reload's submission and its wait.
+        #[derive(Default)]
+        struct AtFirstYield(parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>);
+        impl std::fmt::Debug for AtFirstYield {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("AtFirstYield")
+            }
+        }
+        impl crate::cooperative_scheduler::CooperativeYield for AtFirstYield {
+            fn yield_to_runtime(&self) -> crate::cooperative_scheduler::YieldDecision {
+                if let Some(action) = self.0.lock().take() {
+                    action();
+                }
+                crate::cooperative_scheduler::YieldDecision::Continue
+            }
+        }
+
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let at_yield = Arc::new(AtFirstYield::default());
+        let host = Arc::new(VerterHost::new(
+            HostConfig {
+                cooperative_yield: Some(at_yield.clone()),
+                ..HostConfig::default()
+            },
+            ws.clone(),
+        ));
+        let canonical = "/src/App.vue";
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from("<template><div>v1</div></template>"),
+        );
+        assert!(host.ensure_loaded(canonical));
+        host.evict(canonical);
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from("<template><div>v2</div></template>"),
+        );
+
+        // The reload submits and its load commits the v2 content; then,
+        // before the reload integrates that load, the second eviction lands.
+        {
+            let host = Arc::downgrade(&host);
+            let ws = ws.clone();
+            *at_yield.0.lock() = Some(Box::new(move || {
+                let host = host.upgrade().expect("the host outlives its reload");
+                let committed = std::time::Instant::now();
+                while !host.scheduler.try_get_analysis(canonical).is_some()
+                    || !host
+                        .scheduler
+                        .try_get_source(canonical)
+                        .is_some_and(|snapshot| snapshot.source.contains("v2"))
+                {
+                    assert!(
+                        committed.elapsed() < std::time::Duration::from_secs(30),
+                        "the reload's load never committed"
+                    );
+                    std::thread::yield_now();
+                }
+                ws.inject_file(
+                    canonical.to_string(),
+                    Arc::from("<template><div>v3</div></template>"),
+                );
+                host.evict(canonical);
+            }));
+        }
+        let interrupted = host.ensure_loaded(canonical);
+        assert!(
+            at_yield.0.lock().is_none(),
+            "the eviction landed during the reload"
+        );
+        if interrupted {
+            assert!(
+                host.get_source(canonical)
+                    .is_none_or(|source| !source.contains("v2")),
+                "a reload interrupted by an eviction never serves the pre-eviction content"
+            );
+        }
+
+        assert!(
+            host.ensure_loaded(canonical),
+            "the file reloads after the eviction"
+        );
+        let source = host
+            .get_source(canonical)
+            .expect("the reloaded file has a source");
+        assert!(
+            source.contains("v3"),
+            "the reload after an eviction serves the content current after it: {source}"
+        );
+    }
+
+    /// A reload whose file is evicted again after its load commits, but
+    /// before it integrates, writes nothing of that load: the file keeps the
+    /// dependencies it had, and the next reload integrates the content
+    /// current after the eviction.
+    #[test]
+    fn a_reload_evicted_before_it_integrates_writes_nothing() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = Arc::new(VerterHost::new(HostConfig::default(), ws.clone()));
+        let canonical = "/src/App.ts";
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from(
+                "import { a } from './a'
+export const x = a
+",
+            ),
+        );
+        assert!(host.ensure_loaded(canonical));
+        let depends_on = |stem: &str| {
+            host.dependency_cache()
+                .get(canonical)
+                .is_some_and(|state| state.dependencies.iter().any(|dep| dep.contains(stem)))
+        };
+        assert!(
+            depends_on("/src/a"),
+            "precondition: the first load records its import"
+        );
+
+        host.evict(canonical);
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from(
+                "import { b } from './b'
+export const x = b
+",
+            ),
+        );
+        {
+            let host = Arc::clone(&host);
+            crate::host_lifecycle::integrate_test_hooks::arm_after_snapshot_capture(move || {
+                host.evict(canonical)
+            });
+        }
+        assert!(
+            !host.ensure_loaded(canonical),
+            "a reload evicted again before it integrates is not loaded"
+        );
+        assert!(
+            !depends_on("/src/b"),
+            "a reload evicted again before it integrates records nothing of its load"
+        );
+
+        assert!(
+            host.ensure_loaded(canonical),
+            "the next reload loads the file"
+        );
+        assert!(
+            depends_on("/src/b"),
+            "the next reload integrates the content current after the eviction"
+        );
+    }
+
+    /// A reload that fails leaves the file reloadable: once its content is
+    /// back, a retry loads it.
+    #[test]
+    fn a_retry_after_a_failed_reload_loads_the_current_content() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+        let canonical = "/src/App.vue";
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from("<template><div>v1</div></template>"),
+        );
+        assert!(host.ensure_loaded(canonical));
+        host.evict(canonical);
+        ws.remove_file(canonical);
+        assert!(
+            !host.ensure_loaded(canonical),
+            "a file the workspace no longer holds does not reload"
+        );
+
+        ws.inject_file(
+            canonical.to_string(),
+            Arc::from("<template><div>v2</div></template>"),
+        );
+        assert!(host.ensure_loaded(canonical), "the retry reloads the file");
+        let source = host
+            .get_source(canonical)
+            .expect("the reloaded file has a source");
+        assert!(
+            source.contains("v2"),
+            "the retry serves the current content: {source}"
+        );
+    }
+
     #[test]
     fn test_resolve_import_returns_none_for_evicted_parent() {
         let host = VerterHost::new_standalone(HostConfig::default());
