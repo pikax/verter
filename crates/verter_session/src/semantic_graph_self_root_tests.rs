@@ -808,12 +808,14 @@ fn oversized_self_root_set_builds_a_bounded_carrier() {
     );
 }
 
-/// When the self-roots themselves make the carrier wide, the strict-world
-/// witness replaces every precise root fact — one the traced set holds
-/// included — and keeps every other traced fact.
+/// When the self-roots themselves make the carrier wide — the root facts
+/// the completion adds outnumber the wide width — the strict-world witness
+/// replaces every precise root fact, one the traced set holds included, and
+/// keeps every other traced fact.
 #[test]
 fn an_oversized_root_set_strips_a_traced_root_fact_beside_its_witness() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=WIDE_SIGNATURE_WIDTH)
+    // Root 0 is traced already; the other roots are the facts it adds.
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=WIDE_SIGNATURE_WIDTH + 1)
         .map(|index| {
             (
                 verter_type_expr::OwnedStr::from(format!("/w/root-{index}.ts")),

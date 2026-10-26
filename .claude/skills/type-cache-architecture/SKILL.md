@@ -1424,10 +1424,13 @@ may cite:
    answers only for a set held as one slice already, and `to_vec` is test
    support. A reader that needs every fact iterates them.
 
-**Storage.** A narrow set (at most 32 facts) and every freshly sealed set is
-one shared slice. A wider set built by extending another — a scope absorbing a
-completed witness and adding its own facts, a carrier completing a traced set
-— is a persistent B+tree (`fact_tree.rs`, leaves of 16 inline facts, branches
+**Storage.** A narrow set (at most 32 facts), and a freshly sealed set no
+wider than `WIDE_SIGNATURE_WIDTH`, is one shared slice. A freshly sealed set
+wider than that is sealed into tree storage, so every wide set carries its own
+charge from birth and a store that charges none of its own bytes is still
+charged and refused for it. A wider set built by extending another — a scope
+absorbing a completed witness and adding its own facts, a carrier completing
+a traced set — is a persistent B+tree (`fact_tree.rs`, leaves of 16 inline facts, branches
 of 16 children) that shares every node of the set it was built from except
 the paths its insertions and removals copied. A chain of nested results —
 each link its child's set plus a few facts of its own — therefore holds one

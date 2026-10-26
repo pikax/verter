@@ -6,15 +6,18 @@
 //! ([`FactSet::contains`], [`FactSet::iter_from`]) and compares it, and
 //! nothing it can ask depends on how the set is stored:
 //!
-//! * a set no wider set was built from — every narrow set, and every
-//!   freshly sealed one — is one shared slice, charged inline by whoever
-//!   retains it;
-//! * a set wider than [`FACT_SET_INLINE_WIDTH`] built by extending another
-//!   set is a persistent B+tree ([`super::fact_tree`]): it shares every
-//!   node of the set it was built from except the paths its own insertions
-//!   and removals copied, so a chain of nested results — each link its
-//!   child's set plus a few facts of its own — holds one path per link,
-//!   never a copy of every prefix.
+//! * a set no wider than [`FACT_SET_INLINE_WIDTH`], and a freshly sealed
+//!   set no wider than [`WIDE_SIGNATURE_WIDTH`], is one shared slice,
+//!   charged inline by whoever retains it;
+//! * a wider set built by extending another set, and every freshly sealed
+//!   set wider than [`WIDE_SIGNATURE_WIDTH`], is a persistent B+tree
+//!   ([`super::fact_tree`]) whose nodes carry their own charges: it shares
+//!   every node of the set it was built from except the paths its own
+//!   insertions and removals copied, so a chain of nested results — each
+//!   link its child's set plus a few facts of its own — holds one path per
+//!   link, never a copy of every prefix, and every wide set is charged and
+//!   refused by a retaining admission even when it charges no bytes of its
+//!   own.
 //!
 //! ## Laws
 //!
@@ -51,6 +54,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use super::fact_read_set::WIDE_SIGNATURE_WIDTH;
 use super::fact_tree::{self, Node};
 use super::version::FactVersionRef;
 
@@ -127,21 +131,20 @@ impl FactSet {
     /// The set of `facts`, already strictly increasing: only this crate's
     /// sealer, which sorts first, calls it (checked in debug builds only).
     ///
-    /// A freshly sealed set is one shared slice whatever its width: a tree
-    /// earns its nodes back only by being shared, so a set becomes a tree
-    /// when a wider set is built from it ([`FactSet::edit`]).
+    /// A freshly sealed set no wider than [`WIDE_SIGNATURE_WIDTH`] is one
+    /// shared slice, charged by whoever holds it; a wider one is sealed into
+    /// tree storage, so it carries its own charge from birth and every
+    /// retaining admission is charged and refused for it — even one that
+    /// charges no bytes of its own.
     #[must_use]
     pub(crate) fn from_canonical_vec(facts: Vec<FactVersionRef>) -> Self {
-        #[cfg(debug_assertions)]
-        assert!(
-            facts.windows(2).all(|pair| pair[0] < pair[1]),
-            "a canonical set is strictly increasing"
-        );
-        Self(Repr::Flat(Arc::from(facts)))
+        if facts.len() > WIDE_SIGNATURE_WIDTH {
+            return Self::sealed_tree(&facts);
+        }
+        Self::from_canonical_slice(&facts)
     }
 
-    /// The set of `facts`, already strictly increasing, copied into one
-    /// shared slice.
+    /// [`Self::from_canonical_vec`] over a borrowed run.
     #[must_use]
     pub(crate) fn from_canonical_slice(facts: &[FactVersionRef]) -> Self {
         #[cfg(debug_assertions)]
@@ -149,7 +152,20 @@ impl FactSet {
             facts.windows(2).all(|pair| pair[0] < pair[1]),
             "a canonical set is strictly increasing"
         );
+        if facts.len() > WIDE_SIGNATURE_WIDTH {
+            return Self::sealed_tree(facts);
+        }
         Self(Repr::Flat(Arc::from(facts)))
+    }
+
+    /// A wide canonical run sealed into tree storage, every node charged.
+    fn sealed_tree(facts: &[FactVersionRef]) -> Self {
+        let mut root = fact_tree::build(facts).expect("a wide run is not empty");
+        fact_tree::seal(&mut root);
+        Self(Repr::Tree(Arc::new(TreeStorage {
+            root,
+            digest: digest_of(facts.iter()),
+        })))
     }
 
     /// How many facts the set holds.
@@ -937,7 +953,7 @@ impl<const N: usize> From<[FactVersionRef; N]> for FactSet {
 
 impl From<Arc<[FactVersionRef]>> for FactSet {
     fn from(facts: Arc<[FactVersionRef]>) -> Self {
-        if facts.windows(2).all(|pair| pair[0] < pair[1]) {
+        if facts.len() <= WIDE_SIGNATURE_WIDTH && facts.windows(2).all(|pair| pair[0] < pair[1]) {
             return Self(Repr::Flat(facts));
         }
         Self::from_facts(facts.to_vec())

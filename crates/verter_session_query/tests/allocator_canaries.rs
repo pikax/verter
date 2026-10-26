@@ -160,12 +160,17 @@ fn a_fact_tree_charges_exactly_what_it_allocates() {
     };
     // Facts that own no heap, so the bytes measured are the trees' alone.
     let fact = |generation: u64| FactVersionRef::ProjectGeneration { generation };
-    let base = FactSet::from_facts((0..2_000).map(fact).collect());
-    let mut held: Vec<FactSet> = Vec::with_capacity(300);
+    let mut held: Vec<FactSet> = Vec::with_capacity(302);
+    // The process account the nodes pin on lives for the whole process: it
+    // is created before the baseline, so only the trees are measured.
+    drop(verter_session_query::retention::SemanticRetentionAccount::process_local());
     let before = thread_live();
-    // The first extension builds the tree; each later link adds one fact
-    // and every seventh also removes one, sharing the rest.
+    // A fresh wide seal is born in tree storage; each later link adds one
+    // fact and every seventh also removes one, sharing the rest.
+    let base = FactSet::from_facts((0..2_000).map(fact).collect());
+    held.push(base.clone());
     let mut set = base.union_with_facts(&[fact(1_000_000)]);
+    drop(base);
     for link in 0..300u64 {
         let mut edit = set.edit();
         edit.insert(fact(2_000_000 + link));

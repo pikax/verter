@@ -1506,15 +1506,20 @@ fn sealing_is_deterministic_and_absorbed_sets_are_shared() {
     };
     assert_eq!(enclosing.len(), forward.len() + 1);
     assert!(enclosing.is_superset(&forward));
-    // A fresh seal is one slice; the first set built from it is a tree, and
-    // every set built from that tree shares it.
+    // A fresh seal wider than the wide width is sealed into tree storage,
+    // charged from birth; every set built from it shares its nodes.
     assert!(
-        forward.tree_storage().is_none(),
-        "a fresh seal is one slice"
+        forward.tree_storage().is_some() && forward.tree_footprint().pinned_bytes > 0,
+        "a fresh wide seal carries its own charge"
     );
     assert!(
         enclosing.tree_storage().is_some(),
         "an extended wide set is a tree"
+    );
+    let (own, shared) = enclosing.tree_nodes_against(&forward);
+    assert!(
+        shared > own * 4,
+        "the enclosing set shares the absorbed seal's nodes: {own} own, {shared} shared"
     );
     let mut next = FactReadSet::new();
     next.absorb_canonical_signature(&enclosing);
@@ -1726,6 +1731,44 @@ fn a_retained_candidate_claims_its_receipts_once_into_its_refusable_reservation(
         (drained.retained_bytes, drained.pinned_bytes),
         (0, 0),
         "the last holder's drop drains every receipt charge"
+    );
+}
+
+/// A freshly sealed signature wider than the wide width carries its own
+/// charge, so a store that retains signatures without charging bytes of
+/// its own is still refused for it, and admitted for it only by claiming
+/// its storage.
+#[test]
+fn a_store_charging_no_own_bytes_is_refused_for_a_fresh_wide_signature() {
+    use crate::retention::RetentionLimits;
+    let signature = crate::facts::fact_read_set::seal_canonical_signature(wide_whole_hashes(
+        2 * WIDE_SIGNATURE_WIDTH + 3,
+    ));
+    assert!(crate::facts::receipt::has_unclaimed_retained_storage(
+        &signature
+    ));
+    let none = crate::retention::SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 0,
+        ..RetentionLimits::defaults()
+    });
+    assert!(
+        crate::facts::receipt::claim_retained_storage(&none, &signature).is_err(),
+        "a zero-byte store is refused for a wide signature it would retain"
+    );
+    assert!(crate::facts::receipt::has_unclaimed_retained_storage(
+        &signature
+    ));
+    let account = isolated_account();
+    crate::facts::receipt::claim_retained_storage(&account, &signature).expect("admitted");
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        signature.tree_footprint().charged_bytes,
+        "the admitted store is charged for the signature's storage"
+    );
+    let narrow = crate::facts::fact_read_set::seal_canonical_signature(wide_whole_hashes(64));
+    assert!(
+        crate::facts::receipt::claim_retained_storage(&none, &narrow).is_ok(),
+        "a narrow signature is charged by its holder, never claimed"
     );
 }
 
