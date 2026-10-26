@@ -117,14 +117,16 @@ impl ScopedCacheFlight {
         aggregate.set_wake_delivery(Arc::new(ScopedCancellationDelivery(Arc::downgrade(
             &self.delivery,
         ))));
-        for owner in state.owners.values_mut() {
-            let Some(registration) = aggregate.register_owner(owner.request.clone()) else {
-                state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                state.producer = None;
-                state.owners.clear();
-                self.delivery.deliver(vec![state.wakers.take()]);
-                return false;
-            };
+        let Some(registrations) =
+            aggregate.register_owners(state.owners.values().map(|owner| owner.request.clone()))
+        else {
+            state.terminal = Some(ScopedCacheTerminal::Cancelled);
+            state.producer = None;
+            state.owners.clear();
+            self.delivery.deliver(vec![state.wakers.take()]);
+            return false;
+        };
+        for (owner, registration) in state.owners.values_mut().zip(registrations) {
             owner.aggregate_registration = Some(registration);
         }
         state.aggregate = Some(aggregate);
