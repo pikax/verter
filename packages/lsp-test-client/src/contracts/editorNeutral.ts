@@ -387,9 +387,9 @@ interface HoverTextExemption {
  * else is one analysable region.
  *
  * The obvious reading, "analyse only the contents of fenced blocks", is WRONG
- * against real output. tsgo and shared-tsgo return a hover whose fence closes after
- * the FIRST LINE, leaving the rest of the type — `$props`, `$emit`, every member
- * that matters — outside it:
+ * against real output. tsgo and shared-tsgo on TypeScript 7.0 returned a hover whose
+ * fence closes after the FIRST LINE, leaving the rest of the type — `$props`, `$emit`,
+ * every member that matters — outside it (7.1 keeps the whole type inside):
  *
  * ```text
  * ```typescript
@@ -400,7 +400,8 @@ interface HoverTextExemption {
  * ```
  *
  * Fence position is therefore a formatting artifact of how the provider chopped the
- * payload, not a boundary between code and prose. Excising the markers and keeping
+ * payload, and it moves between engine releases; it is not a boundary between code
+ * and prose. Excising the markers and keeping
  * the remainder as one region matches every route's shape.
  *
  * This still buys the thing the narrowing was for: with the markers removed, a

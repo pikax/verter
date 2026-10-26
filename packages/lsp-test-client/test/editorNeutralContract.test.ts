@@ -543,13 +543,13 @@ const UNTYPED_EMIT_FALLBACK_TEXT = "$emit: (event: string, ...args: unknown[]) =
 
 const CAPTURED = {
   /**
-   * `vue-js.direct-import.hover`, tsserver — a CORRECT Vue component hover. It
-   * contains `any` only as one of `DefineComponent`'s own trailing default type
-   * ARGUMENTS (`…, ComponentProvideOptions, true, {}, any>>`), never as an
-   * annotation. Every route emits this same framework tail.
+   * `vue-js.direct-import.hover`, tsserver — a CORRECT Vue component hover:
+   * the public instance shape, then the framework type, which the provider
+   * elides as `__OmitNew<...>` (TypeScript 7.1 truncation). It carries the
+   * contractual untyped-emit `unknown[]` and no `any` at all.
    */
   correctVueComponent:
-    '```typescript\n(const) const JavaScriptCase: __OmitNew<DefineComponent<ExtractPropTypes<{\n    label: {\n        type: StringConstructor;\n        required: true;\n    };\n}>, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<ExtractPropTypes<{\n    label: {\n        type: StringConstructor;\n        required: true;\n    };\n}>, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & {\n    label: string;\n}) => {\n    $props: import("vue").PublicProps & {\n        label: string;\n    };\n    $emit: (event: string, ...args: unknown[]) => void;\n    $data: {};\n    $attrs: import("vue").HTMLAttributes;\n    $refs: {};\n})\n```',
+    '```typescript\n(const) const JavaScriptCase: (new (props?: import("vue").PublicProps & {\n    label: string;\n} & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof ({\n    label: string;\n})> & __Verter_DataAttrs) => {\n    $props: import("vue").PublicProps & {\n        label: string;\n    } & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof ({\n        label: string;\n    })> & __Verter_DataAttrs;\n    $emit: (event: string, ...args: unknown[]) => void;\n    $data: {};\n    $attrs: import("vue").HTMLAttributes;\n    $refs: {};\n}) & __OmitNew<...>\n```',
   /**
    * `vue-ts.markup.hover`, shared-tsgo — a REAL, currently-live degradation: the
    * script local resolves to `any` on that route while tsserver and tsgo both
@@ -558,12 +558,17 @@ const CAPTURED = {
   degradedLocal: "```typescript\nconst vueTsLocal: any\n```",
   /** `vue-ts.markup.hover`, tsserver — the correct answer for a TS `const 1`. */
   correctLocal: "```typescript\n(const) const vueTsLocal: 1\n```",
-  /** Vue TS direct/barrel QuickInfo captured from the real TS6 tsserver route. */
+  /**
+   * Vue TS direct/barrel QuickInfo captured from the real TS6 tsserver route. It
+   * contains `any` only as one of `DefineComponent`'s own trailing default type
+   * ARGUMENTS (`DefineComponent<{}, ... 18 more ..., any>>`), never as an
+   * annotation.
+   */
   vueTsTsserverPublic:
-    '```typescript\n(const) const TypeScriptCase: __OmitNew<DefineComponent<{}, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<{}, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs) => {\n    $props: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs;\n    $emit: (event: string, ...args: unknown[]) => void;\n    $data: {};\n    $attrs: import("vue").HTMLAttributes;\n    $refs: {};\n})\n```',
+    '```typescript\n(const) const TypeScriptCase: (new (props?: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs) => {\n    $props: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs;\n    $emit: (event: string, ...args: unknown[]) => void;\n    $data: {};\n    $attrs: import("vue").HTMLAttributes;\n    $refs: {};\n}) & __OmitNew<DefineComponent<{}, ... 18 more ..., any>>\n```',
   /** Vue TS direct/barrel QuickInfo captured from the real tsgo/shared-tsgo routes. */
   vueTsTsgoPublic:
-    '```typescript\n(alias) const TypeScriptCase: __OmitNew<DefineComponent<{}, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<{}, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs) => {\n    $props: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs;\n    $emit: (event: string, ...args: unknown[]) => void;\n    $data: {};\n    $attrs: import("vue").HTMLAttributes;\n    $refs: {};\n})\n```',
+    '```typescript\n(alias) const TypeScriptCase: (new (props?: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs) => {\n    $props: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs;\n    $emit: (event: string, ...args: unknown[]) => void;\n    $data: {};\n    $attrs: import("vue").HTMLAttributes;\n    $refs: {};\n}) & __OmitNew<DefineComponent<..., ... 18 more ..., any>>\n```',
 } as const;
 
 function hoverDriver(value: string): EditorNeutralContractDriver {
@@ -663,10 +668,13 @@ describe("editor-neutral hover assertions discriminate on real provider output",
   });
 
   it("passes a correct Vue component hover while still catching an annotation `any`", async () => {
-    // A CORRECT component hover carries Vue's own `…, {}, any>>` default type
+    // A CORRECT component hover carries Vue's own `…, any>>` default type
     // arguments. The bare `/\bany\b/` this replaced fired here, so the case could
     // never pass and asserted nothing about Verter.
-    expect(CAPTURED.correctVueComponent).toMatch(/\bany\b/);
+    expect(CAPTURED.vueTsTsserverPublic).toMatch(/\bany\b/);
+    expect(
+      await runHoverCase("vue-ts.direct-import.hover", CAPTURED.vueTsTsserverPublic),
+    ).toBeNull();
     expect(
       await runHoverCase("vue-js.direct-import.hover", CAPTURED.correctVueComponent),
     ).toBeNull();
