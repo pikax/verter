@@ -4,13 +4,26 @@ use super::oracle;
 use super::support::*;
 use verter_session_oracle_macro::oracle_row;
 
-#[test]
-fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
+/// The work one chain length spent: its cold member visits, cold body
+/// inferences and the member visits of its warm read.
+struct SpreadChainWork {
+    levels: usize,
+    visits: u64,
+    evaluations: u64,
+    warm_visits: u64,
+}
+
+/// Spread-return chains across `levels` modules for each listed length:
+/// every module's literal survives, each body is inferred once, a warm read
+/// reuses the projection, and the 20-module chain answers its edit and its
+/// method-bearing receivers. Returns each length's work.
+fn assert_cross_module_spread_chains(lengths: &[usize]) -> Vec<SpreadChainWork> {
     use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
     use verter_type_engine::semantic_query::object_spread_projection::test_support::work_counts;
 
     let mut doubled_control = None;
-    for levels in [20usize, 40, 100, 300] {
+    let mut measured = Vec::new();
+    for &levels in lengths {
         let host = make_host_with_footprint();
         for level in 0..levels {
             let source = if level == 0 {
@@ -90,6 +103,12 @@ fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
             warm_work.0 - cold_work.0 <= levels,
             "warm consumer only materialises its final surface"
         );
+        measured.push(SpreadChainWork {
+            levels,
+            visits: visits as u64,
+            evaluations: cold_evaluations as u64,
+            warm_visits: (warm_work.0 - cold_work.0) as u64,
+        });
         if levels == 20 {
             upsert_ts(
                 &host,
@@ -138,6 +157,53 @@ fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
                 assert_number_literal(&value, expected);
             }
         }
+    }
+    measured
+}
+
+/// The chains at 20, 40, 60 and 101 modules: the gate version of the 20-,
+/// 40-, 100- and 300-module test in the nightly scale tier, with every one of
+/// its checks at each length (the 20-module edit and receivers included, and
+/// the doubling check on collision comparisons, which count hash collisions
+/// and are not affine). The cold member visits, body inferences and warm
+/// visits grow by the same amount per 20 modules, so they are affine in the chain,
+/// and at 100 and 300 modules they meet the full-size test's per-length
+/// bounds: between one and four member visits per module, one inference per
+/// body, and a warm read within one visit per module. The 101-module chain is
+/// past the checker's instantiation depth of 100.
+#[test]
+fn cross_module_spread_work_is_affine_and_meets_the_full_size_bounds() {
+    use crate::scale_gate::{affine, Counter};
+    let measured = assert_cross_module_spread_chains(&[20, 40, 60, 101]);
+    let affine_lengths = [20, 40, 60];
+    let counter = |name, read: fn(&SpreadChainWork) -> u64| Counter {
+        name,
+        values: measured[..3].iter().map(read).collect(),
+    };
+    assert_eq!(
+        measured[..3]
+            .iter()
+            .map(|work| work.levels)
+            .collect::<Vec<_>>(),
+        affine_lengths
+    );
+    let work = affine(
+        "spread-return chains",
+        affine_lengths,
+        vec![
+            counter("member visits", |work| work.visits),
+            counter("body inferences", |work| work.evaluations),
+            counter("warm visits", |work| work.warm_visits),
+        ],
+    );
+    for levels in [100, 300] {
+        let visits = work.at("member visits", levels);
+        assert!(
+            visits >= levels as u64 && visits <= 4 * levels as u64,
+            "{levels} links would visit {visits} members"
+        );
+        assert_eq!(work.at("body inferences", levels), levels as u64);
+        assert!(work.at("warm visits", levels) <= levels as u64);
     }
 }
 
@@ -649,4 +715,15 @@ export type TOpenComputed = ReturnType<typeof mOpenComputed>;
         "a key whose value is not a literal leaves the surface's key SET unknown and must \
          fail closed, not publish `{{ label }}` as if the literal had one member: {open:?}"
     );
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
+        assert_cross_module_spread_chains(&[20, 40, 100, 300]);
+    }
 }

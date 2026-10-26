@@ -1,18 +1,18 @@
 //! Source-shape guards over the dispatcher and its query vocabulary. They
-//! read only workspace sources, so they stay beside the dispatcher.
+//! read only the engine's own sources, so they stay beside the dispatcher.
 
-/// `SemanticQueryKey::Expand`, `ExpandMode`, `SemanticQueryApi::expand`,
-/// `build_expand`, and `ExpandMode::` are not part of the projection-mode
-/// surface. Each needle is followed by a punctuation character so it cannot
-/// prefix-match an unrelated identifier like `build_expanded_type_text` (a
-/// text-construction helper in `verter_semantic::analysis::macros`) or a
-/// hypothetical `SemanticQueryKey::Expanded`. `ExpandMode` is bare because
-/// Rust requires the `ExpandMode::Foo` prefix anywhere it surfaces.
+/// The retired expand surface: `SemanticQueryKey::Expand`, `ExpandMode`,
+/// `SemanticQueryApi::expand` and `build_expand` are not part of the
+/// projection-mode surface. Each needle is followed by a punctuation character
+/// so it cannot prefix-match an unrelated identifier like
+/// `build_expanded_type_text` or a hypothetical `SemanticQueryKey::Expanded`.
 ///
-/// This is the sole enforcement point. The retired-terminology CI scanner
-/// that used to cover it alongside this test has been removed: it guarded
-/// vocabulary from a completed refactor, and a name-keyed text scanner is
-/// exactly the guard shape the landed-scanner bar forbids.
+/// Most of the surface is held by the compiler: a use of a variant, type or
+/// method that is not declared does not build, and
+/// [`retired_query_vocabulary_is_not_declared`] keeps the key variant
+/// undeclared. The names `fn expand(` and `build_expand(` are the part the
+/// compiler cannot hold, so this list is matched against the engine crate's
+/// sources, where the query surface is declared and implemented.
 const EXPAND_NEEDLES: [&str; 8] = [
     "SemanticQueryKey::Expand ",
     "SemanticQueryKey::Expand{",
@@ -24,96 +24,71 @@ const EXPAND_NEEDLES: [&str; 8] = [
     "fn build_expand(",
 ];
 
-/// Qualified uses of the solver scratch-only nodes as
-/// `SemanticNodeData` variants; see
-/// [`solver_scratch_only_nodes_never_enter_semantic_graph_store`] for why
-/// each stays scratch-only. Each needle is followed by punctuation so it
-/// cannot prefix-match an unrelated identifier.
-const SCRATCH_ONLY_NODE_NEEDLES: [&str; 6] = [
-    "SemanticNodeData::Rest(",
-    "SemanticNodeData::Rest{",
-    "SemanticNodeData::Rest ",
-    "SemanticNodeData::RecursiveRef{",
-    "SemanticNodeData::RecursiveRef(",
-    "SemanticNodeData::RecursiveRef ",
-];
-
-/// Every needle set's matches over the workspace's Rust crate sources and
-/// TypeScript packages, from ONE walk: each source is read once and matched
-/// once against every set together, as `path: contains \`needle\`` lines
-/// per set.
-fn workspace_source_matches(needle_sets: &[&[&str]]) -> Vec<Vec<String>> {
-    use std::path::{Path, PathBuf};
-    let workspace_root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("Cargo.toml").exists() && p.join("crates").is_dir())
-        .expect("workspace root with crates/ dir")
-        .to_path_buf();
-    let exclude_files = [
-        // This file names the needles. The dispatcher module lives as a
-        // directory; the singleton path is kept should it be reconstructed.
-        "project_semantic_dispatch.rs",
-        "project_semantic_dispatch\\tests.rs",
-        "project_semantic_dispatch/tests.rs",
-        // Design docs that describe the retirement of the singleton path.
-        "generic-navigation-prep-plan.md",
-        "feedback-2026-04-19-gennav.md",
-        "tmp-plan.md",
-    ];
-    let needles: Vec<&str> = needle_sets
-        .iter()
-        .flat_map(|set| set.iter().copied())
-        .collect();
-    let matcher = aho_corasick::AhoCorasick::new(&needles).expect("valid source needles");
-    let mut matches: Vec<Vec<String>> = vec![Vec::new(); needle_sets.len()];
-    let mut visit = |path: &Path| {
-        let lossy = path.to_string_lossy();
-        if exclude_files.iter().any(|n| lossy.ends_with(n)) {
+/// Every needle's matches over the engine crate's Rust sources, from one
+/// walk, as `path: contains <needle>` lines.
+fn engine_source_matches(needles: &[&str]) -> Vec<String> {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let matcher = aho_corasick::AhoCorasick::new(needles).expect("valid source needles");
+    let mut matches = Vec::new();
+    walk_sources(&src, &["rs"], &mut |path| {
+        // This file names the needles.
+        if path.ends_with("project_semantic_dispatch/tests.rs") {
             return;
         }
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
         };
-        let found = matching_needles(&matcher, &content);
-        let mut offset = 0;
-        for (set_index, set) in needle_sets.iter().enumerate() {
-            for (needle, hit) in set.iter().zip(&found[offset..offset + set.len()]) {
-                if *hit {
-                    matches[set_index].push(format!("{}: contains `{}`", path.display(), needle));
-                }
+        for (needle, hit) in needles.iter().zip(matching_needles(&matcher, &content)) {
+            if hit {
+                matches.push(format!("{}: contains `{needle}`", path.display()));
             }
-            offset += set.len();
         }
-    };
-    walk_sources(&workspace_root.join("crates"), &["rs"], &mut visit);
-    walk_sources(
-        &workspace_root.join("packages"),
-        &["ts", "tsx", "js", "mjs", "cjs"],
-        &mut visit,
-    );
+    });
     matches
 }
 
-/// The retired expand vocabulary and the qualified scratch-only node
-/// variants are absent across the workspace's Rust crate sources and
-/// TypeScript packages. Both guards read the same tree, so they share one
-/// walk instead of each reading it.
+/// The retired expand names are absent from the engine crate, which declares
+/// and implements the query surface. The walk must reach that surface, or
+/// the ban would pass vacuously.
 #[test]
-fn workspace_sources_name_no_retired_expand_or_scratch_only_node_vocabulary() {
-    let [expand, scratch_only]: [Vec<String>; 2] =
-        workspace_source_matches(&[&EXPAND_NEEDLES, &SCRATCH_ONLY_NODE_NEEDLES])
-            .try_into()
-            .expect("one match list per needle set");
-    assert!(
-        expand.is_empty(),
-        "Found forbidden Expand/ExpandMode/build_expand references (not part of the four-mode surface):\n{}",
-        expand.join("\n")
+fn engine_sources_name_no_retired_expand_vocabulary() {
+    let anchors = engine_source_matches(&[
+        "pub enum SemanticQueryKey {",
+        "pub trait SemanticQueryApi {",
+    ]);
+    assert_eq!(
+        anchors.len(),
+        2,
+        "the walk must read the query surface: {anchors:?}"
     );
+    let found = engine_source_matches(&EXPAND_NEEDLES);
     assert!(
-        scratch_only.is_empty(),
-        "Solver scratch-only nodes (Rest/RecursiveRef) must never appear as \
-         SemanticNodeData variants — they stay solver-scratch per\nFound:\n{}",
-        scratch_only.join("\n")
+        found.is_empty(),
+        "Found forbidden Expand/ExpandMode/build_expand references (not part of the four-mode surface):\n{}",
+        found.join("\n")
+    );
+}
+
+/// The query key declares no `Expand` variant, so no crate can build a
+/// `SemanticQueryKey::Expand` use.
+#[test]
+fn retired_query_vocabulary_is_not_declared() {
+    let semantic_query_src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("semantic_query.rs"),
+    )
+    .expect("read semantic_query.rs");
+    // Anti-vacuity: the scanner isolates the real enum body.
+    assert!(
+        enum_body_declares_variant(&semantic_query_src, "SemanticQueryKey", &["Instantiate"])
+            .is_some(),
+        "declaration scan must isolate the real `enum SemanticQueryKey` body"
+    );
+    assert_eq!(
+        enum_body_declares_variant(&semantic_query_src, "SemanticQueryKey", &["Expand"]),
+        None,
+        "`enum SemanticQueryKey` must not declare a retired `Expand` variant"
     );
 }
 
@@ -349,10 +324,9 @@ fn enum_body_declares_variant(src: &str, enum_name: &str, variants: &[&str]) -> 
 /// first-class variant avoids the scope-as-discriminator anti-pattern
 /// structurally.
 ///
-/// Their qualified uses are absent from the workspace sources
-/// ([`SCRATCH_ONLY_NODE_NEEDLES`], checked by
-/// [`workspace_sources_name_no_retired_expand_or_scratch_only_node_vocabulary`]);
-/// this test scans the `SemanticNodeData` declaration itself.
+/// This test scans the `SemanticNodeData` declaration itself. With the
+/// variants undeclared, no crate can build a qualified use of them, so the
+/// declaration is the whole guard.
 #[test]
 fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
     use std::path::{Path, PathBuf};

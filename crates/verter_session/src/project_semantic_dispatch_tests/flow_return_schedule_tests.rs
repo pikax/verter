@@ -493,68 +493,59 @@ fn module_chain_work(levels: usize) -> (Outcome, usize) {
     })
 }
 
-/// Every module added to a generic chain costs the same connected work.
-///
-/// Each module's `c(k)` instantiates its callee over its OWN binder, a
-/// type parameter of another file, so no two levels share an
-/// instantiation. The instantiated return is read off the callee's
-/// uninstantiated return under the instantiation, as the checker
-/// instantiates a signature's return type, so each function's body is
-/// evaluated once, generically, whatever instantiates it. Re-evaluating
-/// the body under each instantiation instead would re-instantiate the whole
-/// chain beneath every level, and the work would grow with the square of
-/// the chain (measured with the read disabled: 25 / 50 / 100 / 200 modules cost
-/// 4322 / 16772 / 66047 / 262097 units, against 397 / 797 / 1597 / 3197).
-///
-/// Oracle: as for [`a_generic_chain_across_201_modules_answers_without_a_refusal`].
+/// The connected work of generic module chains at `lengths` grows by
+/// `per_module` for every module added.
+fn assert_module_chain_work_per_module(per_module: usize, lengths: [usize; 3]) {
+    let [first, second, third] = lengths.map(|levels| module_chain_work(levels).1);
+    assert_eq!(
+        (second - first, third - second),
+        (
+            (lengths[1] - lengths[0]) * per_module,
+            (lengths[2] - lengths[1]) * per_module
+        ),
+        "every added module must cost the same connected work \
+         ({first} / {second} / {third} at {lengths:?} modules)"
+    );
+}
+
+/// Generic module chains at 9, 10 and 11 modules and at 26, 51 and 101: the
+/// gate version of the test that reaches 128 modules, in the nightly scale
+/// tier. Every chain answers exactly like a four-module one, and every added
+/// module costs the same connected work; re-evaluating a body under each
+/// instantiation would make the work grow with the square of the chain, which
+/// shows at these lengths already. The 101-module chain is past the
+/// checker's instantiation depth of 100.
 #[test]
-fn a_generic_chain_across_modules_costs_the_same_work_per_module() {
+fn a_generic_chain_across_modules_costs_the_same_work_per_module_to_101_modules() {
     on_stack(8 << 20, || {
         let (short, _) = module_chain_work(4);
         assert_tagged_value(&short, &[number(), string()]);
-        let (nine, work_nine) = module_chain_work(9);
-        let (ten, work_ten) = module_chain_work(10);
-        let (eleven, work_eleven) = module_chain_work(11);
-        for (levels, outcome) in [(9, nine), (10, ten), (11, eleven)] {
+        let works = [9, 10, 11].map(|levels| {
+            let (outcome, work) = module_chain_work(levels);
             assert_eq!(
                 outcome, short,
                 "a {levels}-module chain answers exactly like a four-module one"
             );
-        }
+            work
+        });
         assert_eq!(
-            work_eleven - work_ten,
-            work_ten - work_nine,
-            "every added module must cost the same connected work \
-             ({work_nine} / {work_ten} / {work_eleven} at 9 / 10 / 11 modules)"
+            works[2] - works[1],
+            works[1] - works[0],
+            "every added module must cost the same connected work ({works:?} at 9 / 10 / 11 modules)"
         );
-        let per_module = work_eleven - work_ten;
-        let (_, work_32) = module_chain_work(32);
-        let (_, work_64) = module_chain_work(64);
-        let (_, work_128) = module_chain_work(128);
-        assert_eq!(
-            (work_64 - work_32, work_128 - work_64),
-            (32 * per_module, 64 * per_module),
-            "every added module must cost the same connected work \
-             ({work_32} / {work_64} / {work_128} at 32 / 64 / 128 modules)"
-        );
+        assert_module_chain_work_per_module(works[2] - works[1], [26, 51, 101]);
     });
 }
 
-/// A generic chain across 201 modules answers the checker's value, clean
-/// and admitted warm, under the production work budget.
+/// A generic chain across 101 modules answers the checker's value: the gate
+/// version of the 201-module chain in the nightly scale tier. Like it, the
+/// chain is past the checker's instantiation depth of 100 and answers under
+/// the production work budget.
 ///
-/// Oracle (the pinned TypeScript 7.0.2, measured over the same 201
-/// modules; `noImplicitAny` does not apply, every parameter is annotated):
-///
-/// | `strictNullChecks` | `noImplicitAny` | `witness` |
-/// |---|---|---|
-/// | on | on / off | `{ v: string \| number; tag: "c"; }` |
-/// | off | on / off | `{ v: string \| number; tag: "c"; }` |
-///
-/// and every `c(k)` is `<T>(x: T) => { v: T; tag: "c"; }`.
+/// Oracle: as for [`a_generic_chain_across_201_modules_answers_without_a_refusal`].
 #[test]
-fn a_generic_chain_across_201_modules_answers_without_a_refusal() {
-    let (outcome, _) = on_stack(8 << 20, || module_chain_work(201));
+fn a_generic_chain_across_101_modules_answers_without_a_refusal() {
+    let (outcome, _) = on_stack(8 << 20, || module_chain_work(101));
     assert_tagged_value(&outcome, &[number(), string()]);
 }
 
@@ -1059,12 +1050,17 @@ fn a_200_level_nested_argument_chain_answers_on_the_default_stack() {
 /// Oracle: as for
 /// [`a_200_level_nested_argument_chain_answers_on_the_default_stack`], at
 /// every length.
+/// The nested-argument chain at 16, 50 and 101 levels: the gate version of the 16-, 64- and
+/// 200-level test in the nightly scale tier. One more level costs the same at
+/// every length; a cost that grows with the length shows between these
+/// lengths already, and the 101-level chain is past the checker's
+/// instantiation depth of 100.
 #[test]
-fn a_nested_argument_chain_costs_the_same_work_per_level() {
+fn a_nested_argument_chain_costs_the_same_work_per_level_to_101_levels() {
     let per_level = work_per_level(
         nested_argument_chain,
         "{ v: string | number; tag: \"c\"; }",
-        &[16, 64, 200],
+        &[16, 50, 101],
     );
     assert!(
         per_level.windows(2).all(|pair| pair[0] == pair[1]),
@@ -1227,15 +1223,18 @@ fn a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_defa
     );
 }
 
-/// A new instantiation of a warm local-arrow chain costs connected work
-/// linear in the chain's length: one more level costs the same at 16, 64
-/// and 200 levels.
-///
-/// Oracle: as for
-/// [`a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack`],
-/// at every length.
+/// A new instantiation of a warm local-arrow chain at 16, 50 and 101 levels:
+/// the gate version of the 16-, 64- and 200-level test in the nightly scale
+/// tier. One more level costs the same at every length, and the 101-level
+/// chain is past the checker's instantiation depth of 100.
 #[test]
-fn a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level() {
+fn a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level_to_101_levels() {
+    assert_warm_local_arrow_work_per_level([16, 50, 101]);
+}
+
+/// One more level of a warm local-arrow chain's new instantiation costs the
+/// same connected work at each of `lengths`.
+fn assert_warm_local_arrow_work_per_level(lengths: [usize; 3]) {
     let work = |levels: usize| {
         let second = warm_local_chain_second(levels, true);
         let Some(value) = &second.value else {
@@ -1247,7 +1246,7 @@ fn a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level
         assert_tagged_value(value, &[TypeExpr::Primitive(PrimitiveName::Boolean)]);
         second.work
     };
-    let per_level: Vec<usize> = [16, 64, 200]
+    let per_level: Vec<usize> = lengths
         .into_iter()
         .map(|levels| work(levels + 1) - work(levels))
         .collect();
@@ -1306,12 +1305,17 @@ fn a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stac
 /// Oracle: as for
 /// [`a_200_level_nested_argument_chain_in_local_arrows_answers_on_the_default_stack`],
 /// at every length.
+/// The nested-argument chain through local arrows at 16, 50 and 101 levels: the gate version of the 16-, 64- and
+/// 200-level test in the nightly scale tier. One more level costs the same at
+/// every length; a cost that grows with the length shows between these
+/// lengths already, and the 101-level chain is past the checker's
+/// instantiation depth of 100.
 #[test]
-fn a_nested_argument_chain_in_local_arrows_costs_the_same_work_per_level() {
+fn a_nested_argument_chain_in_local_arrows_costs_the_same_work_per_level_to_101_levels() {
     let per_level = work_per_level(
         arrow_nested_argument_chain,
         "{ v: string | number; tag: \"c\"; }",
-        &[16, 64, 200],
+        &[16, 50, 101],
     );
     assert!(
         per_level.windows(2).all(|pair| pair[0] == pair[1]),
@@ -2654,4 +2658,105 @@ fn a_chains_answer_is_the_same_whatever_completed_first() {
     };
     assert_tagged_value(&witness_only, &[number()]);
     assert_eq!(witness_only, middle_first);
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// Every module added to a generic chain costs the same connected work.
+    ///
+    /// Each module's `c(k)` instantiates its callee over its OWN binder, a
+    /// type parameter of another file, so no two levels share an
+    /// instantiation. The instantiated return is read off the callee's
+    /// uninstantiated return under the instantiation, as the checker
+    /// instantiates a signature's return type, so each function's body is
+    /// evaluated once, generically, whatever instantiates it. Re-evaluating
+    /// the body under each instantiation instead would re-instantiate the whole
+    /// chain beneath every level, and the work would grow with the square of
+    /// the chain (measured with the read disabled: 25 / 50 / 100 / 200 modules cost
+    /// 4322 / 16772 / 66047 / 262097 units, against 397 / 797 / 1597 / 3197).
+    ///
+    /// Oracle: as for [`a_generic_chain_across_201_modules_answers_without_a_refusal`].
+    #[test]
+    fn a_generic_chain_across_modules_costs_the_same_work_per_module() {
+        on_stack(8 << 20, || {
+            let (short, _) = module_chain_work(4);
+            assert_tagged_value(&short, &[number(), string()]);
+            let (nine, work_nine) = module_chain_work(9);
+            let (ten, work_ten) = module_chain_work(10);
+            let (eleven, work_eleven) = module_chain_work(11);
+            for (levels, outcome) in [(9, nine), (10, ten), (11, eleven)] {
+                assert_eq!(
+                    outcome, short,
+                    "a {levels}-module chain answers exactly like a four-module one"
+                );
+            }
+            assert_eq!(
+                work_eleven - work_ten,
+                work_ten - work_nine,
+                "every added module must cost the same connected work \
+                 ({work_nine} / {work_ten} / {work_eleven} at 9 / 10 / 11 modules)"
+            );
+            let per_module = work_eleven - work_ten;
+            assert_module_chain_work_per_module(per_module, [32, 64, 128]);
+        });
+    }
+
+    /// A generic chain across 201 modules answers the checker's value, clean
+    /// and admitted warm, under the production work budget.
+    ///
+    /// Oracle (the pinned TypeScript 7.0.2, measured over the same 201
+    /// modules; `noImplicitAny` does not apply, every parameter is annotated):
+    ///
+    /// | `strictNullChecks` | `noImplicitAny` | `witness` |
+    /// |---|---|---|
+    /// | on | on / off | `{ v: string \| number; tag: "c"; }` |
+    /// | off | on / off | `{ v: string \| number; tag: "c"; }` |
+    ///
+    /// and every `c(k)` is `<T>(x: T) => { v: T; tag: "c"; }`.
+    #[test]
+    fn a_generic_chain_across_201_modules_answers_without_a_refusal() {
+        let (outcome, _) = on_stack(8 << 20, || module_chain_work(201));
+        assert_tagged_value(&outcome, &[number(), string()]);
+    }
+
+    #[test]
+    fn a_nested_argument_chain_costs_the_same_work_per_level() {
+        let per_level = work_per_level(
+            nested_argument_chain,
+            "{ v: string | number; tag: \"c\"; }",
+            &[16, 64, 200],
+        );
+        assert!(
+            per_level.windows(2).all(|pair| pair[0] == pair[1]),
+            "work per level: {per_level:?}"
+        );
+    }
+
+    #[test]
+    fn a_nested_argument_chain_in_local_arrows_costs_the_same_work_per_level() {
+        let per_level = work_per_level(
+            arrow_nested_argument_chain,
+            "{ v: string | number; tag: \"c\"; }",
+            &[16, 64, 200],
+        );
+        assert!(
+            per_level.windows(2).all(|pair| pair[0] == pair[1]),
+            "work per level: {per_level:?}"
+        );
+    }
+
+    /// A new instantiation of a warm local-arrow chain costs connected work
+    /// linear in the chain's length: one more level costs the same at 16, 64
+    /// and 200 levels.
+    ///
+    /// Oracle: as for
+    /// [`a_new_instantiation_of_a_warm_200_level_local_arrow_chain_answers_on_the_default_stack`],
+    /// at every length.
+    #[test]
+    fn a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level() {
+        assert_warm_local_arrow_work_per_level([16, 64, 200]);
+    }
 }
