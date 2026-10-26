@@ -2285,57 +2285,75 @@ fn discriminated_switch(cases: usize) -> String {
 /// Repeated full-union narrowing per clause must not hide behind memo hits:
 /// measure enumeration leaves as well as connected query work. Every size
 /// answers all its member literals, completely and within production caps.
+/// The switch at 32, 64 and 96 cases: the gate version of the 128-, 512- and
+/// 2,048-case test in the nightly scale tier. Each answers every case's value
+/// completely and admits reuse; its connected work and union leaf visits grow
+/// by the same amount per step, so they are affine in the cases, and their
+/// counts at 128, 512 and 2,048 pass the full-size test's growth check.
 #[test]
-fn discriminated_switch_narrowing_work_grows_linearly() {
+fn discriminated_switch_narrowing_work_is_affine_and_meets_the_full_size_check() {
     use verter_type_engine::project_semantic_dispatch::flow_return::union_leaf_visits_for_tests;
 
-    let mut measured = Vec::new();
-    for cases in [128, 512, 2_048] {
-        let source = discriminated_switch(cases);
-        let host = host_with(&[(PATH, &source)]);
-        let (outcome, work, leaves) = with_dispatch(&host, |dispatch| {
-            let before = union_leaf_visits_for_tests();
-            let key = key_of(dispatch, PATH, "witness");
-            let outcome = eval_key_on(&host, dispatch, key);
-            (
-                outcome,
-                dispatch.connected_demand_usage().work,
-                union_leaf_visits_for_tests() - before,
-            )
-        });
-        let Outcome::Value {
-            ty: TypeExpr::Union(arms),
-            degradation: None,
-            candidates: 1,
-        } = &outcome
-        else {
-            panic!("{cases} cases must answer completely and admit reuse: {outcome:?}");
-        };
-        let mut values: Vec<_> = arms
-            .iter()
-            .map(|arm| match arm {
-                TypeExpr::Literal(LiteralValue::Number(value)) => *value,
-                other => panic!("unexpected return contributor: {other:?}"),
-            })
-            .collect();
-        values.sort_by(f64::total_cmp);
-        assert_eq!(values, (0..cases).map(|i| i as f64).collect::<Vec<_>>());
-        assert!(work > 0 && leaves >= cases, "work counters must be live");
-        eprintln!("switch cases={cases} connected_work={work} union_leaves={leaves}");
-        measured.push((cases, work, leaves));
-    }
-    for pair in measured.windows(2) {
-        let [(small, small_work, small_leaves), (large, large_work, large_leaves)] = pair else {
-            unreachable!();
-        };
-        for (name, before, after) in [
-            ("connected work", small_work, large_work),
-            ("union leaves", small_leaves, large_leaves),
-        ] {
-            assert!(after > before, "{name} must grow with cases: {measured:?}");
+    let sizes = [32, 64, 96];
+    let measured: Vec<_> = sizes
+        .iter()
+        .map(|&cases| {
+            let source = discriminated_switch(cases);
+            let host = host_with(&[(PATH, &source)]);
+            let (outcome, work, leaves) = with_dispatch(&host, |dispatch| {
+                let before = union_leaf_visits_for_tests();
+                let key = key_of(dispatch, PATH, "witness");
+                let outcome = eval_key_on(&host, dispatch, key);
+                (
+                    outcome,
+                    dispatch.connected_demand_usage().work,
+                    union_leaf_visits_for_tests() - before,
+                )
+            });
+            let Outcome::Value {
+                ty: TypeExpr::Union(arms),
+                degradation: None,
+                candidates: 1,
+            } = &outcome
+            else {
+                panic!("{cases} cases must answer completely and admit reuse: {outcome:?}");
+            };
+            let mut values: Vec<_> = arms
+                .iter()
+                .map(|arm| match arm {
+                    TypeExpr::Literal(LiteralValue::Number(value)) => *value,
+                    other => panic!("unexpected return contributor: {other:?}"),
+                })
+                .collect();
+            values.sort_by(f64::total_cmp);
+            assert_eq!(values, (0..cases).map(|i| i as f64).collect::<Vec<_>>());
+            (work as u64, leaves as u64)
+        })
+        .collect();
+    let work = crate::scale_gate::affine(
+        "the discriminated switch",
+        sizes,
+        vec![
+            crate::scale_gate::Counter {
+                name: "connected work",
+                values: measured.iter().map(|(work, _)| *work).collect(),
+            },
+            crate::scale_gate::Counter {
+                name: "union leaves",
+                values: measured.iter().map(|(_, leaves)| *leaves).collect(),
+            },
+        ],
+    );
+    let full = [128u64, 512, 2_048];
+    for name in ["connected work", "union leaves"] {
+        let counts = full.map(|cases| work.at(name, cases as usize));
+        for step in 0..2 {
+            let (small, large) = (full[step], full[step + 1]);
+            let (before, after) = (counts[step], counts[step + 1]);
+            assert!(after > before, "{name} must grow with cases: {counts:?}");
             assert!(
                 after * small * 10 <= before * large * 11,
-                "{name} grows faster than linear (10% tolerance): {measured:?}"
+                "{name} grows faster than linear (10% tolerance): {counts:?}"
             );
         }
     }
@@ -3006,5 +3024,62 @@ mod nightly_scale {
             per_level.windows(2).all(|pair| pair[0] == pair[1]),
             "work per level: {per_level:?}"
         );
+    }
+
+    #[test]
+    fn discriminated_switch_narrowing_work_grows_linearly() {
+        use verter_type_engine::project_semantic_dispatch::flow_return::union_leaf_visits_for_tests;
+
+        let mut measured = Vec::new();
+        for cases in [128, 512, 2_048] {
+            let source = discriminated_switch(cases);
+            let host = host_with(&[(PATH, &source)]);
+            let (outcome, work, leaves) = with_dispatch(&host, |dispatch| {
+                let before = union_leaf_visits_for_tests();
+                let key = key_of(dispatch, PATH, "witness");
+                let outcome = eval_key_on(&host, dispatch, key);
+                (
+                    outcome,
+                    dispatch.connected_demand_usage().work,
+                    union_leaf_visits_for_tests() - before,
+                )
+            });
+            let Outcome::Value {
+                ty: TypeExpr::Union(arms),
+                degradation: None,
+                candidates: 1,
+            } = &outcome
+            else {
+                panic!("{cases} cases must answer completely and admit reuse: {outcome:?}");
+            };
+            let mut values: Vec<_> = arms
+                .iter()
+                .map(|arm| match arm {
+                    TypeExpr::Literal(LiteralValue::Number(value)) => *value,
+                    other => panic!("unexpected return contributor: {other:?}"),
+                })
+                .collect();
+            values.sort_by(f64::total_cmp);
+            assert_eq!(values, (0..cases).map(|i| i as f64).collect::<Vec<_>>());
+            assert!(work > 0 && leaves >= cases, "work counters must be live");
+            eprintln!("switch cases={cases} connected_work={work} union_leaves={leaves}");
+            measured.push((cases, work, leaves));
+        }
+        for pair in measured.windows(2) {
+            let [(small, small_work, small_leaves), (large, large_work, large_leaves)] = pair
+            else {
+                unreachable!();
+            };
+            for (name, before, after) in [
+                ("connected work", small_work, large_work),
+                ("union leaves", small_leaves, large_leaves),
+            ] {
+                assert!(after > before, "{name} must grow with cases: {measured:?}");
+                assert!(
+                    after * small * 10 <= before * large * 11,
+                    "{name} grows faster than linear (10% tolerance): {measured:?}"
+                );
+            }
+        }
     }
 }
