@@ -8,9 +8,49 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+use verter_session_query::retention::{
+    ChargeClass, RetentionAdmission, RetentionCharge, SemanticRetentionAccount,
+    ENTRY_OVERHEAD_BYTES,
+};
+
 use super::call_resolve::ArrayLiteralShape;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{NodeRead, SemanticNodeData, SemanticNodeId, TupleElement};
+
+/// A payload a dispatcher's tuple contexts keep, with the retention charge
+/// that covers it while any reader holds it: `None` when the account
+/// declined it, and the payload is then read once and not kept.
+pub(in crate::project_semantic_dispatch) struct Charged<T: ?Sized> {
+    charge: Option<RetentionCharge>,
+    payload: Box<T>,
+}
+
+impl<T: ?Sized> Charged<T> {
+    /// `payload`, charged to `account` for `bytes` of its own allocations.
+    fn reserve(
+        account: &Arc<SemanticRetentionAccount>,
+        bytes: usize,
+        payload: Box<T>,
+    ) -> Arc<Self> {
+        let charge = match account.reserve(ChargeClass::Retained, bytes + ENTRY_OVERHEAD_BYTES) {
+            RetentionAdmission::Admitted(charge) => Some(charge),
+            RetentionAdmission::Refused(_) => None,
+        };
+        Arc::new(Self { charge, payload })
+    }
+
+    /// Whether the account admitted the payload, so it may be kept.
+    fn admitted(&self) -> bool {
+        self.charge.is_some()
+    }
+}
+
+impl<T: ?Sized> std::ops::Deref for Charged<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.payload
+    }
+}
 
 /// One element of a contextual tuple: its type, and whether it is a rest
 /// element (whose type is an array of the elements it stands for).
@@ -26,20 +66,25 @@ struct TupleSlot {
 #[derive(Clone)]
 pub(in crate::project_semantic_dispatch) struct ContextualTuple {
     node: SemanticNodeId,
-    elements: Arc<[TupleSlot]>,
+    elements: Arc<Charged<[TupleSlot]>>,
     fixed: usize,
     fixed_end: usize,
 }
 
 impl ContextualTuple {
-    fn new(node: SemanticNodeId, elements: &[TupleElement]) -> Self {
-        let elements: Arc<[TupleSlot]> = elements
+    fn new(
+        account: &Arc<SemanticRetentionAccount>,
+        node: SemanticNodeId,
+        elements: &[TupleElement],
+    ) -> Self {
+        let slots: Box<[TupleSlot]> = elements
             .iter()
             .map(|element| TupleSlot {
                 value: element.value,
                 rest: element.rest,
             })
             .collect();
+        let elements = Charged::reserve(account, std::mem::size_of_val(&*slots), slots);
         let fixed = elements
             .iter()
             .take_while(|element| {
@@ -79,7 +124,7 @@ pub(in crate::project_semantic_dispatch) enum TupleElementContext {
     /// The element types of a middle range of the tuple — its rest
     /// element's, and those of the fixed elements the literal cannot
     /// place — shared by every literal element that reads the same range.
-    Middle(Arc<[SemanticNodeId]>),
+    Middle(Arc<Charged<[SemanticNodeId]>>),
 }
 
 impl TupleElementContext {
@@ -102,13 +147,19 @@ const TUPLE_CONTEXTS_CAPACITY: usize = 4096;
 /// against, by tuple node, and the element types of the middle ranges of
 /// them it has read, by tuple node and range. Each is derived from its
 /// tuple node's payload alone, and a node id is never reused, so an entry
-/// answers for its node for as long as that node is read. Neither map holds
-/// more than [`TUPLE_CONTEXTS_CAPACITY`] entries.
+/// answers for its node for as long as that node is read. Each kept payload
+/// is charged to the retention account, and one the account declines is
+/// not kept. Neither map holds more than [`TUPLE_CONTEXTS_CAPACITY`]
+/// entries.
 #[derive(Default)]
 pub(in crate::project_semantic_dispatch) struct TupleContexts {
     tuples: FxHashMap<SemanticNodeId, ContextualTuple>,
-    middles: FxHashMap<(SemanticNodeId, usize, usize), Arc<[SemanticNodeId]>>,
+    middles: FxHashMap<TupleRange, Arc<Charged<[SemanticNodeId]>>>,
 }
+
+/// A middle range of a contextual tuple: the tuple node, and the range's
+/// first and past-the-end element indexes.
+type TupleRange = (SemanticNodeId, usize, usize);
 
 /// The element type of a tuple's rest element `rest`: the element type of
 /// its array type. `None` when it is no array.
@@ -130,7 +181,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if let Some(tuple) = self.tuple_contexts.borrow().tuples.get(&node) {
             return tuple.clone();
         }
-        let tuple = ContextualTuple::new(node, elements);
+        let tuple = ContextualTuple::new(self.graph().retention_account(), node, elements);
+        if !tuple.elements.admitted() {
+            return tuple;
+        }
         let mut contexts = self.tuple_contexts.borrow_mut();
         if contexts.tuples.len() >= TUPLE_CONTEXTS_CAPACITY {
             contexts.tuples.clear();
@@ -191,11 +245,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     fn tuple_middle(
         &self,
         tuple: &ContextualTuple,
-        key: (SemanticNodeId, usize, usize),
-    ) -> Arc<[SemanticNodeId]> {
+        key: TupleRange,
+    ) -> Arc<Charged<[SemanticNodeId]>> {
         let (_, start, end) = key;
         let graph = self.graph();
-        let contexts: Arc<[SemanticNodeId]> = tuple.elements[start..end]
+        let contexts: Box<[SemanticNodeId]> = tuple.elements[start..end]
             .iter()
             .filter_map(|element| {
                 super::call_resolve::record_tuple_context_work(1);
@@ -206,11 +260,50 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             })
             .collect();
+        let contexts = Charged::reserve(
+            graph.retention_account(),
+            std::mem::size_of_val(&*contexts),
+            contexts,
+        );
+        if !contexts.admitted() {
+            return contexts;
+        }
         let mut known = self.tuple_contexts.borrow_mut();
         if known.middles.len() >= TUPLE_CONTEXTS_CAPACITY {
             known.middles.clear();
         }
         known.middles.insert(key, Arc::clone(&contexts));
         contexts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verter_session_query::retention::RetentionLimits;
+
+    /// A kept tuple-context payload is charged while any reader holds it
+    /// and released with its last holder; one the account declines is not
+    /// admitted, so the dispatcher reads it once and does not keep it.
+    #[test]
+    fn a_kept_payload_is_charged_until_its_last_holder_drops() {
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let payload: Box<[SemanticNodeId]> = vec![SemanticNodeId(1), SemanticNodeId(2)].into();
+        let kept = Charged::reserve(&account, std::mem::size_of_val(&*payload), payload);
+        assert!(kept.admitted());
+        let held = Arc::clone(&kept);
+        drop(kept);
+        assert!(account.snapshot().retained_bytes > 0);
+        assert_eq!(&**held, &[SemanticNodeId(1), SemanticNodeId(2)][..]);
+        drop(held);
+        assert_eq!(account.snapshot().retained_bytes, 0);
+
+        let tiny = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 1,
+            ..RetentionLimits::defaults()
+        });
+        let declined = Charged::reserve(&tiny, 64, vec![SemanticNodeId(3)].into_boxed_slice());
+        assert!(!declined.admitted());
+        assert_eq!(tiny.snapshot().retained_bytes, 0);
     }
 }
