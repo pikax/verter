@@ -606,30 +606,36 @@ fn member_path_typeof_chains_200_deep_answer_cold_and_warm_on_a_small_stack() {
     });
 }
 
-/// A chain of 500 functions each returning the type the one before returns
-/// evaluates on a 1 MiB thread, cold and warm alike: a function's `typeof`
-/// lowers its signatures one at a time as its frame's projections, which
-/// need the instantiations and `typeof`s they reach from the runtime.
-///
-/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
-/// `noImplicitAny` off: `ReturnType<typeof h500>` is `"ok"`.
+/// A chain of `depth` functions each returning the type the one before
+/// returns, answering `"ok"`, displayed cold and then warm.
+fn signature_chain_displays(depth: usize) -> [String; 2] {
+    let mut source = String::from(
+        "function h0(): \"ok\" { return \"ok\"; }
+",
+    );
+    for level in 1..=depth {
+        source.push_str(&format!(
+            "declare function h{level}(): ReturnType<typeof h{}>;
+",
+            level - 1
+        ));
+    }
+    let probe = format!("ReturnType<typeof h{depth}>");
+    assert_eq!(
+        evaluated_mismatches(&source, &[(probe.as_str(), "\"ok\"")]),
+        Vec::<String>::new()
+    );
+    cold_and_warm_displays(&source, &probe)
+}
+
+/// Signature chains 200 deep, cold and warm alike, on the small stack: the
+/// gate version of the 500-deep, 1 MiB test in the nightly scale tier, under
+/// the same tighter per-level stack bound as
+/// [`alias_chains_200_long_answer_every_row_cold_and_warm_on_a_small_stack`].
 #[test]
-fn signature_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+fn signature_chains_200_deep_answer_cold_and_warm_on_a_small_stack() {
     in_a_fresh_process(test_path!(), || {
-        let mut source = String::from("function h0(): \"ok\" { return \"ok\"; }\n");
-        for level in 1..=500 {
-            source.push_str(&format!(
-                "declare function h{level}(): ReturnType<typeof h{}>;\n",
-                level - 1
-            ));
-        }
-        let displays = on_a_one_mebibyte_stack(move || {
-            assert_eq!(
-                evaluated_mismatches(&source, &[("ReturnType<typeof h500>", "\"ok\"")]),
-                Vec::<String>::new()
-            );
-            cold_and_warm_displays(&source, "ReturnType<typeof h500>")
-        });
+        let displays = on_a_small_stack(|| signature_chain_displays(200));
         assert_eq!(displays[0], displays[1], "cold and warm answer alike");
     });
 }
@@ -1536,6 +1542,21 @@ mod nightly_scale {
         in_a_fresh_process(test_path!(), || {
             let displays = on_a_one_mebibyte_stack(|| conditional_chain_displays(500));
             assert_conditional_chains_decide(displays);
+        });
+    }
+
+    /// A chain of 500 functions each returning the type the one before returns
+    /// evaluates on a 1 MiB thread, cold and warm alike: a function's `typeof`
+    /// lowers its signatures one at a time as its frame's projections, which
+    /// need the instantiations and `typeof`s they reach from the runtime.
+    ///
+    /// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+    /// `noImplicitAny` off: `ReturnType<typeof h500>` is `"ok"`.
+    #[test]
+    fn signature_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+        in_a_fresh_process(test_path!(), || {
+            let displays = on_a_one_mebibyte_stack(|| signature_chain_displays(500));
+            assert_eq!(displays[0], displays[1], "cold and warm answer alike");
         });
     }
 }
