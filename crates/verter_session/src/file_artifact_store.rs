@@ -615,6 +615,10 @@ struct RootRegistryState {
     /// `epoch -> number of reserved-but-unapplied mutations at that
     /// epoch`. Its first key bounds the newest fully-applied epoch.
     in_flight: std::collections::BTreeMap<u64, usize>,
+    /// The newest epoch whose mutation has finished applying. It can lie
+    /// above [`Self::stable_epoch`] while an older mutation is still in
+    /// flight.
+    newest_completed: u64,
 }
 
 impl RootRegistryState {
@@ -652,6 +656,7 @@ impl LiveRootRegistry {
     /// [`EpochReservation::drop`].
     fn complete(&self, epoch: u64) {
         let mut state = self.state.lock();
+        state.newest_completed = state.newest_completed.max(epoch);
         if let std::collections::btree_map::Entry::Occupied(mut slot) = state.in_flight.entry(epoch)
         {
             let count = slot.get_mut();
@@ -709,6 +714,7 @@ impl Drop for EpochReservation<'_> {
 /// released once, when the last `Arc` drops.
 pub struct FileArtifactRoot {
     epoch: u64,
+    settled: bool,
     registry: Arc<LiveRootRegistry>,
 }
 
@@ -728,6 +734,21 @@ impl FileArtifactRoot {
     #[must_use]
     pub fn is_exhausted(&self) -> bool {
         self.epoch == EXHAUSTED_EPOCH
+    }
+
+    /// Does this root hold every mutation that had finished when it was
+    /// captured?
+    ///
+    /// A mutation in flight holds a capture back to the epoch before it,
+    /// and a newer mutation may already have finished above it. Such a
+    /// root omits that finished mutation even though a generation read
+    /// before the capture may already count it, so a view pairing the two
+    /// would describe a world no generation names. A mutation still in
+    /// flight unsettles nothing: it advances the generation only after it
+    /// finishes, so no generation read before the capture counts it.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.settled
     }
 }
 
@@ -1259,18 +1280,36 @@ impl FileArtifactStore {
     /// the capture back to its predecessor, so no root can observe a
     /// half-applied transition (and then observe the other half through
     /// the same, supposedly immutable, root).
+    ///
+    /// Held back that way, a root can predate a NEWER mutation that has
+    /// already finished — and that has already advanced
+    /// [`Self::artifact_generation`]. The root records whether any epoch
+    /// above its own had finished when it was captured
+    /// ([`FileArtifactRoot::is_settled`]); only a settled root is known to
+    /// hold every mutation an earlier generation read accounts for. Every
+    /// mutation advances the generation after its reservation is released,
+    /// which is what makes a finished epoch the only one a generation read
+    /// can count.
     #[must_use]
     pub fn capture_root(&self) -> Arc<FileArtifactRoot> {
-        let epoch = {
+        let (epoch, settled) = {
             let mut state = self.live_roots.state.lock();
             let epoch = state.stable_epoch(self.membership_epoch.load(Ordering::Acquire));
             *state.roots.entry(epoch).or_insert(0) += 1;
-            epoch
+            (epoch, state.newest_completed <= epoch)
         };
         Arc::new(FileArtifactRoot {
             epoch,
+            settled,
             registry: Arc::clone(&self.live_roots),
         })
+    }
+
+    /// Reserve a membership epoch and hold it until the returned guard
+    /// drops, as a mutation that has not finished applying does.
+    #[cfg(test)]
+    pub(crate) fn hold_membership_epoch_for_test(&self) -> impl Drop + '_ {
+        self.reserve_membership_epoch()
     }
 
     /// Does `root` address THIS store's membership?
@@ -2250,8 +2289,12 @@ impl FileArtifactStore {
         // entry it contributed to so the next cold-rescan rebuilds without it.
         // Same epoch as the artifact retirements above — one membership
         // transition, not two.
-        self.invalidate_augmentation_index_at_epoch(&removed_augmentations, epoch);
+        let retired_index =
+            self.invalidate_augmentation_index_at_epoch(&removed_augmentations, epoch);
         drop(reservation);
+        if retired_index > 0 {
+            self.bump_artifact_generation();
+        }
         self.publish_global_contributors();
         self.note_retirements(removed.len());
         removed
@@ -3687,6 +3730,9 @@ impl FileArtifactStore {
         let epoch = reservation.epoch();
         let retired = self.invalidate_augmentation_index_at_epoch(augmenter_facts, epoch);
         drop(reservation);
+        if retired > 0 {
+            self.bump_artifact_generation();
+        }
         self.publish_global_contributors();
         retired
     }
@@ -3694,7 +3740,9 @@ impl FileArtifactStore {
     /// [`Self::invalidate_augmentation_index_for_augmenter`] under a
     /// caller-supplied membership epoch — the form the artifact
     /// retirement chokepoint uses so both halves of one removal share a
-    /// single epoch and no root can observe them split.
+    /// single epoch and no root can observe them split. Returns how many
+    /// entries it retired; the caller advances the artifact generation for
+    /// them once its reservation is released.
     fn invalidate_augmentation_index_at_epoch(
         &self,
         augmenter_facts: &[ModuleAugmentationFact],
@@ -3720,14 +3768,10 @@ impl FileArtifactStore {
         // Retirement removes index contributors, which IS a change to the
         // augmentation world — so it advances the route-surface clock,
         // inside the same bracket, unlike the publication cases above.
-        let removed = self.route_surface_generation.mutate(|| {
+        self.route_surface_generation.mutate(|| {
             let removed = self.retire_augmenter_keys(&retire_keys, epoch);
             (removed, removed > 0)
-        });
-        if removed > 0 {
-            self.bump_artifact_generation();
-        }
-        removed
+        })
     }
 
     /// Retire every entry from the augmentation index.

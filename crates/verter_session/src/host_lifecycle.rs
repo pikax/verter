@@ -467,7 +467,24 @@ impl VerterHost {
     /// set, exacts are re-applied via `set_exact_resolutions` from
     /// preserved `cc.import_routes` so the workspace mirrors host
     /// bundler state.
-    pub(crate) fn integrate_scheduler_snapshot(&self, canonical_id: &str) -> bool {
+    ///
+    /// `eviction_epoch` is the file's eviction epoch when the load began.
+    /// If an eviction has landed since, this writes nothing, the file stays
+    /// evicted, and it returns `false`: the load may have read the content
+    /// that eviction replaced, and the next reload integrates the content
+    /// after it.
+    /// The reset lock of `canonical_id`'s derived row, when it has one.
+    fn eviction_reset_lock(&self, canonical_id: &str) -> Option<Arc<parking_lot::Mutex<()>>> {
+        self.derived_raw_cache()
+            .get(canonical_id)
+            .map(|derived| Arc::clone(&derived.eviction_reset))
+    }
+
+    pub(crate) fn integrate_scheduler_snapshot(
+        &self,
+        canonical_id: &str,
+        eviction_epoch: u64,
+    ) -> bool {
         use crate::host_executor::HostSourceData;
 
         let snap = match self.scheduler.try_get_source(canonical_id) {
@@ -477,6 +494,15 @@ impl VerterHost {
         let Some(hd) = snap.downcast_data::<HostSourceData>() else {
             return false;
         };
+        #[cfg(test)]
+        integrate_test_hooks::after_snapshot_capture();
+        if self
+            .derived_raw_cache()
+            .get(canonical_id)
+            .is_some_and(|derived| derived.eviction_epoch != eviction_epoch)
+        {
+            return false;
+        }
 
         let parsed_edges = Self::build_parsed_edges_from_analysis(
             canonical_id,
@@ -529,14 +555,19 @@ impl VerterHost {
         // set_import_dependencies before source was loaded. Cloning
         // here so we can re-apply to workspace below without holding the
         // entry lock.
-        let preserved_routes = {
+        // A file evicted again while this load ran stays evicted: the load
+        // may have read the content that eviction replaced.
+        let (preserved_routes, unevicted) = {
             let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
             let derived = derived_ref.value_mut();
             let preserved_routes = derived.import_routes.clone();
-            derived.evicted = false;
+            let unevicted = derived.eviction_epoch == eviction_epoch;
+            if unevicted {
+                derived.evicted = false;
+            }
             // derived.import_routes is NOT cleared (preserves bundler
             // pre-load route flow).
-            preserved_routes
+            (preserved_routes, unevicted)
         };
 
         self.update_alias_map(canonical_id, &old_aliases, &aliases);
@@ -568,7 +599,7 @@ impl VerterHost {
                 exact_resolutions,
             );
         }
-        true
+        unevicted
     }
 
     /// Clear compile caches (compile slots, template analysis, type
@@ -1325,6 +1356,7 @@ impl VerterHost {
             let derived = derived_ref.value_mut();
             derived.evicted = true;
             derived.evicted_whole_hash = pre_evict_hash;
+            derived.eviction_epoch += 1;
             derived.cached_tsc_extract = None;
             derived.clear_raw_template_analysis();
             derived.cached_resolved_meta.clear();
@@ -1385,18 +1417,52 @@ impl VerterHost {
 
         use verter_scheduler::job::CompletionState;
 
-        let (reload_from_workspace, pre_evict_hash) = self
-            .derived_raw_cache()
-            .get(canonical_id)
-            .filter(|d| d.evicted)
-            .map(|d| (true, d.evicted_whole_hash))
-            .unwrap_or((false, None));
-
-        if reload_from_workspace {
-            // Evicted files must force the scheduler off any stale
-            // committed snapshot before we request a disk-backed reload.
-            self.scheduler.close_file(canonical_id);
-        }
+        // An evicted file must move the scheduler off the snapshot its
+        // evicted content left behind before a disk-backed reload is
+        // requested, once per eviction. Until then that snapshot keeps the
+        // file addressable. The reset bumps the file's scheduler generation,
+        // so a second reset by a caller racing this reload would supersede
+        // the load another caller submitted, or retract the source it
+        // integrated. The file's reset lock orders racing callers: the first
+        // resets and records the eviction it reset for, and the rest find it
+        // reset and submit after it. An eviction landing after that record
+        // raises the eviction epoch above it, so its reload resets again.
+        let (reload_from_workspace, pre_evict_hash, eviction_epoch) = loop {
+            let reset_lock = self.eviction_reset_lock(canonical_id);
+            let _reset = reset_lock.as_ref().map(|lock| lock.lock());
+            // The state is read under the lock its row owns: a row an
+            // eviction created, or replaced, after the lock lookup is read
+            // again under its own lock.
+            let observed = self.derived_raw_cache().get(canonical_id).map(|d| {
+                (
+                    reset_lock
+                        .as_ref()
+                        .is_some_and(|lock| Arc::ptr_eq(lock, &d.eviction_reset)),
+                    d.evicted,
+                    d.evicted_whole_hash,
+                    d.eviction_epoch,
+                    d.eviction_reset_epoch,
+                )
+            });
+            if observed.is_some_and(|(owns_lock, ..)| !owns_lock) {
+                continue;
+            }
+            break match observed
+                .map(|(_, evicted, hash, epoch, reset)| (evicted, hash, epoch, reset))
+            {
+                Some((true, pre_evict_hash, epoch, reset_epoch)) => {
+                    if reset_epoch < epoch {
+                        self.scheduler.close_file(canonical_id);
+                        if let Some(mut derived) = self.derived_raw_cache().get_mut(canonical_id) {
+                            derived.eviction_reset_epoch = derived.eviction_reset_epoch.max(epoch);
+                        }
+                    }
+                    (true, pre_evict_hash, epoch)
+                }
+                Some((false, _, epoch, _)) => (false, None, epoch),
+                None => (false, None, 0),
+            };
+        };
 
         // Submit to scheduler — it loads via WorkspaceSourceLoader.
         // Submission goes THROUGH the host's cooperative adapter: a
@@ -1457,7 +1523,13 @@ impl VerterHost {
         }
 
         let work_start = Instant::now();
-        let loaded = self.integrate_scheduler_snapshot(canonical_id);
+        // Integrated under the file's reset lock, so one reload's
+        // integration never interleaves with another's for the same file.
+        let loaded = {
+            let reset_lock = self.eviction_reset_lock(canonical_id);
+            let _integrating = reset_lock.as_ref().map(|lock| lock.lock());
+            self.integrate_scheduler_snapshot(canonical_id, eviction_epoch)
+        };
         self.provenance
             .ensure_loaded_work_ns
             .fetch_add(work_start.elapsed().as_nanos() as u64, Relaxed);
@@ -1610,5 +1682,27 @@ impl HostReleaseCompletion<'_> {
         self.parse.wait()?;
         self.host.reclaim_released_storage();
         Ok(())
+    }
+}
+
+/// A test seam inside snapshot integration: an action the calling thread runs
+/// once, after the snapshot is captured and before anything is written.
+#[cfg(test)]
+pub(crate) mod integrate_test_hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static AFTER_SNAPSHOT_CAPTURE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `action` at this thread's next snapshot capture.
+    pub(crate) fn arm_after_snapshot_capture(action: impl FnOnce() + 'static) {
+        AFTER_SNAPSHOT_CAPTURE.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
+    }
+
+    pub(super) fn after_snapshot_capture() {
+        if let Some(action) = AFTER_SNAPSHOT_CAPTURE.with(|slot| slot.borrow_mut().take()) {
+            action();
+        }
     }
 }

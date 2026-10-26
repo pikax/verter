@@ -3957,6 +3957,7 @@ dependencies = [
 name = "verter_session"
 version = "0.0.1-beta.7"
 dependencies = [
+ "aho-corasick",
  "arc-swap",
  "bitflags",
  "blake3",
@@ -4372,6 +4373,7 @@ dependencies = [
  "verter_tsgo_api",
  "verter_type_expr",
  "walkdir",
+ "windows-sys",
  "xxhash-rust",
 ]
 

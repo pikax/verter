@@ -12,8 +12,8 @@
 //! its one definition. The static views reach it through the
 //! `FlowDemandDriver` trait (`flow_return.rs`), whose impls forward to this
 //! method, so deleting or renaming it is a compile error at every impl.
-//! What a spelling counter cannot see is guarded by the §6.5 invariant test
-//! `type_expr_lowering_has_exactly_two_single_definition_producers`: no
+//! What a spelling counter cannot see is guarded by the production-source
+//! rule `type_expr_lowering_has_exactly_two_single_definition_producers`: no
 //! bare-`mode` wrapper beside this producer (every caller states its full
 //! [`ProjectionReductionContext`] demand explicitly) and exactly one
 //! query-free structural producer `fn lower_type_expr_structural`.
