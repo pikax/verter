@@ -5003,7 +5003,7 @@ fn session_graph_lowerer_makes_no_query() {
         "tsserver",
         // Assembled at compile time so this needle list does not itself carry
         // the literal identifier and trip the
-        // `no_session_solver_host_in_production_code` retired-symbol scanner,
+        // `no_session_solver_host_in_production_code` retired-symbol rule,
         // which greps non-`*_tests.rs` `crates/**` source for `SessionSolverHost`.
         // The scan against `structural_carrier_producer/macro_arg_producer.rs` is
         // unchanged — it still looks for the full assembled identifier.

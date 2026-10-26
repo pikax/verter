@@ -594,6 +594,8 @@
           "reset",
           "restart_driver",
           "quiesce",
+          "stage_task_boundary",
+          "wait_stage_tasks_before",
           "register_resolved_deps",
           "config",
           "commit_artifact",

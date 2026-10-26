@@ -78,9 +78,22 @@ Recurring server notifications are subscriptions: the server sends
 unasked must now declare the subscription at `initialize`: the VS Code
 extension declares both in `packages/vue-vscode/src/extension.ts`, and every
 other client (Lapce, Neovim, JetBrains, custom) that consumes either
-notification must opt in the same way. The workspace scan is likewise not
-started at `initialized`, `didOpen` or `didChange`; it starts on the first
-request that needs the complete workspace inventory:
+notification must opt in the same way.
+
+`carrierStoreFill: true` is the negotiated demand half of that contract, also
+default-off: a client that runs a consumer over the durable carrier store (the
+VS Code extension wiring its own TypeScript service over the store) declares it
+once at `initialize`, and it is the one signal that starts workspace work
+without a request — when the serving tier has a carrier publisher (the
+editor-owned plugin route, managed tsserver, managed TSGO), the init's own
+arming gate starts the same idempotent workspace scan a request's demand uses;
+a tier with no publisher treats it as inert. No warm-up request is involved,
+and no scan message is ever sent back on this subscription — its fulfilment is
+observed through the `carrierStoreChanged` pings above.
+
+The workspace scan is likewise not started at `initialized`, `didOpen` or
+`didChange` on any other path; it starts on the first request that needs the
+complete workspace inventory:
 
 - references/rename that need the complete carrier frontier fail closed until
   the frontier is built;
@@ -95,8 +108,9 @@ request that needs the complete workspace inventory:
 Document-local requests (hover, diagnostics, document-local completion) never
 wait on or start the scan. `$/verter/typeProviderSyncComplete` no longer implies
 a scanned workspace; a client that needs the complete inventory demands it with
-one of the requests above and retries on `-32803`. The standalone MCP server
-owns its own host and tracked-files-only inventory.
+one of the requests above and retries on `-32803`, or subscribes the
+`carrierStoreFill` demand and lets the init arm the scan. The standalone MCP
+server owns its own host and tracked-files-only inventory.
 
 The pre-release `$/verter/applyStyleOverrides` method was removed by the sealed
 block-content cutover. The LSP does not accept processor-produced bytes;

@@ -353,6 +353,9 @@ verter_test_support = { path = "../verter_test_support" }
 tempfile = "3.27"
 walkdir = "2.5"
 regex = "1.12"
+# One multi-pattern pass over the production sources for the retired-vocabulary
+# rules in `project_semantic_dispatch_invariants_tests`.
+aho-corasick = "1.1.4"
 # Named per-resource serialization for integration tests that contend a
 # process-global resource. Two groups: `fact_counter_provenance` (the
 # fact-counter provenance discriminators) and `parse_fact_injection` (the

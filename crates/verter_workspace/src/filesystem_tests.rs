@@ -3319,3 +3319,71 @@ fn snapshot_change_tombstone_on_close_preserves_the_backing_file() {
         }]
     );
 }
+
+/// A replay that settles before admission returns its own outcome, even
+/// when a file it observed changed on disk meanwhile: only an admission
+/// re-reads the sealed evidence live. Here the replay finds the workspace
+/// republished under it and refuses as superseded; that refusal is the
+/// answer, not a restart that could spend the restart budget.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_replay_refused_before_admission_returns_its_refusal_across_a_watched_file_change() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let (_temp, root, importer, manifest, workspace) = filesystem_package_fixture(1);
+    let workspace = Arc::new(workspace);
+    let published = workspace.load_published().expect("published root");
+    let _ = crate::resolver::take_outer_restarts_for_test();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let hook_attempts = Arc::clone(&attempts);
+    let hook_workspace = Arc::clone(&workspace);
+    let manifest_path = std::path::PathBuf::from(&manifest);
+    let outcome = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::AttemptStart,
+        move || {
+            // The first attempt discovers; the second is the replay over the
+            // sealed evidence.
+            if hook_attempts.fetch_add(1, Ordering::AcqRel) != 1 {
+                return;
+            }
+            std::fs::write(&manifest_path, r#"{"name":"pkg","types":"./b.d.ts"}"#)
+                .expect("rewrite the observed manifest");
+            WorkspaceAccess::configure_resolver(
+                &*hook_workspace,
+                vec![crate::resolver::ide_project_config(
+                    root.clone(),
+                    root.clone(),
+                    Some(format!("{root}/jsconfig.json")),
+                )],
+            );
+        },
+        || {
+            WorkspaceRead::resolve_import_at_published(
+                &*workspace,
+                &published,
+                &importer,
+                "pkg",
+                CONTEXT,
+            )
+        },
+    );
+    assert!(
+        attempts.load(Ordering::Acquire) >= 2,
+        "the resolution reached its replay"
+    );
+    assert_eq!(
+        outcome.non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::ResolutionViewSuperseded),
+        "the replay's refusal is returned as it is: {:?}",
+        outcome.result()
+    );
+    assert_eq!(
+        crate::resolver::take_outer_restarts_for_test(),
+        0,
+        "returning the refusal charges no restart"
+    );
+}

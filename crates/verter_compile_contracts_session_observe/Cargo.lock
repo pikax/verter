@@ -2192,6 +2192,7 @@ dependencies = [
  "verter_language",
  "verter_macro_dto",
  "verter_parser",
+ "verter_retention",
  "verter_semantic",
  "verter_session_query",
  "verter_span",
@@ -2238,6 +2239,7 @@ name = "verter_identity"
 version = "0.0.1-beta.7"
 dependencies = [
  "blake3",
+ "verter_retention",
 ]
 
 [[package]]
@@ -2246,6 +2248,7 @@ version = "0.0.1-beta.7"
 dependencies = [
  "getrandom 0.2.17",
  "verter_identity",
+ "verter_retention",
  "verter_span",
 ]
 
@@ -2315,6 +2318,7 @@ dependencies = [
  "stacker",
  "verter_debug_assert",
  "verter_language",
+ "verter_retention",
  "verter_session_query",
  "verter_span",
  "verter_type_expr",
@@ -2428,6 +2432,7 @@ dependencies = [
  "verter_macro_dto",
  "verter_no_typeexpr",
  "verter_parser",
+ "verter_retention",
  "verter_session_query",
  "verter_span",
  "verter_type_expr",
@@ -2458,6 +2463,7 @@ dependencies = [
  "verter_execution",
  "verter_language",
  "verter_parser",
+ "verter_retention",
  "verter_semantic",
  "verter_session_query",
  "verter_span",
@@ -2671,6 +2677,7 @@ dependencies = [
  "verter_tsgo_api",
  "verter_type_expr",
  "walkdir",
+ "windows-sys",
  "xxhash-rust",
 ]
 

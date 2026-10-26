@@ -16,10 +16,12 @@ publish = false
 # adapters) constructs and compares typed identities through, so its own
 # production closure must reach NOTHING above layer 1 (identity/span/language/
 # contracts) in `crates/verter_identity/tests/cases/workspace_dependency_layers.rs`'s
-# layer matrix. `blake3` is the sole non-workspace production dependency (the
-# canonical-encoding digest primitive); there is no `verter_*` production
-# dependency at all — even `verter_span` is deliberately NOT a dependency here,
-# because a `Span`-carrying identity is a decision for the type that OWNS the
+# layer matrix. `blake3` is the canonical-encoding digest primitive. The sole
+# `verter_*` production dependency is the layer-1 `verter_retention`, so that
+# every owner retaining an identity measures its heap storage through one
+# `HeapSize` derive; it carries no identity or semantic vocabulary. Even
+# `verter_span` is deliberately NOT a dependency here, because a
+# `Span`-carrying identity is a decision for the type that OWNS the
 # span-relative concept, not for this neutral vocabulary crate.
 [dependencies]
 verter_retention = { path = "../verter_retention" }

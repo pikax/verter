@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{footprint, hash_table_bytes, owned_tree, HeapSize};
+use super::{footprint, hash_table_bytes, owned_tree, HeapMeter, HeapSize};
 use crate::allocation::{arc_block_bytes, heap_block_bytes};
 use crate::owned::{ChargeCtx, OwnedStr};
 use crate::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
@@ -25,6 +25,56 @@ enum Node {
 
 fn account() -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits::defaults())
+}
+
+#[test]
+fn inline_buffers_charge_backing_without_visiting_every_element() {
+    fn assert_bulk(value: &impl HeapSize, bytes: usize, counter: &str) {
+        let mut aliases = crate::allocation::AliasSet::new();
+        let mut meter = HeapMeter::new(&mut aliases);
+        assert_eq!(
+            value.heap_size(&mut meter),
+            bytes,
+            "backing stays fully measured"
+        );
+        let visits = meter.inline_element_visits;
+        println!("{counter}={visits}");
+        assert_eq!(visits, 0, "inline elements need no individual heap walk");
+    }
+
+    let mut values = Vec::with_capacity(8192);
+    values.resize(4096, 1u8);
+    assert_bulk(
+        &values,
+        heap_block_bytes(values.capacity()),
+        "inline_vec_element_visits",
+    );
+    let boxed = values.into_boxed_slice();
+    assert_bulk(
+        &boxed,
+        heap_block_bytes(std::mem::size_of_val(&*boxed)),
+        "inline_boxed_element_visits",
+    );
+    let shared: Arc<[u8]> = Arc::from(boxed);
+    assert_bulk(
+        &(Arc::clone(&shared), Arc::clone(&shared)),
+        arc_block_bytes(std::mem::size_of_val(&*shared)),
+        "inline_arc_element_visits",
+    );
+    let arrays = vec![[1u8; 16]; 256];
+    assert_bulk(
+        &arrays,
+        heap_block_bytes(arrays.capacity() * std::mem::size_of::<[u8; 16]>()),
+        "inline_array_element_visits",
+    );
+    let scalar = 1u8;
+    let mut aliases = crate::allocation::AliasSet::new();
+    let mut meter = HeapMeter::new(&mut aliases);
+    assert_eq!(scalar.heap_size(&mut meter), 0);
+    assert_eq!(
+        meter.inline_element_visits, 1,
+        "the scalar control is visited"
+    );
 }
 
 #[test]

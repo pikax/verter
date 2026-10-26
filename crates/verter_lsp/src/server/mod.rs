@@ -621,6 +621,15 @@ pub struct ServerCore {
     /// instead of a deadline.
     #[cfg(test)]
     open_carrier_publish_before_lease_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    /// Pause point inside the background-init completion waiter, between the
+    /// scan-settle wait and the post-init drain — the scan-to-tail handoff. A
+    /// test that parks the waiter here can publish through a detached
+    /// successor pass while the waiter is delayed and then resume it, pinning
+    /// that the store-fill announcement baseline does not absorb publications
+    /// that landed during the delay.
+    #[cfg(test)]
+    pub(crate) post_scan_settle_waiter_pause:
+        parking_lot::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// Canonical IDs needing **deferred API/.vue.ts sync** + owner-aware reconciliation.
     /// Set by did_change and by the interactive path (when API is deferred).
     /// Cleared by the coordinator's debounced sync after a resolver snapshot exists.
@@ -1427,6 +1436,8 @@ impl VerterLanguageServer {
             publish_carrier_after_compile_pause: parking_lot::Mutex::new(None),
             #[cfg(test)]
             open_carrier_publish_before_lease_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            post_scan_settle_waiter_pause: parking_lot::Mutex::new(None),
             needs_deferred_sync,
             pending_snapshot_provider_sync,
             sync_coordinator,

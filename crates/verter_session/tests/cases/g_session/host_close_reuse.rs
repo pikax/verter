@@ -418,6 +418,9 @@ fn closing_one_host_keeps_an_unrelated_live_hosts_data_and_charges() {
         "the closed host returns to its baseline; differing: {:#?}",
         differing(&closed_now, &closed_expected)
     );
+    // The account is process-wide: the closed host's own tables stay
+    // allocated, and charged, until it drops.
+    drop(closed);
     let live_now = shared_capacity(retained(&live.retention_snapshot()));
     let live_expected = shared_capacity(live_footprint);
     assert!(
@@ -502,6 +505,7 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
             drop((control_answer, control_artifact));
             control.close();
             drain(&control);
+            drop(control);
             let readers_only = total(&host);
             assert!(
                 readers_only <= total_before_close,
@@ -690,13 +694,15 @@ fn a_close_racing_a_publication_settles_to_the_baseline() {
 
 /// A parse artifact held across the close keeps the parse snapshot pin it
 /// held live, as observed on the owning worker, and releases it once with
-/// the artifact: the fall is that pin plus the artifact's own small charge,
-/// never a second pin.
+/// the artifact: the fall is that pin plus the artifact's own charge, never
+/// a second pin and never more than the artifact kept on a live host.
 #[test]
 fn a_held_artifact_keeps_and_releases_its_inspected_parse_pin_once() {
     let _serial = serial();
+    let live_bound = live_artifact_bound(3);
     let host = VerterHost::new_standalone(HostConfig::default());
     let baseline = retained(&host.retention_snapshot());
+    let base_total = baseline.active_bytes + baseline.retained_bytes + baseline.pinned_bytes;
     let (answer, _) = demand(&host, 3);
     drop(answer);
     let artifact = host
@@ -720,9 +726,19 @@ fn a_held_artifact_keeps_and_releases_its_inspected_parse_pin_once() {
     drain(&host);
     let fall = before - total(&host);
     assert_eq!(host.parse_pin_bytes_for_tests(), 0, "the snapshot is freed");
+    // The artifact charges its own storage exhaustively, which can exceed
+    // the pin: the fall is bounded by what the same workload kept charged
+    // on a host that never closed, so a pin the close charged again cannot
+    // hide behind a control that closes the same way.
     assert!(
-        fall >= live_pin && fall < 2 * live_pin,
-        "the artifact's release returns its pin once ({live_pin}) plus its own charge, not {fall}"
+        fall >= live_pin && fall <= live_bound,
+        "the artifact's release returns its pin once ({live_pin}) plus its own charge, at most \
+         the live workload's {live_bound}, not {fall}"
+    );
+    assert_eq!(
+        fall,
+        before - base_total,
+        "the held artifact was all the closed host still charged"
     );
     assert_at_baseline(&host, &baseline, "after the artifact's release");
 }

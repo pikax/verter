@@ -421,7 +421,8 @@ impl verter_retention::heap_size::HeapSize for IndexedReady {
             snapshot,
             route_inventory,
             declares_interface_app_config: _,
-            macro_hot_mirror,
+            // The mirror charges its own cells as they are allocated.
+            macro_hot_mirror: _,
             source_parse_key,
             input_projection: _,
         } = self;
@@ -435,7 +436,6 @@ impl verter_retention::heap_size::HeapSize for IndexedReady {
             + snapshot.heap_size(meter)
             + route_inventory.heap_size(meter)
             + source_parse_key.heap_size(meter)
-            + macro_hot_mirror.heap_size(meter)
     }
     fn pin_storage(&self, _context: &verter_retention::pinned_heap::PinContext) -> bool {
         self.pin_storage();

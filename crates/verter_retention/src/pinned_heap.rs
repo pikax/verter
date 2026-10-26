@@ -2,6 +2,7 @@
 //! allocation's charge through the process registry; owned cells charge
 //! themselves. No admission decision can refuse or revoke this storage.
 
+#[cfg(any(test, feature = "test-support"))]
 use std::cell::RefCell;
 use std::sync::{Arc, OnceLock};
 
@@ -10,7 +11,6 @@ use crate::granular::GranularPin;
 use crate::heap_size::{HeapMeter, HeapSize};
 use crate::owned::ChargeCtx;
 use crate::shared::{AliasCharges, CallerHold};
-use crate::word_set::WordSet;
 use crate::{SemanticRetentionAccount, StoreAccount};
 
 /// Accounting context shared by every pinned artifact in the process.
@@ -77,12 +77,12 @@ impl PinContext {
     pub fn account(&self) -> &Arc<SemanticRetentionAccount> {
         self.account.get()
     }
-}
 
-pub(crate) struct Collector {
-    pub context: PinContext,
-    pub seen: WordSet,
-    pub pins: Vec<CallerHold>,
+    /// Give back the shared-allocation registry's table capacity that
+    /// released owners left behind. See [`AliasCharges::reclaim_table`].
+    pub fn reclaim_shared_storage(&self) {
+        self.aliases.reclaim_table();
+    }
 }
 
 /// One owner's live backing and holds on shared allocations. Dropping the
@@ -96,19 +96,14 @@ pub struct PinnedHeap {
 
 impl PinnedHeap {
     pub fn measure(value: &impl HeapSize, inline: usize, context: &PinContext) -> Self {
-        let collector = RefCell::new(Collector {
-            context: context.clone(),
-            seen: WordSet::new(),
-            pins: Vec::new(),
-        });
         let mut handles = AliasSet::collecting();
-        let mut meter = HeapMeter::pinning(&mut handles, &collector);
+        let mut meter = HeapMeter::pinning(&mut handles, context);
         let bytes = inline + value.heap_size(&mut meter);
-        meter.finish_pins();
+        let pins = meter.finish_pins();
         handles
             .take_handles()
             .pin(ChargeCtx::new(context.account()));
-        let pins = collector.into_inner().pins.into_boxed_slice();
+        let pins = pins.into_boxed_slice();
         let mut backing = GranularPin::new(context.account(), 1024);
         backing.add(bytes + heap_block_bytes(std::mem::size_of_val(&*pins)));
         Self {
@@ -125,8 +120,16 @@ impl PinnedHeap {
 /// A charge embedded in a mutable assembly and sealed at publication.
 /// Cloning an assembly creates new backing, so its charge is measured again
 /// when that assembly is published. Shared child allocations stay shared.
-#[derive(Debug, Default)]
-pub struct StoragePin(parking_lot::Mutex<Option<PinnedHeap>>);
+#[derive(Default)]
+pub struct StoragePin(OnceLock<PinnedHeap>);
+
+/// Storage is accounting, not content: a record's `Debug` stays the same
+/// whatever the account holds while it is printed.
+impl std::fmt::Debug for StoragePin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StoragePin")
+    }
+}
 
 impl Clone for StoragePin {
     fn clone(&self) -> Self {
@@ -136,13 +139,11 @@ impl Clone for StoragePin {
 
 impl StoragePin {
     pub fn invalidate(&mut self) {
-        *self.0.get_mut() = None;
+        drop(self.0.take());
     }
     pub fn ensure(&self, value: &impl HeapSize, inline: usize, context: &PinContext) {
-        let mut pin = self.0.lock();
-        if pin.is_none() {
-            *pin = Some(PinnedHeap::measure(value, inline, context));
-        }
+        self.0
+            .get_or_init(|| PinnedHeap::measure(value, inline, context));
     }
 }
 
@@ -267,6 +268,99 @@ impl<T> HeapSize for PinnedOnce<T> {
 mod tests {
     use super::*;
     use crate::{ChargeClass, RetentionAdmission, RetentionLimits};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountedOwner {
+        storage: StoragePin,
+        checks: AtomicUsize,
+        walks: AtomicUsize,
+        text: String,
+    }
+
+    impl CountedOwner {
+        fn new() -> Self {
+            Self {
+                storage: StoragePin::default(),
+                checks: AtomicUsize::new(0),
+                walks: AtomicUsize::new(0),
+                text: String::with_capacity(1024 * 1024),
+            }
+        }
+    }
+
+    impl HeapSize for CountedOwner {
+        fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+            let Self {
+                storage,
+                checks: _,
+                walks,
+                text,
+            } = self;
+            walks.fetch_add(1, Ordering::Relaxed);
+            storage.heap_size(meter) + text.heap_size(meter)
+        }
+
+        fn pin_storage(&self, context: &PinContext) -> bool {
+            self.checks.fetch_add(1, Ordering::Relaxed);
+            self.storage.ensure(
+                self,
+                crate::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+                context,
+            );
+            true
+        }
+    }
+
+    #[test]
+    fn pinned_walk_checks_embedded_owners_once_per_allocation() {
+        let context = PinContext::new(SemanticRetentionAccount::new(RetentionLimits::defaults()));
+        let owner = Arc::new(CountedOwner::new());
+        let aliases = vec![Arc::clone(&owner); 64];
+        let first = PinnedHeap::measure(&aliases, 0, &context);
+        let checks = owner.checks.load(Ordering::Relaxed);
+        println!(
+            "embedded_pin_checks={checks} shared_aliases={}",
+            aliases.len()
+        );
+        assert_eq!(
+            checks, 1,
+            "one allocation needs one ownership check per walk"
+        );
+        assert_eq!(owner.walks.load(Ordering::Relaxed), 1);
+        let charged = context.account().snapshot().pinned_bytes;
+        assert!(charged >= owner.text.capacity());
+        let second = PinnedHeap::measure(&owner, 0, &context);
+        assert_eq!(owner.checks.load(Ordering::Relaxed), 2);
+        assert_eq!(owner.walks.load(Ordering::Relaxed), 1);
+        assert_eq!(context.account().snapshot().pinned_bytes, charged);
+        drop((aliases, first, second));
+        assert!(context.account().snapshot().pinned_bytes >= owner.text.capacity());
+        drop(owner);
+        assert_eq!(context.account().snapshot().total_bytes(), 0);
+    }
+
+    #[test]
+    fn concurrent_embedded_publications_measure_and_charge_the_payload_once() {
+        let context = PinContext::new(SemanticRetentionAccount::new(RetentionLimits::defaults()));
+        let owner = Arc::new(CountedOwner::new());
+        let barrier = std::sync::Barrier::new(2);
+        let pins = std::thread::scope(|scope| {
+            let publish = || {
+                barrier.wait();
+                PinnedHeap::measure(&owner, 0, &context)
+            };
+            let first = scope.spawn(publish);
+            let second = scope.spawn(publish);
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        assert_eq!(owner.checks.load(Ordering::Relaxed), 2);
+        assert_eq!(owner.walks.load(Ordering::Relaxed), 1);
+        assert!(context.account().snapshot().pinned_bytes >= owner.text.capacity());
+        drop(pins);
+        assert!(context.account().snapshot().pinned_bytes >= owner.text.capacity());
+        drop(owner);
+        assert_eq!(context.account().snapshot().total_bytes(), 0);
+    }
 
     #[derive(HeapSize)]
     struct Payload {

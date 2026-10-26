@@ -158,16 +158,12 @@ impl FrozenBump {
     pub(crate) fn freeze(bump: Bump) -> Self {
         Self(bump)
     }
-}
 
-impl verter_retention::heap_size::HeapSize for FrozenBump {
-    fn heap_size<'t>(
-        &'t self,
-        _meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        // One aggregate arena reservation, including spare capacity and
-        // bumpalo's chunk metadata. Bump-backed children own no separate heap.
-        verter_retention::allocation::heap_block_bytes(self.0.allocated_bytes_including_metadata())
+    /// The arena's one aggregate reservation: every chunk with its spare
+    /// capacity and bumpalo's chunk metadata. Bump-backed children own no
+    /// separate heap.
+    pub(crate) fn reserved_bytes(&self) -> usize {
+        self.0.allocated_bytes_including_metadata()
     }
 }
 

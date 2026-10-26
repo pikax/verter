@@ -51,8 +51,12 @@ initializer to transitive `NoTypeExpr` facts, preserving that witness through
 erased accounting metadata. `HeapSize` derives may declare an embedded-pin
 hook with `#[heap_size(pin = "path")]` while still measuring every field.
 Pinned heap walks keep one iterative worklist and attribute each deferred node
-to its owning allocation before registering shared charges. Test-only
-`PinContext::enter_for_test` scopes isolated accounting on one thread; host
+to its owning allocation before registering shared charges.
+Contiguous buffers use `HeapSize::heap_size_of_slice` for element heap, beside
+their full capacity/block charge. Inline scalars and Copy arrays summarize
+their zero element heap without walking every byte; owning elements retain
+the exhaustive default walk and owned-handle collection.
+Test-only `PinContext::enter_for_test` scopes isolated accounting on one thread; host
 stage executors explicitly carry it to workers. Production defaults still
 share the single process account and registry.
 
