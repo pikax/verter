@@ -334,20 +334,7 @@ fn assert_work_is_linear(nest: impl Fn(usize) -> (String, &'static str), checker
         connected_work_of(&source, function, checker)
     };
     let (at_100, at_200, at_400) = (work(100), work(200), work(400));
-    assert!(
-        at_100 < at_200 && at_200 < at_400,
-        "work at 100 / 200 / 400 levels grows: {at_100} / {at_200} / {at_400}"
-    );
-    let (first, second) = (at_200 - at_100, at_400 - at_200);
-    assert!(
-        second <= first * 2 + first / 10,
-        "work at 100 / 200 / 400 levels: {at_100} / {at_200} / {at_400}"
-    );
-    assert!(
-        at_400 * 25 <= super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
-        "a nest of 10,000 levels, at the work of 400 ({at_400}) twenty-five times over, \
-         stays within the production work budget"
-    );
+    assert_linear_bounds(at_100, at_200, at_400);
 }
 
 /// The gate version of [`assert_work_is_linear`]: the nest's connected work at
@@ -375,6 +362,14 @@ fn assert_work_is_affine_and_meets_the_linear_bounds(
     );
     let [at_100, at_200, at_400] =
         [100, 200, 400].map(|depth| work.at("connected work", depth) as usize);
+    assert_linear_bounds(at_100, at_200, at_400);
+}
+
+/// The linear-work checks on a nest's connected work at 100, 200 and 400
+/// levels, measured or exactly extrapolated: it grows, the second doubling
+/// costs at most about twice the first, and 10,000 levels at the work of 400
+/// twenty-five times over stay within the production work budget.
+fn assert_linear_bounds(at_100: usize, at_200: usize, at_400: usize) {
     assert!(
         at_100 < at_200 && at_200 < at_400,
         "work at 100 / 200 / 400 levels grows: {at_100} / {at_200} / {at_400}"
