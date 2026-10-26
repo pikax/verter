@@ -4,11 +4,13 @@
 //! its module path is `nightly_scale`, so membership is structural: moving a
 //! test into or out of such a module is the whole change.
 //!
-//! This binary holds tier tests, so it is the probe. Under each profile,
-//! `cargo nextest list` discovers every test of this already-compiled binary
-//! (no nested build runs) and reports whether the profile selects it. The
-//! expected selection is derived from the discovered names by the module rule
-//! alone, independently of the filter expression the configuration spells.
+//! This binary holds tier tests, so it is the probe. Under the `ci` and
+//! `nightly` profiles, `cargo nextest list` discovers every test of this
+//! already-compiled binary (no nested build runs) and reports whether the
+//! profile selects it. The expected selection is derived from the discovered
+//! names by the module rule alone, independently of the filter expression the
+//! configuration spells. `default` is not listed: `ci` declares no filter of
+//! its own, so it inherits `default`'s, and the `ci` listing proves that one.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -41,6 +43,18 @@ fn repo_root() -> PathBuf {
 #[test]
 fn the_gate_runs_everything_but_the_nightly_scale_tier_and_nightly_runs_only_the_tier() {
     let binary = std::env::current_exe().expect("compiled test binary");
+    let config_text = std::fs::read_to_string(repo_root().join(".config/nextest.toml"))
+        .expect("nextest configuration");
+    let config: toml::Value = toml::from_str(&config_text).expect("valid TOML");
+    let profile = |name: &str| &config["profile"][name];
+    assert!(
+        profile("default").get("default-filter").is_some(),
+        "the default profile owns the gate's filter"
+    );
+    assert!(
+        profile("ci").get("default-filter").is_none(),
+        "the ci profile inherits the default profile's filter, so the gate is one selection"
+    );
     // Listing-only metadata for this binary; manifest-only Cargo metadata and
     // an empty Cargo home, so an extracted archive needs no registry cache.
     let repo = repo_root();
@@ -109,9 +123,9 @@ fn the_gate_runs_everything_but_the_nightly_scale_tier_and_nightly_runs_only_the
     std::fs::write(temp.path().join("cargo.json"), metadata).unwrap();
     std::fs::write(temp.path().join("binaries.json"), binaries.to_string()).unwrap();
 
-    // The three listings are independent; run them together.
+    // The two listings are independent; run them together.
     let listings: Vec<(&str, Listing)> = std::thread::scope(|scope| {
-        let probes: Vec<_> = ["default", "ci", "nightly"]
+        let probes: Vec<_> = ["ci", "nightly"]
             .into_iter()
             .map(|profile| {
                 let (repo, temp, cargo_home) = (&repo, temp.path(), &cargo_home);
