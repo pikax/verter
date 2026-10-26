@@ -1337,26 +1337,39 @@ fn display_resolved_type_node(
             is_abstract,
             ..
         } => {
-            let new_prefix = match kind {
-                crate::semantic_query::SignatureKind::Call => "",
-                crate::semantic_query::SignatureKind::Construct if *is_abstract => "abstract new ",
-                crate::semantic_query::SignatureKind::Construct => "new ",
-            };
-            // The fewest a signature prints beside its parts
-            // (`signatureToSignatureDeclarationHelper`).
-            visited.add_length(3);
-            let tps = render_type_parameters(store, type_parameters, needs, child_depth, visited);
-            let rendered_params = render_params(store, params, needs, child_depth, visited);
-            let ret = render_return(
-                store,
-                *return_type,
-                *predicate,
-                params,
-                needs,
-                child_depth,
-                visited,
-            );
-            format!("{new_prefix}{tps}({rendered_params}) => {ret}")
+            // A function or constructor type is the checker's object type with
+            // one signature, so it elides as `...` when it begins past the
+            // truncation length, as [`render_object_surface`] does for one
+            // lowered as an object (TypeScript 7.1.0-beta:
+            // `{ padding: "<155 x>"; fun: () => void }` prints `fun: ...`).
+            if visited.check_truncation() {
+                visited.add_length(3);
+                "...".to_string()
+            } else {
+                let new_prefix = match kind {
+                    crate::semantic_query::SignatureKind::Call => "",
+                    crate::semantic_query::SignatureKind::Construct if *is_abstract => {
+                        "abstract new "
+                    }
+                    crate::semantic_query::SignatureKind::Construct => "new ",
+                };
+                // The fewest a signature prints beside its parts
+                // (`signatureToSignatureDeclarationHelper`).
+                visited.add_length(3);
+                let tps =
+                    render_type_parameters(store, type_parameters, needs, child_depth, visited);
+                let rendered_params = render_params(store, params, needs, child_depth, visited);
+                let ret = render_return(
+                    store,
+                    *return_type,
+                    *predicate,
+                    params,
+                    needs,
+                    child_depth,
+                    visited,
+                );
+                format!("{new_prefix}{tps}({rendered_params}) => {ret}")
+            }
         }
         // Lazy named references: render the NAME (§14.3 — a lazy ref carries no
         // materialised body, and display must not re-resolve, so `ExpandAliases`

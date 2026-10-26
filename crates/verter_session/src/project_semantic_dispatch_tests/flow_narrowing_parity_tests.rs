@@ -3401,3 +3401,130 @@ fn elaborated_and_overloaded_overflows_report_nothing() {
         }
     }
 }
+
+/// A property whose comparison overflows the checker's relation stack is
+/// one the checker counts related: it compares the sibling properties past
+/// it and reports the first that fails, in property order, whichever side
+/// of the overflowing one it sits. Only when every failing property
+/// overflows does the whole call report nothing (`both_deep`). One more
+/// object level puts 99 nested levels past the stack too (`deep_99`).
+/// Measured on TypeScript 7.1.0-beta with `--strict`; the messages are
+/// tsc's own, the argument types truncated as it prints them.
+#[test]
+fn an_overflowing_property_leaves_its_failing_siblings_reported() {
+    let nest =
+        |leaf: &str, count: usize| format!("{}{leaf}{}", "{ e: ".repeat(count), " }".repeat(count));
+    for (name, order, elaborated, count, expected) in [
+        ("deep_first", 0, false, 100, &["(3,41): error TS2345: Argument of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...' is not assignable to parameter of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...'.\n  Types of property 'shallow' are incompatible.\n    Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("shallow_first", 1, false, 100, &["(3,44): error TS2345: Argument of type '{ shallow: string; deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { ...' is not assignable to parameter of type '{ shallow: number; deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { ...'.\n  Types of property 'shallow' are incompatible.\n    Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("deep_first_elaborated", 0, true, 100, &["(3,68): error TS2322: Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("deep_99", 0, false, 99, &["(3,38): error TS2345: Argument of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...' is not assignable to parameter of type '{ deep: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e: { e:...'.\n  Types of property 'shallow' are incompatible.\n    Type 'string' is not assignable to type 'number'."] as &[&str]),
+        ("both_deep", 2, false, 100, &[] as &[&str]),
+    ] {
+        let (source_type, target_type) = match order {
+            0 => (
+                format!("{{ deep: {}; shallow: string }}", nest("{ x: number }", count)),
+                format!("{{ deep: {}; shallow: number }}", nest("{ y: number }", count)),
+            ),
+            1 => (
+                format!("{{ shallow: string; deep: {} }}", nest("{ x: number }", count)),
+                format!("{{ shallow: number; deep: {} }}", nest("{ y: number }", count)),
+            ),
+            _ => (
+                format!(
+                    "{{ deep: {}; deep2: {} }}",
+                    nest("{ x: number }", count),
+                    nest("{ x: number }", count)
+                ),
+                format!(
+                    "{{ deep: {}; deep2: {} }}",
+                    nest("{ y: number }", count),
+                    nest("{ y: number }", count)
+                ),
+            ),
+        };
+        let argument = if elaborated {
+            "{ deep: x.deep, shallow: x.shallow }"
+        } else {
+            "x"
+        };
+        let source = format!(
+            "declare const x: {source_type};\ndeclare function f(arg: {target_type}): number;\nexport function {name}() {{ return f({argument}); }}\n"
+        );
+        let expected: Vec<String> = expected.iter().map(|line| (*line).to_owned()).collect();
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            assert_eq!(
+                super::signature_predicate_inference_tests::checker_report(
+                    &host,
+                    STRICT_ROOT,
+                    name,
+                    &source
+                ),
+                expected,
+                "{pass} {name}"
+            );
+        }
+    }
+}
+
+/// A function or constructor type is the checker's object type with one
+/// signature: one that begins past the truncation length prints as `...`,
+/// however it was written, while a method (a signature of the enclosing
+/// object, not a type) still prints, and so does a function type begun
+/// before the length even where its own parameter types start past it.
+/// Measured on TypeScript 7.1.0-beta with `--strict`.
+#[test]
+fn function_types_begun_past_the_truncation_length_elide() {
+    let mut mismatches = Vec::new();
+    for (name, pad, members, printed) in [
+        ("fun", 155, "fun: () => void", "fun: ...;"),
+        ("ctor", 155, "ctor: new () => object", "ctor: ...;"),
+        ("fun_typed", 155, "fun: (a: number) => string", "fun: ...;"),
+        ("generic", 155, "g: <T>(t: T) => T", "g: ...;"),
+        ("method", 155, "m(): void", "m(): void;"),
+        (
+            "fun_early",
+            100,
+            "fun: (a: number) => string; tail: boolean",
+            "fun: (a: number) => string; tail: boolean;",
+        ),
+        (
+            "nested_fn",
+            140,
+            "fun: (cb: () => void) => void",
+            "fun: (cb: () => void) => void;",
+        ),
+    ] {
+        let padding = "x".repeat(pad);
+        let source = format!(
+            "declare function one(v: string): void;\ndeclare const v: {{ padding: \"{padding}\"; {members} }};\nexport function {name}() {{ return one(v); }}\n"
+        );
+        let column = source.lines().nth(2).unwrap().find("one(").unwrap() + 5;
+        let expected = vec![format!(
+            "(3,{column}): error TS2345: Argument of type '{{ padding: \"{padding}\"; {printed} }}' is not assignable to parameter of type 'string'."
+        )];
+        let host = host_with(&source);
+        for pass in ["cold", "warm"] {
+            let reports = super::signature_predicate_inference_tests::checker_report(
+                &host,
+                STRICT_ROOT,
+                name,
+                &source,
+            );
+            if reports != expected {
+                mismatches.push(format!(
+                    "{pass} {name}: got {reports:?}, expected {expected:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{}",
+        mismatches.join(
+            "
+"
+        )
+    );
+}
