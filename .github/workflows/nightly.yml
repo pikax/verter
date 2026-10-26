@@ -130,6 +130,47 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------
+  # The nightly scale tier: every test under a `nightly_scale` module, at full
+  # size, on the debug build, with the `nightly` nextest profile's own deadline
+  # (`.config/nextest.toml`). The PR gate (profiles `default` and `ci`)
+  # excludes exactly these tests and runs their smaller gate versions instead.
+  # nextest fails a run that selects no test, so an emptied or mistyped tier
+  # fails here rather than passing vacuously.
+  # ---------------------------------------------------------------------------
+  rust-scale-tier:
+    name: Rust Test (nightly scale tier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-scale-tier
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run the nightly scale tier
+        id: nextest
+        env:
+          NEXTEST_PROFILE: nightly
+        run: |
+          node scripts/compile-fixture-artifacts.mjs prepare --workspace
+          cargo nextest run --workspace --no-fail-fast -E "$(node scripts/provider-ci.mjs filter core)"
+      - name: Upload nightly scale tier JUnit
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nextest-nightly-scale-tier
+          path: target/nextest/nightly/junit.xml
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Rust coverage. Moved off the PR path: `cargo llvm-cov` changes RUSTFLAGS, so
   # it cannot share the rust-cache with rust-test and is a FULLY SEPARATE
   # instrumented compile + test run of the whole workspace, producing an

@@ -4,8 +4,11 @@
 //! empties). A test that needs that
 //! long in the debug build is a code problem (CLAUDE.md, Test Speed), so the
 //! base limit is never raised; tests that predate the gate sit on the config's
-//! shrinking "Known slow tests" list instead. This hermetic guard parses the
-//! committed config and fails if the base limit drifts.
+//! shrinking "Known slow tests" list instead. The `nightly` profile runs the
+//! nightly scale tier (full-size workloads the gate excludes) under its own
+//! deadline: flagged at 60s, terminated at 120s, so a regression there still
+//! fails by name instead of hanging. This hermetic guard parses the committed
+//! config and fails if either limit drifts.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -34,7 +37,11 @@ fn nextest_flags_a_test_at_10s_and_fails_it_at_20s_on_ci() {
     // CI fails a test at 20s. The local profile also runs the agents' gate on
     // loaded workers, so it fails at 60s until the "Known slow tests" list in
     // the config is empty; then it tightens to two periods as well.
-    for (name, expected_terminate_after) in [("default", 6), ("ci", 2)] {
+    for (name, expected_period, expected_terminate_after) in [
+        ("default", "10s", 6),
+        ("ci", "10s", 2),
+        ("nightly", "60s", 2),
+    ] {
         let st = profile
             .get(name)
             .and_then(|p| p.get("slow-timeout"))
@@ -44,8 +51,8 @@ fn nextest_flags_a_test_at_10s_and_fails_it_at_20s_on_ci() {
             .and_then(|v| v.as_str())
             .unwrap_or_else(|| panic!("profile.{name}.slow-timeout.period missing"));
         assert_eq!(
-            period, "10s",
-            "profile.{name} flags a test slow at 10s, got {period:?}"
+            period, expected_period,
+            "profile.{name} flags a test slow at {expected_period}, got {period:?}"
         );
         let terminate_after = st
             .get("terminate-after")
@@ -53,7 +60,7 @@ fn nextest_flags_a_test_at_10s_and_fails_it_at_20s_on_ci() {
             .unwrap_or_else(|| panic!("profile.{name}.slow-timeout.terminate-after missing"));
         assert_eq!(
             terminate_after, expected_terminate_after,
-            "profile.{name} terminates a test after {expected_terminate_after} 10s periods"
+            "profile.{name} terminates a test after {expected_terminate_after} {expected_period} periods"
         );
     }
 }
