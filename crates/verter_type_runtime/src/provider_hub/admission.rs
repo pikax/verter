@@ -1270,6 +1270,11 @@ where
                             .serving
                             .read()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        #[cfg(test)]
+                        self.state
+                            .shared
+                            .compensation_receipt_release_started
+                            .notify_one();
                         if current
                             .as_ref()
                             .is_some_and(|current| current.epoch == serving.epoch)

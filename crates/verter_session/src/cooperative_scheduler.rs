@@ -196,11 +196,16 @@ impl CooperativeSchedulerAdapter {
                 CallerKind::CpuWorker | CallerKind::IoWorker
             )
             .then_some(std::time::Duration::from_millis(10));
-            verter_execution::blocking::block_on_when_pending_with_interval(
-                verter_execution::blocking::WaitFamily::SchedulerCompletion,
-                interval,
-                poll_external,
-            )
+            let mut poll_external = poll_external;
+            let family = verter_execution::blocking::WaitFamily::SchedulerCompletion;
+            verter_execution::blocking::block_on_when_pending(family, |waker| {
+                match poll_external(waker) {
+                    std::task::Poll::Ready(result) => std::task::Poll::Ready(result),
+                    std::task::Poll::Pending => std::task::Poll::Ready(
+                        verter_execution::blocking::block_on(family, interval, &mut poll_external),
+                    ),
+                }
+            })
         }
         #[cfg(target_arch = "wasm32")]
         {

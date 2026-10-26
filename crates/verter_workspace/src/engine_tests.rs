@@ -1093,8 +1093,8 @@ fn a_workspace_importer_keeps_its_dependency_edge_whatever_the_lane_retains() {
 /// retired decision, so its bytes stay charged until that snapshot drops,
 /// and are then released exactly once.
 ///
-/// Mutation recipe: in `publish_charged_decision`, drop the
-/// `decision_charges` insert. The charge then drains when the slot retires,
+/// Mutation recipe: in `publish_charged_decision`, publish the record
+/// without its charge. The charge then drains when the slot retires,
 /// while the held snapshot still holds the decision.
 #[test]
 fn a_held_snapshot_keeps_its_retired_decision_charged_until_it_drops() {

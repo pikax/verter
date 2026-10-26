@@ -204,7 +204,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone> SingleflightGroup<K, V, E> {
                 stop,
                 Box::new(compute),
                 Box::new(retain),
-                false,
+                FlightMode::Owned,
             ),
         }
     }
@@ -217,6 +217,19 @@ pub(super) enum CoreStep<K: Eq + Hash + Clone, V, E: Clone, F, R> {
 
 pub(super) type CorePoll<K, V, E, F, R> =
     Poll<Result<CoreStep<K, V, E, F, R>, ResolverFlightError<E>>>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FlightMode {
+    Owned,
+    Synchronous,
+    Pollable,
+}
+
+impl FlightMode {
+    fn is_compatibility(self) -> bool {
+        self != Self::Owned
+    }
+}
 
 /// A generic private core permits borrowed synchronous callbacks without a
 /// second lifecycle or a blocking method on the public polling capability.
@@ -233,7 +246,7 @@ pub(super) struct FlightCore<K: Eq + Hash + Clone, V, E: Clone, F, R> {
     edge: Option<WaitEdge>,
     role: SingleflightRole,
     forked_lane: bool,
-    compatibility: bool,
+    mode: FlightMode,
     finished: bool,
 }
 impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
@@ -246,7 +259,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
         stop: CancellationToken,
         compute: F,
         retain: R,
-        compatibility: bool,
+        mode: FlightMode,
     ) -> Self {
         Self {
             group: Some(group),
@@ -261,7 +274,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
             edge: None,
             role: SingleflightRole::Follower,
             forked_lane: false,
-            compatibility,
+            mode,
             finished: false,
         }
     }
@@ -377,7 +390,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
                     let mut inner = state.inner.lock();
                     let leader = matches!(*inner, FlightInner::Pending);
                     let (task, answer) = if leader {
-                        let task = if self.compatibility {
+                        let task = if self.mode == FlightMode::Pollable {
                             self.waiter.clone()
                         } else {
                             group
@@ -387,7 +400,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
                                 .map(TaskRegistry::register_task)
                         };
                         let answer = Arc::new(Mutex::new(LeaderAnswer {
-                            compatibility: self.compatibility,
+                            compatibility: self.mode.is_compatibility(),
                             ..LeaderAnswer::default()
                         }));
                         *inner = FlightInner::Running {
@@ -417,7 +430,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
                     if let (Some(waiter), Some(task)) = (&self.waiter, task) {
                         match waiter.wait_for(&task) {
                             Ok(edge) => self.edge = Some(edge),
-                            Err(_) if self.compatibility => {}
+                            Err(_) if self.mode.is_compatibility() => {}
                             Err(_) => {
                                 drop(producer);
                                 return self.finish(Err(ResolverFlightError::Cycle));
@@ -443,7 +456,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
                     )
                 }
                 Poll::Ready(FlightTerminal::Aborted(reason)) => {
-                    if !self.compatibility {
+                    if !self.mode.is_compatibility() {
                         return self.finish(Err(reason.error()));
                     }
                     self.release_join();
@@ -465,7 +478,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
             if !running {
                 continue;
             }
-            if self.compatibility && same_thread {
+            if self.mode.is_compatibility() && same_thread {
                 return self.transfer_inline();
             }
             if self.edge.is_none() {
@@ -473,10 +486,12 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
                     if let Some(task) = task {
                         match waiter.wait_for(&task) {
                             Ok(edge) => self.edge = Some(edge),
-                            Err(_) if self.compatibility => return self.transfer_inline(),
+                            Err(_) if self.mode.is_compatibility() => {
+                                return self.transfer_inline()
+                            }
                             Err(_) => return self.finish(Err(ResolverFlightError::Cycle)),
                         }
-                    } else if !self.compatibility {
+                    } else if !self.mode.is_compatibility() {
                         return self.finish(Err(ResolverFlightError::ProducerUnowned));
                     }
                 }

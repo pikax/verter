@@ -509,15 +509,30 @@ fn extended_signature(facts: Vec<FactVersionRef>) -> ReadSetSignature {
     )
 }
 
+/// The fact count the full-size wide-signature tests use.
+const WIDE_FACTS: usize = 2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3;
+
+/// The fact count their gate versions use. An extension wider than
+/// `FACT_SET_INLINE_WIDTH` is already tree storage, and 300 facts fill more
+/// than sixteen 16-wide leaves, so the tree has leaves, branches and a root,
+/// the same levels as the full-size tree.
+const GATE_WIDE_FACTS: usize = 300;
+
 impl WideArtifactNode {
     fn new(account: Arc<verter_session_query::retention::SemanticRetentionAccount>) -> Self {
-        let facts: Vec<FactVersionRef> =
-            (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
-                .map(|index| FactVersionRef::FileWholeHash {
-                    canonical_id: format!("/wide/{index:05}.ts").into(),
-                    hash: [1u8; 16],
-                })
-                .collect();
+        Self::of_width(account, WIDE_FACTS)
+    }
+
+    fn of_width(
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        width: usize,
+    ) -> Self {
+        let facts: Vec<FactVersionRef> = (0..width)
+            .map(|index| FactVersionRef::FileWholeHash {
+                canonical_id: format!("/wide/{index:05}.ts").into(),
+                hash: [1u8; 16],
+            })
+            .collect();
         Self {
             entries: dashmap::DashMap::new(),
             inflight: InflightTable::new(),
@@ -529,13 +544,13 @@ impl WideArtifactNode {
         }
     }
 
-    fn with_valid_signature(mut self, host: &VerterHost) -> Self {
-        self.signature = extended_signature(Self::valid_dependency_facts(host));
+    fn with_valid_signature_of(mut self, host: &VerterHost, width: usize) -> Self {
+        self.signature = extended_signature(Self::valid_dependency_facts(host, width));
         self
     }
 
-    fn valid_dependency_facts(host: &VerterHost) -> Vec<FactVersionRef> {
-        (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
+    fn valid_dependency_facts(host: &VerterHost, width: usize) -> Vec<FactVersionRef> {
+        (0..width)
             .map(|index| {
                 let canonical_id = format!("/wide/{index:05}.ts");
                 let _ = host
@@ -623,19 +638,27 @@ impl ArtifactNode for WideArtifactNode {
     }
 }
 
-/// A cold winner about to publish a wide signature claims its shared
-/// storage into a refusable reservation; an account that refuses that
-/// footprint returns the complete value uncached and leaves the storage
-/// pinned.
+/// The same claim and refusal over a 300-fact extended signature: the gate
+/// version of the 2,051-fact test in the nightly scale tier. The signature is
+/// tree storage with every tree level at either size, and the refused claim
+/// is shown to leave real charged storage pinned, not an empty footprint.
 #[test]
-fn cold_publish_claims_wide_signature_storage_and_is_refused_for_it() {
+fn cold_publish_claims_a_tree_signature_storage_and_is_refused_for_it() {
+    assert_cold_publish_claims_wide_signature_storage(GATE_WIDE_FACTS);
+}
+
+/// A cold winner publishing a `width`-fact extended signature claims its
+/// shared storage, and an account that refuses it returns the value uncached
+/// with the storage pinned.
+fn assert_cold_publish_claims_wide_signature_storage(width: usize) {
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
     let host = VerterHost::new_standalone(HostConfig::default());
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let flags: &RequestFlags = ctx.request_flags();
 
     let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
-    let node = WideArtifactNode::new(Arc::clone(&account)).with_valid_signature(&host);
+    let node = WideArtifactNode::of_width(Arc::clone(&account), width)
+        .with_valid_signature_of(&host, width);
     assert_eq!(lookup(&node, 7u32, ctx, flags).as_deref(), Some("v7"));
     assert_eq!(node.entries.len(), 1);
     let storage = node.storage();
@@ -656,7 +679,8 @@ fn cold_publish_claims_wide_signature_storage_and_is_refused_for_it() {
         max_entry_bytes: 1,
         ..RetentionLimits::defaults()
     });
-    let node = WideArtifactNode::new(Arc::clone(&tight)).with_valid_signature(&host);
+    let node =
+        WideArtifactNode::of_width(Arc::clone(&tight), width).with_valid_signature_of(&host, width);
     assert_eq!(
         lookup(&node, 7u32, ctx, flags).as_deref(),
         Some("v7"),
@@ -666,23 +690,39 @@ fn cold_publish_claims_wide_signature_storage_and_is_refused_for_it() {
     let storage = node.storage();
     assert_eq!(storage.retained_bytes, 0);
     assert_eq!(storage.pinned_bytes, storage.charged_bytes);
+    assert!(
+        storage.charged_bytes > 0,
+        "the refused claim pins real tree storage"
+    );
     assert_eq!(tight.snapshot().retained_bytes, 0);
 }
 
+/// The same refusals over a 300-fact extended signature: the gate version of
+/// the 2,051-fact test in the nightly scale tier, over tree storage with the
+/// same levels.
 #[test]
-fn retention_refusal_preserves_artifact_post_compute_validation() {
+fn retention_refusal_preserves_artifact_post_compute_validation_over_a_tree_signature() {
+    assert_retention_refusal_preserves_post_compute_validation(GATE_WIDE_FACTS);
+}
+
+/// A stale or strict-rooted `width`-fact artifact neither publishes nor
+/// answers, whatever the retention limit.
+fn assert_retention_refusal_preserves_post_compute_validation(width: usize) {
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     for max_entry_bytes in [usize::MAX, 1] {
         for strict_root in [false, true] {
-            let mut node = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
-                max_entry_bytes,
-                ..RetentionLimits::defaults()
-            }));
+            let mut node = WideArtifactNode::of_width(
+                SemanticRetentionAccount::new(RetentionLimits {
+                    max_entry_bytes,
+                    ..RetentionLimits::defaults()
+                }),
+                width,
+            );
             node.strict_root = strict_root;
             if !strict_root {
-                node = node.with_valid_signature(&host);
+                node = node.with_valid_signature_of(&host, width);
                 let host = Arc::clone(&host);
                 node.during_compute = Some(Arc::new(move || {
                     host.project_type_store().bump_project_generation();
@@ -775,7 +815,7 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     // Admit the identical dependency files only once. Seal a fresh set for
     // each case so its retention account owns independent signature storage.
-    let facts = WideArtifactNode::valid_dependency_facts(&host);
+    let facts = WideArtifactNode::valid_dependency_facts(&host, WIDE_FACTS);
     for (limit, stale, lower) in [
         (usize::MAX, false, false),
         (1, false, false),
@@ -989,5 +1029,25 @@ fn a_refused_or_return_only_artifact_value_is_charged_to_its_caller() {
         );
         drop(read);
         assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// A cold winner about to publish a wide signature claims its shared
+    /// storage into a refusable reservation; an account that refuses that
+    /// footprint returns the complete value uncached and leaves the storage
+    /// pinned.
+    #[test]
+    fn cold_publish_claims_wide_signature_storage_and_is_refused_for_it() {
+        assert_cold_publish_claims_wide_signature_storage(WIDE_FACTS);
+    }
+
+    #[test]
+    fn retention_refusal_preserves_artifact_post_compute_validation() {
+        assert_retention_refusal_preserves_post_compute_validation(WIDE_FACTS);
     }
 }

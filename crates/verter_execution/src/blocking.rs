@@ -343,18 +343,7 @@ pub fn complete_now<F: std::future::Future + ?Sized>(
 /// # Panics
 ///
 /// Under a forbidding `WaitProbe`, once the first poll is pending.
-pub fn block_on_when_pending<T>(family: WaitFamily, poll: impl FnMut(&Waker) -> Poll<T>) -> T {
-    block_on_when_pending_with_interval(family, None, poll)
-}
-
-/// Drive an eager compatibility entry, announcing a wait only after `Pending`.
-/// The optional interval preserves a legacy cancellation or worker-pump cadence
-/// while parked; an immediately ready answer never enters that wait.
-pub fn block_on_when_pending_with_interval<T>(
-    family: WaitFamily,
-    interval: Option<Duration>,
-    mut poll: impl FnMut(&Waker) -> Poll<T>,
-) -> T {
+pub fn block_on_when_pending<T>(family: WaitFamily, mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
     let notification = UnparkThread::new();
     let waker = Waker::from(Arc::clone(&notification));
     if let Poll::Ready(outcome) = poll(&waker) {
@@ -362,7 +351,7 @@ pub fn block_on_when_pending_with_interval<T>(
     }
     enter_wait(family);
     loop {
-        notification.park(interval);
+        notification.park(None);
         if let Poll::Ready(outcome) = poll(&waker) {
             return outcome;
         }

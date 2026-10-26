@@ -295,6 +295,12 @@ live owner detaches. A requester cancelling while a sibling keeps the job
 live wakes nothing. The waker lock is never taken while an aggregate's
 owner list is held.
 
+Existing owners attach atomically through `register_owners`, so cancellation
+never observes only the cancelled prefix of a live batch. Under an enclosing
+owner lock, `register_owner_deferred` and `register_owners_deferred` return
+their notifications for delivery after that lock releases. Scheduler admission
+uses the deferred batch form and its shared wake delivery rail.
+
 Users: the semantic runtime registers on the token its stop selects
 (`Program::wake_on_stop`, called whenever a poll returns `Pending`; for
 `QueryProgram` the job token when it has owners, else the request's, else
@@ -307,10 +313,11 @@ register on their cancellation and park untimed.
 ## The external-boundary driver
 
 Compatibility entries that can answer on their first poll use
-`block_on_when_pending` or `block_on_when_pending_with_interval`. They announce
-their wait family only after `Pending`. The optional interval preserves legacy
-cancellation and worker-pump cadence while parked; owned dependency polls use
-their readiness and stop subscriptions.
+`block_on_when_pending`. They announce their wait family only after `Pending`.
+The legacy boolean-cancellation and worker-pump boundaries delegate a pending
+poll to `block_on` with their existing park interval; immediately ready answers
+stay outside that timed drive. Owned dependency polls use their readiness and
+stop subscriptions.
 
 `verter_execution::blocking::block_on(family, slice, poll)` drives a
 pollable computation to completion by blocking. It polls with a waker that
@@ -803,6 +810,8 @@ Its only advancing operation, `poll`, returns a complete
 `SingleflightRunResult` or transfers the sole `OwnedResolverProducer`.
 Polling does not compute or run the retention policy. `run_retaining` and
 `run` externally drive the same core with borrowed callbacks.
+Synchronous and transferred producers own distinct tasks. A pollable
+computation retains its polling root's task as the lane owner across suspension.
 
 - **Ownership:** host composition binds every resolver flight family to the
   host's existing registry. Production compatibility entries install that

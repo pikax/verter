@@ -113,31 +113,39 @@ impl ScopedCacheFlight {
         if state.terminal.is_some() {
             return false;
         }
+        self.bind_aggregate(&mut state, aggregate)
+    }
+
+    /// Install `aggregate` as the flight's job token and register every
+    /// current owner on it. Whichever of admission and dispatch reaches the
+    /// flight first binds it; the other finds it bound. Returns `false`, with
+    /// the flight terminal-cancelled, when the token no longer accepts owners.
+    fn bind_aggregate(
+        &self,
+        state: &mut ScopedCacheFlightState,
+        aggregate: CancellationToken,
+    ) -> bool {
         if state.aggregate.is_some() {
             return true;
         }
         aggregate.set_wake_delivery(Arc::new(ScopedCancellationDelivery(Arc::downgrade(
             &self.delivery,
         ))));
-        // These owners already coexist. Keep initialization live while attaching
-        // them so a cancelled first entry cannot retire an existing sibling.
-        let (initializing, wakes) = aggregate.register_owner_deferred(None);
+        let (registrations, wakes) = aggregate
+            .register_owners_deferred(state.owners.values().map(|owner| owner.request.clone()));
         self.delivery.deliver(vec![wakes]);
-        if let Some(initializing) = initializing {
-            for owner in state.owners.values_mut() {
-                let (registration, wakes) =
-                    aggregate.register_owner_deferred(owner.request.clone());
-                self.delivery.deliver(vec![wakes]);
-                let Some(registration) = registration else {
-                    break;
-                };
-                owner.aggregate_registration = Some(registration);
-            }
-            self.delivery.deliver(vec![initializing.detach_deferred()]);
+        let Some(registrations) = registrations else {
+            state.terminal = Some(ScopedCacheTerminal::Cancelled);
+            self.clear_owners(state);
+            self.delivery.deliver(vec![state.wakers.take()]);
+            return false;
+        };
+        for (owner, registration) in state.owners.values_mut().zip(registrations) {
+            owner.aggregate_registration = Some(registration);
         }
         if aggregate.is_cancelled() {
             state.terminal = Some(ScopedCacheTerminal::Cancelled);
-            self.clear_owners(&mut state);
+            self.clear_owners(state);
             self.delivery.deliver(vec![state.wakers.take()]);
             return false;
         }
@@ -185,7 +193,9 @@ impl ScopedCacheFlight {
             }
             return false;
         }
-        state.aggregate.get_or_insert(aggregate);
+        if !self.bind_aggregate(&mut state, aggregate) {
+            return false;
+        }
         state.dispatched = true;
         self.delivery.deliver(vec![state.wakers.take()]);
         true

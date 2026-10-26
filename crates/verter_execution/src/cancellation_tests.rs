@@ -147,6 +147,77 @@ fn late_owner_cannot_revive_an_unpolled_cancelled_aggregate() {
     assert!(aggregate.is_cancelled());
 }
 
+#[test]
+fn owner_batch_keeps_live_requests_in_either_order() {
+    for cancelled_first in [false, true] {
+        let aggregate = CancellationToken::aggregate();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let live = CancellationToken::new();
+        let requests = if cancelled_first {
+            [Some(cancelled), Some(live.clone())]
+        } else {
+            [Some(live.clone()), Some(cancelled)]
+        };
+        let (count, waker) = counting();
+        let mut waiting = aggregate.subscribe();
+        assert!(waiting.poll(&waker).is_pending());
+        let registrations = aggregate.register_owners(requests).unwrap();
+        assert_eq!(registrations.len(), 2);
+        assert!(registrations[usize::from(cancelled_first)]
+            .state
+            .request
+            .as_ref()
+            .unwrap()
+            .same_source(&live));
+        assert!(!aggregate.is_cancelled());
+        assert_eq!(wakes(&count), 0);
+        live.cancel();
+        assert!(waiting.poll(&waker).is_ready());
+        assert_eq!(wakes(&count), 1);
+        assert!(aggregate.register_owners([None]).is_none());
+        drop(registrations);
+        assert_eq!(registered(&live), 0);
+    }
+}
+
+#[test]
+fn owner_batch_preserves_ownerless_and_terminal_states() {
+    let aggregate = CancellationToken::aggregate();
+    assert!(aggregate.register_owners([]).unwrap().is_empty());
+    assert!(!aggregate.has_registered_owners());
+    assert!(!aggregate.is_cancelled());
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let mut registrations = aggregate
+        .register_owners([Some(cancelled.clone()), None])
+        .unwrap();
+    assert!(!aggregate.is_cancelled(), "an uncancellable owner is live");
+    drop(registrations.pop());
+    // No probe between the last live owner's detach and registration: the
+    // registration itself must discover the terminal gap, just as a single
+    // late owner does.
+    assert!(aggregate.register_owners([None]).is_none());
+    assert!(aggregate.is_cancelled());
+    drop(registrations);
+
+    let all_cancelled = CancellationToken::aggregate();
+    let (count, waker) = counting();
+    let mut waiting = all_cancelled.subscribe();
+    assert!(waiting.poll(&waker).is_pending());
+    let registrations = all_cancelled
+        .register_owners([Some(cancelled.clone()), Some(cancelled)])
+        .unwrap();
+    assert!(waiting.poll(&waker).is_ready());
+    assert_eq!(wakes(&count), 1);
+    assert!(all_cancelled.register_owners([None]).is_none());
+    drop(registrations);
+
+    let explicitly_cancelled = CancellationToken::aggregate();
+    explicitly_cancelled.cancel();
+    assert!(explicitly_cancelled.register_owners([None]).is_none());
+}
+
 fn examined(aggregate: &CancellationToken) -> u64 {
     aggregate
         .state
@@ -571,22 +642,30 @@ fn owner_registration_preserves_deferred_stop_delivery() {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
-    let aggregate = CancellationToken::aggregate();
-    let request = CancellationToken::new();
-    let _owner = aggregate.register_owner(Some(request.clone())).unwrap();
-    let count = Arc::new(Count(AtomicUsize::new(0)));
-    let waker = Waker::from(Arc::clone(&count));
-    let mut stopped = aggregate.subscribe();
-    assert!(stopped.poll(&waker).is_pending());
-    // An enclosing owner has published stop but still holds its lock.
-    let request_wakes = request.cancel_deferred();
-    let (late, wakes) = aggregate.register_owner_deferred(None);
-    assert!(late.is_none());
-    assert_eq!(count.0.load(Ordering::SeqCst), 0);
-    wakes.wake();
-    request_wakes.wake();
-    assert_eq!(count.0.load(Ordering::SeqCst), 1);
-    assert!(stopped.poll(&waker).is_ready());
+    for batch in [false, true] {
+        let aggregate = CancellationToken::aggregate();
+        let request = CancellationToken::new();
+        let _owner = aggregate.register_owner(Some(request.clone())).unwrap();
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&count));
+        let mut stopped = aggregate.subscribe();
+        assert!(stopped.poll(&waker).is_pending());
+        // An enclosing owner has published stop but still holds its lock.
+        let request_wakes = request.cancel_deferred();
+        let (refused, wakes) = if batch {
+            let (owners, wakes) = aggregate.register_owners_deferred([None, None]);
+            (owners.is_none(), wakes)
+        } else {
+            let (owner, wakes) = aggregate.register_owner_deferred(None);
+            (owner.is_none(), wakes)
+        };
+        assert!(refused);
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+        wakes.wake();
+        request_wakes.wake();
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(stopped.poll(&waker).is_ready());
+    }
 }
 
 #[test]

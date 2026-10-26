@@ -2198,12 +2198,11 @@ where
             verter_execution::cancellation::CancellationToken::new(),
             compute,
             retain,
-            true,
+            owned_singleflight::FlightMode::Synchronous,
         );
         loop {
-            match verter_execution::blocking::block_on_when_pending_with_interval(
+            match verter_execution::blocking::block_on_when_pending(
                 verter_execution::blocking::WaitFamily::ResolverFlight,
-                None,
                 |waker| core.poll(waker),
             ) {
                 Ok(owned_singleflight::CoreStep::Produce(producer)) => producer.run(),
@@ -2239,7 +2238,7 @@ where
             verter_execution::cancellation::CancellationToken::new(),
             compute,
             retain,
-            true,
+            owned_singleflight::FlightMode::Pollable,
         );
         loop {
             match std::future::poll_fn(|cx| core.poll(cx.waker())).await {

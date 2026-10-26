@@ -14,6 +14,9 @@
 pub struct HandlerActivity {
     active: std::sync::atomic::AtomicU32,
     idle: tokio::sync::Notify,
+    /// Woken whenever a handler starts, for waiters that need the end of an
+    /// idle period rather than its start.
+    started: tokio::sync::Notify,
     epoch: std::sync::atomic::AtomicU64,
 }
 
@@ -55,6 +58,48 @@ impl HandlerActivity {
     ) -> bool {
         wait_for_quiet_counter_bounded(&self.active, &self.idle, &self.epoch, quiet, max_defer)
             .await
+    }
+
+    /// Wait until no handler has started or finished for a complete `quiet`
+    /// window, with no fairness deadline, and return the activity epoch that
+    /// held throughout it. Every handler event restarts the window.
+    pub async fn wait_quiet_unbounded(&self, quiet: std::time::Duration) -> u64 {
+        use std::sync::atomic::Ordering::Acquire;
+        loop {
+            wait_for_idle_counter(&self.active, &self.idle).await;
+            let epoch = self.epoch.load(Acquire);
+            // Race the timer against the next handler start, so the window
+            // restarts at the latest event instead of at the old deadline.
+            let started = self.started.notified();
+            tokio::pin!(started);
+            started.as_mut().enable();
+            if self.active.load(Acquire) != 0 || self.epoch.load(Acquire) != epoch {
+                continue;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(quiet) => {
+                    if self.active.load(Acquire) == 0 && self.epoch.load(Acquire) == epoch {
+                        return epoch;
+                    }
+                }
+                () = &mut started => {}
+            }
+        }
+    }
+
+    /// Wait until any handler starts or finishes after `epoch` (a value
+    /// returned by [`Self::wait_quiet_unbounded`]). Event-driven: it is woken
+    /// by the next handler start and never polls.
+    pub async fn wait_for_activity_after(&self, epoch: u64) {
+        loop {
+            let started = self.started.notified();
+            tokio::pin!(started);
+            started.as_mut().enable();
+            if self.epoch.load(std::sync::atomic::Ordering::Acquire) != epoch {
+                return;
+            }
+            started.await;
+        }
     }
 }
 
@@ -136,6 +181,7 @@ impl<'a> HandlerGuard<'a> {
         activity
             .epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        activity.started.notify_waiters();
         #[cfg(feature = "semantic-observe")]
         let prev = activity
             .active
@@ -173,12 +219,14 @@ impl Drop for HandlerGuard<'_> {
             .active
             .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
             - 1;
-        if remaining == 0 {
-            activity.idle.notify_waiters();
-        }
+        // Bump the epoch BEFORE waking idle waiters, so a quiet window that
+        // starts on this wake reads an epoch that already includes this exit.
         activity
             .epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if remaining == 0 {
+            activity.idle.notify_waiters();
+        }
         #[cfg(feature = "semantic-observe")]
         {
             let elapsed = self.start.elapsed();
