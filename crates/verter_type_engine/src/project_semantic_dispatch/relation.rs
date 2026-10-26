@@ -9490,10 +9490,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ShallowRelation::Assignable
                 }
             }
-            // A carrier may settle to `never`: the structural reducer reads
-            // the type it settles to.
+            // A carrier or intersection may settle to `never`: the structural
+            // reducer reads instantiated contributors before deciding bottom.
             (source, SemanticNodeData::Primitive(PrimitiveKind::Never))
-                if is_settling_carrier(source) =>
+                if is_settling_carrier(source)
+                    || matches!(source, SemanticNodeData::Intersection(_)) =>
             {
                 ShallowRelation::Unknown
             }

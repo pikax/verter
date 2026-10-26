@@ -26,8 +26,17 @@ fn published(
     mode: ProjectionMode,
 ) -> TypeExpr {
     let args = [Arc::new(TypeExpr::Primitive(argument))];
+    published_arguments(host, name, &args, mode)
+}
+
+fn published_arguments(
+    host: &crate::VerterHost,
+    name: &str,
+    args: &[Arc<TypeExpr>],
+    mode: ProjectionMode,
+) -> TypeExpr {
     let (outcome, _) = host
-        .resolve_named_symbol_wire_with_audit(FILE, name, &args, Some(mode))
+        .resolve_named_symbol_wire_with_audit(FILE, name, args, Some(mode))
         .into_parts();
     let root = outcome
         .expect("publication must not fault")
@@ -39,6 +48,10 @@ fn published(
 }
 
 fn assert_application(expr: &TypeExpr, name: &str, argument: PrimitiveName) {
+    assert_application_arguments(expr, name, &[TypeExpr::Primitive(argument)]);
+}
+
+fn assert_application_arguments(expr: &TypeExpr, name: &str, expected: &[TypeExpr]) {
     let TypeExpr::Intersection(arms) = expr else {
         panic!("named application must survive the intersection: {expr:?}");
     };
@@ -49,7 +62,108 @@ fn assert_application(expr: &TypeExpr, name: &str, argument: PrimitiveName) {
     let TypeExpr::Ref { type_arguments, .. } = application else {
         unreachable!()
     };
-    assert_eq!(type_arguments.as_ref(), &[TypeExpr::Primitive(argument)]);
+    assert_eq!(type_arguments.as_ref(), expected);
+}
+
+#[test]
+fn generic_interface_identity_preserves_structural_intersection_reduction() {
+    for strict in [false, true] {
+        for implicit in [false, true] {
+            let host = host(strict, implicit);
+            for _ in 0..2 {
+                let conflict =
+                    published_arguments(&host, "Conflict", &[], ProjectionMode::Expanded);
+                assert_primitive(&conflict, PrimitiveName::Never);
+                let conditional =
+                    published_arguments(&host, "ConflictIsNever", &[], ProjectionMode::Expanded);
+                assert_boolean_literal(&conditional, true);
+                if strict {
+                    for name in ["NullIntersection", "UndefinedIntersection"] {
+                        let nullish =
+                            published_arguments(&host, name, &[], ProjectionMode::Expanded);
+                        assert_primitive(&nullish, PrimitiveName::Never);
+                    }
+                }
+                let (compatible, _) = evaluate_expr(
+                    &host,
+                    FILE,
+                    "Tag<'a'> & { kind: 'a' }",
+                    ProjectionMode::Expanded,
+                );
+                assert!(!matches!(
+                    compatible,
+                    TypeExpr::Primitive(PrimitiveName::Never)
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn generic_interface_identity_completes_substituted_defaults() {
+    for strict in [false, true] {
+        for implicit in [false, true] {
+            let host = host(strict, implicit);
+            for _ in 0..2 {
+                for name in ["DefaultState", "PartialState", "DefaultNested"] {
+                    let expr = published_arguments(&host, name, &[], ProjectionMode::Expanded);
+                    match name {
+                        "DefaultState" => {
+                            assert_application(&expr, "DefaultEmpty", PrimitiveName::String)
+                        }
+                        "PartialState" => assert_application_arguments(
+                            &expr,
+                            "Pair",
+                            &[
+                                TypeExpr::Primitive(PrimitiveName::Number),
+                                TypeExpr::Primitive(PrimitiveName::Number),
+                            ],
+                        ),
+                        _ => {
+                            let TypeExpr::Tuple { elements, .. } = &expr else {
+                                panic!("default tuple: {expr:?}")
+                            };
+                            assert_application(
+                                &elements[0].ty,
+                                "DefaultEmpty",
+                                PrimitiveName::String,
+                            );
+                            assert_application_arguments(
+                                &object_props(&elements[1].ty)["state"].ty,
+                                "Pair",
+                                &[
+                                    TypeExpr::Primitive(PrimitiveName::Number),
+                                    TypeExpr::Primitive(PrimitiveName::Number),
+                                ],
+                            );
+                        }
+                    }
+                }
+            }
+            upsert_ts(
+                &host,
+                FILE,
+                &SOURCE
+                    .replace("DefaultEmpty<T = string>", "DefaultEmpty<T = number>")
+                    .replace("Pair<T, U = T>", "Pair<T, U = string>"),
+            );
+            for _ in 0..2 {
+                assert_application(
+                    &published_arguments(&host, "DefaultState", &[], ProjectionMode::Expanded),
+                    "DefaultEmpty",
+                    PrimitiveName::Number,
+                );
+                assert_application_arguments(
+                    &published_arguments(&host, "PartialState", &[], ProjectionMode::Expanded),
+                    "Pair",
+                    &[
+                        TypeExpr::Primitive(PrimitiveName::Number),
+                        TypeExpr::Primitive(PrimitiveName::String),
+                    ],
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -75,14 +189,10 @@ fn generic_interface_identity_survives_named_and_wire_publication() {
                     }
                 }
             }
-            let (ordinary, _) =
-                resolve_expr(&host, FILE, "Ordinary", &[], ProjectionMode::Navigate);
-            let TypeExpr::Intersection(arms) = &ordinary else {
-                panic!("ordinary interface carrier")
-            };
-            assert!(arms
-                .iter()
-                .any(|arm| matches!(arm, TypeExpr::Ref { name, .. } if name.as_ref() == "Plain")));
+            for mode in [ProjectionMode::Navigate, ProjectionMode::Expanded] {
+                let ordinary = published_arguments(&host, "Ordinary", &[], mode);
+                assert_application_arguments(&ordinary, "Plain", &[]);
+            }
         }
     }
 }

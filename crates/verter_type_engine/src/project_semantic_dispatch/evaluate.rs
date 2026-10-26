@@ -2236,7 +2236,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// supplied arguments followed by every omitted defaulted one
     /// ([`Self::declared_application_arguments`]). The carrier itself when
     /// nothing is omitted or the defaults cannot be recovered.
-    fn declared_application(
+    pub(super) fn declared_application(
         &self,
         carrier: SemanticNodeId,
         identity: &crate::semantic_query::DeclIdentity,

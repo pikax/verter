@@ -429,12 +429,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // declaration and its arguments before intersection reduction or output
         // materialization can observe them. Member/operator demands still enter
         // the ordinary Instantiate owner to read its structural surface.
-        let named_interface = context.demand == ReductionDemand::Published
-            && context.mode == ProjectionMode::Expanded
-            && context.merge_role() != MemberMergeRole::Heritage
-            && self.prepared_decl_kind(base)
-                == Some(verter_session_query::declarations::TypeDeclKind::Interface);
-        if keeps_carrier || named_interface {
+        if self.keeps_published_interface_application(base, context) {
+            return ProjectionFinish::Node(self.declared_application(
+                rebuild(Arc::clone(&projected_args)),
+                base,
+                &projected_args,
+                context,
+            ));
+        }
+        if keeps_carrier {
             ProjectionFinish::Node(rebuild(projected_args))
         } else if self.is_instantiate_active(
             base.canonical_id.as_ref(),
@@ -1045,9 +1048,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .iter()
                     .map(|arm| self.reduce_answer_constituent(*arm, context, inputs))
                     .collect();
-                if ids.as_slice() == &***arms {
-                    return node;
-                }
                 self.rebuild_answer_intersection(node, arms.origin_category(), ids)
             }
             _ => node,
@@ -1131,6 +1131,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             C::OrderedCarrier | C::OverloadGroup | C::MergedOverloadGroup | C::Heritage
         );
         if !ordered {
+            // Names remain the published contributors, but the algebra reads
+            // their instantiated denotation before keeping the intersection.
+            if self.intersection_arms_reduce_to_never(&ids) {
+                return self.primitive_node(PrimitiveKind::Never);
+            }
+            if matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Intersection(original)) if &***original == ids.as_slice()
+            ) {
+                // An unchanged written carrier retains its construction policy,
+                // including the checker's preserved `string & {}` form.
+                return node;
+            }
             if let Some(distributed) = self.distributed_intersection(&ids) {
                 return distributed;
             }
@@ -1281,6 +1294,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .iter()
                     .map(|arm| self.answer_member(projected(memo, *arm, context), context, inputs))
                     .collect();
+                if context.mode == ProjectionMode::Expanded && may_reduce_operator(context) {
+                    return self.rebuild_answer_intersection(node, arms.origin_category(), ids);
+                }
                 if ids.as_slice() == &***arms {
                     // Identity projection — see the Union arm.
                     return node;

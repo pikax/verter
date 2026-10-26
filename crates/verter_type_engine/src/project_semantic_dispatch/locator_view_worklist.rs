@@ -466,6 +466,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
+    /// Whether a published answer keeps this interface as a named contributor.
+    /// Both reference forms complete it through `declared_application`, using
+    /// the same substituted defaults that its instantiated body binds.
+    fn keeps_published_interface_application(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+        context: ProjectionReductionContext,
+    ) -> bool {
+        context.demand == ReductionDemand::Published
+            && context.mode == ProjectionMode::Expanded
+            && context.merge_role() != MemberMergeRole::Heritage
+            && self.prepared_decl_kind(identity)
+                == Some(verter_session_query::declarations::TypeDeclKind::Interface)
+    }
+
     /// Arguments are projected at the caller's altitude. The continuation
     /// stack classifies recursive applications with `in_deferred_position`:
     /// alias arguments are eager; class and interface arguments are deferred.
@@ -656,6 +671,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
                 ) {
                     return ReferenceProjectionPlan::Ready(node);
+                }
+                if self.keeps_published_interface_application(identity, context) {
+                    return ReferenceProjectionPlan::Ready(self.declared_application(
+                        node,
+                        identity,
+                        &[],
+                        context,
+                    ));
                 }
                 let anchor =
                     match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {

@@ -1,4 +1,19 @@
 export interface Empty<T> {}
+export interface DefaultEmpty<T = string> {}
+export interface Pair<T, U = T> {}
+export interface Tag<T> {
+  kind: T;
+}
+export type Conflict = Tag<"a"> & { kind: "b" };
+export type ConflictIsNever = Tag<"a"> & { kind: "b" } extends never ? true : false;
+export type NullIntersection = Empty<string> & null;
+export type UndefinedIntersection = Empty<string> & undefined;
+export type DefaultState = DefaultEmpty & { count: number };
+export type PartialState = Pair<number> & { count: number };
+export type DefaultNested = [
+  DefaultEmpty & { count: number },
+  { state: Pair<number> & { count: number } },
+];
 export interface Full<T> {
   value: T;
 }

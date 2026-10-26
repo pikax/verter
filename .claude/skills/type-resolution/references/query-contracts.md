@@ -10,7 +10,9 @@ The shared semantic query system has exactly five modes. Every caller picks one;
 
 **Named interface applications in published answers.** Expanded publication
 retains an interface application's `InstantiationRef` at a reference position,
-with its substituted and evaluated arguments. An empty interface therefore
+with its substituted and evaluated arguments, including omitted defaults bound
+by the shared `declared_application_arguments` owner (a zero-argument `DeclRef`
+uses the same completion as a partially supplied `InstantiationRef`). An empty interface therefore
 remains a named contributor to an intersection, including inside an object or
 tuple, instead of becoming an empty object that the intersection's raise fold
 drops. This decision belongs to the shared post-substitution view projector
@@ -21,6 +23,13 @@ and an indexed access still read the interface's instantiated structural meaning
 through the same engine. An Expanded root alias that directly names an
 application still requests its body through the shared named/wire root
 materializer; a named declaration selected by an indexed access stays named.
+Retaining a name does not exempt its intersection from structural reduction:
+the shared `intersection_arms_reduce_to_never` reader instantiates contributors
+and applies the canonical algebra to their denotation, so conflicting literal
+discriminants and disjoint nullish/object domains still reduce to `never`.
+Only the reduction result replaces the published carriers; a compatible
+intersection keeps its named contributors. Heritage and shallow carriers do
+not enter this published Expanded reduction.
 Heritage positions materialize their interface bodies
 so inherited members remain visible. Aliases, including closed conditional
 helpers beside a named interface, still evaluate normally. Navigate and Shallow

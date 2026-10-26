@@ -1,12 +1,14 @@
-// Optional native-checker oracle for the provider-free Rust publication tests.
+// Native-checker oracle for the provider-free Rust publication tests.
+// Run by test:scripts and test:scripts:ci via test:generic-interface-identity-oracle.
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { version } from "typescript";
-import { API } from "typescript/unstable/sync";
+import { API, NodeBuilderFlags } from "typescript/unstable/sync";
 
 assert.equal(version, "7.0.2");
+const displayFlags = NodeBuilderFlags.NoTruncation | NodeBuilderFlags.InTypeAlias;
 const dir = mkdtempSync(join(tmpdir(), "verter-interface-identity-")).replaceAll("\\", "/");
 const fixture = readFileSync(new URL("./generic_interface_identity.ts", import.meta.url), "utf8");
 const source =
@@ -21,6 +23,8 @@ export type StructurallyEqual = Equivalent<string>;
 export type StructurallyNestedEqual = NestedEquivalent<string>;
 export type KeysClosed = keyof Child<string>;
 export type ChangedArgument = State<number>;
+class GK<T> { v!: T }
+export type ToGK = GK<string>;
 `;
 try {
   writeFileSync(`${dir}/probe.ts`, source);
@@ -53,7 +57,9 @@ try {
             return type;
           };
           const print = (name) =>
-            project.checker.typeToString(typeOf(name), undefined, 1 | (1 << 23));
+            project.checker.typeToString(typeOf(name), undefined, displayFlags);
+          // A print-altitude demand keeps the alias of a generic class.
+          assert.equal(project.checker.typeToString(typeOf("ToGK")), "ToGK");
           const answers = Object.fromEntries(
             [
               "Direct",
@@ -65,6 +71,13 @@ try {
               "StructurallyNestedEqual",
               "KeysClosed",
               "ChangedArgument",
+              "Conflict",
+              "ConflictIsNever",
+              "NullIntersection",
+              "UndefinedIntersection",
+              "DefaultState",
+              "PartialState",
+              "DefaultNested",
             ].map((name) => [name, print(name)]),
           );
           assert.match(answers.Direct, /Empty<string>/);
@@ -89,6 +102,16 @@ try {
             ["own", "value"],
           );
           assert.match(answers.ChangedArgument, /Empty<number>/);
+          assert.equal(answers.Conflict, "never");
+          assert.equal(answers.ConflictIsNever, "true");
+          if (strictNullChecks) {
+            assert.equal(answers.NullIntersection, "never");
+            assert.equal(answers.UndefinedIntersection, "never");
+          }
+          assert.match(answers.DefaultState, /DefaultEmpty<string>/);
+          assert.match(answers.PartialState, /Pair<number, number>/);
+          assert.match(answers.DefaultNested, /DefaultEmpty<string>/);
+          assert.match(answers.DefaultNested, /Pair<number, number>/);
           console.log(
             JSON.stringify({ strictNullChecks, noImplicitAny, diagnostics: [], answers }),
           );

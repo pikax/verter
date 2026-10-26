@@ -15021,8 +15021,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Whether the intersection of `arms` is one the checker reduces to
     /// `never` (`getReducedType`): the object types its arms name declare
-    /// one property whose literal types conflict (`{ c: 1 }` beside
-    /// `{ c: 2 }`), read through the declarations the arms name.
+    /// conflicting discriminants or disjoint domains (an interface beside
+    /// `null`, for example), read through the declarations the arms name.
     pub(super) fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool {
         let published =
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
@@ -15030,15 +15030,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .map(|arm| self.resolve_signature_source_carrier(*arm, published))
             .collect();
-        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
-        let conflicts = super::canonical_algebra::object_arms_conflict_on_a_literal_property(
+        let reduced = super::canonical_algebra::intern_ordered_intersection_charged(
             self.graph(),
             &surfaces,
             self.construction_meter(),
-            &mut evidence,
         );
-        self.deposit_canonical_evidence(evidence);
-        conflicts
+        self.deposit_canonical_evidence(reduced.evidence);
+        matches!(
+            self.graph().node_data(reduced.node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        )
     }
 
     /// `keyof` over a union or intersection as the checker's `getIndexType`

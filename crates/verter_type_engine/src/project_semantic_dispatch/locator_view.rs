@@ -32,8 +32,8 @@ use super::ProjectSemanticDispatch;
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
-    MemberMergeRole, NodeScopeId, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
-    ResultCompleteness, SemanticNodeData, SemanticNodeId,
+    may_reduce_operator, MemberMergeRole, NodeScopeId, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, ResultCompleteness, SemanticNodeData, SemanticNodeId,
 };
 
 /// A decl-body projection the caller can resume: its roots, the one memo
@@ -769,6 +769,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .zip(contexts)
                     .map(|(arm, context)| self.reduce_answer_arm(*arm, *context, inputs))
                     .collect();
+                if reduced == *ids
+                    && contexts.iter().any(|context| {
+                        context.mode == ProjectionMode::Expanded && may_reduce_operator(*context)
+                    })
+                    && self.intersection_arms_reduce_to_never(&reduced)
+                {
+                    return self.primitive_node(PrimitiveKind::Never);
+                }
+                // Unchanged projected arms keep the group's written construction:
+                // projection may already have erased a nullable union operand.
                 if reduced != *ids {
                     let category = match self.graph().node_data(*body).as_deref() {
                         Some(SemanticNodeData::Intersection(authored)) => {
