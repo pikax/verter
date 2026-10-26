@@ -258,3 +258,22 @@ fn a_system_build_selects_the_platform_heap_and_links_no_mimalloc() {
     assert_eq!(purge_delay_ms(), None);
     assert!(!mimalloc_serves_global_allocations());
 }
+
+/// A collect never touches a live allocation, on any thread, and is a no-op
+/// where no mimalloc is linked.
+#[test]
+fn collecting_idle_memory_is_safe_beside_live_allocations() {
+    let live: Vec<Vec<u8>> = (0..64_u8).map(|i| vec![i; 4096]).collect();
+    collect_idle_memory();
+    let other = std::thread::spawn(|| {
+        let own = vec![7_u8; 1 << 16];
+        collect_idle_memory();
+        own.iter().all(|&b| b == 7)
+    });
+    assert!(other.join().expect("collecting thread must not panic"));
+    collect_idle_memory();
+    assert!(live
+        .iter()
+        .enumerate()
+        .all(|(i, block)| block.iter().all(|&b| usize::from(b) == i)));
+}

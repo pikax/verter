@@ -121,6 +121,7 @@ pub mod external_ts;
 pub mod external_ts_sync;
 pub mod features;
 pub mod heap_in_use;
+pub(crate) mod idle_collect;
 pub mod interaction_trace;
 pub mod outbound;
 pub mod provider_surface_store;
