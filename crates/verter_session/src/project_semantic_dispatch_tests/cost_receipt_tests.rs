@@ -980,7 +980,7 @@ fn a_sealed_refusal_answers_its_repeat_without_evaluating() {
 }
 
 /// Imported modules whose relation [`wide_refusal_root`] reads: enough that
-/// the refusal's proving prefix spans more than one evidence page while
+/// the refusal's proving prefix is wider than `WIDE_SIGNATURE_WIDTH` while
 /// every fact domain stays precise.
 const WIDE_PREFIX_MODULES: usize = 300;
 
@@ -1048,19 +1048,20 @@ fn wide_refusal_root() -> (
     (host, key)
 }
 
-/// A refusal whose proving prefix is wider than one evidence page is sealed
+/// A refusal whose proving prefix is wider than a wide signature is sealed
 /// whole and replayed like a narrow one: the root, out of work after reading
-/// every imported module, seals a refusal whose carrier pages every fact it
-/// read; the sealed refusal keeps its pages charged; an exact repeat answers
-/// it without evaluating; a follower parked on a producer's flight answers
-/// as the root does alone; and a change to the one fact on the carrier's
-/// LAST page — the project generation — misses the refusal, so the root
-/// evaluates afresh.
+/// every imported module, seals a refusal whose carrier holds every fact it
+/// read; the sealed refusal keeps the carrier's storage charged; an exact
+/// repeat answers it without evaluating; a follower parked on a producer's
+/// flight answers as the root does alone; and a change to the carrier's one
+/// project-generation fact — which sorts after every file fact, at the end
+/// of the canonical order — misses the refusal, so the root evaluates
+/// afresh.
 #[test]
-fn a_wide_refusal_is_replayed_whole_and_missed_by_a_last_page_edit() {
+fn a_wide_refusal_is_replayed_whole_and_missed_by_an_edit_at_its_end() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use verter_session_query::facts::fact_cache::{FactVersionRef, ResultReceipt};
-    use verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH;
 
     let (host, key) = wide_refusal_root();
     let refused = root_read(&host, &key, WIDE_PREFIX_WORK);
@@ -1072,39 +1073,46 @@ fn a_wide_refusal_is_replayed_whole_and_missed_by_a_last_page_edit() {
     let carriers = store.refusal_carriers_for_tests();
     assert_eq!(carriers.len(), 1, "the refused root sealed its refusal");
     let carrier = &carriers[0];
-    let pages: Vec<ResultReceipt> = carrier
-        .facts
-        .iter()
-        .filter_map(|entry| match entry {
-            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
-            _ => None,
-        })
-        .collect();
     assert!(
-        carrier.entries().count() > FACT_PAGE_WIDTH && pages.len() >= 2,
-        "the proving prefix is wider than one page and held on pages: {} entries on {} pages",
-        carrier.entries().count(),
-        pages.len()
+        carrier.facts.len() > WIDE_SIGNATURE_WIDTH,
+        "the proving prefix is wider than a wide signature: {} facts",
+        carrier.facts.len()
     );
+    let storage = carrier.facts.tree_footprint();
     assert!(
-        pages.iter().all(|page| page.retained_charge_class()
-            == Some(verter_session_query::retention::ChargeClass::Retained)),
-        "sealing the refusal claimed its pages into its retained reservation"
+        storage.nodes > 0 && storage.charged_bytes > 0,
+        "the carrier completes a wide traced set, so it is held in tree storage: {storage:?}"
     );
-    let last_page = pages
-        .iter()
-        .max_by(|a, b| a.facts().last().cmp(&b.facts().last()))
-        .expect("pages");
+    assert_eq!(
+        (storage.pinned_bytes, storage.retained_bytes),
+        (0, storage.charged_bytes),
+        "sealing the refusal claimed every node of its carrier into a retained reservation"
+    );
     let is_generation =
         |fact: &FactVersionRef| matches!(fact, FactVersionRef::ProjectGeneration { .. });
+    assert_eq!(
+        carrier
+            .facts
+            .iter()
+            .filter(|fact| is_generation(fact))
+            .count(),
+        1,
+        "the carrier reads the project generation once"
+    );
     assert!(
-        last_page.facts().iter().any(is_generation)
-            && pages
-                .iter()
-                .filter(|page| page.facts().iter().any(is_generation))
-                .count()
-                == 1,
-        "the project generation is read on the carrier's last page alone"
+        carrier
+            .facts
+            .iter()
+            .rev()
+            .take_while(|fact| !is_generation(fact))
+            .all(|fact| !matches!(
+                fact,
+                FactVersionRef::FileWholeHash { .. }
+                    | FactVersionRef::DerivedFactHash { .. }
+                    | FactVersionRef::Parse(_)
+                    | FactVersionRef::ResolveImports(_)
+            )),
+        "the project generation sorts after every file fact of the carrier"
     );
 
     let misses = semantic_misses(&host);
@@ -1119,17 +1127,16 @@ fn a_wide_refusal_is_replayed_whole_and_missed_by_a_last_page_edit() {
     let _ = root_read(&host, &key, WIDE_PREFIX_WORK);
     assert!(
         semantic_misses(&host) > misses,
-        "a change to the fact on the last page misses the refusal"
+        "a change to the carrier's last file-independent fact misses the refusal"
     );
 
     store.invalidate_all();
-    assert!(
-        pages.iter().all(|page| page.retained_charge_class()
-            == Some(verter_session_query::retention::ChargeClass::Retained)
-            && page.retained_charge_bytes() > 0),
-        "a page outliving the refusal that claimed it stays charged while a holder lives"
+    let outliving = carrier.facts.tree_footprint();
+    assert_eq!(
+        (outliving.nodes, outliving.charged_bytes),
+        (storage.nodes, storage.charged_bytes),
+        "storage outliving the refusal that claimed it stays charged while a holder lives"
     );
-    drop(pages);
     drop(carriers);
 
     // A follower parked on a producer's flight answers as the root alone.

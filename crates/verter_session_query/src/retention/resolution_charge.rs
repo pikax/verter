@@ -10,15 +10,16 @@ pub trait ResolutionRetentionAccount: Send + Sync {
     /// reservation: the caller serves its value without retaining it.
     fn reserve_retained(&self, bytes: usize) -> Option<ResolutionRetentionCharge>;
 
-    /// Reserve the entry and claim its reachable evidence pages together.
-    /// Byte-only test accounts cannot transfer page charges, so they refuse
-    /// signatures that need that capability rather than retain pinned pages.
+    /// Reserve the entry and claim the shared storage its signature reaches
+    /// (receipts and tree nodes) together. Byte-only test accounts cannot
+    /// transfer those charges, so they refuse signatures that need that
+    /// capability rather than retain pinned storage.
     fn reserve_retained_with_evidence(
         &self,
         bytes: usize,
-        facts: &[crate::facts::fact_cache::FactVersionRef],
+        facts: crate::facts::fact_set::FactsRef<'_>,
     ) -> Option<ResolutionRetentionCharge> {
-        if crate::facts::receipt::has_unclaimed_evidence_pages(facts) {
+        if crate::facts::receipt::has_unclaimed_retained_storage(&facts) {
             return None;
         }
         self.reserve_retained(bytes)

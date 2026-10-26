@@ -36,7 +36,7 @@ const COMPONENT: &str = "/workspace/Wide.vue";
 /// The authored primitive of prop `p{index}`: string and number alternate,
 /// so a payload read from a neighbouring prop's address changes the answer.
 fn primitive_of(index: usize) -> (&'static str, PrimitiveName) {
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         ("string", PrimitiveName::String)
     } else {
         ("number", PrimitiveName::Number)

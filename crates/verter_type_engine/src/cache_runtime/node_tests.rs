@@ -87,11 +87,12 @@ fn cache_admission_has_three_arms_with_typed_reasons() {
 /// `NonCacheable` would yield `None` from `cacheable()` and fail here.
 #[test]
 fn signature_admission_from_ok_finalise_is_cacheable() {
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/a.ts".into(),
-        hash: [1u8; 16],
-    }]);
-    let admission = SignatureAdmission::from_finalise(FactReadSetFinalise::Ok(Arc::clone(&facts)));
+    let facts: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
+            canonical_id: "/a.ts".into(),
+            hash: [1u8; 16],
+        }]);
+    let admission = SignatureAdmission::from_finalise(FactReadSetFinalise::Ok(facts.clone()));
 
     match &admission {
         SignatureAdmission::Cacheable(sig) => {
@@ -119,10 +120,11 @@ fn signature_admission_from_ok_finalise_is_cacheable() {
 /// can drop a sibling boolean and accidentally publish it.
 #[test]
 fn signature_admission_from_non_cacheable_finalise_refuses_admission() {
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: "/a.ts".into(),
-        hash: [1u8; 16],
-    }]);
+    let facts: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
+            canonical_id: "/a.ts".into(),
+            hash: [1u8; 16],
+        }]);
     let admission = SignatureAdmission::from_finalise(FactReadSetFinalise::NonCacheable(facts));
 
     match &admission {

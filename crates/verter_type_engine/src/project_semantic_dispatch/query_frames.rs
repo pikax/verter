@@ -2517,6 +2517,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Whether a window [`Self::open_contextual_window`] opened is open: a
+    /// read made inside it may stop the run instead of completing.
+    pub(super) fn contextual_window_open(&self) -> bool {
+        self.flow_seam
+            .borrow()
+            .as_ref()
+            .is_some_and(|seam| seam.windows > 0)
+    }
+
     /// Whether the stepping flow evaluation's run waits on a need: what is
     /// left of it is dropped.
     pub(super) fn contextual_window_waits(&self) -> bool {

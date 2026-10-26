@@ -874,20 +874,21 @@ impl<P> ComponentMetaResultDb<P> {
             + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
             + request_bytes;
         let handles = recovery_footprint.handles.merge(aliases.take_handles());
-        let reserved = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+        // The signature's storage is claimed only once the refusal's own
+        // names are held: a refused hold leaves it pinned and unclaimed.
+        let reserved = verter_session_query::facts::receipt::reserve_retained_with_evidence_then(
             self.retention_account(),
             bytes,
             &[&read_set_signature.facts],
-        ) {
-            verter_session_query::retention::RetentionAdmission::Admitted(charge) => handles
-                .retained_with(
+            |charge| {
+                handles.retained_with(
                     charge,
                     verter_session_query::retention::owned::ChargeCtx::new(
                         self.retention_account(),
                     ),
-                ),
-            verter_session_query::retention::RetentionAdmission::Refused(refusal) => Err(refusal),
-        };
+                )
+            },
+        );
         let charge = match reserved {
             Ok(charge) => charge,
             Err(refusal) => {

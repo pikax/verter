@@ -30,7 +30,7 @@
 //! * **Root metadata** — the delivery owner's own bookkeeping, charged
 //!   separately from what it delivers: the owner's block (a caller hold a
 //!   retaining cache adopts into retention and hands back pinned) and the
-//!   root-owner cells naming the nodes the read roots.
+//!   shared blocks of the root sets naming the nodes the read roots.
 //!
 //! Store backing is NOT covered: the rooted nodes' payloads are the arena's
 //! storage, charged with the graph through its granular pins, and a

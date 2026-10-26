@@ -187,6 +187,12 @@ impl<'h, 't> HeapMeter<'h, 't> {
         self.raw.first_allocation(arc)
     }
 
+    /// Bytes an immutable shared encoding keeps alive, once per measurement
+    /// (see [`super::allocation::shared_encoding_bytes`]).
+    pub fn shared_encoding_bytes(&mut self, value: &Arc<[u8]>) -> usize {
+        super::allocation::shared_encoding_bytes(value, self.handles)
+    }
+
     /// The handle set owned allocations are offered to.
     pub fn handles(&mut self) -> &mut AliasSet {
         self.handles

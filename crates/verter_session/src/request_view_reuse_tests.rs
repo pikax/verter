@@ -617,7 +617,7 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
     // optimistic-accept window does not apply). This establishes that the base
     // view alone cannot validate the warm hit.
     assert!(
-        !base.validates_fact_signature(&sig),
+        !base.validates_fact_signature((&sig).into()),
         "fixture invariant: the base view without `/owner.ts` MUST reject the \
          fact through the untracked-file arm"
     );
@@ -639,7 +639,7 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
     // resolve-imports validation through the OVERLAY's content hash
     // and look up the populated shared `ResolvedImportFactsDb` entry.
     assert!(
-        request_view.validates_fact_signature(&sig),
+        request_view.validates_fact_signature((&sig).into()),
         "RequestStoreView::validates_resolve_imports_domain MUST validate the fact \
          via the overlay's content hash when the base view does not track the owner"
     );
@@ -805,7 +805,13 @@ fn a_request_validates_a_shared_receipt_once() {
     let view = RequestStoreView::new(&base, Arc::clone(&overlay));
     let reads = |signature: &[FactVersionRef], roots: &[&str]| {
         let before = view.leaf_validations_for_tests();
-        assert_eq!(view.validate_fact_signature(signature, roots), Ok(()));
+        assert_eq!(
+            view.validate_fact_signature(
+                verter_session_query::facts::fact_set::FactsRef::from(signature),
+                roots
+            ),
+            Ok(())
+        );
         view.leaf_validations_for_tests() - before
     };
     assert_eq!(reads(&first, &[]), 33, "the chain's 32 facts and its own");
@@ -841,7 +847,7 @@ fn a_request_validates_a_shared_receipt_once() {
     let stale = vec![FactVersionRef::Receipt(stale)];
     let stale_reads = |view: &RequestStoreView<'_>| {
         let before = view.leaf_validations_for_tests();
-        assert!(view.validate_fact_signature(&stale, &[]).is_err());
+        assert!(view.validate_fact_signature((&stale).into(), &[]).is_err());
         view.leaf_validations_for_tests() - before
     };
     assert_eq!(stale_reads(&view), 1, "only the stale receipt's own fact");
@@ -849,7 +855,7 @@ fn a_request_validates_a_shared_receipt_once() {
 
     let fresh = RequestStoreView::new(&base, overlay);
     let before = fresh.leaf_validations_for_tests();
-    assert_eq!(fresh.validate_fact_signature(&second, &[]), Ok(()));
+    assert_eq!(fresh.validate_fact_signature((&second).into(), &[]), Ok(()));
     assert_eq!(
         fresh.leaf_validations_for_tests() - before,
         33,

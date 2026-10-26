@@ -1117,7 +1117,7 @@ impl VerterHost {
     ) -> bool {
         let view = current_view.view();
         use verter_session_query::facts::store_view::StoreView;
-        view.validates_fact_signature(&signature.facts)
+        view.validates_fact_signature((&signature.facts).into())
     }
 
     /// Read-only predicate: would `get_virtual_file(query)` for this
@@ -1193,8 +1193,8 @@ impl VerterHost {
     /// the producer actually recorded the cross-file fact set the
     /// consumer's read-side fact-validation oracle depends on. The
     /// returned `ReadSetSignature` exposes `.facts` (the path-precise
-    /// fact rail, paged when wide) and `.entries()` (every entry with its
-    /// pages read through).
+    /// fact rail, one canonical set at any width) and `.entries()` (every
+    /// entry, in canonical order).
     pub fn compile_slot_fact_dep_signature(
         &self,
         canonical_id: &str,

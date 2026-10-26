@@ -303,10 +303,11 @@ fn lookup_publish_threads_deferred_victims_to_evict() {
 // ---------------------------------------------------------------------------
 
 fn sig_for(canonical: &str, hash_byte: u8) -> ReadSetSignature {
-    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
-        canonical_id: canonical.into(),
-        hash: [hash_byte; 16],
-    }]);
+    let facts: verter_session_query::facts::fact_set::FactSet =
+        verter_session_query::facts::fact_set::FactSet::from(vec![FactVersionRef::FileWholeHash {
+            canonical_id: canonical.into(),
+            hash: [hash_byte; 16],
+        }]);
     ReadSetSignature::new(facts)
 }
 
@@ -317,7 +318,7 @@ fn candidate_for(
     Candidate {
         discriminant: FactCandidateDiscriminant {
             validated_at_generation: 0,
-            facts: Arc::clone(&sig.facts),
+            facts: sig.facts.clone(),
         },
         value: value.to_string(),
         signature: sig,

@@ -717,48 +717,78 @@ const comp = defineComponent({
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-#[test]
-fn contextual_this_marker_scales_across_object_members() {
-    let mut work = Vec::new();
-    for count in [20, 100, 400] {
-        let data = (0..count)
-            .map(|i| format!("d{i}: {i} as const"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let methods = (0..count)
-            .map(|i| format!("m{i}() {{ return this.d{i}; }}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let source = format!(
-            "export {{}}; declare global {{ interface ThisType<T> {{}} }}
+/// A component of `count` data members and as many methods, each method
+/// returning its data member through the contextual `this` marker, and the
+/// mapped answer the checker gives for it.
+fn this_marker_component(count: usize) -> (String, String) {
+    let data = (0..count)
+        .map(|i| format!("d{i}: {i} as const"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let methods = (0..count)
+        .map(|i| format!("m{i}() {{ return this.d{i}; }}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "export {{}}; declare global {{ interface ThisType<T> {{}} }}
 declare function defineComponent<D, M>(o: {{ data(): D; methods: M & ThisType<D & M> }}):
   {{ [K in keyof M]: M[K] extends () => infer R ? R : never }};
 const comp = defineComponent({{ data() {{ return {{ {data} }}; }}, methods: {{ {methods} }} }});"
-        );
-        let expected = format!(
-            "{{ {} }}",
-            (0..count)
-                .map(|i| format!("m{i}: {i};"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let mut relation_work = 0;
-        let failures = super::checker_probe_lane_tests::mismatches_in_one_host_observing(
-            &source,
-            &[("typeof comp", &expected), ("typeof comp", &expected)],
-            |dispatch| relation_work = dispatch.graph().stats_snapshot().relation_check_count,
-        );
-        assert!(failures.is_empty(), "{count}: {}", failures.join("\n"));
-        work.push(relation_work);
-    }
-    let [small, medium, large] = work.as_slice() else {
-        unreachable!()
-    };
-    eprintln!("contextual receiver relation work (20, 100, 400): {work:?}");
-    assert!(*small > 0 && small < medium && medium < large);
+    );
+    let expected = format!(
+        "{{ {} }}",
+        (0..count)
+            .map(|i| format!("m{i}: {i};"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    (source, expected)
+}
+
+/// The relation checks one host spends answering the component twice.
+fn this_marker_relation_work(count: usize) -> u64 {
+    let (source, expected) = this_marker_component(count);
+    let mut relation_work = 0;
+    let failures = super::checker_probe_lane_tests::mismatches_in_one_host_observing(
+        &source,
+        &[("typeof comp", &expected), ("typeof comp", &expected)],
+        |dispatch| relation_work = dispatch.graph().stats_snapshot().relation_check_count,
+    );
+    assert!(
+        failures.is_empty(),
+        "{count}: {}",
+        failures.join(
+            "
+"
+        )
+    );
+    relation_work
+}
+
+/// The component at 5, 10 and 15 members: the gate version of the 20-, 100-
+/// and 400-member test in the nightly scale tier. Each answers exactly; its
+/// relation checks grow by the same amount per step, so they are affine in
+/// the members, and at 20, 100 and 400 members they meet the full-size
+/// test's checks: increasing, and the last step at most five times the first.
+#[test]
+fn contextual_this_marker_relation_work_is_affine_and_meets_the_full_size_check() {
+    let sizes = [5, 10, 15];
+    let work = crate::scale_gate::affine(
+        "the contextual receiver",
+        sizes,
+        vec![crate::scale_gate::Counter {
+            name: "relation checks",
+            values: sizes
+                .iter()
+                .map(|&count| this_marker_relation_work(count))
+                .collect(),
+        }],
+    );
+    let [small, medium, large] = [20, 100, 400].map(|count| work.at("relation checks", count));
+    assert!(small > 0 && small < medium && medium < large);
     assert!(
         large - medium <= 5 * (medium - small),
-        "member growth repeats prior relation work: {work:?}"
+        "member growth repeats prior relation work: {small}, {medium}, {large}"
     );
 }
 
@@ -1299,4 +1329,53 @@ fn an_object_method_nest_walks_each_member_once_for_its_own_this() {
         2 * (sixteen - eight),
         "the walks grow linearly with the nest: {eight}, {sixteen}, {thirty_two}"
     );
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    #[test]
+    fn contextual_this_marker_scales_across_object_members() {
+        let mut work = Vec::new();
+        for count in [20, 100, 400] {
+            let data = (0..count)
+                .map(|i| format!("d{i}: {i} as const"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let methods = (0..count)
+                .map(|i| format!("m{i}() {{ return this.d{i}; }}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = format!(
+                "export {{}}; declare global {{ interface ThisType<T> {{}} }}
+    declare function defineComponent<D, M>(o: {{ data(): D; methods: M & ThisType<D & M> }}):
+      {{ [K in keyof M]: M[K] extends () => infer R ? R : never }};
+    const comp = defineComponent({{ data() {{ return {{ {data} }}; }}, methods: {{ {methods} }} }});"
+            );
+            let expected = format!(
+                "{{ {} }}",
+                (0..count)
+                    .map(|i| format!("m{i}: {i};"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let mut relation_work = 0;
+            let failures = super::super::checker_probe_lane_tests::mismatches_in_one_host_observing(
+                &source,
+                &[("typeof comp", &expected), ("typeof comp", &expected)],
+                |dispatch| relation_work = dispatch.graph().stats_snapshot().relation_check_count,
+            );
+            assert!(failures.is_empty(), "{count}: {}", failures.join("\n"));
+            work.push(relation_work);
+        }
+        let [small, medium, large] = work.as_slice() else {
+            unreachable!()
+        };
+        eprintln!("contextual receiver relation work (20, 100, 400): {work:?}");
+        assert!(*small > 0 && small < medium && medium < large);
+        assert!(
+            large - medium <= 5 * (medium - small),
+            "member growth repeats prior relation work: {work:?}"
+        );
+    }
 }

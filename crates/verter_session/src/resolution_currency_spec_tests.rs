@@ -578,7 +578,9 @@ fn resolution_world_publication_is_odd_during_all_four_write_steps() {
 
 #[test]
 fn typed_non_admission_uses_the_existing_substrate() {
-    let empty = SignatureAdmission::from_finalise(FactReadSetFinalise::Ok(Arc::from([])));
+    let empty = SignatureAdmission::from_finalise(FactReadSetFinalise::Ok(
+        verter_session_query::facts::fact_set::FactSet::from([]),
+    ));
     let unstable = SignatureAdmission::from_finalise(FactReadSetFinalise::MutationUnstable);
     assert!(matches!(
         empty,

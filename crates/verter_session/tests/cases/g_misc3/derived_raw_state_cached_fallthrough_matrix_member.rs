@@ -55,7 +55,7 @@ fn cached_fallthrough_signature_carries_member() {
     let signature: Arc<[FactVersionRef]> = Arc::from(vec![member_fact].into_boxed_slice());
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&signature),
+        view.validates_fact_signature((&signature).into()),
         "permissive view must accept a Member fact in the Arc-stored signature"
     );
 }

@@ -178,7 +178,7 @@ mod tests {
             .get(&key, owner_hash)
             .expect("DB-owned computation must admit its traced candidate");
         assert_eq!(
-            admitted.read_set_signature.facts.as_ref(),
+            admitted.read_set_signature.facts.to_vec(),
             std::slice::from_ref(&owner_fact)
         );
 

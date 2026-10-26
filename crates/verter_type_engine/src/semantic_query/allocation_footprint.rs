@@ -12,8 +12,8 @@
 //!
 //! * graph nodes (`SemanticNodeId` operands) — the node arena owns their
 //!   storage; a carrier holds an ordinal and, through its lease, a root;
-//! * evidence pages and cost receipts — each carries its own charge for as
-//!   long as it lives;
+//! * result receipts, sealed-set tree nodes and cost receipts — each
+//!   carries its own charge for as long as it lives;
 //! * a signature epoch's tables — the epoch's owner;
 //! * the inline bytes of a field — the block of the value embedding it.
 
@@ -390,7 +390,7 @@ macro_rules! node_set_key_heap_bytes {
         $(impl $key {
             pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
                 arc_slice_block_bytes(&self.0, aliases).unwrap_or(0)
-                    + self.1 .0.owned_heap_bytes(aliases)
+                    + self.1.owned_heap_bytes(aliases)
             }
         })*
     };
@@ -406,6 +406,6 @@ impl super::CanonicalTypeSubstitution {
     /// The pair list — an owned allocation charged by its own cell — and
     /// its root attachment's owner.
     pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        self.0.offer(aliases) + self.1 .0.owned_heap_bytes(aliases)
+        self.0.offer(aliases) + self.1.owned_heap_bytes(aliases)
     }
 }

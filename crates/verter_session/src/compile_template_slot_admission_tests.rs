@@ -190,7 +190,7 @@ fn default_profile_inline_compile_still_persists_and_warm_serves() {
 }
 
 #[test]
-fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
+fn evidence_retention_refusal_evicts_compile_companions_and_serves_uncached() {
     use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
     use verter_session_query::retention::{
         RetentionLimits, SemanticRetentionAccount, StoreAccount,
@@ -199,31 +199,31 @@ fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
     for refused in [false, true] {
         let host = make_host();
         upsert(&host, INLINE_SOURCE);
-        let facts: Vec<_> = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH
-            + 3)
-            .map(|i| {
-                let canonical_id = format!("/publish-evidence/{i}.ts");
-                let _ = host
-                    .upsert(UpsertRequest {
-                        canonical_id: Some(canonical_id.clone()),
-                        input_id: canonical_id.clone(),
-                        source: Arc::from("export const value = 1;"),
-                        file_language: verter_language::FileLanguage::script_ts(),
-                        aliases: Vec::new(),
-                    })
-                    .unwrap();
-                let source = host.scheduler.try_get_source(&canonical_id).unwrap();
-                let hash = source
-                    .downcast_data::<crate::host_executor::HostSourceData>()
-                    .unwrap()
-                    .parse
-                    .whole_hash;
-                FactVersionRef::FileWholeHash {
-                    canonical_id: canonical_id.into(),
-                    hash,
-                }
-            })
-            .collect();
+        let facts: Vec<_> =
+            (0..2 * verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 3)
+                .map(|i| {
+                    let canonical_id = format!("/publish-evidence/{i}.ts");
+                    let _ = host
+                        .upsert(UpsertRequest {
+                            canonical_id: Some(canonical_id.clone()),
+                            input_id: canonical_id.clone(),
+                            source: Arc::from("export const value = 1;"),
+                            file_language: verter_language::FileLanguage::script_ts(),
+                            aliases: Vec::new(),
+                        })
+                        .unwrap();
+                    let source = host.scheduler.try_get_source(&canonical_id).unwrap();
+                    let hash = source
+                        .downcast_data::<crate::host_executor::HostSourceData>()
+                        .unwrap()
+                        .parse
+                        .whole_hash;
+                    FactVersionRef::FileWholeHash {
+                        canonical_id: canonical_id.into(),
+                        hash,
+                    }
+                })
+                .collect();
         let first = compile_with(&host, profile.clone()).unwrap();
         assert!(template_slot(&host).is_some());
         let profile_hash = compile_profile_hash(&profile);
@@ -286,7 +286,7 @@ fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
             assert!(
                 verter_session_query::facts::store_view::StoreView::validates_fact_signature(
                     &view,
-                    &signature.facts
+                    verter_session_query::facts::fact_set::FactsRef::Set(&signature.facts)
                 ),
                 "the admitted wide witness is current"
             );
@@ -300,7 +300,7 @@ fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
         assert_eq!(
             account.snapshot().retained_bytes,
             0,
-            "dropping companions drains pages"
+            "dropping companions drains the retained signature storage"
         );
     }
 }

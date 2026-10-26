@@ -78,7 +78,7 @@ describe("createActivationGate", () => {
 
     // The live attempt still owns the gate, so a new caller joins it instead
     // of starting a third activation.
-    expect(gate.run()).resolves.toBe("second");
+    await expect(gate.run()).resolves.toBe("second");
     expect(start).toHaveBeenCalledTimes(2);
   });
 });

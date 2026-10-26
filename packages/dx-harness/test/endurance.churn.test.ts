@@ -38,7 +38,7 @@ import {
 const config = loadEnduranceConfig();
 const lane = DEFAULT_ENDURANCE_LANE;
 
-describe.sequential(`endurance: churn [${lane.id}/${config.route}]`, () => {
+describe(`endurance: churn [${lane.id}/${config.route}]`, { concurrent: false }, () => {
   let rig: EnduranceRig;
   const fixture = churnFixture(config.churnCarrierBlocks, lane);
 

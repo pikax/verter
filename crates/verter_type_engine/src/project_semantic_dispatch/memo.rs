@@ -20,7 +20,7 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 ///
 /// The refusal charges and the isolation flag are this compute's. A later compute does not replace them.
 pub struct ComponentMetaEvidence {
-    facts: Arc<[FactVersionRef]>,
+    facts: verter_session_query::facts::fact_set::FactSet,
     generation: u64,
     external_fingerprint: u64,
     effects: crate::component_meta_result_db::ComponentMetaRefusalEffects,
@@ -182,7 +182,7 @@ impl<'a, D, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> Mem
 enum SingleEntryOutcome<V> {
     /// Valid AND cacheable: the value plus the path-precise fact signature
     /// the entry is validated by.
-    Cacheable(V, Arc<[FactVersionRef]>),
+    Cacheable(V, verter_session_query::facts::fact_set::FactSet),
     /// Valid but NOT cacheable: publish nothing, serve the value to the
     /// winner verbatim. Never a fabricated `Partial` — refusal is
     /// CACHE-ONLY.
@@ -421,7 +421,7 @@ where
         // bump.
         crate::cache_runtime::FactCandidateDiscriminant {
             validated_at_generation,
-            facts: Arc::clone(&signature.facts),
+            facts: signature.facts.clone(),
         }
     }
 
@@ -586,7 +586,10 @@ impl<
         compute: F,
     ) -> Option<MaterializedOutputTypeExpr>
     where
-        F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
+        F: FnOnce() -> Option<(
+            MaterializedOutputTypeExpr,
+            verter_session_query::facts::fact_set::FactSet,
+        )>,
     {
         MemoPublish::new(self.db, self.ctx, self.snapshot)
             .get_or_compute_in_scope(key, self.ctx, self.probe, compute)
@@ -601,7 +604,7 @@ impl<
         &self,
         key: &ShapeCacheKey,
         value: MaterializedOutputTypeExpr,
-        fact_dep_signature: Arc<[FactVersionRef]>,
+        fact_dep_signature: verter_session_query::facts::fact_set::FactSet,
     ) -> MaterializedOutputTypeExpr {
         let value_for_closure = value.clone();
         self.get_or_compute(key, move || Some((value_for_closure, fact_dep_signature)))
@@ -816,7 +819,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                     CacheAdmission::Cacheable {
                         value: entry.value,
                         signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                            Arc::clone(&entry.fact_dep_signature),
+                            entry.fact_dep_signature.clone(),
                         ),
                         self_root_canonicals: self_roots,
                         validated_at_generation: entry.validated_at_generation,
@@ -1229,7 +1232,10 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         compute: F,
     ) -> Option<MaterializedOutputTypeExpr>
     where
-        F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
+        F: FnOnce() -> Option<(
+            MaterializedOutputTypeExpr,
+            verter_session_query::facts::fact_set::FactSet,
+        )>,
     {
         let storage = self.db.attach_output();
 
@@ -1299,7 +1305,10 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         compute: F,
     ) -> Option<MaterializedOutputTypeExpr>
     where
-        F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
+        F: FnOnce() -> Option<(
+            MaterializedOutputTypeExpr,
+            verter_session_query::facts::fact_set::FactSet,
+        )>,
     {
         self.with_owner_scope::<verter_audit::observe::Uncaptured, _, _>(
             &crate::request_observers::CaptureTargets::EMPTY,
@@ -1313,7 +1322,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         &self,
         key: &ShapeCacheKey,
         value: MaterializedOutputTypeExpr,
-        fact_dep_signature: Arc<[FactVersionRef]>,
+        fact_dep_signature: verter_session_query::facts::fact_set::FactSet,
     ) -> MaterializedOutputTypeExpr {
         self.with_owner_scope::<verter_audit::observe::Uncaptured, _, _>(
             &crate::request_observers::CaptureTargets::EMPTY,
@@ -1377,7 +1386,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     /// Whether every fact in `facts` still validates under the request's live
     /// view.
     #[must_use]
-    pub fn validates_fact_signature(&self, facts: &[FactVersionRef]) -> bool {
+    pub fn validates_fact_signature(
+        &self,
+        facts: verter_session_query::facts::fact_set::FactsRef<'_>,
+    ) -> bool {
         self.ctx.validates_fact_signature(facts)
     }
 
@@ -1394,7 +1406,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         }
         let candidate = db.candidate(key, owner_whole_hash)?;
         if candidate.value.validated_at_generation != self.current_project_generation()
-            || !self.validates_fact_signature(&candidate.value.read_set_signature.facts)
+            || !self.validates_fact_signature((&candidate.value.read_set_signature.facts).into())
         {
             return None;
         }
@@ -1449,8 +1461,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                 )
             })
             .cloned()
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<verter_session_query::facts::fact_set::FactSet>();
         ReadSetSignature::new(facts)
     }
 
@@ -1579,7 +1590,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         }
         let (retained, effects) = db.refusal_for(key, owner_whole_hash, query)?;
         if retained.validated_at_generation != self.current_project_generation()
-            || !self.validates_fact_signature(&retained.read_set_signature.facts)
+            || !self.validates_fact_signature((&retained.read_set_signature.facts).into())
         {
             return None;
         }

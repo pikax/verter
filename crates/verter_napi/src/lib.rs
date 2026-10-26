@@ -52,6 +52,20 @@ mod meta;
 mod project_config_tests;
 mod typeinfo;
 
+/// The addon's Rust allocations run on the process allocator (mimalloc on
+/// native targets; see `verter_alloc` for how it coexists with Node and other
+/// addons). An instrumented (`semantic-observe`) binding installs the memory
+/// audit's counting wrapper over the same allocator instead.
+#[cfg(not(feature = "semantic-observe"))]
+#[global_allocator]
+static GLOBAL: verter_alloc::Allocator = verter_alloc::ALLOCATOR;
+
+/// Applies the allocator's runtime configuration when the addon image loads.
+#[napi_derive::module_init]
+fn configure_allocator() {
+    verter_alloc::configure();
+}
+
 pub use host_compile_request::{
     decode_host_compile_request, napi_host_compile_request_to_ffi, NapiHostCompileRequest,
     NapiRequestedProduct,

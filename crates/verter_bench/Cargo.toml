@@ -35,8 +35,12 @@ hotpath-alloc = ["semantic-observe", "verter_compiler/hotpath-alloc", "hotpath/h
 # component-meta producer entries). General session/engine `test-support`,
 # audit/footprint capture and `semantic-observe` stay off in this lane.
 soak-support = ["verter_session/soak-support", "verter_type_engine/soak-support"]
+# Run the semantic-perf probes on the platform heap instead of the shipped
+# mimalloc, to compare the two allocators.
+system-allocator = ["verter_alloc/system-allocator"]
 
 [dependencies]
+verter_alloc = { path = "../verter_alloc" }
 # `bench` unlocks `template`/`script` module visibility (see
 # `verter_compiler`'s own Cargo.toml) for the benches/examples below; it does
 # NOT gate `compile`/`compile_with_parsed`/`compile_client`, so it stays on
@@ -103,7 +107,9 @@ name = "css_latency_gate"
 path = "src/bin/css_latency_gate.rs"
 
 # The Verter arm of `scripts/benchmark/semantic-perf.mjs` (production library,
-# system allocator) and its separately labelled allocation-counting twin.
+# on the allocator the shipped binaries install, `verter_alloc`) and its
+# separately labelled allocation-counting twin, whose counter wraps that
+# allocator.
 [[bin]]
 name = "semantic_perf_probe"
 path = "src/bin/semantic_perf_probe.rs"

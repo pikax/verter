@@ -60,7 +60,7 @@ fn cached_meta_payload_signature_carries_module_aug_index_shape() {
     let signature: Arc<[FactVersionRef]> = Arc::from(vec![aug_fact].into_boxed_slice());
     let view = PermissiveStoreView;
     assert!(
-        view.validates_fact_signature(&signature),
+        view.validates_fact_signature((&signature).into()),
         "permissive view must accept a ModuleAugmentationIndexShape fact in the \
          Arc-stored signature"
     );

@@ -163,14 +163,14 @@ fn observe_borrowed_signature_appends() {
 // ── Test 4 ─────────────────────────────────────────────────────────────
 //
 // `FactReadSet::finalise` never refuses a wide observation set: a tracer
-// that observes more distinct facts than one evidence page seals EVERY one
-// of them into a paged signature.
+// that observes more distinct facts than `WIDE_SIGNATURE_WIDTH` seals EVERY
+// one of them into its signature.
 
 #[test]
 fn a_wide_observation_set_seals_every_fact() {
     let host = make_host();
 
-    const N_WIDE: usize = verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1;
+    const N_WIDE: usize = verter_session_query::facts::fact_read_set::WIDE_SIGNATURE_WIDTH + 1;
 
     let ((), set) = host.with_fact_tracer(
         verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
@@ -198,7 +198,7 @@ fn a_wide_observation_set_seals_every_fact() {
             assert_eq!(
                 signature.entry_count(),
                 N_WIDE,
-                "every distinct fact survives into the paged signature"
+                "every distinct fact survives into the wide signature"
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),

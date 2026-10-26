@@ -374,9 +374,13 @@ fn evaluate_inner(
     // Cache fast-path. Only consulted when the caller asked for
     // caching — otherwise the cache is bypassed in both directions.
     if req.cacheable {
-        let mut guard = host.scratch_cache().lock();
-        if let Some(node_id) = guard.get(scratch_uri) {
-            return (Ok(Some(node_id)), true);
+        let hit = host.scratch_cache().lock().get(scratch_uri);
+        // The roots are counted only after the cache's lock is released; an
+        // entry whose node a release destroyed meanwhile is a miss.
+        if let Some((node_id, roots)) = hit {
+            if roots.retain_for_construction() {
+                return (Ok(Some(node_id)), true);
+            }
         }
     }
 
