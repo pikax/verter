@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{RecursiveRwLock, RecursiveRwLockReadGuard, RecursiveRwLockWriteGuard};
 
 /// A [`std::cell::RefCell`] whose borrow flag is atomic.
 ///
@@ -22,21 +22,21 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 /// polls the owning computation: shared borrows nest, and a borrow that
 /// conflicts with a live one panics instead of waiting.
 #[derive(Default)]
-pub struct SyncRefCell<T>(RwLock<T>);
+pub struct SyncRefCell<T>(RecursiveRwLock<T>);
 
 /// A [`SyncRefCell`] borrow refused because a conflicting borrow is live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AlreadyBorrowed;
 
 /// A shared borrow of a [`SyncRefCell`].
-pub type SyncRef<'a, T> = RwLockReadGuard<'a, T>;
+pub type SyncRef<'a, T> = RecursiveRwLockReadGuard<'a, T>;
 
 /// An exclusive borrow of a [`SyncRefCell`].
-pub type SyncRefMut<'a, T> = RwLockWriteGuard<'a, T>;
+pub type SyncRefMut<'a, T> = RecursiveRwLockWriteGuard<'a, T>;
 
 impl<T> SyncRefCell<T> {
     pub const fn new(value: T) -> Self {
-        Self(parking_lot::const_rwlock(value))
+        Self(RecursiveRwLock::new(value))
     }
 
     /// Borrow the value shared.
@@ -46,9 +46,7 @@ impl<T> SyncRefCell<T> {
     /// While the value is mutably borrowed.
     #[track_caller]
     pub fn borrow(&self) -> SyncRef<'_, T> {
-        self.0
-            .try_read_recursive()
-            .expect("already mutably borrowed")
+        self.0.try_read().expect("already mutably borrowed")
     }
 
     /// Borrow the value exclusively.
@@ -116,7 +114,7 @@ impl<T: Clone> Clone for SyncRefCell<T> {
 
 impl<T: fmt::Debug> fmt::Debug for SyncRefCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0.try_read_recursive() {
+        match self.0.try_read() {
             Some(value) => f.debug_tuple("SyncRefCell").field(&*value).finish(),
             None => f.write_str("SyncRefCell(<borrowed>)"),
         }
@@ -129,7 +127,7 @@ pub struct SyncCell<T: Copy>(parking_lot::Mutex<T>);
 
 impl<T: Copy> SyncCell<T> {
     pub const fn new(value: T) -> Self {
-        Self(parking_lot::const_mutex(value))
+        Self(parking_lot::Mutex::new(value))
     }
 
     #[inline(always)]

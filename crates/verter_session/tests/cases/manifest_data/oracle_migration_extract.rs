@@ -781,7 +781,7 @@ impl EvalReach {
     /// reachability cursor, left-to-right), LAZY/CONDITIONAL/DEFERRED (gated), or a
     /// boundary/frame. `syn::Expr` is `#[non_exhaustive]`, so the trailing wildcard is
     /// mandatory; it is a SAFE barrier (never `MayComplete`) and is unreachable on the
-    /// pinned `syn 2.0.117` (proven by `expr_variant_table_covers_every_syn_variant`;
+    /// pinned `syn 3.0.9` (proven by `expr_variant_table_covers_every_syn_variant`;
     /// a syn bump is caught by `syn_version_is_pinned_for_the_expr_variant_table`).
     fn walk_expr(&mut self, expr: &Expr, dead: bool) -> Flow {
         if self.error.is_some() {
@@ -1008,8 +1008,9 @@ impl EvalReach {
                 let mut any_guard_diverges = false;
                 let mut all_bodies_diverge = true;
                 for arm in &e.arms {
-                    if let Some((_, guard)) = &arm.guard {
-                        let g = self.within_gate("conditional", |s| s.walk_expr(guard, arms_dead));
+                    if let syn::Pat::Guard(guarded) = &arm.pat {
+                        let g = self
+                            .within_gate("conditional", |s| s.walk_expr(&guarded.guard, arms_dead));
                         if !arms_dead && g.diverges() {
                             any_guard_diverges = true;
                             arms_dead = true;
@@ -1142,7 +1143,7 @@ impl EvalReach {
             // `Verbatim` (never `MayComplete`) until the table, this match, and a
             // discriminator are updated — forced by the `syn`-version pin guard
             // (`syn_version_is_pinned_for_the_expr_variant_table`) plus the
-            // variant-coverage test. This arm is unreachable on the pinned `syn 2.0.117`
+            // variant-coverage test. This arm is unreachable on the pinned `syn 3.0.9`
             // (every current variant is handled explicitly above).
             _ => Flow::AlwaysDiverges,
         }
@@ -3072,7 +3073,7 @@ mod tests {
         assert_eq!(t.queries[0].symbol_or_expression, "ConstSym");
     }
 
-    // --- The exhaustive `syn 2.0.117` variant guard ---------------------------
+    // --- The exhaustive `syn 3.0.9` variant guard ---------------------------
     // `syn::Expr` is `#[non_exhaustive]` and the `non_exhaustive_omitted_patterns` lint
     // that would make an omitted variant a COMPILE error is unstable on the pinned stable
     // toolchain — so the compile-time mechanism the syn docs suggest is unavailable here.
@@ -3082,15 +3083,15 @@ mod tests {
     //       corpus proving every modeled variant is individually recognized (never the
     //       `Unrecognized` wildcard);
     //   (2) `syn_version_is_pinned_for_the_expr_variant_table` — a Cargo.lock version pin
-    //       that FAILS when `syn` 2.x drifts from the reviewed pin, forcing a re-audit of
+    //       that FAILS when `syn` 3.x drifts from the reviewed pin, forcing a re-audit of
     //       the table + `walk_expr` + classifier + corpus (the only way a NEW Expr variant
     //       can arrive is a syn bump).
     // `syn::Stmt` is NOT `#[non_exhaustive]`, so `walk_stmt` (and `stmt_variant_tag`) are
     // exhaustive with NO wildcard — a new Stmt variant is a COMPILE error directly.
 
-    /// The reviewed `syn` 2.x version the Expr variant table was audited against. Bump
+    /// The reviewed `syn` 3.x version the Expr variant table was audited against. Bump
     /// ONLY after re-auditing `syn::Expr`'s variants against the table in this file.
-    const REVIEWED_SYN_VERSION: &str = "2.0.117";
+    const REVIEWED_SYN_VERSION: &str = "3.0.9";
     /// The number of `syn::Expr` variants modeled (excluding the `Unrecognized` mirror).
     const KNOWN_EXPR_VARIANT_COUNT: usize = 40;
 
@@ -3381,12 +3382,12 @@ mod tests {
         // an EXACT syn version. Because `syn::Expr` is `#[non_exhaustive]` and the
         // `non_exhaustive_omitted_patterns` lint is unstable on the pinned stable
         // toolchain, a new Expr variant cannot be caught at compile time — this guard
-        // catches it instead: it FAILS when the resolved `syn` 2.x version drifts.
+        // catches it instead: it FAILS when the resolved `syn` 3.x version drifts.
         let lock = read_workspace_cargo_lock();
-        let resolved = resolved_syn_2x_version(&lock);
+        let resolved = resolved_syn_3x_version(&lock);
         assert_eq!(
             resolved, REVIEWED_SYN_VERSION,
-            "syn 2.x resolved to {resolved} but the Expr variant table was audited against \
+            "syn 3.x resolved to {resolved} but the Expr variant table was audited against \
              {REVIEWED_SYN_VERSION}. Re-audit syn::Expr's variants against the per-variant \
              arms in walk_expr (the variant-table contract) plus expr_variant_tag and the \
              coverage corpus; if a variant was added or removed, update walk_expr, the \
@@ -3412,9 +3413,9 @@ mod tests {
         }
     }
 
-    /// The single resolved `syn` 2.x version in a Cargo.lock (the workspace also pins a
-    /// distinct `syn 1.x` for legacy macro deps; this picks the 2.x line).
-    fn resolved_syn_2x_version(lock: &str) -> String {
+    /// The single resolved `syn` 3.x version in a Cargo.lock (dependencies still pull
+    /// `syn` 2.x for their own macros; this picks the 3.x line the extractor parses with).
+    fn resolved_syn_3x_version(lock: &str) -> String {
         let mut in_syn = false;
         let mut versions: Vec<String> = Vec::new();
         for line in lock.lines() {
@@ -3432,15 +3433,15 @@ mod tests {
                 }
             }
         }
-        let two_x: Vec<String> = versions
+        let three_x: Vec<String> = versions
             .into_iter()
-            .filter(|v| v.starts_with("2."))
+            .filter(|v| v.starts_with("3."))
             .collect();
         assert_eq!(
-            two_x.len(),
+            three_x.len(),
             1,
-            "expected exactly one syn 2.x package in Cargo.lock, found {two_x:?}",
+            "expected exactly one syn 3.x package in Cargo.lock, found {three_x:?}",
         );
-        two_x.into_iter().next().unwrap()
+        three_x.into_iter().next().unwrap()
     }
 }

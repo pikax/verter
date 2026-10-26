@@ -143,7 +143,7 @@ diagnosis-bench = ["external-corpus"]
 verter_resolution = { workspace = true }
 verter_ecma = { workspace = true }
 verter_execution = { path = "../verter_execution" }
-imbl = "7.0.1"
+imbl = "7.0.2"
 verter_debug_assert = { workspace = true }
 verter_audit = { path = "../verter_audit" }
 verter_language = { path = "../verter_language" }
@@ -152,7 +152,7 @@ verter_identity = { path = "../verter_identity" }
 verter_analysis_inputs = { path = "../verter_analysis_inputs" }
 verter_parser = { path = "../verter_parser" }
 verter_protocol = { path = "../verter_protocol" }
-prost = "0.14.3"
+prost = "0.14.4"
 verter_semantic = { path = "../verter_semantic" }
 verter_semantic_source = { workspace = true }
 # The query-owned host port (inversion of control): the query boundary crate
@@ -188,13 +188,13 @@ tempfile = { version = "3.27", optional = true }
 # them enter the default/production closure. `span-locations` is what lets the
 # command locate a test fn's attribute + body byte ranges from the parsed item
 # instead of scanning text.
-syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"], optional = true }
-quote = { version = "1.0.45", optional = true }
+syn = { version = "3.0", features = ["full", "extra-traits", "visit", "parsing"], optional = true }
+quote = { version = "1.0.47", optional = true }
 proc-macro2 = { version = "1.0", features = ["span-locations"], optional = true }
 # Async runtime for the `oracle-gen` spike's `#[tokio::test]` tsgo driver. OPTIONAL
 # (only the `oracle-gen` feature activates it) so it stays off the default closure.
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util", "process", "sync"], optional = true }
-bitflags = "2.11"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "io-util", "process", "sync"], optional = true }
+bitflags = "2.13"
 dashmap = "6.2"
 hotpath = { version = "0.23", optional = true }
 oxc_allocator = { workspace = true }
@@ -205,18 +205,18 @@ oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
 rustc-hash = { workspace = true }
 self_cell = { workspace = true }
-smallvec = "1.15"
-uuid = { version = "1.23", features = ["v4"] }
+smallvec = "1.16"
+uuid = { version = "1.29", features = ["v4"] }
 sha2 = { workspace = true }
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 serde = { workspace = true }
 tracing = "0.1.44"
 serde_json = { workspace = true }
-oxc_sourcemap = "7.0.0"
+oxc_sourcemap = "9.0.0"
 thiserror = "2.0"
 arc-swap = "1.9"
-parking_lot = "0.12.5"
-crossbeam-channel = "0.5.15"
+parking_lot = "0.13.0"
+crossbeam-channel = "0.5.17"
 indexmap = "2.14"
 similar = "3"
 # ts-rs is a REGULAR dependency (not dev) so derives compile into production
@@ -242,7 +242,7 @@ boxcar = "=0.2.14"
 web-time = "1.1"
 # uuid 1.22 split RNG into explicit features. On wasm32-unknown-unknown
 # the `js` feature routes through wasm-bindgen + WebCrypto.
-uuid = { version = "1.23", features = ["js"] }
+uuid = { version = "1.29", features = ["js"] }
 
 # Windows process-RSS reporting in `component_meta_audit::current_process_rss`.
 # Requires `K32GetProcessMemoryInfo` (kernel32.dll, exposed by
@@ -265,7 +265,7 @@ hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
 rayon = { workspace = true }
 # uuid 1.22 split RNG into explicit features. Native targets use
 # `rng-getrandom` for v4 generation.
-uuid = { version = "1.23", features = ["rng-getrandom"] }
+uuid = { version = "1.29", features = ["rng-getrandom"] }
 
 [dev-dependencies]
 verter_session_query = { workspace = true, features = ["test-support"] }
@@ -352,10 +352,10 @@ verter_no_storedspan = { workspace = true }
 verter_test_support = { path = "../verter_test_support" }
 tempfile = "3.27"
 walkdir = "2.5"
-regex = "1.12"
+regex = "1.13"
 # One multi-pattern pass over the production sources for the retired-vocabulary
 # rules in `project_semantic_dispatch_invariants_tests`.
-aho-corasick = "1.1.4"
+aho-corasick = "1.1.5"
 # Named per-resource serialization for integration tests that contend a
 # process-global resource. Two groups: `fact_counter_provenance` (the
 # fact-counter provenance discriminators) and `parse_fact_injection` (the
@@ -371,13 +371,13 @@ tracing-test = "0.2.6"
 # The remaining `syn::Visit`-based guards (e.g. the recursion-budget
 # scanner) require the `visit` and `parsing` features in addition to the
 # original `full`+`extra-traits` set.
-syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"] }
+syn = { version = "3.0", features = ["full", "extra-traits", "visit", "parsing"] }
 # Route-mutator guard macro-body scan: walks proc_macro2 TokenTrees of
 # macro invocations for marker IDENTS (syn::visit does not descend into
 # macro token streams; ident-token matching keeps log-string mentions
 # from false-flagging).
 proc-macro2 = "1.0"
-quote = "1.0.45"
+quote = "1.0.47"
 
 # The TS7 oracle harness snapshot GENERATOR. `required-features` gates it behind
 # `oracle-gen` so a default `cargo build` / `cargo clippy --workspace` SKIPS it

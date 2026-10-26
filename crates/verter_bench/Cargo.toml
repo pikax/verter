@@ -48,7 +48,7 @@ verter_session = { path = "../verter_session" }
 verter_type_engine = { path = "../verter_type_engine" }
 verter_workspace = { path = "../verter_workspace" }
 verter_lsp = { path = "../verter_lsp" }
-tokio = { version = "1.52", features = ["rt", "sync"] }
+tokio = { version = "1.54", features = ["rt", "sync"] }
 verter_session_query = { workspace = true }
 verter_audit = { path = "../verter_audit" }
 verter_execution = { path = "../verter_execution" }
@@ -67,7 +67,7 @@ serde_json = { workspace = true, features = ["unbounded_depth"] }
 serde_stacker = "0.1"
 stacker = "0.1.25"
 walkdir = "2.5"
-glob = "0.3.3"
+glob = "0.3.4"
 rayon = "1.12"
 tempfile = "3.27"
 sha2 = { workspace = true }
@@ -96,7 +96,7 @@ verter_supervise = { path = "../verter_supervise" }
 # `verter_compiler` dev-dependency edges in `verter_session`'s Cargo.toml.
 verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
-smallvec = "1.15"
+smallvec = "1.16"
 
 [[bin]]
 name = "css_latency_gate"

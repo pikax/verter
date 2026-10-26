@@ -1662,11 +1662,12 @@ fn accessor_names() -> Vec<&'static str> {
 ///     everything; and `x @ <sub>` is a catch-all iff `<sub>` is;
 ///   - a `|`-pattern (`Pat::Or`) any of whose alternatives is a catch-all;
 ///   - a parenthesised `(_)` (`Pat::Paren`) or a reference `&_` / `&mut _`
-///     (`Pat::Reference`).
+///     (`Pat::Reference`);
+///   - a guarded arm `_ if …` (`Pat::Guard`) whose pattern is a catch-all.
 ///
-/// (syn 2.x has no `Pat::Group`; a grouping pattern surfaces as `Pat::Paren`, so
-/// unwrapping `Paren`/`Reference`/`Or`/`Ident`-subpat covers `(_)`, `&_`,
-/// `x @ _`, and `A | _`.) A qualified path / tuple-struct / struct pattern
+/// (syn has no `Pat::Group`; a grouping pattern surfaces as `Pat::Paren`, so
+/// unwrapping `Paren`/`Reference`/`Guard`/`Or`/`Ident`-subpat covers `(_)`,
+/// `&_`, `_ if …`, `x @ _`, and `A | _`.) A qualified path / tuple-struct / struct pattern
 /// naming a variant (`Self::Foo(..)`, `Foo { .. }`) is NOT a catch-all.
 fn arm_is_catchall(pat: &syn::Pat) -> bool {
     match pat {
@@ -1678,6 +1679,7 @@ fn arm_is_catchall(pat: &syn::Pat) -> bool {
         syn::Pat::Or(po) => po.cases.iter().any(arm_is_catchall),
         syn::Pat::Paren(pp) => arm_is_catchall(&pp.pat),
         syn::Pat::Reference(pr) => arm_is_catchall(&pr.pat),
+        syn::Pat::Guard(pg) => arm_is_catchall(&pg.pat),
         _ => false,
     }
 }
