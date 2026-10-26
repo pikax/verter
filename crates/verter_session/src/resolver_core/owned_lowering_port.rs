@@ -1176,7 +1176,8 @@ impl KeptBodyHolder for crate::VerterHost {
 }
 
 /// Deref `locator` through `memo`, reading a type body from the parts
-/// `holder`'s request kept for it when it keeps them.
+/// `holder`'s request kept for it when it keeps them. The charge covering
+/// taken parts is held until the deref, which reads them, returns.
 fn deref_with_kept(
     holder: &impl KeptBodyHolder,
     memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
@@ -1186,9 +1187,14 @@ fn deref_with_kept(
     verter_session_query::source::deref::LocatorBodyDerefError,
 > {
     match holder.kept_body_holder() {
-        Some((request, _)) => memo.deref_locator_body_with(locator, &|owner, name, scope| {
-            request.take_kept_type_body(memo, owner, name, scope)
-        }),
+        Some((request, _)) => {
+            let charges = std::cell::RefCell::new(Vec::new());
+            memo.deref_locator_body_with(locator, &|owner, name, scope| {
+                let (parts, charge) = request.take_kept_type_body(memo, owner, name, scope)?;
+                charges.borrow_mut().push(charge);
+                Some(parts)
+            })
+        }
         None => memo.deref_locator_body(locator),
     }
 }

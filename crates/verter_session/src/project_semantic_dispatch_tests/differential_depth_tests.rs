@@ -512,10 +512,12 @@ fn an_80_deep_nested_generic_application_relates_on_the_default_stack() {
 /// Each declaration of an alias chain is handed to the declaration-lowering
 /// workers once: the lowering that registers its facts also serves the
 /// body read that follows, so every link the chain grows by adds one
-/// worker rendezvous.
+/// worker rendezvous and one statement lowering.
 #[test]
 fn an_alias_chain_hands_each_declaration_to_the_lowering_workers_once() {
     let mut work = Vec::new();
+    #[cfg(feature = "semantic-observe")]
+    let mut lowered = Vec::new();
     for links in [32, 64] {
         let mut source = String::from("type A0<T> = T | undefined;\n");
         for i in 0..links {
@@ -526,13 +528,29 @@ fn an_alias_chain_hands_each_declaration_to_the_lowering_workers_once() {
         let rows = [(Read::Type(&probe), vec!["1"])];
         let host = matrix.host(&rows);
         let before = host.decl_lowering.handoff_count();
+        #[cfg(feature = "semantic-observe")]
+        let statements_before = host.provenance().snapshot().decl_statements_lowered;
         let verdict = &matrix.verdicts_on(&host, &rows)[0][0];
         assert!(verdict.matched, "links={links}: {}", verdict.lane);
         let after = host.decl_lowering.handoff_count();
         assert!(after >= before, "the rendezvous count never falls");
         work.push(after - before);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let statements_after = host.provenance().snapshot().decl_statements_lowered;
+            assert!(statements_after >= statements_before);
+            lowered.push(statements_after - statements_before);
+        }
     }
     eprintln!("alias chain rendezvous: {work:?}");
+    #[cfg(feature = "semantic-observe")]
+    {
+        eprintln!("alias chain statements lowered: {lowered:?}");
+        assert!(
+            lowered[1] <= lowered[0] + 32 + 4,
+            "32 more links must add one statement lowering each: {lowered:?}"
+        );
+    }
     let (shorter, longer) = (work[0], work[1]);
     assert!(
         longer <= shorter + 32 + 4,

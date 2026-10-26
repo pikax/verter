@@ -1003,22 +1003,27 @@ impl KeptTypeBodies {
         self.bytes += bytes;
     }
 
-    /// Take, and release, the kept body parts of `name` declared by
-    /// `owner` in `scope` (the file scope when `None`) of `memo`'s source.
+    /// Take the kept body parts of `name` declared by `owner` in `scope`
+    /// (the file scope when `None`) of `memo`'s source, with the charge
+    /// that covers them: the taker holds the charge for as long as it holds
+    /// the parts.
     pub(crate) fn take(
         &mut self,
         memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         scope: Option<&verter_session_query::declarations::AugmentationScopeKind>,
-    ) -> Option<Arc<verter_session_query::source::transient_parts::TransientTypeParts>> {
+    ) -> Option<(
+        Arc<verter_session_query::source::transient_parts::TransientTypeParts>,
+        verter_session_query::retention::RetentionCharge,
+    )> {
         let position = self
             .bodies
             .iter()
             .position(|(body, _, _)| body.serves(memo, owner, name, scope))?;
-        let (body, _charge, bytes) = self.bodies.remove(position)?;
+        let (body, charge, bytes) = self.bodies.remove(position)?;
         self.bytes -= bytes;
-        Some(body.into_parts())
+        Some((body.into_parts(), charge))
     }
 }
 
@@ -1315,7 +1320,7 @@ impl<'a> RequestStoreView<'a> {
     }
 
     /// Take the kept body parts of `name` declared by `owner` in `scope` of
-    /// `memo`'s source, if this request keeps them
+    /// `memo`'s source, with their charge, if this request keeps them
     /// ([`KeptTypeBodies::take`]).
     pub(crate) fn take_kept_type_body(
         &self,
@@ -1323,7 +1328,10 @@ impl<'a> RequestStoreView<'a> {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         scope: Option<&verter_session_query::declarations::AugmentationScopeKind>,
-    ) -> Option<Arc<verter_session_query::source::transient_parts::TransientTypeParts>> {
+    ) -> Option<(
+        Arc<verter_session_query::source::transient_parts::TransientTypeParts>,
+        verter_session_query::retention::RetentionCharge,
+    )> {
         self.kept_type_bodies.lock().take(memo, owner, name, scope)
     }
 

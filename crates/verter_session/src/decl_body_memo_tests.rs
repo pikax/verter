@@ -2891,7 +2891,10 @@ export {};
     let read = |locator: AuthoredBodyLocator| {
         let derefed = memo
             .deref_locator_body_with(&locator, &|owner, name, scope| {
-                request.lock().take(&memo, owner, name, scope)
+                request
+                    .lock()
+                    .take(&memo, owner, name, scope)
+                    .map(|(parts, _charge)| parts)
             })
             .expect("the body derefs");
         format!("{:?}", single(&derefed))
@@ -2935,7 +2938,8 @@ export {};
 }
 
 /// A request's kept type bodies stay within its byte budget: keeping a
-/// body past it releases the oldest, whose charge goes with it.
+/// body past it releases the oldest, whose charge goes with it, and taken
+/// parts stay charged until their taker lets them go.
 #[test]
 fn kept_type_bodies_release_the_oldest_past_their_budget() {
     let members: String = (0..2000)
@@ -2963,7 +2967,12 @@ fn kept_type_bodies_release_the_oldest_past_their_budget() {
         "the third body released the first: {charged:?}"
     );
     assert!(request.take(&memo, owner, "L0", None).is_none());
-    assert!(request.take(&memo, owner, "L2", None).is_some());
+    let taken = request.take(&memo, owner, "L2", None).expect("L2 is kept");
     assert!(request.take(&memo, owner, "L1", None).is_some());
+    assert!(
+        account.snapshot().active_bytes > 0,
+        "taken parts stay charged while their taker holds them"
+    );
+    drop(taken);
     assert_eq!(account.snapshot().active_bytes, 0);
 }
