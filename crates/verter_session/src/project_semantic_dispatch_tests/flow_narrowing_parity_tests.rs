@@ -3377,26 +3377,9 @@ fn elaborated_and_overloaded_overflows_report_nothing() {
                     expected,
                     "{pass} {root} {name}"
                 );
-                if overload {
-                    // The checker's overflowing argument holds and the first
-                    // candidate applies; this engine's relation still fails
-                    // past the depth (the known relation-depth deviation), so
-                    // the overloaded call is a typed gap, never a complete
-                    // answer and never a reported diagnostic.
-                    super::signature_predicate_inference_tests::observe(
-                        &host,
-                        root,
-                        name,
-                        |_, degradation, _| {
-                            assert!(
-                                degradation.is_some(),
-                                "overload recovery retains its existing typed gap"
-                            )
-                        },
-                    );
-                } else {
-                    assert_prints(&host, root, name, "number");
-                }
+                // The overflowing argument holds (`Maybe`), so the first
+                // candidate applies and the call answers its return type.
+                assert_prints(&host, root, name, "number");
             }
         }
     }

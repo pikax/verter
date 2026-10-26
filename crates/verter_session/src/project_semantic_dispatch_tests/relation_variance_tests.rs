@@ -453,24 +453,24 @@ fn a_class_reference_and_a_covariant_void_argument_follow_the_checker() {
 /// `getVariances` starts a fresh `checkTypeRelatedTo`: measured where a
 /// deep relation first needs it, it does not inherit that relation's depth.
 ///
-/// Measured over `interface Box<T> { v: T }` and `type B = { v: …Box<1>… }`
-/// with `{ v: … }` nested `n` times: `[B] extends [{ v: …Box<number>… }] ?
-/// 1 : 2` is `1` at `n` 97 and 98 (the `Box` pair is the 100th nested
-/// structured relation, and its arguments are simple types) and `2` with
-/// TS2321 at 99.
+/// Measured on TypeScript 7.1.0-beta over `interface Box<T> { v: T }` and
+/// `type B = { v: …Box<1>… }` with `{ v: … }` nested `n` times: `[B]
+/// extends [{ v: …Box<string>… }] ? 1 : 2` is `2` at `n` 97 and 98 (the
+/// `Box` pair is the 100th nested structured relation, and its arguments
+/// are simple types) and `1` (`Maybe` past the depth) at 99.
 #[test]
 fn a_variance_measurement_starts_a_relation_chain_of_its_own() {
     let nested = |depth: usize, inner: &str| {
         format!("{}{inner}{}", "{ v: ".repeat(depth), " }".repeat(depth))
     };
-    let failures: Vec<String> = [(97, "1"), (98, "1"), (99, "2")]
+    let failures: Vec<String> = [(97, "2"), (98, "2"), (99, "1")]
         .into_iter()
         .flat_map(|(depth, expected)| {
             let source = format!(
                 "interface Box<T> {{ v: T }}\ntype B = {};\n",
                 nested(depth, "Box<1>")
             );
-            let probe = format!("[B] extends [{}] ? 1 : 2", nested(depth, "Box<number>"));
+            let probe = format!("[B] extends [{}] ? 1 : 2", nested(depth, "Box<string>"));
             mismatches(&source, &[(probe.as_str(), expected)])
                 .into_iter()
                 .map(move |failure| format!("depth {depth}: {failure}"))
