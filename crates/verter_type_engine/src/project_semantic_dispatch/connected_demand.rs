@@ -1651,11 +1651,6 @@ impl ConnectedDemandLedger<'_> {
         .map(|_| ())
     }
 
-    /// [`Self::replay_admit`] for a reader whose relation check, if any,
-    /// has `comparison_room` structured comparisons left: the unpaid
-    /// closure's comparisons — what its cold run would have recorded into
-    /// that check — must fit it. `Ok` carries those comparisons, which the
-    /// reader's check records as its cold run would have.
     /// Why the result `receipt` costs, read the way `nesting` names, does
     /// not fit this reader's allowances whatever it has paid: its nesting
     /// past the remaining query depth, its instantiation frames past the
@@ -1694,6 +1689,11 @@ impl ConnectedDemandLedger<'_> {
         None
     }
 
+    /// [`Self::replay_admit`] for a reader whose relation check, if any,
+    /// has `comparison_room` structured comparisons left: the unpaid
+    /// closure's comparisons — what its cold run would have recorded into
+    /// that check — must fit it. `Ok` carries those comparisons, which the
+    /// reader's check records as its cold run would have.
     pub(crate) fn replay_admit_within(
         &self,
         receipt: &Arc<DemandCostReceipt>,
