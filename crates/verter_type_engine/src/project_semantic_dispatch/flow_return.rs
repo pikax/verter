@@ -11064,6 +11064,21 @@ pub(super) trait FlowDemandDriver {
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<crate::semantic_query::SurfaceView>;
     fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId;
+    /// The contextual tuple `node`, whose elements are `elements`
+    /// ([`ProjectSemanticDispatch::contextual_tuple`]).
+    fn contextual_tuple(
+        &self,
+        node: SemanticNodeId,
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> super::contextual_tuple::ContextualTuple;
+    /// What `tuple` gives one array literal element
+    /// ([`ProjectSemanticDispatch::tuple_element_context`]).
+    fn tuple_element_context(
+        &self,
+        tuple: &super::contextual_tuple::ContextualTuple,
+        index: usize,
+        shape: super::call_resolve::ArrayLiteralShape,
+    ) -> super::contextual_tuple::TupleElementContext;
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
     fn shallow_lower_type_expr_with_context(
         &self,
@@ -11795,6 +11810,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
         ProjectSemanticDispatch::resolved_reduction_view(self, view)
+    }
+    fn contextual_tuple(
+        &self,
+        node: SemanticNodeId,
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> super::contextual_tuple::ContextualTuple {
+        ProjectSemanticDispatch::contextual_tuple(self, node, elements)
+    }
+    fn tuple_element_context(
+        &self,
+        tuple: &super::contextual_tuple::ContextualTuple,
+        index: usize,
+        shape: super::call_resolve::ArrayLiteralShape,
+    ) -> super::contextual_tuple::TupleElementContext {
+        ProjectSemanticDispatch::tuple_element_context(self, tuple, index, shape)
     }
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         ProjectSemanticDispatch::self_reference_declaration(self, node)
@@ -12667,6 +12697,21 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
         self.driver.resolved_reduction_view(view)
+    }
+    fn contextual_tuple(
+        &self,
+        node: SemanticNodeId,
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> super::contextual_tuple::ContextualTuple {
+        self.driver.contextual_tuple(node, elements)
+    }
+    fn tuple_element_context(
+        &self,
+        tuple: &super::contextual_tuple::ContextualTuple,
+        index: usize,
+        shape: super::call_resolve::ArrayLiteralShape,
+    ) -> super::contextual_tuple::TupleElementContext {
+        self.driver.tuple_element_context(tuple, index, shape)
     }
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         self.driver.self_reference_declaration(node)
@@ -16125,7 +16170,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// array literal shaped `shape` typed by `contextual`
     /// (`getContextualTypeForElementExpression`): per constituent of a
     /// union, a tuple's element at the position
-    /// ([`super::call_resolve::tuple_element_contexts`]), an array's
+    /// ([`FlowDemandDriver::tuple_element_context`]), an array's
     /// element type, or, while no spread came before it, the object's
     /// numeric property or index; a constrained type parameter's through
     /// its constraint.
@@ -16150,17 +16195,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             SemanticNodeData::Array { element, .. } => Some(*element),
             SemanticNodeData::Tuple { elements, .. } => {
-                let types = super::call_resolve::tuple_element_contexts(
-                    elements,
-                    position,
-                    shape,
-                    |rest| match graph.node_data(rest).as_deref() {
-                        Some(SemanticNodeData::Array { element, .. }) => Some(*element),
-                        _ => None,
-                    },
-                );
+                let tuple = self.dispatch.contextual_tuple(contextual, elements);
                 drop(data);
-                (!types.is_empty()).then(|| self.union(&types))
+                match self.dispatch.tuple_element_context(&tuple, position, shape) {
+                    super::contextual_tuple::TupleElementContext::None => None,
+                    super::contextual_tuple::TupleElementContext::Element(element) => {
+                        Some(self.union(&[element]))
+                    }
+                    super::contextual_tuple::TupleElementContext::Middle(middle) => {
+                        Some(self.union(&middle))
+                    }
+                }
             }
             SemanticNodeData::TypeParam {
                 constraint: Some(constraint),

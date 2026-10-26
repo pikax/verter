@@ -322,9 +322,71 @@ fn recursive_mapped_index_publishes_dotted_paths_across_five_modules() {
     assert_recursive_paths_layout(100, 5);
 }
 
+/// The full-size layout, run by the nightly scale tier (`.config/nextest.toml`).
+/// Its gate version is
+/// `recursive_mapped_index_work_is_affine_and_fits_three_hundred_entities`.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities() {
+        assert_recursive_paths_layout(300, 5);
+    }
+}
+
+/// The 300-entity, five-module layout's guarantees at a gate size. Each layout
+/// publishes its exact dotted-path set under the instantiation bound
+/// `15n + 20`, as the full-size layout does. The engine's deterministic work
+/// counters — instantiations, charged request operations and paid
+/// computations — then grow by exactly the same amount for each further five
+/// entities, so the work is affine in the entity count: any term that grows
+/// faster than the entities, however small, changes the second step. The
+/// affine work, extended to 300 entities, must meet the two limits the
+/// full-size layout runs under: the `15n + 20` instantiation bound and the
+/// 50,000-operation request allowance it is given.
 #[test]
-fn recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities() {
-    assert_recursive_paths_layout(300, 5);
+fn recursive_mapped_index_work_is_affine_and_fits_three_hundred_entities() {
+    const GROUPS: usize = 5;
+    const SIZES: [usize; 3] = [5, 10, 15];
+    const FULL_SIZE: u64 = 300;
+    const FULL_SIZE_ALLOWANCE: u64 = 50_000;
+    let work = SIZES.map(|count| assert_recursive_paths_layout(count, GROUPS));
+    let counters: [(&str, [u64; 3]); 3] = [
+        ("instantiations", work.each_ref().map(|w| w.instantiations)),
+        ("request operations", work.each_ref().map(|w| w.operations)),
+        ("paid computations", work.each_ref().map(|w| w.paid)),
+    ];
+    let step = (SIZES[1] - SIZES[0]) as u64;
+    assert_eq!(SIZES[2] - SIZES[1], SIZES[1] - SIZES[0], "equal size steps");
+    let mut at_full_size = Vec::new();
+    for (name, [small, middle, large]) in counters {
+        assert!(
+            small < middle && middle - small == large - middle,
+            "{name} must grow by the same amount for each further {step} entities: \
+             {small}, {middle}, {large} at {SIZES:?} entities"
+        );
+        let per_step = middle - small;
+        let first = SIZES[0] as u64;
+        assert_eq!(
+            (FULL_SIZE - first) % step,
+            0,
+            "the full size is a whole number of steps"
+        );
+        at_full_size.push(small + per_step * (FULL_SIZE - first) / step);
+    }
+    let [instantiations, operations, _] = at_full_size[..] else {
+        unreachable!()
+    };
+    assert!(
+        instantiations <= FULL_SIZE * 15 + 20,
+        "{FULL_SIZE} entities would use {instantiations} instantiations, over the bound {}",
+        FULL_SIZE * 15 + 20,
+    );
+    assert!(
+        operations <= FULL_SIZE_ALLOWANCE,
+        "{FULL_SIZE} entities would charge {operations} request operations, over the \
+         {FULL_SIZE_ALLOWANCE}-operation allowance their layout runs under"
+    );
 }
 
 /// Tripling the entities triples the work: instantiations and fact-signature
@@ -705,22 +767,24 @@ fn assert_recursive_paths_layout(count: usize, groups: usize) -> RecursivePathsW
     // request allowance; the smallest layout exercises the default fuse.
     let host = recursive_paths_host(count, groups, if count <= 20 { 0 } else { 50_000 });
     let proof_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
-    let (answer, record) = resolve_expr(
-        &host,
-        "/paths/scenario.ts",
-        "Probe",
-        &[],
-        ProjectionMode::Expanded,
-    );
+    // The spend capture records the operations the request charges against
+    // its allowance and the computations it pays, on this thread's request.
+    let ((answer, record), operations, paid) =
+        verter_type_engine::request_budget::with_request_spend_capture_for_tests(|| {
+            resolve_expr(
+                &host,
+                "/paths/scenario.ts",
+                "Probe",
+                &[],
+                ProjectionMode::Expanded,
+            )
+        });
     let stats = host.project_type_store().semantic_graph().stats_snapshot();
     let proof_work =
         verter_session_query::facts::fact_read_set::signature_work_for_tests() - proof_before;
-    let verter_audit::RequestKindPayload::TypeResolution(payload) = &record.kind_payload else {
-        panic!("recursive paths must retain their resolution audit");
-    };
     println!(
-        "entities={count} instantiate_count={} projection_ops={} paths_proof_work={proof_work}",
-        stats.instantiate_count, payload.projection_ops_executed,
+        "entities={count} instantiate_count={} request_operations={operations} paid_computations={paid} paths_proof_work={proof_work}",
+        stats.instantiate_count,
     );
     assert!(
         stats.instantiate_count <= u64::try_from(count * 15 + 20).unwrap(),
@@ -757,6 +821,8 @@ fn assert_recursive_paths_layout(count: usize, groups: usize) -> RecursivePathsW
     assert_eq!(actual, expected, "{count} entities/{groups} modules");
     RecursivePathsWork {
         instantiations: stats.instantiate_count,
+        operations: u64::try_from(operations).unwrap(),
+        paid: u64::try_from(paid).unwrap(),
         proof_work,
     }
 }
@@ -764,6 +830,10 @@ fn assert_recursive_paths_layout(count: usize, groups: usize) -> RecursivePathsW
 /// The work one `Paths<Api>` resolution spent, read from the engine's counters.
 struct RecursivePathsWork {
     instantiations: u64,
+    /// Operations charged against the request's allowance.
+    operations: u64,
+    /// Computations the request paid the operations of.
+    paid: u64,
     proof_work: usize,
 }
 

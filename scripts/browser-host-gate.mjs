@@ -114,7 +114,7 @@ export function censusForbiddenHits(treeText) {
   return [...new Set(hits)];
 }
 
-/** wasm-bindgen 0.2.122 `--target web` emits `export { initSync, __wbg_init as default }`, not `export default`. */
+/** wasm-bindgen 0.2.129 `--target web` emits `export { initSync, __wbg_init as default }`, not `export default`. */
 export function hasDefaultExport(jsText) {
   const text = jsText ?? "";
   return /\bexport\s+default\b/.test(text) || /\bexport\s*\{[^}]*\bas\s+default\b/.test(text);

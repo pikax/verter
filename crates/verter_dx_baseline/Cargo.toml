@@ -18,9 +18,9 @@ verter_scheduler = { path = "../verter_scheduler" }
 verter_span = { path = "../verter_span" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-oxc_sourcemap = "7.0.0"
+oxc_sourcemap = "9.0.0"
 thiserror = "2.0"
-tokio = { version = "1.52", features = [
+tokio = { version = "1.54", features = [
   "rt",
   "rt-multi-thread",
   "macros",

@@ -183,27 +183,25 @@ A comment may supplement that durable explanation with a GitHub issue only when 
 
 ### Test Economy
 
-The recursive mapped-index regressions run on every ordinary debug run as
-four separately discoverable tests over one generator and one set of
-assertions: `recursive_mapped_index_publishes_dotted_paths_across_three_modules`
+The recursive mapped-index regressions share one generator and one set of
+assertions. The gate runs `recursive_mapped_index_publishes_dotted_paths_across_three_modules`
 (20 entities across three modules, under the default request fuse),
 `recursive_mapped_index_publishes_dotted_paths_across_five_modules` (100
 entities across five modules, under an explicit 50,000-operation allowance),
-`recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities`
-(300 entities across five modules, under the same 50,000-operation allowance)
-and `recursive_mapped_index_publishes_dotted_paths_in_small_cyclic_layouts`
-(six entities across three modules and ten across five). Each asserts the
-exact dotted-path set and the instantiation bound through the public host
-resolver. No environment variable selects a population, and no layout moves
-out of the normal lane; the large-key mapped-value benchmark keeps its
-separate 1,000/3,000/10,000-key populations.
-
-The exact 300-entity test is temporarily accepted as known-slow, documented
-in `.config/nextest.toml`. Its normal CI surface, 10-second slow warning and
-20-second termination remain unchanged; it has no timeout override. Shared
-engine improvements must restore the under-10-second loaded-debug target
-before the known-slow note is removed. Preserve the full path set, logical
-charges, instantiation/work assertions and request allowance throughout.
+`recursive_mapped_index_publishes_dotted_paths_in_small_cyclic_layouts` (six
+entities across three modules and ten across five) and
+`recursive_mapped_index_work_is_affine_and_fits_three_hundred_entities`. Each
+asserts the exact dotted-path set and the instantiation bound `15n + 20`
+through the public host resolver. The last is the gate version of the
+300-entity layout: at 5, 10 and 15 entities across five modules, the
+instantiations, the request operations charged against the allowance and the
+paid computations must each grow by exactly the same amount per five entities,
+and the affine work extended to 300 entities must meet both the `15n + 20`
+bound and the 50,000-operation allowance. The full 300-entity, five-module
+layout, unchanged, is `nightly_scale::recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities`
+in the nightly scale tier (CLAUDE.md, Test Speed). No environment variable
+selects a population; the large-key mapped-value benchmark keeps its separate
+1,000/3,000/10,000-key populations.
 
 The Svelte projection profile gates run one solution build per pinned
 TypeScript engine. Every profile and corruption/publication twin remains a

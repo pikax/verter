@@ -51,6 +51,92 @@ fn repeated_contravariant_callbacks_charge_linear_work() {
     }
 }
 
+/// Typing each element of an array literal against a contextual tuple
+/// reads the tuple's shape once per literal, not once per element: the
+/// contextual tuple elements read grow with the element count, and
+/// doubling it doubles them, for a call argument and for a literal a
+/// `satisfies` types alike, by its fixed prefix, by its fixed suffix after
+/// a rest element, or, after a spread, by its middle.
+#[test]
+fn tuple_element_contexts_charge_linear_work() {
+    /// A call argument literal against a tuple parameter, and its answer.
+    fn argument(elements: usize) -> (String, String) {
+        let parameters = vec!["T"; elements].join(", ");
+        let arguments = vec!["1"; elements].join(", ");
+        (
+            format!(
+                "declare function f<T>(xs: [{parameters}]): T;\nexport function result() {{ return f([{arguments}]); }}"
+            ),
+            "number".to_owned(),
+        )
+    }
+    /// A literal a `satisfies` tuple types, and its answer.
+    fn satisfied(elements: usize) -> (String, String) {
+        let tuple = vec!["1 | 2"; elements].join(", ");
+        let literal = vec!["1"; elements].join(", ");
+        (
+            format!("export function result() {{ return [{literal}] satisfies [{tuple}]; }}"),
+            format!("[{literal}]"),
+        )
+    }
+    /// A literal a tuple with a rest element and a fixed suffix types: every
+    /// element is typed by the suffix element at its distance from the end.
+    fn suffixed(elements: usize) -> (String, String) {
+        let suffix = vec!["1 | 2"; elements].join(", ");
+        let literal = vec!["1"; elements].join(", ");
+        (
+            format!(
+                "export function result() {{ return [{literal}] satisfies [...(1 | 2)[], {suffix}]; }}"
+            ),
+            format!("[{literal}]"),
+        )
+    }
+    /// A literal led by a spread that a tuple with a fixed prefix types:
+    /// every element after the spread is typed by the tuple's middle.
+    fn spread_led(elements: usize) -> (String, String) {
+        let prefix = vec!["1 | 2"; elements].join(", ");
+        let literal = vec!["1"; elements].join(", ");
+        (
+            format!(
+                "declare const ys: (1 | 2)[];\nexport function result() {{ return [...ys, {literal}] satisfies [{prefix}, ...(1 | 2)[]]; }}"
+            ),
+            format!("[...(1 | 2)[], {literal}]"),
+        )
+    }
+    type Fixture = fn(usize) -> (String, String);
+    let fixtures: [(&str, Fixture); 4] = [
+        ("argument", argument),
+        ("satisfied", satisfied),
+        ("suffixed", suffixed),
+        ("spread-led", spread_led),
+    ];
+    for (label, fixture) in fixtures {
+        let mut counts = Vec::new();
+        for elements in [64, 128, 256] {
+            let (source, answer) = fixture(elements);
+            let matrix =
+                Matrix::new(&source).settings(&super::differential_harness_tests::ALL[..1]);
+            let failures = matrix.returns(&[("result", &answer)]);
+            assert!(failures.is_empty(), "{label}: {}", failures.join("\n"));
+            let (_, [work]) = matrix.return_work(
+                "result",
+                [verter_type_engine::project_semantic_dispatch::call_resolve::tuple_context_work_for_tests],
+            );
+            counts.push(work);
+        }
+        eprintln!("contextual tuple element work ({label}): {counts:?}");
+        let (small, medium, large) = (counts[0], counts[1], counts[2]);
+        assert!(
+            small > 0 && small <= medium && medium <= large,
+            "{label}: {counts:?}"
+        );
+        assert!(
+            large - medium <= 2 * (medium - small) + 8,
+            "{label}: doubling the elements repeats earlier work: {small}, {medium}, {large}"
+        );
+    }
+}
+
 fn pipe_declaration(stages: usize, name: &str) -> String {
     let binders = (0..=stages)
         .map(|i| format!("T{i}"))

@@ -33,7 +33,7 @@ verter-editor-client = { path = "../../crates/verter-editor-client" }
 zed_extension_api = "0.7.0"
 
 [dev-dependencies]
-toml = "0.8"
+toml = "1.1"
 
 [profile.release]
 opt-level = 3

@@ -111,7 +111,7 @@ All types use `#[serde(rename_all = "camelCase")]` for JavaScript-friendly field
 - Rust toolchain via [rustup](https://rustup.rs/) — `rust-toolchain.toml` pins the compiler
   version and the `wasm32-unknown-unknown` target, and rustup installs both on the first
   `cargo` invocation in the repo. No `rustup target add` step is needed.
-- `wasm-bindgen` CLI (`cargo install wasm-bindgen-cli --version 0.2.122 --locked`)
+- `wasm-bindgen` CLI (`cargo install wasm-bindgen-cli --version 0.2.129 --locked`)
 
 ### Building the WASM Module
 
