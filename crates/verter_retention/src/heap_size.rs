@@ -67,9 +67,11 @@ pub struct HeapMeter<'h, 't> {
     allocations: Vec<PendingAllocation<'t>>,
 }
 
+type AllocationRegistration<'t> = dyn FnOnce(&PinContext, usize) -> CallerHold + 't;
+
 struct PendingAllocation<'t> {
     bytes: usize,
-    register: Box<dyn FnOnce(&PinContext, usize) -> CallerHold + 't>,
+    register: Box<AllocationRegistration<'t>>,
 }
 
 impl<'h, 't> HeapMeter<'h, 't> {
