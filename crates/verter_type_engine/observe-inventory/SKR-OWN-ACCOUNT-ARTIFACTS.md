@@ -15,6 +15,13 @@ destructure every field of every variant; adding an owning field requires
 measurement at compile time. Copy-only fields own no separate heap. No source,
 analysis, declaration, inventory or parser payload uses a fixed per-item weight.
 
+Contiguous buffers measure their complete backing separately from their
+elements through `HeapSize::heap_size_of_slice`. Inline scalars and Copy arrays
+own no per-element heap, so their bulk measurement visits no elements. Other
+element types keep the exhaustive walk, including every owned-handle offer.
+The inline-element visit counter exists only in unit-test builds and observes
+real scalar/array walkers; it adds no shipped field or capture path.
+
 `PinContext` shares one process `AliasCharges` registry. A pinned measurement
 registers each distinct raw Arc allocation once, including its variable heap;
 independently published artifact and scheduler owners share that registration.

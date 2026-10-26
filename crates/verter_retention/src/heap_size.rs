@@ -37,6 +37,17 @@ pub trait HeapSize {
     /// Heap this value keeps reachable beyond its inline bytes.
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize;
 
+    /// Heap owned by slice elements, excluding the slice's backing block.
+    /// Implementations may summarize inline-only elements without visiting
+    /// each one; owning elements must still measure their heap and offer
+    /// every owned handle to the meter.
+    fn heap_size_of_slice<'t>(values: &'t [Self], meter: &mut HeapMeter<'_, 't>) -> usize
+    where
+        Self: Sized,
+    {
+        values.iter().map(|value| value.heap_size(meter)).sum()
+    }
+
     /// A mutable storage owner carries its own pin, including its outer
     /// allocation. Immutable parents then pay only for the owning handle.
     fn pin_storage(&self, _context: &crate::pinned_heap::PinContext) -> bool {
@@ -65,6 +76,8 @@ pub struct HeapMeter<'h, 't> {
     pins: Vec<CallerHold>,
     allocation: Option<usize>,
     allocations: Vec<PendingAllocation<'t>>,
+    #[cfg(test)]
+    inline_element_visits: usize,
 }
 
 type AllocationRegistration<'t> = dyn FnOnce(&PinContext, usize) -> CallerHold + 't;
@@ -86,6 +99,8 @@ impl<'h, 't> HeapMeter<'h, 't> {
             pins: Vec::new(),
             allocation: None,
             allocations: Vec::new(),
+            #[cfg(test)]
+            inline_element_visits: 0,
         }
     }
 
@@ -265,6 +280,15 @@ macro_rules! inline_heap_size {
         $(impl HeapSize for $t {
             #[inline]
             fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
+                #[cfg(test)]
+                {
+                    _meter.inline_element_visits += 1;
+                }
+                0
+            }
+
+            #[inline]
+            fn heap_size_of_slice<'t>(_: &'t [Self], _meter: &mut HeapMeter<'_, 't>) -> usize {
                 0
             }
         })*
@@ -297,6 +321,15 @@ inline_heap_size!(
 
 impl<T: Copy, const N: usize> HeapSize for [T; N] {
     fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
+        #[cfg(test)]
+        {
+            _meter.inline_element_visits += 1;
+        }
+        0
+    }
+
+    #[inline]
+    fn heap_size_of_slice<'t>(_: &'t [Self], _meter: &mut HeapMeter<'_, 't>) -> usize {
         0
     }
 }
@@ -334,15 +367,14 @@ impl<T: HeapSize> HeapSize for Box<T> {
 
 impl<T: HeapSize> HeapSize for Box<[T]> {
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        heap_block_bytes(std::mem::size_of_val::<[T]>(self))
-            + self.iter().map(|item| item.heap_size(meter)).sum::<usize>()
+        heap_block_bytes(std::mem::size_of_val::<[T]>(self)) + T::heap_size_of_slice(self, meter)
     }
 }
 
 impl<T: HeapSize> HeapSize for Vec<T> {
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         heap_block_bytes(self.capacity() * std::mem::size_of::<T>())
-            + self.iter().map(|item| item.heap_size(meter)).sum::<usize>()
+            + T::heap_size_of_slice(self, meter)
     }
 }
 
@@ -393,9 +425,7 @@ impl HeapSize for Arc<str> {
 
 impl<T: HeapSize + Send + Sync + 'static> HeapSize for Arc<[T]> {
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        meter.shared_arc(self, |items, meter| {
-            items.iter().map(|item| item.heap_size(meter)).sum()
-        })
+        meter.shared_arc(self, |items, meter| T::heap_size_of_slice(items, meter))
     }
 }
 
