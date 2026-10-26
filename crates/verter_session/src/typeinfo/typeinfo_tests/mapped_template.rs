@@ -376,26 +376,26 @@ mod nightly_scale {
 /// sixteenth (about 1,270); the measured difference is under 200.
 #[test]
 fn recursive_mapped_index_work_is_affine_and_fits_every_full_size_layout() {
-    use crate::scale_gate::{AffineWork, Counter};
+    use crate::scale_gate::{affine, Counter};
     const GROUPS: usize = 5;
     const ALLOWANCE: u64 = 50_000;
     let sizes = [5, 10, 15];
     let work = sizes.map(|count| assert_recursive_paths_layout(count, GROUPS));
-    let affine = AffineWork::new(
+    let affine = affine(
         "Paths<Api>",
         sizes,
         vec![
             Counter {
                 name: "instantiations",
-                values: work.each_ref().map(|w| w.instantiations),
+                values: work.iter().map(|w| w.instantiations).collect(),
             },
             Counter {
                 name: "request operations",
-                values: work.each_ref().map(|w| w.operations),
+                values: work.iter().map(|w| w.operations).collect(),
             },
             Counter {
                 name: "paid computations",
-                values: work.each_ref().map(|w| w.paid),
+                values: work.iter().map(|w| w.paid).collect(),
             },
         ],
     );

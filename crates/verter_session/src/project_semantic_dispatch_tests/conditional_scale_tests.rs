@@ -529,7 +529,7 @@ fn affine_probe_work(
     label: &str,
     sizes: [usize; 3],
     demand: impl Fn(usize) -> (String, String, usize, BTreeSet<Literal>),
-) -> crate::scale_gate::AffineWork<'static> {
+) -> crate::scale_gate::PolynomialWork<'static> {
     let measured = sizes.map(|size| {
         let (source, probe, fuse, expected) = demand(size);
         let measured = named_probe_measured(&source, &probe, fuse);
@@ -539,14 +539,14 @@ fn affine_probe_work(
     let mut counters: Vec<_> = (0..measured[0].work.len())
         .map(|index| crate::scale_gate::Counter {
             name: measured[0].work[index].0,
-            values: measured.each_ref().map(|m| m.work[index].1),
+            values: measured.iter().map(|m| m.work[index].1).collect(),
         })
         .collect();
     counters.push(crate::scale_gate::Counter {
         name: "charged operations",
-        values: measured.each_ref().map(|m| m.operations),
+        values: measured.iter().map(|m| m.operations).collect(),
     });
-    crate::scale_gate::AffineWork::new(label, sizes, counters)
+    crate::scale_gate::affine(label, sizes, counters)
 }
 
 /// The full-size test's checks, on the counts the affine work reaches at its
@@ -554,7 +554,7 @@ fn affine_probe_work(
 /// most 1.5 times faster than the size between consecutive full sizes.
 fn assert_full_size_work(
     label: &str,
-    work: &crate::scale_gate::AffineWork<'static>,
+    work: &crate::scale_gate::PolynomialWork<'static>,
     full_sizes: &[usize],
     fuse: impl Fn(usize) -> usize,
 ) {

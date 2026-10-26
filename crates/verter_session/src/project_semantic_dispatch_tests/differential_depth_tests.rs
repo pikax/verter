@@ -1387,26 +1387,6 @@ fn an_800_guard_narrowing_chain_answers_in(setting: Setting) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-#[test]
-fn an_800_guard_narrowing_chain_answers_strict() {
-    an_800_guard_narrowing_chain_answers_in(STRICT);
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_without_strict_null_checks() {
-    an_800_guard_narrowing_chain_answers_in(LOOSE);
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_without_no_implicit_any() {
-    an_800_guard_narrowing_chain_answers_in(STRICT_IMPLICIT);
-}
-
-#[test]
-fn an_800_guard_narrowing_chain_answers_with_both_off() {
-    an_800_guard_narrowing_chain_answers_in(LOOSE_IMPLICIT);
-}
-
 /// 800 returning guards.
 const RETURN_CHAIN_800: &str = r##"export function chain(x: number) {
   if (x === 0) return "r0" as const;
@@ -2502,4 +2482,100 @@ fn a_conditional_over_an_infer_bound_union_distributes() {
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The 799-guard chain's shape at 10, 20, 30 and 40 members, in `setting`:
+/// the gate version of the 800-member chains in the nightly scale tier
+/// (`NARROW_CHAIN_800` is this generator's 800-member chain). Each width
+/// narrows to its last literal. Every guard filters the arms left, as the
+/// checker's `filterType` does, so the relations the chain asks grow exactly
+/// as its length times its width, a quadratic of the width, and the other
+/// counters at most that fast; any faster term changes the third step's
+/// growth. At 800 members the work stays within the request's connected-work
+/// budget and operation fuse.
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(setting: Setting) {
+    use crate::scale_gate::{quadratic, Counter};
+    let widths = [10, 20, 30, 40];
+    let settings = [setting];
+    let work = widths.map(|width| {
+        let source = super::wide_union_relation_tests::equality_guard_chain(width);
+        let matrix = Matrix::new(&source).settings(&settings);
+        let last = format!("\"k{}\"", width - 1);
+        let failures = matrix.returns(&[("last", &last)]);
+        assert!(failures.is_empty(), "{width}: {}", failures.join("\n"));
+        matrix.return_work("last")
+    });
+    let counters = (0..work[0].len())
+        .map(|index| Counter {
+            name: work[0][index].0,
+            values: work.iter().map(|counts| counts[index].1).collect(),
+        })
+        .collect();
+    let work = quadratic("the guard chain", widths, counters);
+    let connected = work.at("connected work", 800);
+    assert!(
+        connected <= super::connected_demand::MAX_CONNECTED_PROJECTION_WORK as u64,
+        "800 members would spend {connected} connected work"
+    );
+    let operations = work.at("charged operations", 800);
+    assert!(
+        operations <= verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET as u64,
+        "800 members would charge {operations} operations"
+    );
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_strict() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(STRICT);
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_without_strict_null_checks() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(LOOSE);
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_without_no_implicit_any() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(STRICT_IMPLICIT);
+}
+
+#[test]
+fn guard_chain_work_is_quadratic_and_fits_eight_hundred_members_with_both_off() {
+    guard_chain_work_is_quadratic_and_fits_eight_hundred_members_in(LOOSE_IMPLICIT);
+}
+
+/// The fixture is the generator's chain, so the gate widths are the same
+/// shape as the full-size chains.
+#[test]
+fn the_800_guard_fixture_is_the_generated_chain() {
+    assert_eq!(
+        NARROW_CHAIN_800,
+        super::wide_union_relation_tests::equality_guard_chain(800)
+    );
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_strict() {
+        an_800_guard_narrowing_chain_answers_in(STRICT);
+    }
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_without_strict_null_checks() {
+        an_800_guard_narrowing_chain_answers_in(LOOSE);
+    }
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_without_no_implicit_any() {
+        an_800_guard_narrowing_chain_answers_in(STRICT_IMPLICIT);
+    }
+
+    #[test]
+    fn an_800_guard_narrowing_chain_answers_with_both_off() {
+        an_800_guard_narrowing_chain_answers_in(LOOSE_IMPLICIT);
+    }
 }

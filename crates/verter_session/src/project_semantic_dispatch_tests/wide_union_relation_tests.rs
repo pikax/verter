@@ -642,7 +642,7 @@ fn relating_a_wide_literal_union_to_its_superset_costs_the_same_checks_per_membe
 
 /// `type K = "k0" | … `, `width` members, and `last(x: K)` returning `x`
 /// past a `throw` on each of its first `width - 1` members.
-fn equality_guard_chain(width: usize) -> String {
+pub(super) fn equality_guard_chain(width: usize) -> String {
     let members: Vec<String> = (0..width).map(|index| format!("\"k{index}\"")).collect();
     let mut guards = String::new();
     for index in 0..width - 1 {
@@ -654,30 +654,60 @@ fn equality_guard_chain(width: usize) -> String {
     )
 }
 
-/// A chain of `x === "k<i>"` guards over a literal union filters every
-/// remaining arm against each guard's literal, as the checker's
-/// `filterType` does; each such pair is two literal types, decided by
-/// value, so no relation of the chain reaches the structural reducer.
-///
-/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
-/// all four settings): `last` is `"k799"` over an 800-member union and
-/// `"k99"` over a 100-member one.
+/// The guard chain at 10, 20, 30, 40 and 100 members: the gate version of the
+/// 100- and 800-member test in the nightly scale tier. At every width the
+/// chain narrows to its last literal and asks no relation the structural
+/// reducer decides. The chain's work at 800 members is bounded by the
+/// quadratic the differential-depth gate versions establish for this
+/// generator in every setting.
 #[test]
-fn an_equality_guard_chain_over_a_literal_union_reduces_no_relation() {
-    let before = super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
-    let failures = mismatches(
-        &equality_guard_chain(100),
-        &[("ReturnType<typeof last>", "\"k99\"")],
-    );
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_eq!(
-        super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - before,
-        0,
-        "every relation a literal guard chain asks is a pair of literals"
-    );
-    let failures = mismatches(
-        &equality_guard_chain(800),
-        &[("ReturnType<typeof last>", "\"k799\"")],
-    );
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+fn an_equality_guard_chain_reduces_no_relation_at_any_width() {
+    for width in [10, 20, 30, 40, 100] {
+        let before = super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
+        let last = format!("\"k{}\"", width - 1);
+        let failures = mismatches(
+            &equality_guard_chain(width),
+            &[("ReturnType<typeof last>", &last)],
+        );
+        assert!(failures.is_empty(), "{width}: {}", failures.join("\n"));
+        assert_eq!(
+            super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - before,
+            0,
+            "{width}: every relation a literal guard chain asks is a pair of literals"
+        );
+    }
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// A chain of `x === "k<i>"` guards over a literal union filters every
+    /// remaining arm against each guard's literal, as the checker's
+    /// `filterType` does; each such pair is two literal types, decided by
+    /// value, so no relation of the chain reaches the structural reducer.
+    ///
+    /// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
+    /// all four settings): `last` is `"k799"` over an 800-member union and
+    /// `"k99"` over a 100-member one.
+    #[test]
+    fn an_equality_guard_chain_over_a_literal_union_reduces_no_relation() {
+        let before = super::super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
+        let failures = mismatches(
+            &equality_guard_chain(100),
+            &[("ReturnType<typeof last>", "\"k99\"")],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert_eq!(
+            super::super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - before,
+            0,
+            "every relation a literal guard chain asks is a pair of literals"
+        );
+        let failures = mismatches(
+            &equality_guard_chain(800),
+            &[("ReturnType<typeof last>", "\"k799\"")],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 }

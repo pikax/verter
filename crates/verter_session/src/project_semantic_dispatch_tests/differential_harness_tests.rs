@@ -607,6 +607,73 @@ impl<'a> Matrix<'a> {
         )
     }
 
+    /// The work the first setting's cold read of `function`'s return spends,
+    /// by the deterministic counters a growth test compares: relation
+    /// checks, cold builds, connected work, the operations charged against
+    /// the request's fuse, and call resolution's argument and binding work.
+    pub(super) fn return_work(&self, function: &str) -> Vec<(&'static str, u64)> {
+        let host = self.host(&[]);
+        let canonical = format!("{}/probe.ts", self.settings[0].root);
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let key = verter_type_engine::semantic_query::FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical.as_str()),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(function),
+                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
+            context: dispatch.flow_return_context_for(&canonical),
+            demand: ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let stats = dispatch.graph().stats_snapshot();
+        let argument_before =
+            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests();
+        let binding_before =
+            verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests();
+        let connected_before = dispatch.connected_demand().work_used_for_tests();
+        let (result, charged, _) =
+            verter_type_engine::request_budget::with_request_spend_capture_for_tests(|| {
+                dispatch.execute_read(
+                    verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+                )
+            });
+        assert!(
+            !result.result_is_partial(),
+            "{function}: {:?}",
+            result.partial_reasons()
+        );
+        let after = dispatch.graph().stats_snapshot();
+        vec![
+            ("relation checks", after.relation_check_count - stats.relation_check_count),
+            ("cold builds", after.misses - stats.misses),
+            (
+                "connected work",
+                (dispatch.connected_demand().work_used_for_tests() - connected_before) as u64,
+            ),
+            ("charged operations", charged as u64),
+            (
+                "argument work",
+                (verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests()
+                    - argument_before) as u64,
+            ),
+            (
+                "binding work",
+                (verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests()
+                    - binding_before) as u64,
+            ),
+        ]
+    }
+
     /// Each row's verdict in each setting, in row then setting order.
     pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
         if self.installed_packages.is_some() {
