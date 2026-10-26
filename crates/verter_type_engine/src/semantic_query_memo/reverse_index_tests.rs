@@ -546,7 +546,7 @@ fn a_wide_distinct_file_fence_links_and_unlinks_in_linear_work() {
 
 /// A payload whose destructor reports whether its index's lock was held:
 /// a candidate's final owner may take other locks as it drops (an interned
-/// family key's interner, a root owner's arena), so the index releases
+/// family key's interner, a root set's arena), so the index releases
 /// every candidate it drops only after it unlocks.
 #[derive(Clone)]
 struct LockProbe {

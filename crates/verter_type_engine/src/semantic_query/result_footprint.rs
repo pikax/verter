@@ -100,7 +100,7 @@ impl OwnedHeap for CanonicalTypeSubstitution {
     /// The pair list's block and its root attachment's owner.
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         let Self(bindings, roots) = self;
-        bindings.owned_heap_bytes(aliases) + roots.0.owned_heap_bytes(aliases)
+        bindings.owned_heap_bytes(aliases) + roots.owned_heap_bytes(aliases)
     }
 }
 
@@ -119,9 +119,11 @@ impl OwnedHeap for FlowReturnKey {
             + context.owned_heap_bytes(aliases)
             + demand.owned_heap_bytes(aliases)
             + input.owned_heap_bytes(aliases)
-            // The canonical bytes' buffer, by the length it exposes.
-            + verter_session_query::retention::allocation::heap_block_bytes(
-                result_contract.canonical_bytes().len(),
+            // The canonical bytes: one `Arc` block every clone of the
+            // contract shares, counted once per `aliases`.
+            + verter_session_query::retention::allocation::shared_encoding_bytes(
+                result_contract.canonical_shared_bytes(),
+                aliases,
             )
     }
 }

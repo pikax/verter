@@ -164,7 +164,11 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     drop(members);
     drop((root, member));
     drop(receipt);
-    assert_eq!(account.snapshot().total_bytes(), 0, "every charge released");
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        store.project_dep_name_pinned_bytes(),
+        "every charge released but the store's own name"
+    );
     assert_eq!(store.shared_allocation_registrations_for_tests(), 0);
 }
 

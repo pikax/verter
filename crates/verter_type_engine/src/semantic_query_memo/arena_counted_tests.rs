@@ -580,3 +580,266 @@ fn storage_snapshot_completes_beside_an_interner_holding_a_shard() {
         "the snapshot acquires the shard and finishes"
     );
 }
+
+/// A root set's every clone holds counts of its own, one per operand,
+/// repeated operands included, and each holder releases exactly its own
+/// counts once. Discriminating against a clone that shares its original's
+/// counts (two drops would release one count twice and destroy a node
+/// another holder still counts: the double free) and against a drop that
+/// releases nothing (the nodes would outlive every holder: the leak).
+#[test]
+fn a_root_set_clone_holds_counts_of_its_own_and_each_holder_releases_them_once() {
+    use super::super::node_roots::NodeRootSet;
+    let arena = NodeArena::default();
+    let child = arena.intern_owned(
+        SemanticNodeData::Literal(LiteralValue::String("counted-child".into())),
+        NodeScopeId::Global,
+    );
+    let other = arena.intern_owned(
+        SemanticNodeData::Literal(LiteralValue::String("counted-other".into())),
+        NodeScopeId::Global,
+    );
+    let (child_id, other_id) = (child.id(), other.id());
+    let set = NodeRootSet::acquire(
+        Arc::clone(&arena.core),
+        smallvec::smallvec![child_id, child_id, other_id],
+    )
+    .expect("live operands");
+    assert_eq!(
+        (arena.owner_count(child_id), arena.owner_count(other_id)),
+        (3, 2)
+    );
+    let clones: Vec<NodeRootSet> = (0..5).map(|_| set.clone()).collect();
+    assert_eq!(
+        (arena.owner_count(child_id), arena.owner_count(other_id)),
+        (13, 7),
+        "each clone counts every operand it names, repeats included"
+    );
+    assert_eq!(arena.ownership_counts().roots, 20);
+
+    // The interned roots go first: the set and its clones still count both.
+    drop(child);
+    drop(other);
+    drop(set);
+    assert_eq!(
+        (arena.owner_count(child_id), arena.owner_count(other_id)),
+        (10, 5)
+    );
+    let mut clones = clones;
+    let last = clones.pop().expect("five clones");
+    drop(clones);
+    assert_eq!(
+        (arena.owner_count(child_id), arena.owner_count(other_id)),
+        (2, 1),
+        "each dropped clone released exactly its own counts"
+    );
+    assert!(arena.is_live(child_id) && arena.is_live(other_id));
+    let read = last.node_ref(child_id).expect("operand").read();
+    assert!(read.is_ok(), "the last holder still reads its node");
+    drop(read);
+    drop(last);
+    assert!(
+        !arena.is_live(child_id) && !arena.is_live(other_id),
+        "the last holder's drop releases the nodes"
+    );
+    assert_eq!(arena.live_len(), 0);
+    assert!(arena.inner.read().chunks.is_empty());
+}
+
+/// A root set cloned and dropped on many threads at once, beside threads
+/// interning and releasing other nodes (which take the arena's write lock
+/// and destroy slots), returns its node to exactly the counts its holders
+/// keep, and the node dies with the last of them.
+#[test]
+fn concurrent_root_set_clones_and_drops_return_to_the_held_count() {
+    let arena = Arc::new(NodeArena::default());
+    let root = arena.intern_owned(
+        SemanticNodeData::Literal(LiteralValue::String("shared-root".into())),
+        NodeScopeId::Global,
+    );
+    let id = root.id();
+    let set = root.roots().clone();
+    assert_eq!(arena.owner_count(id), 2);
+    std::thread::scope(|scope| {
+        for worker in 0..4 {
+            let set = &set;
+            scope.spawn(move || {
+                let mut kept = Vec::new();
+                for round in 0..2_000 {
+                    let copy = set.clone();
+                    kept.push(copy.clone());
+                    drop(copy);
+                    if round % 16 == worker {
+                        kept.clear();
+                    }
+                }
+            });
+        }
+        for _ in 0..2 {
+            let arena = &arena;
+            scope.spawn(move || {
+                for round in 0..2_000 {
+                    let churn = arena.intern_owned(
+                        SemanticNodeData::Literal(LiteralValue::String(format!(
+                            "churn-{}",
+                            round % 64
+                        ))),
+                        NodeScopeId::Global,
+                    );
+                    drop(churn.clone());
+                    drop(churn);
+                }
+            });
+        }
+    });
+    assert_eq!(
+        arena.owner_count(id),
+        2,
+        "every count a clone took was released by its holder"
+    );
+    assert_eq!(arena.live_len(), 1, "every churned node was destroyed");
+    drop(root);
+    assert!(arena.is_live(id), "the set still holds the node");
+    drop(set);
+    assert!(!arena.is_live(id));
+    assert_eq!(arena.live_len(), 0);
+}
+
+/// A keyed root attachment is one shared set: a key clone shares it rather
+/// than taking counts of its own, every clone offers the one cell to a
+/// measurement so it is charged once, and the set releases its counts when
+/// the last clone drops.
+#[test]
+fn a_keyed_root_attachment_is_one_set_its_key_clones_share() {
+    use super::super::node_roots::IdentityNodeRoots;
+    use verter_session_query::retention::allocation::AliasSet;
+    let arena = NodeArena::default();
+    let root = arena.intern_owned(
+        SemanticNodeData::Literal(LiteralValue::String("keyed".into())),
+        NodeScopeId::Global,
+    );
+    let id = root.id();
+    let attachment = IdentityNodeRoots::in_arena(&arena.core, [id]);
+    assert_eq!(arena.owner_count(id), 2);
+    let clones: Vec<IdentityNodeRoots> = (0..10).map(|_| attachment.clone()).collect();
+    assert_eq!(
+        arena.owner_count(id),
+        2,
+        "a key clone shares the attachment's set and adds no count"
+    );
+    let mut aliases = AliasSet::new();
+    let counted = attachment.owned_heap_bytes(&mut aliases)
+        + clones
+            .iter()
+            .map(|clone| clone.owned_heap_bytes(&mut aliases))
+            .sum::<usize>();
+    assert_eq!(counted, 0, "the cell is charged by itself, not by the key");
+    assert_eq!(
+        aliases.take_handles().len(),
+        1,
+        "every clone offers the same one cell"
+    );
+    assert!(attachment.node_ref(id).is_ok());
+    drop(attachment);
+    drop(clones);
+    assert_eq!(arena.owner_count(id), 1, "the last clone released the set");
+    drop(root);
+    assert_eq!(arena.live_len(), 0);
+}
+
+/// Acquiring a root races the node's last release: the acquisition either
+/// roots a node that is still live, which then lives exactly as long as the
+/// roots it took, or is refused as stale once the release destroyed it. It
+/// never counts a destroyed slot and never resurrects one.
+#[test]
+fn an_acquisition_racing_the_last_release_roots_a_live_node_or_is_refused() {
+    use super::super::node_roots::NodeRootSet;
+    for round in 0..200 {
+        let arena = NodeArena::default();
+        let root = arena.intern_owned(
+            SemanticNodeData::Literal(LiteralValue::String(format!("racing-{round}"))),
+            NodeScopeId::Global,
+        );
+        let id = root.id();
+        let acquired = std::thread::scope(|scope| {
+            let acquirer = scope.spawn(|| {
+                let mut taken = Vec::new();
+                for _ in 0..64 {
+                    match NodeRootSet::acquire(Arc::clone(&arena.core), smallvec::smallvec![id]) {
+                        Ok(set) => taken.push(set),
+                        Err(error) => {
+                            assert_eq!(
+                                error,
+                                crate::semantic_query::QueryError::StaleSemanticOperand
+                            );
+                            assert!(taken.is_empty(), "a held node is never refused");
+                            break;
+                        }
+                    }
+                }
+                taken
+            });
+            drop(root);
+            acquirer.join().unwrap()
+        });
+        assert_eq!(arena.is_live(id), !acquired.is_empty());
+        assert_eq!(arena.owner_count(id), acquired.len());
+        drop(acquired);
+        assert!(!arena.is_live(id));
+        assert_eq!(arena.live_len(), 0);
+    }
+}
+
+/// A root set too long to keep inline holds one count per operand in its
+/// shared block, whatever the number of holders: its clones share the block
+/// and take no count, an operand repeated in the list is counted once per
+/// repeat, and the last holder's drop releases every count — leaving
+/// neither a leaked count nor a count released twice.
+#[test]
+fn a_long_root_set_shares_one_set_of_counts_between_its_clones() {
+    use super::super::node_roots::NodeRootSet;
+    let arena = NodeArena::default();
+    let roots: Vec<_> = (0..6)
+        .map(|index| {
+            arena.intern_owned(
+                SemanticNodeData::Literal(LiteralValue::String(format!("long-{index}"))),
+                NodeScopeId::Global,
+            )
+        })
+        .collect();
+    let ids: Vec<_> = roots
+        .iter()
+        .map(super::super::node_roots::NodeRoot::id)
+        .collect();
+    let mut operands: super::super::node_roots::RootIds = ids.iter().copied().collect();
+    operands.push(ids[0]);
+    let set = NodeRootSet::acquire(Arc::clone(&arena.core), operands).expect("live operands");
+    assert_eq!(
+        arena.owner_count(ids[0]),
+        3,
+        "the repeated operand counts twice"
+    );
+    assert_eq!(arena.owner_count(ids[5]), 2);
+    let clones: Vec<NodeRootSet> = (0..16).map(|_| set.clone()).collect();
+    assert_eq!(
+        (arena.owner_count(ids[0]), arena.owner_count(ids[5])),
+        (3, 2),
+        "clones share the block's counts"
+    );
+    drop(roots);
+    drop(set);
+    assert!(
+        ids.iter().all(|id| arena.is_live(*id)),
+        "a clone still holds the block"
+    );
+    let mut clones = clones;
+    let last = clones.pop().expect("sixteen clones");
+    drop(clones);
+    assert_eq!(
+        (arena.owner_count(ids[0]), arena.owner_count(ids[5])),
+        (2, 1)
+    );
+    drop(last);
+    assert!(ids.iter().all(|id| !arena.is_live(*id)));
+    assert_eq!(arena.live_len(), 0);
+}

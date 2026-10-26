@@ -1522,7 +1522,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Arc::clone(self.binding.construction.arena()),
             operands,
         )
-        .capture_in_scope();
+        .capture_into_scope();
         // Receipts end with this operation, before the sink closes. The
         // carrier keeps the result's explicit roots, including reused nodes.
         drop(operation);
@@ -3471,10 +3471,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
         let project_gen = self.snapshot.current_project_generation();
-        DepSignature::new(vec![crate::semantic_query::DepEntry::new(
-            "<project>",
-            DepVersion::ProjectGeneration(project_gen),
-        )])
+        DepSignature::new(vec![self
+            .graph()
+            .project_dep_entry(DepVersion::ProjectGeneration(project_gen))])
     }
 
     /// Emit a `ProjectMember` origin-graph edge tagged

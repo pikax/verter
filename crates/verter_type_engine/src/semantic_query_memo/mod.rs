@@ -650,6 +650,11 @@ pub struct SemanticGraphStore {
     /// remains the semantic authority; candidate admission sequence identifies
     /// individual reverse-index registrations.
     dep_signature_interner: DepSignatureInterner,
+    /// The name every project-generation dependency entry of this store
+    /// carries, minted with the store and pinned to its account once: each
+    /// entry shares the one allocation and its charge rather than copying
+    /// the text per signature ([`Self::project_dep_entry`]).
+    project_dep_name: verter_type_expr::OwnedStr,
     /// Global insertion-ordered total-size budget for the family memo.
     /// Each `FamilyKey` is built from content-derived `SemanticNodeId`s
     /// / a `DeclIdentity` embedding the file whole-hash, so a content
@@ -819,6 +824,34 @@ impl AsRef<SemanticGraphStore> for SemanticGraphStore {
 }
 
 impl SemanticGraphStore {
+    /// A project-generation dependency entry at `version`: its name is this
+    /// store's one `"<project>"` allocation, shared by every such entry, so
+    /// a signature that records only the project generation copies no text.
+    ///
+    /// The store mints the name with itself and pins its cell to the
+    /// store's account, so the allocation is charged once, as the store's
+    /// own storage, until the store and the last entry naming it drop. A
+    /// cache retaining an entry holds the same cell, as it would any owned
+    /// name.
+    pub(crate) fn project_dep_entry(
+        &self,
+        version: crate::semantic_query::DepVersion,
+    ) -> crate::semantic_query::DepEntry {
+        crate::semantic_query::DepEntry(self.project_dep_name.clone(), version)
+    }
+
+    /// Bytes the store's project dependency name is pinned for while the
+    /// store alone charges it; a cache retaining an entry holds that charge
+    /// instead while it does.
+    pub(super) fn project_dep_name_pinned_bytes(&self) -> usize {
+        // Bytes and class read together: a cache hold or release between two
+        // reads would count the name in neither class or in both.
+        match self.project_dep_name.charge() {
+            Some((bytes, verter_session_query::retention::ChargeClass::Pinned)) => bytes,
+            _ => 0,
+        }
+    }
+
     /// The one store constructor: the store and its graph storage charge
     /// the same account, bound before the first node is interned. Binds
     /// signature-token ownership to the final arena before publishing the
@@ -836,6 +869,10 @@ impl SemanticGraphStore {
         let refusal_summaries =
             refusal_summary::RefusalSummaryTable::charged(retention_account.get());
         let dep_signature_interner = DepSignatureInterner::charged(retention_account.get());
+        let project_dep_name = verter_type_expr::OwnedStr::from("<project>");
+        project_dep_name.pin(verter_session_query::retention::owned::ChargeCtx::new(
+            retention_account.get(),
+        ));
         let unresolved_reach = Arc::new(release::SidecarMutex::new(
             unresolved_reach::StructureBits::new(retention_account.get()),
         ));
@@ -890,6 +927,7 @@ impl SemanticGraphStore {
             joiner_on_condvar_count: Default::default(),
             canonical_to_entries,
             dep_signature_interner,
+            project_dep_name,
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
             structural_domains: Default::default(),

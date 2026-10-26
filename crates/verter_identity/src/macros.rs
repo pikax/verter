@@ -28,6 +28,12 @@ macro_rules! digest_identity {
             pub fn canonical_bytes(&self) -> &[u8] {
                 self.0.bytes()
             }
+
+            /// The one allocation every clone shares, for a measurement
+            /// that counts each distinct allocation once.
+            pub fn canonical_shared_bytes(&self) -> &std::sync::Arc<[u8]> {
+                self.0.shared_bytes()
+            }
         }
 
         impl core::fmt::Debug for $name {

@@ -130,8 +130,8 @@ fn deferred_publication_reuses_the_receipts_operand_owner() {
         );
         assert_eq!(
             super::super::node_roots::root_owner_constructions_for_tests() - before_owners,
-            usize::from(!same_result),
-            "an identical result shares the existing physical root owner"
+            0,
+            "a short result set allocates no owner"
         );
     }
 }

@@ -1,12 +1,13 @@
 //! Heap measurement of identity types owned by crates below the retention
 //! layer, for the `#[heap_size(with = "...")]` fields that carry them.
 
-use verter_retention::allocation::{arc_block_bytes, heap_block_bytes};
+use verter_retention::allocation::arc_block_bytes;
 use verter_retention::heap_size::HeapMeter;
 
-/// A parse identity's retained canonical encoding.
-pub fn parse_key<'t>(key: &'t verter_language::ParseKey, _meter: &mut HeapMeter<'_, 't>) -> usize {
-    heap_block_bytes(key.canonical_bytes().len())
+/// A parse identity's retained canonical encoding: one `Arc` block every
+/// clone of the key shares, counted once per measurement.
+pub fn parse_key<'t>(key: &'t verter_language::ParseKey, meter: &mut HeapMeter<'_, 't>) -> usize {
+    meter.shared_encoding_bytes(key.canonical_shared_bytes())
 }
 
 /// A file language row. Adapter and language ids are interned process-wide

@@ -985,7 +985,11 @@ fn evaluate_type_expression_cleanup_preserves_concurrently_owned_scratch() {
     // The cache fast-path returns the owner's node, and it still backs a
     // live file: a fresh cacheable evaluation hits the warm entry and
     // resolves, proving the cached node is not dangling.
-    let cached = host.scratch_cache().lock().get(&scratch_uri);
+    let cached = host
+        .scratch_cache()
+        .lock()
+        .get(&scratch_uri)
+        .map(|(node, _)| node);
     assert_eq!(
         cached,
         Some(owner_node.id()),
