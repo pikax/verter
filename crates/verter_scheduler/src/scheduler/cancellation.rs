@@ -96,6 +96,18 @@ impl ScopedCacheFlight {
         if state.terminal.is_some() {
             return false;
         }
+        self.bind_aggregate(&mut state, aggregate)
+    }
+
+    /// Install `aggregate` as the flight's job token and register every
+    /// current owner on it. Whichever of admission and dispatch reaches the
+    /// flight first binds it; the other finds it bound. Returns `false`, with
+    /// the flight terminal-cancelled, when the token no longer accepts owners.
+    fn bind_aggregate(
+        &self,
+        state: &mut ScopedCacheFlightState,
+        aggregate: CancellationToken,
+    ) -> bool {
         if state.aggregate.is_some() {
             return true;
         }
@@ -157,7 +169,9 @@ impl ScopedCacheFlight {
             }
             return false;
         }
-        state.aggregate.get_or_insert(aggregate);
+        if !self.bind_aggregate(&mut state, aggregate) {
+            return false;
+        }
         state.dispatched = true;
         self.delivery.deliver(vec![state.wakers.take()]);
         true

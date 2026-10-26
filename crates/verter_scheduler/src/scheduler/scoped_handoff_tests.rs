@@ -834,3 +834,27 @@ fn final_capacity_release_wakes_progress_subscribers_after_lifecycle_unlock() {
     drop(current);
     assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
 }
+
+/// Dispatch can select an admitted node before its submission binds the
+/// node's job token to the flight. The owners that arrived before either
+/// still own the job: a later follower's cancellation must not cancel it,
+/// while every owner's cancellation still does.
+#[test]
+fn dispatch_before_aggregate_binding_keeps_earlier_owners_on_the_job() {
+    let scheduler = scheduler();
+    let flight = ScopedCacheFlight::new(Arc::clone(&scheduler.dag));
+    let root = CancellationToken::new();
+    let follower = CancellationToken::new();
+    assert!(flight.try_add_owner(1, Some(root.clone())));
+    let aggregate = CancellationToken::aggregate();
+    assert!(flight.mark_dispatched(aggregate.clone()));
+    assert!(flight.attach_aggregate(aggregate.clone()));
+    assert!(flight.try_add_owner(2, Some(follower.clone())));
+    follower.cancel();
+    assert!(
+        !aggregate.is_cancelled(),
+        "the earlier owner still wants the job"
+    );
+    root.cancel();
+    assert!(aggregate.is_cancelled(), "no owner wants the job any more");
+}
