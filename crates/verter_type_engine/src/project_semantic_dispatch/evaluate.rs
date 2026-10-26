@@ -2200,7 +2200,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// arguments as types, resolving the operators they write
     /// (`Promise<Awaited<T>>` at `T = string` prints `Promise<string>`). An
     /// argument that does not settle stays as written.
-    fn application_over_printed_arguments(
+    pub(super) fn application_over_printed_arguments(
         &self,
         application: SemanticNodeId,
         context: ProjectionReductionContext,

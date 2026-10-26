@@ -15387,7 +15387,11 @@ trait RelationDemandDriver {
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> SemanticNodeId;
-    fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool;
+    fn reduced_intersection_terminal(
+        &self,
+        source: SemanticNodeId,
+        arms: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId>;
     fn leave_inline_recursion(&self);
     fn matched_union_inference(
         &self,
@@ -15659,8 +15663,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     ) -> SemanticNodeId {
         ProjectSemanticDispatch::intern_normalized_union_or_intersection(self, members, is_union)
     }
-    fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool {
-        ProjectSemanticDispatch::intersection_arms_reduce_to_never(self, arms)
+    fn reduced_intersection_terminal(
+        &self,
+        source: SemanticNodeId,
+        arms: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::reduced_intersection_terminal(
+            self,
+            source,
+            arms,
+            super::build::IntersectionDenotationDemand::Operand,
+        )
     }
     fn leave_inline_recursion(&self) {
         ProjectSemanticDispatch::leave_inline_recursion(self)
@@ -16145,8 +16158,12 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         self.driver
             .intern_normalized_union_or_intersection(members, is_union)
     }
-    fn intersection_arms_reduce_to_never(&self, arms: &[SemanticNodeId]) -> bool {
-        self.driver.intersection_arms_reduce_to_never(arms)
+    fn reduced_intersection_terminal(
+        &self,
+        source: SemanticNodeId,
+        arms: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        self.driver.reduced_intersection_terminal(source, arms)
     }
     fn leave_inline_recursion(&self) {
         self.driver.leave_inline_recursion()
@@ -17277,11 +17294,10 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         //    types conflict) relates as `never`. ──────────────────────────
         if let SemanticNodeData::Intersection(arms) = &*source_data {
             let arms = arms.members_arc();
-            if self.intersection_arms_reduce_to_never(&arms) {
+            if let Some(terminal) = self.reduced_intersection_terminal(source, &arms) {
                 drop(source_data);
                 drop(target_data);
-                let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
-                work.push(same_pair(never, target));
+                work.push(same_pair(terminal, target));
                 return;
             }
         }

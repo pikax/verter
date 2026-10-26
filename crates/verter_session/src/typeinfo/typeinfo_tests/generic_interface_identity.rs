@@ -44,7 +44,18 @@ fn published_arguments(
     let bytes = host
         .project_node_to_type_expr_json_bytes(&root)
         .expect("wire publication");
-    serde_json::from_slice(&bytes).expect("typed wire payload")
+    let expr: TypeExpr = serde_json::from_slice(&bytes).expect("typed wire payload");
+    if args.is_empty() {
+        let root = host
+            .resolve_named_symbol(FILE, name, Some(mode))
+            .expect("bare named type");
+        let named = host
+            .project_node_to_type_expr_json_bytes(&root)
+            .expect("named publication");
+        let named: TypeExpr = serde_json::from_slice(&named).expect("typed named payload");
+        assert_eq!(expr, named, "named and wire publication: {name}");
+    }
+    expr
 }
 
 fn assert_application(expr: &TypeExpr, name: &str, argument: PrimitiveName) {
@@ -77,12 +88,57 @@ fn generic_interface_identity_preserves_structural_intersection_reduction() {
                 let conditional =
                     published_arguments(&host, "ConflictIsNever", &[], ProjectionMode::Expanded);
                 assert_boolean_literal(&conditional, true);
+                for (name, non_strict) in [
+                    ("NullIntersection", PrimitiveName::Null),
+                    ("UndefinedIntersection", PrimitiveName::Undefined),
+                ] {
+                    let nullish = published_arguments(&host, name, &[], ProjectionMode::Expanded);
+                    assert_primitive(
+                        &nullish,
+                        if strict {
+                            PrimitiveName::Never
+                        } else {
+                            non_strict
+                        },
+                    );
+                }
+                for name in ["NullIntersectionIsNever", "UndefinedIntersectionIsNever"] {
+                    let conditional =
+                        published_arguments(&host, name, &[], ProjectionMode::Expanded);
+                    assert_boolean_literal(&conditional, strict);
+                }
+                let keys = published_arguments(
+                    &host,
+                    "NullIntersectionKeys",
+                    &[],
+                    ProjectionMode::Expanded,
+                );
                 if strict {
-                    for name in ["NullIntersection", "UndefinedIntersection"] {
-                        let nullish =
-                            published_arguments(&host, name, &[], ProjectionMode::Expanded);
-                        assert_primitive(&nullish, PrimitiveName::Never);
+                    let TypeExpr::Union(arms) = &keys else {
+                        panic!("keyof never: {keys:?}")
+                    };
+                    assert_eq!(arms.len(), 3);
+                    for kind in [
+                        PrimitiveName::String,
+                        PrimitiveName::Number,
+                        PrimitiveName::Symbol,
+                    ] {
+                        assert!(
+                            arms.iter().any(
+                                |arm| matches!(arm, TypeExpr::Primitive(found) if *found == kind)
+                            ),
+                            "missing {kind:?}: {keys:?}"
+                        );
                     }
+                } else {
+                    assert_primitive(&keys, PrimitiveName::Never);
+                }
+                // Nullability erasure does not make disjoint scalar domains overlap.
+                for name in ["NullScalarIntersection", "UndefinedScalarIntersection"] {
+                    assert_primitive(
+                        &published_arguments(&host, name, &[], ProjectionMode::Expanded),
+                        PrimitiveName::Never,
+                    );
                 }
                 let (compatible, _) = evaluate_expr(
                     &host,
@@ -167,6 +223,50 @@ fn generic_interface_identity_completes_substituted_defaults() {
 }
 
 #[test]
+fn generic_interface_identity_reduces_closed_default_arguments() {
+    use verter_type_expr::LiteralValue;
+    let key = TypeExpr::Literal(LiteralValue::String("v".into()));
+    for strict in [false, true] {
+        for implicit in [false, true] {
+            let host = host(strict, implicit);
+            for _ in 0..2 {
+                let expr =
+                    published_arguments(&host, "ClosedDefaults", &[], ProjectionMode::Expanded);
+                let TypeExpr::Tuple { elements, .. } = &expr else {
+                    panic!("default tuple: {expr:?}")
+                };
+                assert_application_arguments(
+                    &elements[0].ty,
+                    "KeyEmpty",
+                    std::slice::from_ref(&key),
+                );
+                assert_application_arguments(
+                    &object_props(&elements[1].ty)["state"].ty,
+                    "KeyEmpty",
+                    std::slice::from_ref(&key),
+                );
+                assert_application(&elements[2].ty, "IndexedEmpty", PrimitiveName::String);
+                assert_application_arguments(
+                    &published_arguments(&host, "ExplicitKeyState", &[], ProjectionMode::Expanded),
+                    "KeyEmpty",
+                    std::slice::from_ref(&key),
+                );
+            }
+            upsert_ts(
+                &host,
+                FILE,
+                &SOURCE.replace("Value = { v: string }", "Value = { v: number }"),
+            );
+            let expr = published_arguments(&host, "ClosedDefaults", &[], ProjectionMode::Expanded);
+            let TypeExpr::Tuple { elements, .. } = &expr else {
+                panic!("edited default tuple: {expr:?}")
+            };
+            assert_application(&elements[2].ty, "IndexedEmpty", PrimitiveName::Number);
+        }
+    }
+}
+
+#[test]
 fn generic_interface_identity_survives_named_and_wire_publication() {
     for strict in [false, true] {
         for implicit in [false, true] {
@@ -207,6 +307,79 @@ fn generic_interface_structural_equivalence_is_independent_of_identity() {
                     let equivalent = published(&host, name, argument, ProjectionMode::Expanded);
                     assert_boolean_literal(&equivalent, true);
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn generic_interface_identity_distinguishes_contributors_from_structural_members() {
+    let host = host(true, true);
+    for _ in 0..2 {
+        let expr = published(
+            &host,
+            "ReferencePositions",
+            PrimitiveName::String,
+            ProjectionMode::Expanded,
+        );
+        let TypeExpr::Tuple { elements, .. } = &expr else {
+            panic!("reference positions: {expr:?}")
+        };
+        assert_application(&elements[0].ty, "Empty", PrimitiveName::String);
+        assert_primitive(
+            &object_props(&elements[1].ty)["value"].ty,
+            PrimitiveName::String,
+        );
+        let TypeExpr::Array { element, .. } = &elements[2].ty else {
+            panic!("array: {:?}", elements[2].ty)
+        };
+        // Non-generic element references retain their existing carrier form.
+        assert!(
+            matches!(element.as_ref(), TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == "Plain" && type_arguments.is_empty())
+        );
+        let members = object_props(&elements[3].ty);
+        assert_application(&members["state"].ty, "Empty", PrimitiveName::String);
+        assert_primitive(
+            &object_props(&members["full"].ty)["value"].ty,
+            PrimitiveName::String,
+        );
+        let selected = published_arguments(&host, "SelectedFull", &[], ProjectionMode::Expanded);
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = &selected
+        else {
+            panic!("selected declaration must stay named")
+        };
+        assert_eq!(name.as_ref(), "Full");
+        assert_eq!(
+            type_arguments.as_ref(),
+            &[TypeExpr::Primitive(PrimitiveName::String)]
+        );
+    }
+}
+
+#[test]
+fn generic_interface_identity_preserves_indexed_declaration_values() {
+    for strict in [false, true] {
+        for implicit in [false, true] {
+            let host = host(strict, implicit);
+            for _ in 0..2 {
+                let selected =
+                    published_arguments(&host, "SelectedFull", &[], ProjectionMode::Expanded);
+                let TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } = &selected
+                else {
+                    panic!("selected declaration must stay named")
+                };
+                assert_eq!(name.as_ref(), "Full");
+                assert_eq!(
+                    type_arguments.as_ref(),
+                    &[TypeExpr::Primitive(PrimitiveName::String)]
+                );
             }
         }
     }

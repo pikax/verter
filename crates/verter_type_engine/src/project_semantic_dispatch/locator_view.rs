@@ -202,13 +202,17 @@ pub struct LocatorViewInputs<'a> {
 /// Where a node is projected, where the place changes what it projects to:
 /// an application a tuple spreads is instantiated to splice, though the
 /// carrier modes keep the same application a carrier anywhere else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProjectionSlot {
     /// Any position that does not change the node's projection.
+    #[default]
     Plain,
     /// A tuple's rest element holding an application, under a carrier mode
     /// that splices it (`Navigate`, `Shallow`).
     Spread,
+    /// A named contributor to an authored union or intersection. Its declaration
+    /// identity survives publication while member positions still expand.
+    CompositeContributor,
 }
 
 /// Per-projection memo so shared sub-graphs project once per context and
@@ -525,6 +529,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             match self.next_body_root(projection) {
                 Some((root, root_context)) => {
+                    projection.seam.root_slot = if projection.reference_arm_role
+                        == MemberMergeRole::Authored
+                        && matches!(&projection.plan, BodyPlan::Group(BodyGroup::Arms { .. }))
+                        && matches!(
+                            self.graph().node_data(root).as_deref(),
+                            Some(
+                                SemanticNodeData::DeclRef { .. }
+                                    | SemanticNodeData::InstantiationRef { .. }
+                            )
+                        ) {
+                        ProjectionSlot::CompositeContributor
+                    } else {
+                        ProjectionSlot::Plain
+                    };
                     let begun = self.begin_projection(
                         root,
                         root_context,
@@ -773,9 +791,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     && contexts.iter().any(|context| {
                         context.mode == ProjectionMode::Expanded && may_reduce_operator(*context)
                     })
-                    && self.intersection_arms_reduce_to_never(&reduced)
                 {
-                    return self.primitive_node(PrimitiveKind::Never);
+                    if let Some(terminal) = self.reduced_intersection_terminal(
+                        *body,
+                        &reduced,
+                        super::build::IntersectionDenotationDemand::ProjectedContributors,
+                    ) {
+                        return terminal;
+                    }
                 }
                 // Unchanged projected arms keep the group's written construction:
                 // projection may already have erased a nullable union operand.

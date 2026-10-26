@@ -8,6 +8,8 @@ import { version } from "typescript";
 import { API, NodeBuilderFlags } from "typescript/unstable/sync";
 
 assert.equal(version, "7.0.2");
+// Native TypeScript 7.0.2 definitions: typescript/dist/enums/nodeBuilderFlags.enum.d.ts.
+// NoTruncation keeps the full answer; InTypeAlias prints the alias's underlying type.
 const displayFlags = NodeBuilderFlags.NoTruncation | NodeBuilderFlags.InTypeAlias;
 const dir = mkdtempSync(join(tmpdir(), "verter-interface-identity-")).replaceAll("\\", "/");
 const fixture = readFileSync(new URL("./generic_interface_identity.ts", import.meta.url), "utf8");
@@ -75,6 +77,14 @@ try {
               "ConflictIsNever",
               "NullIntersection",
               "UndefinedIntersection",
+              "NullIntersectionIsNever",
+              "NullIntersectionKeys",
+              "UndefinedIntersectionIsNever",
+              "NullScalarIntersection",
+              "UndefinedScalarIntersection",
+              "ClosedDefaults",
+              "ExplicitKeyState",
+              "SelectedFull",
               "DefaultState",
               "PartialState",
               "DefaultNested",
@@ -104,10 +114,20 @@ try {
           assert.match(answers.ChangedArgument, /Empty<number>/);
           assert.equal(answers.Conflict, "never");
           assert.equal(answers.ConflictIsNever, "true");
-          if (strictNullChecks) {
-            assert.equal(answers.NullIntersection, "never");
-            assert.equal(answers.UndefinedIntersection, "never");
-          }
+          assert.equal(answers.NullIntersection, strictNullChecks ? "never" : "null");
+          assert.equal(answers.UndefinedIntersection, strictNullChecks ? "never" : "undefined");
+          assert.equal(answers.NullIntersectionIsNever, String(strictNullChecks));
+          assert.equal(
+            answers.NullIntersectionKeys,
+            strictNullChecks ? "string | number | symbol" : "never",
+          );
+          assert.equal(answers.UndefinedIntersectionIsNever, String(strictNullChecks));
+          assert.equal(answers.NullScalarIntersection, "never");
+          assert.equal(answers.UndefinedScalarIntersection, "never");
+          assert.equal(answers.ClosedDefaults.match(/KeyEmpty<"v">/g)?.length, 2);
+          assert.match(answers.ClosedDefaults, /IndexedEmpty<string>/);
+          assert.match(answers.ExplicitKeyState, /KeyEmpty<"v">/);
+          assert.match(answers.SelectedFull, /Full<string>/);
           assert.match(answers.DefaultState, /DefaultEmpty<string>/);
           assert.match(answers.PartialState, /Pair<number, number>/);
           assert.match(answers.DefaultNested, /DefaultEmpty<string>/);

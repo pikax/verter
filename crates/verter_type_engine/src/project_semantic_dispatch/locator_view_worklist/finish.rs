@@ -221,7 +221,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.graph().node_data(child).as_deref(),
                 Some(SemanticNodeData::InstantiationRef { .. })
             );
-        if spread {
+        if matches!(
+            parent,
+            SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)
+        ) && matches!(
+            self.graph().node_data(child).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. })
+        ) {
+            ProjectionSlot::CompositeContributor
+        } else if spread {
             ProjectionSlot::Spread
         } else {
             ProjectionSlot::Plain
@@ -244,6 +252,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map_or(ProjectionSlot::Plain, |index| {
                     self.child_projection_slot(data.as_ref(), index, node, context)
                 }),
+            Some(ProjectionFrame::RootSlot(slot)) => *slot,
             _ => ProjectionSlot::Plain,
         }
     }
@@ -305,6 +314,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 mode: ProjectionMode::Navigate,
             }) {
                 QueryResult::Value(SemanticQueryOutput { value, .. }) if value != node => {
+                    if context.mode == ProjectionMode::Expanded {
+                        let generic_interface = |base: &crate::semantic_query::DeclIdentity| {
+                            self.prepared_decl_kind(base)
+                                == Some(verter_session_query::declarations::TypeDeclKind::Interface)
+                                && self.prepared_decl_is_generic(base) == Some(true)
+                        };
+                        match self.graph().node_data(value).as_deref() {
+                            Some(SemanticNodeData::InstantiationRef { base, args })
+                                if generic_interface(base) =>
+                            {
+                                return ProjectionFinish::Node(
+                                    self.published_interface_application(
+                                        value, base, args, context,
+                                    ),
+                                );
+                            }
+                            Some(SemanticNodeData::DeclRef { identity })
+                                if generic_interface(identity) =>
+                            {
+                                return ProjectionFinish::Node(
+                                    self.published_interface_application(
+                                        value,
+                                        identity,
+                                        &[],
+                                        context,
+                                    ),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
                     ProjectionFinish::Project(value)
                 }
                 QueryResult::Value(_) => ProjectionFinish::Node(node),
@@ -429,8 +469,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // declaration and its arguments before intersection reduction or output
         // materialization can observe them. Member/operator demands still enter
         // the ordinary Instantiate owner to read its structural surface.
-        if self.keeps_published_interface_application(base, context) {
-            return ProjectionFinish::Node(self.declared_application(
+        if self.keeps_published_interface_application(
+            base,
+            context,
+            self.finishing_projection_slot(node, context, ancestors),
+        ) {
+            return ProjectionFinish::Node(self.published_interface_application(
                 rebuild(Arc::clone(&projected_args)),
                 base,
                 &projected_args,
@@ -465,6 +509,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             ))
         }
+    }
+
+    /// Complete defaults and read the arguments through the shared print-argument owner.
+    pub(super) fn published_interface_application(
+        &self,
+        carrier: SemanticNodeId,
+        identity: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let complete = self.declared_application(carrier, identity, args, context);
+        self.application_over_printed_arguments(complete, context)
     }
 
     /// What a closed `keyof` or indexed access nested in a published
@@ -1133,8 +1189,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !ordered {
             // Names remain the published contributors, but the algebra reads
             // their instantiated denotation before keeping the intersection.
-            if self.intersection_arms_reduce_to_never(&ids) {
-                return self.primitive_node(PrimitiveKind::Never);
+            if let Some(terminal) = self.reduced_intersection_terminal(node, &ids, crate::project_semantic_dispatch::build::IntersectionDenotationDemand::ProjectedContributors) {
+                return terminal;
             }
             if matches!(
                 self.graph().node_data(node).as_deref(),
@@ -1265,7 +1321,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::Union(arms) => {
                 let ids: Vec<_> = arms
                     .iter()
-                    .map(|arm| self.answer_member(projected(memo, *arm, context), context, inputs))
+                    .map(|arm| self.answer_member(projected_in(memo, *arm, context,
+                        self.child_projection_slot(data, 0, *arm, context)), context, inputs))
                     .collect();
                 let nullability = self.answer_nullability(context, inputs);
                 let erases_nullish = !nullability.is_strict()
@@ -1292,7 +1349,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::Intersection(arms) => {
                 let ids: Vec<_> = arms
                     .iter()
-                    .map(|arm| self.answer_member(projected(memo, *arm, context), context, inputs))
+                    .map(|arm| self.answer_member(projected_in(memo, *arm, context,
+                        self.child_projection_slot(data, 0, *arm, context)), context, inputs))
                     .collect();
                 if context.mode == ProjectionMode::Expanded && may_reduce_operator(context) {
                     return self.rebuild_answer_intersection(node, arms.origin_category(), ids);

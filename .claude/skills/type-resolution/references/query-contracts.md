@@ -9,7 +9,7 @@ The shared semantic query system has exactly five modes. Every caller picks one;
 - **`Skeleton`** — specialised traversal mode for BFS/generic-helper surfaces where unbound type parameters must remain `TypeParam` shells and conditional branches must not collapse to `never` just because arguments are intentionally absent. It is not a display mode and does not alias `Navigate`; it is a distinct semantic policy.
 
 **Named interface applications in published answers.** Expanded publication
-retains an interface application's `InstantiationRef` at a reference position,
+retains an interface application's `InstantiationRef` as a union or intersection contributor,
 with its substituted and evaluated arguments, including omitted defaults bound
 by the shared `declared_application_arguments` owner (a zero-argument `DeclRef`
 uses the same completion as a partially supplied `InstantiationRef`). An empty interface therefore
@@ -22,11 +22,26 @@ or provenance. A direct declaration instantiation, a demanded member, `keyof`
 and an indexed access still read the interface's instantiated structural meaning
 through the same engine. An Expanded root alias that directly names an
 application still requests its body through the shared named/wire root
-materializer; a named declaration selected by an indexed access stays named.
+projector. An indexed access keeps a selected generic interface application
+named, including completed defaults. An explicit Expanded terminal demand
+materializes aliases and non-generic declarations through Instantiate; Navigate
+keeps those same terminals shallow.
+Ordinary member and element positions still expand. Contributor and ordinary
+positions have distinct `ProjectionSlot` memo keys, including when the body
+folder projects a contributor as a separate root. Residual applications from
+a partial or recursive evaluation are terminal; the materializer never retries
+them as fresh root instantiations.
 Retaining a name does not exempt its intersection from structural reduction:
-the shared `intersection_arms_reduce_to_never` reader instantiates contributors
-and applies the canonical algebra to their denotation, so conflicting literal
-discriminants and disjoint nullish/object domains still reduce to `never`.
+the shared `reduced_intersection_terminal` reader applies the written
+intersection algebra under the source file's nullability policy. Its
+`ProjectedContributors` demand reads retained interfaces while leaving other
+already-projected carriers alone: publication must not lower the transitive
+declarations those carriers preserve. Relations, keyspace and mapped operations
+use `Operand` demand to read every operand head through the existing resolver.
+Conflicting
+literal discriminants reduce to `never`; nullish/object intersections reduce
+to `never` with strict null checks and to the nullish type without them.
+Disjoint scalar domains still reduce to `never` under either policy.
 Only the reduction result replaces the published carriers; a compatible
 intersection keeps its named contributors. Heritage and shallow carriers do
 not enter this published Expanded reduction.
