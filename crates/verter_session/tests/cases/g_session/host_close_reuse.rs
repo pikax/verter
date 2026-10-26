@@ -420,9 +420,6 @@ fn closing_one_host_keeps_an_unrelated_live_hosts_data_and_charges() {
         "the closed host returns to its baseline; differing: {:#?}",
         differing(&closed_now, &closed_expected)
     );
-    // The account is process-wide: the closed host's own tables stay
-    // allocated, and charged, until it drops.
-    drop(closed);
     let live_now = shared_capacity(retained(&live.retention_snapshot()));
     let live_expected = shared_capacity(live_footprint);
     assert!(
