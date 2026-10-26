@@ -3289,12 +3289,6 @@ impl FileArtifactStore {
         // invalidates the augmentation index the removed augmenters
         // contributed to.
         let removed_pairs = self.retire_artifact_keys(&to_remove);
-        // Rows the artifact facts did not cover (a target's published
-        // absence of augmenters) describe a world with no artifacts left:
-        // retire them too, so the reset is total.
-        if !self.augmentation_index.is_empty() {
-            self.clear_augmentation_index();
-        }
         let removed = removed_pairs.len();
         if removed > 0 {
             self.live_counter

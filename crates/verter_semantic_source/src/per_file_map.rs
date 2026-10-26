@@ -2,6 +2,9 @@
 //! Shards allocate on first write; each entry carries its payload pin.
 //! Keys hash deterministically, so equal contents occupy equal shards and
 //! two maps holding the same entries charge the same bucket storage.
+//! An entry's pin lives beside its value: a shared handle readers clone out
+//! of the map must own its storage (`SelfPinned`, or an embedded pin), so
+//! its charge outlives the entry with the reader.
 use dashmap::DashMap;
 use std::borrow::Borrow;
 use std::hash::Hash;

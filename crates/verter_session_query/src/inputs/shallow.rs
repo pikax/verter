@@ -224,7 +224,11 @@ impl ShallowTypeSymbol {
 /// split over one type declaration's reference graph, baked against the
 /// owning state's import targets. Dependency EDGES only; no body product.
 #[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
+#[heap_size(pin = "verter_retention::pinned_heap::pin_embedded")]
 pub struct ClassifiedTypeDeps {
+    /// The shared classification's own charge: readers clone the `Arc` out
+    /// of the per-file classification cache.
+    storage: verter_retention::pinned_heap::StoragePin,
     /// Names of same-file symbols this type directly depends on.
     /// Used for iterative local closure.
     pub local_deps: Vec<String>,
@@ -253,6 +257,16 @@ pub struct ClassifiedTypeDeps {
     /// Import-local roots required in a runtime value position by declaration
     /// syntax, currently class `extends` heritage.
     pub external_value_positions: Vec<String>,
+}
+
+impl verter_retention::pinned_heap::EmbeddedStorage for ClassifiedTypeDeps {
+    fn ensure_storage(&self, context: &verter_retention::pinned_heap::PinContext) {
+        self.storage.ensure(
+            self,
+            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+    }
 }
 
 /// Classification of an arbitrary parser-authored dependency-path set against
@@ -1209,6 +1223,7 @@ impl ShallowInputAssembly {
         external_value_positions.sort();
 
         Arc::new(ClassifiedTypeDeps {
+            storage: Default::default(),
             local_deps,
             owner_value_deps,
             retained_value_carrier_deps,

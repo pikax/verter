@@ -1632,7 +1632,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         owner_canonical: &str,
         macro_index: usize,
-    ) -> Option<crate::structural_carrier_producer::MacroHotProduct> {
+    ) -> Option<std::sync::Arc<crate::structural_carrier_producer::MacroHotProduct>> {
         crate::structural_carrier_producer::macro_type_arg_hot_ref(
             self.ctx,
             self.graph(),

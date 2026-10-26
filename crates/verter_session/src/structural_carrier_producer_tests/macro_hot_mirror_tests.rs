@@ -1014,3 +1014,58 @@ fn a_reopened_unchanged_owner_serves_the_carrier_its_mirror_owns() {
         "the served carrier is the props object"
     );
 }
+
+/// A macro product read out of the mirror keeps its charge with its reader
+/// after the host that cached it is gone, and releases it with that reader.
+#[test]
+fn macro_product_reader_keeps_its_charge_after_host_teardown() {
+    let context = verter_retention::pinned_heap::PinContext::new(
+        verter_retention::SemanticRetentionAccount::new(
+            verter_retention::RetentionLimits::defaults(),
+        ),
+    );
+    let _scope = context.enter_for_test();
+    let host = host();
+    let fields = (0..128)
+        .map(|n| format!("field{n}: string; "))
+        .collect::<String>();
+    upsert_vue(
+        &host,
+        "/C.vue",
+        &format!(
+            "<script setup lang=\"ts\">\ndefineProps<{{ {fields}}}>()\n</script>\n<template><div /></template>\n"
+        ),
+    );
+    let macro_index = first_macro_index(&host, "/C.vue");
+    let product = {
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let product = dispatch
+            .macro_type_arg_hot_ref("/C.vue", macro_index)
+            .expect("the inline macro arg mirrors to a product");
+        let warm = dispatch
+            .macro_type_arg_hot_ref("/C.vue", macro_index)
+            .expect("the committed product is served warm");
+        assert!(Arc::ptr_eq(&product, &warm), "readers share one product");
+        product
+    };
+    assert_eq!(product.prop_reference_heads.len(), 128);
+    let mut handles = verter_retention::allocation::AliasSet::estimating();
+    let bytes = verter_retention::heap_size::HeapSize::heap_size(
+        &product.prop_reference_heads,
+        &mut verter_retention::heap_size::HeapMeter::new(&mut handles),
+    );
+    drop(handles);
+    assert!(bytes > 128 * std::mem::size_of::<usize>());
+    drop(host);
+    let held = context.account().snapshot().pinned_bytes;
+    assert!(
+        held >= bytes,
+        "the escaping product remains charged after host teardown"
+    );
+    drop(product);
+    let released = context.account().snapshot().pinned_bytes;
+    assert!(
+        held - released >= bytes,
+        "the product's last reader releases its charge: {held} then {released}"
+    );
+}

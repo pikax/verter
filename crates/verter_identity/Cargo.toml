@@ -29,3 +29,4 @@ blake3 = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+verter_retention = { path = "../verter_retention", features = ["test-support"] }

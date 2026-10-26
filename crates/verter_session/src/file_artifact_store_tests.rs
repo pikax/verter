@@ -2891,6 +2891,37 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
     );
 }
 
+/// Draining one canonical retires only the augmentation rows its own
+/// artifacts contributed: another target's published augmenter set stays
+/// served.
+#[test]
+fn removing_one_canonical_keeps_unrelated_augmenter_sets() {
+    use smallvec::{smallvec, SmallVec};
+    use verter_session_query::resolution::{AugmenterEntry, AugmenterSet};
+
+    let store = FileArtifactStore::new();
+    let target = relative_dep_target_key();
+    store.populate_augmenter_set(
+        target.clone(),
+        Arc::new(AugmenterSet {
+            entries: smallvec![AugmenterEntry {
+                artifact_key: FileArtifactKey::base_for_test(Arc::from("/src/aug.ts"), [9u8; 16]),
+                parse_stable_hash: [3u8; 16],
+            }] as SmallVec<[AugmenterEntry; 2]>,
+            fingerprint: [0xaa; 16],
+        }),
+    );
+    store.insert(Arc::from("/unrelated.ts"), synth_indexed(0x55));
+    assert_eq!(store.remove_canonical("/unrelated.ts"), 1);
+    assert_eq!(
+        store
+            .get_augmenter_set(&target)
+            .expect("an unrelated removal keeps the published set")
+            .fingerprint,
+        [0xaa; 16]
+    );
+}
+
 /// A root minted by a DIFFERENT store names an unrelated epoch line.
 /// Every root-relative accessor fails closed rather than answering out
 /// of the wrong world.

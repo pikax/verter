@@ -191,6 +191,53 @@ pub fn pin_embedded<T: EmbeddedStorage>(value: &T, context: &PinContext) {
     value.ensure_storage(context);
 }
 
+/// A value with its own embedded pin, for a payload published behind an
+/// `Arc` that readers clone out of their publication cell. The `Arc`'s
+/// publication charges the whole allocation into this pin, so every reader
+/// keeps the charge until the allocation itself is freed.
+pub struct SelfPinned<T> {
+    storage: StoragePin,
+    value: T,
+}
+
+impl<T> SelfPinned<T> {
+    pub fn new(value: T) -> Self {
+        Self {
+            storage: StoragePin::default(),
+            value,
+        }
+    }
+}
+
+impl<T> std::ops::Deref for SelfPinned<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for SelfPinned<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl<T: HeapSize> HeapSize for SelfPinned<T> {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        let Self { storage, value } = self;
+        storage.heap_size(meter) + value.heap_size(meter)
+    }
+
+    fn pin_storage(&self, context: &PinContext) -> bool {
+        self.storage.ensure(
+            self,
+            crate::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
+            context,
+        );
+        true
+    }
+}
+
 /// A published write-once value with its pin, initialized in the same
 /// transaction as the value. Failed setters drop their provisional pin.
 /// Raw Arc children are internal to the cell. A child handed to readers must

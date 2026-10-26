@@ -219,3 +219,83 @@ fn macro_field_address_storage_is_charged_once_until_the_last_cell_owner_drops()
     drop(cell);
     assert_eq!(context.account().snapshot().pinned_bytes, 0);
 }
+
+#[test]
+fn raw_surface_readers_keep_storage_charged_across_memo_teardown() {
+    let fields = (0..128)
+        .map(|n| format!("  field{n}: string;\n"))
+        .collect::<String>();
+    let source: Arc<str> = Arc::from(format!("export interface Kept {{\n{fields}}}\n"));
+    let header_index = {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            verter_parser::oxc_parse::Parser::new(&allocator, &source, oxc_span::SourceType::ts())
+                .parse();
+        assert!(!parsed.fatal_error);
+        Arc::new(
+            verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners(
+                &parsed.program,
+                &source,
+                &TopLevelOwnerTable::ordinary_file(parsed.program.body.len()),
+            )
+            .expect("ordinary owners cover every statement")
+            .declaration_headers,
+        )
+    };
+    for memo_first in [true, false] {
+        let context = PinContext::new(verter_retention::SemanticRetentionAccount::new(
+            verter_retention::RetentionLimits::defaults(),
+        ));
+        let _scope = context.enter_for_test();
+        let service = Arc::new(DeclLoweringService::new_with_account(
+            false,
+            1,
+            Arc::clone(context.account()),
+        ));
+        let memo = DeclBodyMemo::new(
+            SnapshotKey {
+                canonical: Arc::from("/retained-surfaces.ts"),
+                whole_hash: [35; 16],
+                parse_env_hash: [0; 16],
+            },
+            Arc::clone(&source),
+            None,
+            oxc_span::SourceType::ts(),
+            Arc::new(TopLevelOwnerTable::ordinary_file(1)),
+            false,
+            Arc::clone(&service),
+            Arc::clone(&header_index),
+            Arc::default(),
+            None,
+        );
+        let reader = memo.raw_surfaces_for("Kept", SymbolSpace::Type);
+        assert_eq!(reader.len(), 1);
+        let mut handles = verter_retention::allocation::AliasSet::estimating();
+        let bytes = reader.heap_size(&mut verter_retention::heap_size::HeapMeter::new(
+            &mut handles,
+        ));
+        drop(handles);
+        assert!(bytes > 0, "fixture captures a nonempty surface");
+        let charged = context.account().snapshot().pinned_bytes;
+        let second = memo.raw_surfaces_for("Kept", SymbolSpace::Type);
+        assert!(Arc::ptr_eq(&reader, &second));
+        assert_eq!(context.account().snapshot().pinned_bytes, charged);
+        drop(second);
+        if memo_first {
+            drop(memo);
+            drop(service);
+            assert_eq!(reader.len(), 1);
+            assert!(
+                context.account().snapshot().pinned_bytes >= bytes,
+                "the escaping surfaces remain fully charged after memo teardown"
+            );
+            drop(reader);
+        } else {
+            drop(reader);
+            assert_eq!(context.account().snapshot().pinned_bytes, charged);
+            drop(memo);
+            drop(service);
+        }
+        assert_eq!(context.account().snapshot().pinned_bytes, 0);
+    }
+}

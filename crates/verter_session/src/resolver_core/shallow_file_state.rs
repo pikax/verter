@@ -2907,4 +2907,47 @@ export interface Props extends Base {
             "missing direct metadata should conservatively fall back to whole closure"
         );
     }
+
+    /// A classification read out of the per-file cache stays charged for as
+    /// long as its reader holds it, after the state that cached it is gone.
+    #[test]
+    fn type_deps_readers_keep_their_charge_after_state_teardown() {
+        let context = verter_retention::pinned_heap::PinContext::new(
+            verter_retention::SemanticRetentionAccount::new(
+                verter_retention::RetentionLimits::defaults(),
+            ),
+        );
+        let _scope = context.enter_for_test();
+        let mut source = (0..128)
+            .map(|n| format!("type Dependency{n} = {{ v: {n} }};\n"))
+            .collect::<String>();
+        source.push_str("export type Kept = ");
+        source.push_str(
+            &(0..128)
+                .map(|n| format!("Dependency{n}"))
+                .collect::<Vec<_>>()
+                .join(" | "),
+        );
+        source.push_str(";\n");
+        let state = ShallowFileState::service_backed_for_test(&source);
+        let reader = state.type_deps("Kept").expect("Kept classifies");
+        assert_eq!(reader.local_deps.len(), 128);
+        let mut handles = verter_retention::allocation::AliasSet::estimating();
+        let bytes = verter_retention::heap_size::HeapSize::heap_size(
+            &*reader,
+            &mut verter_retention::heap_size::HeapMeter::new(&mut handles),
+        );
+        drop(handles);
+        assert!(bytes > 128 * std::mem::size_of::<String>());
+        let warm = state.type_deps("Kept").expect("cached classification");
+        assert!(Arc::ptr_eq(&reader, &warm));
+        drop(warm);
+        drop(state);
+        assert!(
+            context.account().snapshot().pinned_bytes >= bytes,
+            "the escaping classification remains charged after state teardown"
+        );
+        drop(reader);
+        assert_eq!(context.account().snapshot().pinned_bytes, 0);
+    }
 }

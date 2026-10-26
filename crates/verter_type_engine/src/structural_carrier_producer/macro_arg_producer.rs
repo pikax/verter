@@ -1252,7 +1252,10 @@ fn build_script_setup_seed_frames<M: verter_audit::observe::ObserveExec>(
 ///
 /// The sidecar is route evidence only. It never participates in semantic node
 /// or query identity.
-#[derive(Debug, Clone)]
+///
+/// A product is read through its shared `Arc`, never copied: the product's
+/// embedded charge travels with that allocation to every reader.
+#[derive(Debug)]
 pub struct MacroHotProduct {
     storage: StoragePin,
     pub roots: crate::semantic_query_memo::node_roots::NodeRootSet,
@@ -1480,9 +1483,8 @@ pub(crate) fn macro_type_arg_hot_ref<
     selector: &M,
     owner_canonical: &str,
     macro_index: usize,
-) -> Option<MacroHotProduct> {
+) -> Option<Arc<MacroHotProduct>> {
     macro_hot_product(ctx, graph, selector, owner_canonical, macro_index)
-        .map(|product| product.as_ref().clone())
 }
 
 fn macro_hot_product<
