@@ -522,7 +522,7 @@ fn tables_pass_through_untouched() {
         vec![Token::new(0, 0, 1, 1, Some(1), Some(0))].into_boxed_slice(),
         None,
     );
-    input.set_x_google_ignore_list(vec![1]);
+    input.set_ignore_list(vec![1]);
 
     let allocator = Allocator::default();
     let transform = CodeTransform::new("const x = 1\n", &allocator);
@@ -538,7 +538,7 @@ fn tables_pass_through_untouched() {
         [Some("SOURCE A"), None]
     );
     assert_eq!(chained.get_source_root(), Some("/root"));
-    assert_eq!(chained.get_x_google_ignore_list(), Some(&[1u32][..]));
+    assert_eq!(chained.get_ignore_list(), Some(&[1u32][..]));
     assert_eq!(chained.get_file(), Some("ignored.js"));
     assert_eq!(segments(&chained), vec![(0, 0, Some((1, 1, 1, Some(0))))]);
 }

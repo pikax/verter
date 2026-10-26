@@ -2596,3 +2596,86 @@ fn captured_view_project_identity_survives_live_republish() {
         "captured view must keep the pre-republish identity"
     );
 }
+
+/// A view is current only if its artifact root holds every artifact its
+/// token accounts for. An artifact-membership mutation still in flight holds
+/// a root capture back below its epoch, so an artifact published above it
+/// has already advanced the artifact generation the token captures while
+/// the root omits it. Such a capture is never handed out as current; once
+/// the mutation in flight completes, the view is current and holds the
+/// artifact.
+#[test]
+fn a_view_captured_below_a_finished_artifact_publication_is_not_current() {
+    use crate::file_artifact_store::FileArtifactKeySource;
+    let (host, canonical) = host_with_one_file();
+    let store = host.project_type_store().indexed();
+    let whole_hash = host
+        .scheduler
+        .try_get_source(&canonical)
+        .expect("the upserted file has a source")
+        .whole_hash;
+
+    let in_flight = store.hold_membership_epoch_for_test();
+    let indexed = Arc::new(crate::project_type_store::IndexedReady::new_for_test(
+        whole_hash,
+    ));
+    let key = verter_session_query::source::artifact_key::FileArtifactKey::for_indexed(
+        Arc::from(canonical.as_str()),
+        &indexed,
+        verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
+    );
+    store.insert_artifacts(
+        key,
+        Arc::new(crate::file_artifact_store::FileArtifacts::with_indexed(
+            indexed,
+        )),
+    );
+
+    let read = host.resolver_store_view_read();
+    assert!(
+        !read.is_current_for_tests()
+            || read
+                .view_for_tests()
+                .tracks_file_facts_for_tests(&canonical),
+        "a view handed out as current must hold the artifact its token accounts for"
+    );
+
+    drop(in_flight);
+    let read = host.resolver_store_view_read();
+    assert!(
+        read.is_current_for_tests(),
+        "with no mutation in flight the view is current"
+    );
+    assert!(
+        read.view_for_tests()
+            .tracks_file_facts_for_tests(&canonical),
+        "the current view holds the published artifact"
+    );
+}
+
+/// A mutation still in flight unsettles no capture by itself: it advances
+/// the artifact generation only after it finishes, so a view captured while
+/// it applies, with nothing finished above it, is current.
+#[test]
+fn a_view_captured_beside_an_unfinished_artifact_mutation_is_current() {
+    let (host, canonical) = host_with_one_file();
+    let store = host.project_type_store().indexed();
+    let in_flight = store.hold_membership_epoch_for_test();
+    assert!(
+        store.capture_root().is_settled(),
+        "a root captured beside an unfinished mutation, with nothing finished above it, is settled"
+    );
+    host.bump_store_view_epoch();
+    let read = host.resolver_store_view_read();
+    assert!(
+        read.is_current_for_tests(),
+        "a view captured beside an unfinished mutation is current"
+    );
+    assert!(
+        read.view_for_tests()
+            .whole_hash_for_tests(&canonical)
+            .is_some(),
+        "the current view tracks the loaded file"
+    );
+    drop(in_flight);
+}

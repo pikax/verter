@@ -473,8 +473,13 @@ impl FilesystemWorkspace {
             }
             input_ledger.discard_staged_loaded_inputs();
 
+            // The freeze just read every observation live, so the replay
+            // starts as soon as nothing it was sealed against moved. The
+            // evidence is read live once more only if the replay reaches
+            // admission, through the operation's final validation; a replay
+            // that settles before admission returns its outcome as it is.
             let frozen = recorder.freeze();
-            if !frozen.revalidate() {
+            if !frozen.sealed_current() {
                 if input_ledger.charge_outer_restart(self).is_err() {
                     return crate::resolution_currency::ResolutionOutcome::refused(
                         None,
@@ -496,7 +501,7 @@ impl FilesystemWorkspace {
                         published,
                         &mut input_ledger,
                         &|| {
-                            let valid = frozen.complete() && frozen.revalidate();
+                            let valid = frozen.revalidate();
                             final_valid.set(valid);
                             valid
                         },
@@ -1382,17 +1387,21 @@ impl FrozenFilesystemResolutionReader<'_> {
         self.complete.load(Ordering::Acquire)
     }
 
+    /// Whether the sealed evidence is complete and nothing it was sealed
+    /// against has moved: the content generation and the published root.
+    /// Reads nothing from disk; [`Self::revalidate`] adds the live re-read.
+    fn sealed_current(&self) -> bool {
+        self.complete()
+            && self.workspace.engine.current_content_generation() == self.content_generation
+            && self
+                .workspace
+                .engine
+                .load_published()
+                .is_some_and(|current| Arc::ptr_eq(&current, &self.published))
+    }
+
     fn revalidate(&self) -> bool {
-        if !self.complete() {
-            return false;
-        }
-        if self.workspace.engine.current_content_generation() != self.content_generation {
-            return false;
-        }
-        let Some(current) = self.workspace.engine.load_published() else {
-            return false;
-        };
-        if !Arc::ptr_eq(&current, &self.published) {
+        if !self.sealed_current() {
             return false;
         }
         self.files.iter().all(|(canonical, expected)| {

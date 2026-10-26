@@ -1683,9 +1683,28 @@ fn canonicalize_with<M: verter_audit::observe::ObserveExec>(
     //    computed in O(n) over the childless scalar domain.
     if !is_union
         && (scalar_domain_provably_empty(graph.store(), &kept)
-            || nullable_beside_object_type(graph.store(), &kept, &mut evidence)
-            || object_arms_conflict_on_a_literal_property(graph, &kept, meter, &mut evidence))
+            || (nullability.is_strict()
+                && nullable_beside_object_type(graph.store(), &kept, &mut evidence)))
     {
+        return CanonicalComposite {
+            node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+            evidence,
+        };
+    }
+
+    if !is_union && !nullability.is_strict() {
+        if let Some(nullish) = kept
+            .iter()
+            .copied()
+            .find(|arm| peek_nullable_via_graph(graph.store(), *arm, &mut evidence).is_some())
+        {
+            return CanonicalComposite {
+                node: nullish,
+                evidence,
+            };
+        }
+    }
+    if !is_union && object_arms_conflict_on_a_literal_property(graph, &kept, meter, &mut evidence) {
         return CanonicalComposite {
             node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
             evidence,

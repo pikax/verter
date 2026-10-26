@@ -2,47 +2,56 @@
 //! read only workspace sources, so they stay beside the dispatcher.
 
 /// `SemanticQueryKey::Expand`, `ExpandMode`, `SemanticQueryApi::expand`,
-/// `build_expand`, and `ExpandMode::` are absent across the workspace's
-/// Rust crate sources and TypeScript packages. These identifiers are not
-/// part of the projection-mode surface; this test fails loudly if any
-/// survive.
+/// `build_expand`, and `ExpandMode::` are not part of the projection-mode
+/// surface. Each needle is followed by a punctuation character so it cannot
+/// prefix-match an unrelated identifier like `build_expanded_type_text` (a
+/// text-construction helper in `verter_semantic::analysis::macros`) or a
+/// hypothetical `SemanticQueryKey::Expanded`. `ExpandMode` is bare because
+/// Rust requires the `ExpandMode::Foo` prefix anywhere it surfaces.
 ///
 /// This is the sole enforcement point. The retired-terminology CI scanner
 /// that used to cover it alongside this test has been removed: it guarded
 /// vocabulary from a completed refactor, and a name-keyed text scanner is
 /// exactly the guard shape the landed-scanner bar forbids.
-#[test]
-fn expand_variant_and_expand_mode_absent_from_workspace() {
+const EXPAND_NEEDLES: [&str; 8] = [
+    "SemanticQueryKey::Expand ",
+    "SemanticQueryKey::Expand{",
+    "SemanticQueryKey::Expand,",
+    "ExpandMode::",
+    "SemanticQueryApi::expand(",
+    "fn expand(",
+    "build_expand(",
+    "fn build_expand(",
+];
+
+/// Qualified uses of the solver scratch-only nodes as
+/// `SemanticNodeData` variants; see
+/// [`solver_scratch_only_nodes_never_enter_semantic_graph_store`] for why
+/// each stays scratch-only. Each needle is followed by punctuation so it
+/// cannot prefix-match an unrelated identifier.
+const SCRATCH_ONLY_NODE_NEEDLES: [&str; 6] = [
+    "SemanticNodeData::Rest(",
+    "SemanticNodeData::Rest{",
+    "SemanticNodeData::Rest ",
+    "SemanticNodeData::RecursiveRef{",
+    "SemanticNodeData::RecursiveRef(",
+    "SemanticNodeData::RecursiveRef ",
+];
+
+/// Every needle set's matches over the workspace's Rust crate sources and
+/// TypeScript packages, from ONE walk: each source is read once and matched
+/// once against every set together, as `path: contains \`needle\`` lines
+/// per set.
+fn workspace_source_matches(needle_sets: &[&[&str]]) -> Vec<Vec<String>> {
     use std::path::{Path, PathBuf};
     let workspace_root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .find(|p| p.join("Cargo.toml").exists() && p.join("crates").is_dir())
         .expect("workspace root with crates/ dir")
         .to_path_buf();
-
-    // Each needle is followed by a punctuation character so it cannot
-    // prefix-match an unrelated identifier like `build_expanded_type_text`
-    // or `SemanticQueryKey::Expanded` (a hypothetical future variant
-    // outside this track). `ExpandMode` is bare because Rust requires the
-    // `ExpandMode::Foo` prefix anywhere it surfaces — there is no
-    // identifier whose first characters are `ExpandMode` followed by
-    // anything other than `::` in this workspace.
-    let needles = [
-        "SemanticQueryKey::Expand ",
-        "SemanticQueryKey::Expand{",
-        "SemanticQueryKey::Expand,",
-        "ExpandMode::",
-        "SemanticQueryApi::expand(",
-        "fn expand(",
-        "build_expand(",
-        "fn build_expand(",
-    ];
-
     let exclude_files = [
-        // The test itself contains the needle strings. Post-§5.2 split
-        // the dispatcher module lives as a directory; the old singleton
-        // path is retained in case anyone reconstructs it for grep
-        // purposes.
+        // This file names the needles. The dispatcher module lives as a
+        // directory; the singleton path is kept should it be reconstructed.
         "project_semantic_dispatch.rs",
         "project_semantic_dispatch\\tests.rs",
         "project_semantic_dispatch/tests.rs",
@@ -51,39 +60,60 @@ fn expand_variant_and_expand_mode_absent_from_workspace() {
         "feedback-2026-04-19-gennav.md",
         "tmp-plan.md",
     ];
-
-    let matcher = aho_corasick::AhoCorasick::new(needles).expect("valid source needles");
-    let mut violations: Vec<String> = Vec::new();
+    let needles: Vec<&str> = needle_sets
+        .iter()
+        .flat_map(|set| set.iter().copied())
+        .collect();
+    let matcher = aho_corasick::AhoCorasick::new(&needles).expect("valid source needles");
+    let mut matches: Vec<Vec<String>> = vec![Vec::new(); needle_sets.len()];
     let mut visit = |path: &Path| {
         let lossy = path.to_string_lossy();
         if exclude_files.iter().any(|n| lossy.ends_with(n)) {
             return;
         }
-        // build_expanded_type_text / build_expanded_type_expr are
-        // unrelated text-construction helpers in
-        // verter_semantic::analysis::macros — the script's needles are
-        // tightened above (`build_expand(` and `fn build_expand`) to
-        // avoid colliding with them.
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
         };
-        for (needle, found) in needles.iter().zip(matching_needles(&matcher, &content)) {
-            if found {
-                violations.push(format!("{}: contains `{}`", path.display(), needle));
+        let found = matching_needles(&matcher, &content);
+        let mut offset = 0;
+        for (set_index, set) in needle_sets.iter().enumerate() {
+            for (needle, hit) in set.iter().zip(&found[offset..offset + set.len()]) {
+                if *hit {
+                    matches[set_index].push(format!("{}: contains `{}`", path.display(), needle));
+                }
             }
+            offset += set.len();
         }
     };
-
     walk_sources(&workspace_root.join("crates"), &["rs"], &mut visit);
     walk_sources(
         &workspace_root.join("packages"),
         &["ts", "tsx", "js", "mjs", "cjs"],
         &mut visit,
     );
+    matches
+}
+
+/// The retired expand vocabulary and the qualified scratch-only node
+/// variants are absent across the workspace's Rust crate sources and
+/// TypeScript packages. Both guards read the same tree, so they share one
+/// walk instead of each reading it.
+#[test]
+fn workspace_sources_name_no_retired_expand_or_scratch_only_node_vocabulary() {
+    let [expand, scratch_only]: [Vec<String>; 2] =
+        workspace_source_matches(&[&EXPAND_NEEDLES, &SCRATCH_ONLY_NODE_NEEDLES])
+            .try_into()
+            .expect("one match list per needle set");
     assert!(
-        violations.is_empty(),
+        expand.is_empty(),
         "Found forbidden Expand/ExpandMode/build_expand references (not part of the four-mode surface):\n{}",
-        violations.join("\n")
+        expand.join("\n")
+    );
+    assert!(
+        scratch_only.is_empty(),
+        "Solver scratch-only nodes (Rest/RecursiveRef) must never appear as \
+         SemanticNodeData variants — they stay solver-scratch per\nFound:\n{}",
+        scratch_only.join("\n")
     );
 }
 
@@ -319,9 +349,10 @@ fn enum_body_declares_variant(src: &str, enum_name: &str, variants: &[&str]) -> 
 /// first-class variant avoids the scope-as-discriminator anti-pattern
 /// structurally.
 ///
-/// Each needle is followed by punctuation so it cannot prefix-
-/// match an unrelated identifier (same discipline as
-/// [`expand_variant_and_expand_mode_absent_from_workspace`]).
+/// Their qualified uses are absent from the workspace sources
+/// ([`SCRATCH_ONLY_NODE_NEEDLES`], checked by
+/// [`workspace_sources_name_no_retired_expand_or_scratch_only_node_vocabulary`]);
+/// this test scans the `SemanticNodeData` declaration itself.
 #[test]
 fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
     use std::path::{Path, PathBuf};
@@ -331,57 +362,9 @@ fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
         .expect("workspace root with crates/ dir")
         .to_path_buf();
 
-    let needles = [
-        "SemanticNodeData::Rest(",
-        "SemanticNodeData::Rest{",
-        "SemanticNodeData::Rest ",
-        "SemanticNodeData::RecursiveRef{",
-        "SemanticNodeData::RecursiveRef(",
-        "SemanticNodeData::RecursiveRef ",
-    ];
-
-    let exclude_files = [
-        "project_semantic_dispatch.rs",
-        "project_semantic_dispatch\\tests.rs",
-        "project_semantic_dispatch/tests.rs",
-        "generic-navigation-prep-plan.md",
-        "feedback-2026-04-19-gennav.md",
-        "tmp-plan.md",
-    ];
-
-    let matcher = aho_corasick::AhoCorasick::new(needles).expect("valid source needles");
-    let mut violations: Vec<String> = Vec::new();
-    let mut visit = |path: &Path| {
-        let lossy = path.to_string_lossy();
-        if exclude_files.iter().any(|n| lossy.ends_with(n)) {
-            return;
-        }
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return;
-        };
-        for (needle, found) in needles.iter().zip(matching_needles(&matcher, &content)) {
-            if found {
-                violations.push(format!("{}: contains `{}`", path.display(), needle));
-            }
-        }
-    };
-
-    walk_sources(&workspace_root.join("crates"), &["rs"], &mut visit);
-    walk_sources(
-        &workspace_root.join("packages"),
-        &["ts", "tsx", "js", "mjs", "cjs"],
-        &mut visit,
-    );
-    assert!(
-        violations.is_empty(),
-        "Solver scratch-only nodes (Rest/RecursiveRef) must never appear as \
-         SemanticNodeData variants — they stay solver-scratch per\nFound:\n{}",
-        violations.join("\n")
-    );
-
     // ── Declaration scan (backstop completeness) ────────────────────────
     //
-    // The needle scan above only catches QUALIFIED usage
+    // The workspace needle scan only catches QUALIFIED usage
     // (`SemanticNodeData::Rest(...)` etc.). It NEVER inspects the
     // `enum SemanticNodeData { ... }` DECLARATION, where a re-added variant is
     // written `Rest { ... }` / `Rest(...)` WITHOUT the `SemanticNodeData::`

@@ -2376,7 +2376,7 @@ fn every_consumer_has_production_call_site() {
         variant_set: &'a std::collections::HashSet<String>,
         hits: BTreeMap<String, Vec<String>>,
         rel_path: String,
-        // Depth counter for pattern context. syn 2.x dispatches
+        // Depth counter for pattern context. syn dispatches
         // `Pat::Path` (unit-variant patterns like
         // `RequestKind::ComponentMeta` in `match` arms) to
         // `visit_expr_path` — see `syn::visit::visit_pat` source.
@@ -2404,6 +2404,13 @@ fn every_consumer_has_production_call_site() {
             syn::visit::visit_item_fn(self, item);
         }
         fn visit_pat(&mut self, pat: &'ast syn::Pat) {
+            // A match-arm guard is an expression evaluated by the arm, not
+            // pattern context: only the guarded pattern counts as a pattern.
+            if let syn::Pat::Guard(guarded) = pat {
+                self.visit_pat(&guarded.pat);
+                self.visit_expr(&guarded.guard);
+                return;
+            }
             self.pat_depth = self.pat_depth.saturating_add(1);
             syn::visit::visit_pat(self, pat);
             self.pat_depth = self.pat_depth.saturating_sub(1);
@@ -5003,7 +5010,7 @@ fn session_graph_lowerer_makes_no_query() {
         "tsserver",
         // Assembled at compile time so this needle list does not itself carry
         // the literal identifier and trip the
-        // `no_session_solver_host_in_production_code` retired-symbol scanner,
+        // `no_session_solver_host_in_production_code` retired-symbol rule,
         // which greps non-`*_tests.rs` `crates/**` source for `SessionSolverHost`.
         // The scan against `structural_carrier_producer/macro_arg_producer.rs` is
         // unchanged — it still looks for the full assembled identifier.

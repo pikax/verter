@@ -583,9 +583,11 @@ fn publisher_registration_visible_to_concurrent_invalidator() {
     // The invalidator MUST be blocked while the publisher is parked. Wait
     // for the observed point where it has ENTERED the exclusive acquire:
     // parking_lot's writer takes the gate's writer bit first and then
-    // waits for the readers to leave, so `is_locked_exclusive()` turns
-    // true exactly when the invalidator is queued behind the parked
-    // publisher's read guard. A read-side invalidator never sets the bit:
+    // waits for the readers to leave, and a pending writer turns new
+    // readers away, so `try_read()` fails exactly when the invalidator is
+    // queued behind the parked publisher's read guard (while only the
+    // publisher reads, a second reader is admitted and released at once).
+    // A read-side invalidator never sets the bit:
     // however late it is scheduled, it eventually races through
     // `canonical_index.reached_by(canonical)` and finishes while the
     // publisher is still parked, which is the bug pattern. The deadline
@@ -604,7 +606,7 @@ fn publisher_registration_visible_to_concurrent_invalidator() {
                  is taking retention_gate.read() instead of write()."
             );
         }
-        if store.retention_gate().is_locked_exclusive() {
+        if store.retention_gate().try_read().is_none() {
             break;
         }
         assert!(

@@ -699,7 +699,7 @@ alternative: specify last-wins. It is deterministic and free, and it is a defens
 rejected because it silently assigns meaning to a document that has none, which is the same class of
 move as reading an absent `mappings` as empty (`U1.3`), and because the detection cost is small and
 one-time. Unreachable for real producers: the in-tree serializer emits each member once
-(`oxc_sourcemap-7.0.0/src/encode.rs:119-165`).
+(`oxc_sourcemap-9.0.0/src/encode.rs:108-152`).
 
 ### 4.5 The interoperable JSON domain
 
@@ -1276,8 +1276,8 @@ sequence is forbidden.
 **The member names above are the COMPARED artifact's logical field names**, not JSON keys. The
 comparison is over the decoded object, so a field is identified by which of §7.2–§7.6's rules produced
 it, not by the string an encoder happens to write for it. This matters for exactly one field: the
-ignore list is the logical member `ignoreList` here, while the in-tree encoder writes the JSON key
-`x_google_ignoreList` (§7.8). Those are the same field.
+ignore list is the logical member `ignoreList` here, and the in-tree encoder writes it under the JSON
+key `ignoreList` (§7.8). An input may spell it `x_google_ignoreList`; that is the same field.
 
 **JSON member order is NOT part of the compared artifact, and is not layer-1 algebra.** AMD-008 is
 explicit that "the compared artifact is the complete decoded map object" (AMD-008:127-128), and a
@@ -1344,7 +1344,7 @@ never ran for a single-fragment compile, so the very silent drop it existed to p
 what happened to a script-only map. Fixing the reachability made the remaining choice between
 "reject everywhere" and "carry everywhere", and carrying is the one that discards nothing. This
 decision is unreachable for current producers either way: the in-tree serializer always constructs
-the map with `x_google_ignore_list: None` (`oxc_sourcemap-7.0.0/src/sourcemap.rs:53`, reached from
+the map with `ignore_list: None` (`oxc_sourcemap-9.0.0/src/sourcemap.rs:53`, reached from
 `source_map.rs:383-392`).
 
 ### 7.4 Source and name tables: stable append, no deduplication
@@ -1365,7 +1365,7 @@ fragment's rows. Within a fragment, rows are taken in the order the fragment's m
   `sourcesContent` entry at that row's local index when that map declares the member and the entry is
   a string, otherwise `null`. **The member is present iff at least one entry is non-null**, matching
   the in-tree serializer, which emits it iff any entry is `Some`
-  (`oxc_sourcemap-7.0.0/src/encode.rs:20-32`, `:138-146`).
+  (`oxc_sourcemap-9.0.0/src/encode.rs:20-22`, `:127-134`).
 - `names` is always present, possibly empty. On real inputs it is always empty: the producer
   constructs the map with an empty names vector (`source_map.rs:383-392`, passing `Vec::new()`) and
   all nine `Token::new` call sites in `source_map.rs` pass `None` for the name id.
@@ -1468,7 +1468,7 @@ as part of source identity (`src/mapping-oracle.mjs:1148-1154`).
   additional segment rather than a replacement (`src/sourcemap.mjs:80-103`), so sequence order survives
   a round trip.
 
-This matches the in-tree serializer (`oxc_sourcemap-7.0.0/src/encode.rs:186-265`). It also matches the
+This matches the in-tree serializer (`oxc_sourcemap-9.0.0/src/encode.rs:163-276`). It also matches the
 accepted harness encoder (`src/sourcemap.mjs:108-143`) on every sequence this specification can
 produce: that encoder sorts by `(genLine, genCol)` first (`src/sourcemap.mjs:110`), which is a no-op on
 a non-decreasing sequence, and the sort is stable so equal-coordinate order survives. `U3.6` and §5.5
@@ -1502,18 +1502,18 @@ bytes. That is a property of one implementation's encoder, not of the compositio
 the equality comparison (§7.1).
 
 For the record, the in-tree serializer emits the members in the order `version`, `file`?,
-`sourceRoot`?, `names`, `sources`, `sourcesContent`?, `x_google_ignoreList`?, `mappings`,
-`debugId`? — the last one **after** `mappings` (`oxc_sourcemap-7.0.0/src/encode.rs:119-163`, with the
-`debugId` arm at `:158-161`). Under §7.2 both `file` and `debugId` are absent from every artifact this
+`sourceRoot`?, `names`, `sources`, `sourcesContent`?, `ignoreList`?, `mappings`,
+`debugId`? — the last one **after** `mappings` (`oxc_sourcemap-9.0.0/src/encode.rs:108-152`, with the
+`debugId` arm at `:147-150`). Under §7.2 both `file` and `debugId` are absent from every artifact this
 specification produces, so the conforming reduced order is `version`, `sourceRoot`?, `names`,
-`sources`, `sourcesContent`?, `x_google_ignoreList`?, `mappings`. `debugId` is inventoried here rather
+`sources`, `sourcesContent`?, `ignoreList`?, `mappings`. `debugId` is inventoried here rather
 than omitted, so that the citation describes the encoder as it is and the reduction is visibly a
 consequence of §7.2 rather than an incomplete reading. A conforming production implementation satisfies
 the determinism exit by serializing deterministically; it does not have to match this order, and the
 reference does not have to match it at all.
 
 **The ignore list's JSON key is a serialization fact.** The compared artifact's field is `ignoreList`
-(§7.1, §7.3); the in-tree encoder writes it under the key `x_google_ignoreList`, the only spelling it
+(§7.1, §7.3); the in-tree encoder writes it under the key `ignoreList`, the only spelling it
 emits. A producer writing either key emits the same compared artifact, because the comparison is over
 the decoded object. On the INPUT side both spellings are accepted and must agree (§4.3 step 1.15,
 `U1.7`) — that is a separate, decoding-side rule and does not make the two keys two fields.

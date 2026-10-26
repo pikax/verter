@@ -49,6 +49,20 @@ impl DeclBodyMemo {
         &self,
         locator: &AuthoredBodyLocator,
     ) -> Result<DerefedAuthoredBody, LocatorBodyDerefError> {
+        self.deref_locator_body_with(locator, &|_, _, _| None)
+    }
+
+    /// [`Self::deref_locator_body`], reading a type declaration's body from
+    /// the parts `kept` hands over for it — the parts its caller kept from
+    /// the lowering that registered its facts
+    /// ([`Self::type_decl_outcome_keeping_in`]) — instead of lowering its
+    /// statements again. `kept` takes the parts of a name declared by an
+    /// owner in a scope (the file scope when `None`), if it holds them.
+    pub fn deref_locator_body_with(
+        &self,
+        locator: &AuthoredBodyLocator,
+        kept: &super::KeptTypeParts<'_>,
+    ) -> Result<DerefedAuthoredBody, LocatorBodyDerefError> {
         // One top-level anchor-canonical coherence gate for ALL arms: a
         // locator MUST deref through the memo of its OWN producing canonical.
         // Checked BEFORE any body demand — the typed, release-present successor
@@ -331,12 +345,14 @@ impl DeclBodyMemo {
                         // snapshot by the lease-only transient service (the
                         // graph-tier `LowerLocator` memo owns caching the
                         // lowered product).
-                        let parts = match aug_scope.as_ref() {
-                            None => self.transient_type_parts_in(owner, symbol),
-                            Some(scope) => {
-                                self.transient_augmentation_type_parts_in(scope, owner, symbol)
-                            }
-                        };
+                        let parts =
+                            match (kept(owner, symbol, aug_scope.as_ref()), aug_scope.as_ref()) {
+                                (Some(parts), _) => DemandOutcome::Ready(Some(parts)),
+                                (None, None) => self.transient_type_parts_in(owner, symbol),
+                                (None, Some(scope)) => {
+                                    self.transient_augmentation_type_parts_in(scope, owner, symbol)
+                                }
+                            };
                         let parts = transient_outcome(parts)?;
                         let shape = transient_body_shape(&lowered, &parts)?;
                         // A type-decl-header type parameter's bound (leading
@@ -509,11 +525,16 @@ impl DeclBodyMemo {
                                 return Err(LocatorBodyDerefError::UnknownSymbol);
                             }
                         };
-                        let parts = transient_outcome(self.transient_augmentation_type_parts_in(
-                            &scope_kind,
-                            aug.anchor.owner,
-                            symbol,
-                        ))?;
+                        let parts = transient_outcome(
+                            match kept(aug.anchor.owner, symbol, Some(&scope_kind)) {
+                                Some(parts) => DemandOutcome::Ready(Some(parts)),
+                                None => self.transient_augmentation_type_parts_in(
+                                    &scope_kind,
+                                    aug.anchor.owner,
+                                    symbol,
+                                ),
+                            },
+                        )?;
                         let shape = transient_body_shape(&lowered, &parts)?;
                         // An augmentation-scoped `interface` / `type` decl is an
                         // authored type-decl-header decl, so its type-param

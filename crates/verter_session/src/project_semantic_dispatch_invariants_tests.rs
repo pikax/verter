@@ -1887,82 +1887,6 @@ fn solver_host_module_deleted() {
 // ============================================================================
 
 #[test]
-fn type_query_engine_struct_absent() {
-    // Identifier-absence invariant: `TypeQueryEngine` must not appear
-    // in production code under any form (struct decl, trait impl,
-    // function body). `ComponentMetaQueryEngine` is the sole
-    // request-scoped solve engine on the session side.
-    let hits = retired_symbol_hits_in_production(&["TypeQueryEngine"]);
-    assert!(
-        hits.is_empty(),
-        "TypeQueryEngine identifier must not appear in production source:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
-fn no_session_solver_host_in_production_code() {
-    // Identifier-absence invariant: zero non-comment references to
-    // `SessionSolverHost` may appear in production source. The
-    // session uses `ComponentMetaQueryEngine` + `bare_name_resolve`
-    // directly. The grep-based helper skips `//` and `/*` lines as
-    // well as `*_tests.rs` / `tests.rs` files so doc pointers and
-    // characterization-test blocks stay valid.
-    let hits = retired_symbol_hits_in_production(&["SessionSolverHost"]);
-    assert!(
-        hits.is_empty(),
-        "SessionSolverHost identifier must not appear in production source:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
-fn no_eval_env_solver_host_in_production_code() {
-    // Identifier-absence invariant: `EvalEnvSolverHost` must not
-    // appear in production code. Env substitution lives in
-    // `structural_substitute_typeof_refs`.
-    let hits = retired_symbol_hits_in_production(&["EvalEnvSolverHost"]);
-    assert!(
-        hits.is_empty(),
-        "EvalEnvSolverHost identifier must not appear in production source:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
-fn no_type_solver_host_trait_in_production_code() {
-    // Identifier-absence invariant: `TypeSolverHost` trait must not
-    // appear in production code. The session does not thread a
-    // `&dyn TypeSolverHost` through `solve_type`; every solve-like
-    // operation runs through `ProjectSemanticDispatch::execute` on
-    // the semantic graph.
-    let hits = retired_symbol_hits_in_production(&["TypeSolverHost"]);
-    assert!(
-        hits.is_empty(),
-        "TypeSolverHost trait identifier must not appear in production source:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
-fn no_parser_arena_adapter_in_production_code() {
-    // Identifier-absence invariant: the `ParserArenaAdapter` /
-    // `ParserArenaBridgeHost` bridge names must not appear in
-    // production code. There is no parser↔dispatch bridge seam.
-    let hits = retired_symbol_hits_in_production(&[
-        "ParserArenaAdapter",
-        "ParserArenaBridgeHost",
-        "parser_arena_adapter",
-        "parser_arena_bridge",
-    ]);
-    assert!(
-        hits.is_empty(),
-        "retired ParserArenaAdapter / ParserArenaBridgeHost identifiers:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
 fn solver_no_longer_contains_distributive_union_loop() {
     // File-absence invariant: `solve.rs` is not part of the final
     // module set. The previous distributive-union loop (a walker
@@ -1982,24 +1906,6 @@ fn solver_no_longer_contains_distributive_union_loop() {
     assert!(
         !path.exists(),
         "solve.rs must not exist (file-absence invariant)"
-    );
-}
-
-#[test]
-fn solve_rs_has_no_resolve_indexed_access_or_collect_structural_property_descriptors_inner() {
-    // Identifier-absence invariant: the walker methods
-    // `resolve_indexed_access` +
-    // `collect_structural_property_descriptors_inner` must not appear
-    // in production source — they belong to a solver shape that is
-    // not part of the final design.
-    let hits = retired_symbol_hits_in_production(&[
-        "resolve_indexed_access",
-        "collect_structural_property_descriptors_inner",
-    ]);
-    assert!(
-        hits.is_empty(),
-        "walker method identifiers must not appear in production source:\n{}",
-        hits.join("\n")
     );
 }
 
@@ -2083,203 +1989,6 @@ fn relation_memo_lives_in_the_family_memo() {
         graph.relation_memo_count(),
         0,
         "fresh host has zero relation memo entries"
-    );
-}
-
-// ============================================================================
-// Single-authority invariants — cardinality
-// ============================================================================
-//
-// Each test walks the workspace source and greps for exactly-one
-// occurrence of the named authority surface, enforcing the
-// authority-uniqueness contract that each owning surface has a
-// single home.
-
-/// Count occurrences of `needle` in all `.rs` files under
-/// `crates/`, excluding:
-/// - the characterization-test file itself (names these needles as
-///   string literals for the search).
-/// - `tests.rs` and any `*_tests.rs` file (test helpers + regression
-///   fixtures may name retired identifiers for characterisation).
-/// - lines that start with `//` or `/*` (retirement-documentation
-///   comments are not live references).
-fn count_def_in_crates(needle: &str) -> usize {
-    let mut count = 0usize;
-    for (p, lines) in production_code_lines() {
-        // Skip integration-test files (anything under a `tests/`
-        // directory): a guard's assertion / self-test fixtures may name
-        // a definition needle (`fn lower_type_expr_structural(`) as a
-        // string literal, which is not a production definition.
-        let p_str = p.to_string_lossy().replace('\\', "/");
-        if p_str.contains("/tests/") {
-            continue;
-        }
-        for (_, line) in lines {
-            count += line.matches(needle).count();
-        }
-    }
-    count
-}
-
-#[test]
-fn semantic_query_api_has_exactly_one_implementor() {
-    // `impl SemanticQueryApi for ` should appear exactly once — on
-    // `ProjectSemanticDispatch`.
-    let count = count_def_in_crates("impl SemanticQueryApi for ");
-    // Also allow the capability-generic "impl<'a, C: ...> SemanticQueryApi" form.
-    let count_lifetimed = count_def_in_crates(
-        "impl<'a, C: crate::resolver_core::ResolverCapabilities> SemanticQueryApi",
-    );
-    assert!(
-        count + count_lifetimed >= 1,
-        "SemanticQueryApi must have at least one implementor; got {count} plain + {count_lifetimed} lifetimed"
-    );
-    // Exactly one.
-    assert_eq!(
-        count + count_lifetimed,
-        1,
-        "SemanticQueryApi must have exactly one implementor; got {count} plain + {count_lifetimed} lifetimed"
-    );
-}
-
-#[test]
-fn relation_engine_has_exactly_one_implementation() {
-    // Retired-symbol guard (the relation-engine activation): the bare-pair
-    // `relate_nodes` entry point, the process-global `RELATION_IN_FLIGHT`
-    // TLS cycle guard, and its `enter_/exit_relation_guard` helpers are
-    // DELETED and cannot be re-introduced — the SOLE relation authority is
-    // `execute(SemanticQueryKey::Relate)` (`fn execute_relate`, exactly one
-    // definition, in `project_semantic_dispatch/relation.rs`).
-    let relate_nodes = count_def_in_crates("fn relate_nodes");
-    assert_eq!(
-        relate_nodes, 0,
-        "the bare-pair `relate_nodes` entry point is retired; got {relate_nodes}"
-    );
-    let tls_guard = count_def_in_crates("RELATION_IN_FLIGHT");
-    assert_eq!(
-        tls_guard, 0,
-        "the process-global RELATION_IN_FLIGHT TLS cycle guard is retired; got {tls_guard}"
-    );
-    let guard_helpers = count_def_in_crates("fn enter_relation_guard")
-        + count_def_in_crates("fn exit_relation_guard");
-    assert_eq!(
-        guard_helpers, 0,
-        "the enter_/exit_relation_guard helpers are retired; got {guard_helpers}"
-    );
-    let authority = count_def_in_crates("fn execute_relate(");
-    assert_eq!(
-        authority, 1,
-        "fn execute_relate (the sole relation authority) must have exactly one definition; got {authority}"
-    );
-}
-
-#[test]
-fn type_expr_lowering_has_exactly_two_single_definition_producers() {
-    // `TypeExpr` lowering has exactly TWO producers, each with a single
-    // definition:
-    //   1. the EAGER, resolving producer `shallow_lower_type_expr_with_context`,
-    //      which takes the full `ProjectionReductionContext` so every caller
-    //      states its demand explicitly — a bare-`mode` wrapper that defaults
-    //      the demand to `Published` is forbidden (it is exactly how a transit /
-    //      skeleton caller would silently lower at a publication demand it never
-    //      asked for). It is ONE definition behind a lowering trait the
-    //      static views forward to, so its cardinality is a compile-time
-    //      property (see below), not a spelling count; and
-    //   2. the QUERY-FREE structural producer `lower_type_expr_structural`
-    //      (owned by `verter_type_engine::structural_carrier_producer::macro_arg_producer`,
-    //      where it is module-private — no visibility modifier — so no other
-    //      file can name it; the only crate-visible producer entry is
-    //      `macro_type_arg_hot_ref`), which emits the dormant graph carriers
-    //      from the owned `TypeExpr` without performing any name / import /
-    //      type resolution.
-    // The two are distinct and non-overlapping; neither may grow a second
-    // definition, and the retired bare-`mode` eager wrapper stays absent.
-    //
-    // The eager producer's cardinality is NOT name-counted.
-    // `FlowDemandDriver` declares
-    // `shallow_lower_type_expr_with_context` and its impls forward to the one
-    // inherent definition in `project_semantic_dispatch/lower.rs`, so a
-    // `fn shallow_lower_type_expr_with_context(` count reports the
-    // declaration plus the forwarders — forwarders are not lowering
-    // implementations, so that count is a false oracle. What the COMPILER
-    // pins here is the delegation: removing or renaming the inherent
-    // definition breaks every forwarding impl and the trait obligation. A
-    // second eager lowering implementation under another type is not caught
-    // by that; the two assertions below are the oracle for this test.
-    let legacy = count_def_in_crates("fn shallow_lower_type_expr(");
-    let structural = count_def_in_crates("fn lower_type_expr_structural<");
-    assert_eq!(
-        legacy, 0,
-        "the bare-mode `fn shallow_lower_type_expr(` wrapper is retired; \
-         callers state the full ProjectionReductionContext; got {legacy}"
-    );
-    assert_eq!(
-        structural, 1,
-        "fn lower_type_expr_structural (the single query-free structural producer) \
-         must have exactly one definition; got {structural}"
-    );
-}
-
-#[test]
-fn semantic_node_to_type_expr_has_exactly_one_path() {
-    // Sibling invariant of `type_expr_lowering_has_exactly_two_single_definition_producers`:
-    // the reverse direction (`SemanticNodeId → TypeExpr`) must also
-    // have exactly one production path. `fn raise_node_to_type_expr(`
-    // appears exactly once — the module-private shell primitive in
-    // `project_semantic_dispatch/raise.rs` that delegates to
-    // `shape_engine::fold_to_type_expr`. The trailing `(` is part of the
-    // needle as a whole-identifier boundary so the counter cannot
-    // double-count any `..._suffix(` variant of the same name stem.
-    let count = count_def_in_crates("fn raise_node_to_type_expr(");
-    assert_eq!(
-        count, 1,
-        "fn raise_node_to_type_expr must have exactly one definition; got {count}"
-    );
-}
-
-#[test]
-fn relation_memo_has_exactly_one_owner() {
-    // The dedicated `BudgetedRelationMemo` wrapper is RETIRED — relation
-    // judgements have exactly ONE owner: the family memo
-    // (`SemanticGraphStore::entries`) under the `FamilyKey::Relate`
-    // family. No dedicated field, no wrapper type, no relation-local
-    // `DashMap`, no dual memo path.
-    let field_count = count_def_in_crates("relation_memo: BudgetedRelationMemo");
-    assert_eq!(
-        field_count, 0,
-        "the dedicated relation_memo field is retired — relation judgements live in the \
-         family memo's `Relate` family; got {field_count}"
-    );
-    let wrapper_count = count_def_in_crates("BudgetedRelationMemo");
-    assert_eq!(
-        wrapper_count, 0,
-        "the BudgetedRelationMemo wrapper type is retired; got {wrapper_count}"
-    );
-    let map_count = count_def_in_crates("memo: DashMap<RelateMemoKey,");
-    assert_eq!(
-        map_count, 0,
-        "no dedicated relation `DashMap` may remain — the family memo is the single \
-         owner; got {map_count}"
-    );
-    // The retired bare-pair relation memo key must not survive anywhere.
-    let bare_pair_count = count_def_in_crates("memo: DashMap<(SemanticNodeId, SemanticNodeId)");
-    assert_eq!(
-        bare_pair_count, 0,
-        "the bare-pair relation memo key is RETIRED — re-keyed on the \
-         full RelateMemoKey identity; got {bare_pair_count}"
-    );
-}
-
-#[test]
-fn semantic_node_map_has_exactly_one_owner() {
-    // The semantic node arena is accessed via `NodeArena` in
-    // `SemanticGraphStore`. Ensure the `arena: NodeArena` field
-    // appears exactly once. Include the field terminator so constructor
-    // initializers (`arena: NodeArena::...`) are not counted as owners.
-    let count = count_def_in_crates("arena: NodeArena,");
-    assert_eq!(
-        count, 1,
-        "semantic node arena must have exactly one owner; got {count}"
     );
 }
 
@@ -2476,282 +2185,583 @@ fn contains_variant_decl(src: &str, variant_name: &str) -> bool {
 }
 
 // ============================================================================
-// §6.5 D5 grep (5 tests) — un-ignored in §5.9
+// Production-source vocabulary
 // ============================================================================
 //
-// Each test asserts that a specific retired-cache symbol is absent
-// from production code via a workspace-wide grep. The scan skips
-// the self-file (names symbols as strings), files matching
-// `*_tests.rs`, and lines that begin with `//` (documentation /
-// retirement-note comments in the sibling files are fine).
+// Retired identifiers stay out of production source, and each single-owner
+// authority surface keeps exactly its one definition. Every rule reads the
+// same corpus, each production `.rs` file under `crates/`, so one test checks
+// them all: the tree is walked and read once, and each file gets one
+// multi-pattern pass for every needle at once. Only a file that holds a
+// needle is read line by line, and only for the needles it holds.
+//
+// The corpus excludes this file (it names the needles), `tests.rs` and every
+// `*_tests.rs` file (test helpers and regression fixtures may name retired
+// identifiers to characterise them). A line whose first non-blank characters
+// are `//` or `/*` is documentation, not a live reference.
 
-/// Every production Rust source under `crates/` (test files excluded),
-/// read once per process: each scanner below searches the same corpus, so
-/// the tree is walked and read once, not once per scanner.
-fn production_sources() -> &'static [(std::path::PathBuf, String)] {
-    &production_corpus().0
+/// One rule the production source is held to.
+enum SourceRule {
+    /// No live line names any of the symbols.
+    Absent(&'static [&'static str]),
+    /// The live occurrences of `needles` outside integration-test files
+    /// (anything under a `tests/` directory, whose guards may name a
+    /// definition needle as a string literal) total exactly `expected`.
+    Count {
+        needles: &'static [&'static str],
+        expected: usize,
+    },
+    /// No `#[deprecated` attribute names any of the symbols on its own line
+    /// or the three lines after it: a retired symbol is absent, not present
+    /// and deprecated. Comment lines count here.
+    NotDeprecated(&'static [&'static str]),
 }
 
-/// Every `(line number, line)` of [`production_sources`] that is not a
-/// comment line, per file, in the files' order: the lines a scanner
-/// searches for a live reference, filtered once per process.
-fn production_code_lines() -> &'static [(std::path::PathBuf, Vec<(usize, String)>)] {
-    &production_corpus().1
+impl SourceRule {
+    fn words(&self) -> &'static [&'static str] {
+        match self {
+            SourceRule::Absent(words)
+            | SourceRule::Count { needles: words, .. }
+            | SourceRule::NotDeprecated(words) => words,
+        }
+    }
 }
 
-#[allow(clippy::type_complexity)]
-fn production_corpus() -> &'static (
-    Vec<(std::path::PathBuf, String)>,
-    Vec<(std::path::PathBuf, Vec<(usize, String)>)>,
-) {
-    static CORPUS: std::sync::OnceLock<(
-        Vec<(std::path::PathBuf, String)>,
-        Vec<(std::path::PathBuf, Vec<(usize, String)>)>,
-    )> = std::sync::OnceLock::new();
-    CORPUS.get_or_init(|| {
-        let sources = read_production_sources();
-        let code_lines = sources
-            .iter()
-            .map(|(p, content)| {
-                let lines: Vec<(usize, String)> = content
-                    .lines()
-                    .enumerate()
-                    .filter(|(_, line)| {
-                        let trimmed = line.trim_start();
-                        !(trimmed.starts_with("//") || trimmed.starts_with("/*"))
-                    })
-                    .map(|(i, line)| (i + 1, line.to_owned()))
-                    .collect();
-                (p.clone(), lines)
-            })
-            .collect();
-        (sources, code_lines)
-    })
-}
+/// `(invariant, rule, what the rule protects)` for every production-source
+/// rule.
+const PRODUCTION_SOURCE_RULES: &[(&str, SourceRule, &str)] = &[
+    (
+        "type_query_engine_struct_absent",
+        SourceRule::Absent(&["TypeQueryEngine"]),
+        "`ComponentMetaQueryEngine` is the sole request-scoped solve engine on the session side",
+    ),
+    (
+        "no_session_solver_host_in_production_code",
+        SourceRule::Absent(&["SessionSolverHost"]),
+        "the session uses `ComponentMetaQueryEngine` + `bare_name_resolve` directly",
+    ),
+    (
+        "no_eval_env_solver_host_in_production_code",
+        SourceRule::Absent(&["EvalEnvSolverHost"]),
+        "env substitution lives in `structural_substitute_typeof_refs`",
+    ),
+    (
+        "no_type_solver_host_trait_in_production_code",
+        SourceRule::Absent(&["TypeSolverHost"]),
+        "every solve-like operation runs through `ProjectSemanticDispatch::execute` on the \
+         semantic graph; no `&dyn TypeSolverHost` is threaded through `solve_type`",
+    ),
+    (
+        "no_parser_arena_adapter_in_production_code",
+        SourceRule::Absent(&[
+            "ParserArenaAdapter",
+            "ParserArenaBridgeHost",
+            "parser_arena_adapter",
+            "parser_arena_bridge",
+        ]),
+        "there is no parser-to-dispatch bridge seam",
+    ),
+    (
+        "solve_rs_has_no_resolve_indexed_access_or_collect_structural_property_descriptors_inner",
+        SourceRule::Absent(&[
+            "resolve_indexed_access",
+            "collect_structural_property_descriptors_inner",
+        ]),
+        "the walker methods belong to a solver shape that is not part of the design",
+    ),
+    (
+        "open_generic_expansion_no_longer_short_circuits_to_applied_stub",
+        SourceRule::Absent(&["collect_structural_property_descriptors_inner"]),
+        "no walker drives an `Applied`-stub short-circuit for open generic expansions",
+    ),
+    (
+        "path_projection_through_open_applied_does_not_short_circuit_to_symbolic_indexed_access",
+        SourceRule::Absent(&[
+            "symbolic_indexed_access",
+            "record_indexed_access_open_skip",
+            "indexed_access_open_skips",
+        ]),
+        "path projection re-dispatches instead of emitting a symbolic-stop helper",
+    ),
+    (
+        "budget_domain_solver_resolve_steps_trips_cleanly",
+        SourceRule::Absent(&["max_resolve_steps", "SolveLimits"]),
+        "there is no `resolve_steps` counter in dispatch",
+    ),
+    (
+        "budget_domain_solver_arena_nodes_trips_cleanly",
+        SourceRule::Absent(&["max_arena_nodes"]),
+        "dispatch uses the `SemanticGraphStore` interned node pool with no per-request cap",
+    ),
+    (
+        "subject_key_and_op_cache_types_deleted",
+        SourceRule::Absent(&[
+            "SubjectKey",
+            "SubjectId",
+            "ResolvedSubjectKey",
+            "ResolvedSubjectEntry",
+            "OpKey",
+        ]),
+        "the request-scoped query-identity subsystem (SubjectKey/OpKey) is gone",
+    ),
+    (
+        "solver_caches_member_and_keyspace_deleted",
+        SourceRule::Absent(&["projection_cache_member", "projection_cache_keyspace"]),
+        "the `SolverCaches::{member, keyspace}` projection caches are gone",
+    ),
+    (
+        "solver_caches_relation_field_deleted",
+        SourceRule::Absent(&[
+            "SolverCaches::relation",
+            "caches.relation",
+            "solver_caches.relation",
+        ]),
+        "relation judgements live in the semantic graph's family memo",
+    ),
+    (
+        "projection_cache_and_active_projection_keys_deleted",
+        SourceRule::Absent(&["ProjectionCacheKey", "active_projection_keys"]),
+        "the projection cache and its active-key set are gone",
+    ),
+    (
+        "type_query_engine_has_no_shallow_caches",
+        SourceRule::Absent(&[
+            "shallow_field_expr_cache",
+            "shallow_imported_bare_ref_cache",
+            "shallow_transitive_ref_cache",
+            "instantiation_cache:",
+        ]),
+        "the request engine carries no shallow-cache fields",
+    ),
+    (
+        "solver_trace_summary_does_not_double_count_dispatch_metrics",
+        SourceRule::Absent(&["SolverTraceSummary", "solver_trace_summary"]),
+        "no trace summary duplicates the dispatch-owned `SemanticGraphStats` counters",
+    ),
+    (
+        "semantic_query_api_has_exactly_one_implementor",
+        SourceRule::Count {
+            needles: &[
+                "impl SemanticQueryApi for ",
+                "impl<'a, C: crate::resolver_core::ResolverCapabilities> SemanticQueryApi",
+            ],
+            expected: 1,
+        },
+        "`ProjectSemanticDispatch` is the one `SemanticQueryApi` implementor",
+    ),
+    (
+        "relation_engine_has_exactly_one_implementation: bare-pair entry point",
+        SourceRule::Count {
+            needles: &["fn relate_nodes"],
+            expected: 0,
+        },
+        "the bare-pair `relate_nodes` entry point is retired",
+    ),
+    (
+        "relation_engine_has_exactly_one_implementation: TLS cycle guard",
+        SourceRule::Count {
+            needles: &["RELATION_IN_FLIGHT"],
+            expected: 0,
+        },
+        "the process-global RELATION_IN_FLIGHT TLS cycle guard is retired",
+    ),
+    (
+        "relation_engine_has_exactly_one_implementation: guard helpers",
+        SourceRule::Count {
+            needles: &["fn enter_relation_guard", "fn exit_relation_guard"],
+            expected: 0,
+        },
+        "the enter_/exit_relation_guard helpers are retired",
+    ),
+    (
+        "relation_engine_has_exactly_one_implementation: sole authority",
+        SourceRule::Count {
+            needles: &["fn execute_relate("],
+            expected: 1,
+        },
+        "`execute(SemanticQueryKey::Relate)` is the sole relation authority: `fn execute_relate` \
+         has exactly one definition, in `project_semantic_dispatch/relation.rs`",
+    ),
+    // `TypeExpr` lowering has exactly TWO producers, each with a single
+    // definition: the EAGER, resolving `shallow_lower_type_expr_with_context`,
+    // which takes the full `ProjectionReductionContext` so every caller states
+    // its demand (a bare-`mode` wrapper defaulting the demand to `Published`
+    // is forbidden: it is how a transit / skeleton caller would silently lower
+    // at a publication demand it never asked for), and the QUERY-FREE
+    // structural `lower_type_expr_structural` (module-private in
+    // `verter_type_engine::structural_carrier_producer::macro_arg_producer`;
+    // the only crate-visible producer entry is `macro_type_arg_hot_ref`),
+    // which emits the dormant graph carriers from the owned `TypeExpr` without
+    // any name / import / type resolution.
+    //
+    // The eager producer's cardinality is not counted by name:
+    // `FlowDemandDriver` declares it and its impls forward to the one inherent
+    // definition in `project_semantic_dispatch/lower.rs`, so a name count
+    // would report the declaration plus the forwarders. The compiler pins that
+    // delegation: removing or renaming the inherent definition breaks every
+    // forwarding impl. A second eager implementation under another type is not
+    // caught by that; the two rules below are the oracle for the rest.
+    (
+        "type_expr_lowering_has_exactly_two_single_definition_producers: no bare-mode wrapper",
+        SourceRule::Count {
+            needles: &["fn shallow_lower_type_expr("],
+            expected: 0,
+        },
+        "the bare-mode `fn shallow_lower_type_expr(` wrapper is retired; callers state the \
+         full ProjectionReductionContext",
+    ),
+    (
+        "type_expr_lowering_has_exactly_two_single_definition_producers: structural producer",
+        SourceRule::Count {
+            needles: &["fn lower_type_expr_structural<"],
+            expected: 1,
+        },
+        "`lower_type_expr_structural` is the single query-free structural producer",
+    ),
+    (
+        "semantic_node_to_type_expr_has_exactly_one_path",
+        SourceRule::Count {
+            // The trailing `(` keeps a `..._suffix(` variant of the same stem
+            // from counting.
+            needles: &["fn raise_node_to_type_expr("],
+            expected: 1,
+        },
+        "`SemanticNodeId -> TypeExpr` has one production path: the module-private shell \
+         primitive in `project_semantic_dispatch/raise.rs` delegating to \
+         `shape_engine::fold_to_type_expr`",
+    ),
+    (
+        "relation_memo_has_exactly_one_owner: dedicated field",
+        SourceRule::Count {
+            needles: &["relation_memo: BudgetedRelationMemo"],
+            expected: 0,
+        },
+        "relation judgements live in the family memo's `Relate` family, not a dedicated field",
+    ),
+    (
+        "relation_memo_has_exactly_one_owner: wrapper type",
+        SourceRule::Count {
+            needles: &["BudgetedRelationMemo"],
+            expected: 0,
+        },
+        "the BudgetedRelationMemo wrapper type is retired",
+    ),
+    (
+        "relation_memo_has_exactly_one_owner: relation map",
+        SourceRule::Count {
+            needles: &["memo: DashMap<RelateMemoKey,"],
+            expected: 0,
+        },
+        "no dedicated relation `DashMap` remains; the family memo is the single owner",
+    ),
+    (
+        "relation_memo_has_exactly_one_owner: bare-pair key",
+        SourceRule::Count {
+            needles: &["memo: DashMap<(SemanticNodeId, SemanticNodeId)"],
+            expected: 0,
+        },
+        "relation memo entries key on the full RelateMemoKey identity",
+    ),
+    (
+        "semantic_node_map_has_exactly_one_owner",
+        SourceRule::Count {
+            // The field terminator keeps constructor initializers
+            // (`arena: NodeArena::...`) from counting as owners.
+            needles: &["arena: NodeArena,"],
+            expected: 1,
+        },
+        "`SemanticGraphStore` is the one owner of the semantic node arena",
+    ),
+    (
+        "no_deprecated_attributes_on_retired_symbols",
+        SourceRule::NotDeprecated(&[
+            "TypeSolverHost",
+            "EvalEnvSolverHost",
+            "SessionSolverHost",
+            "TypeQueryEngine",
+            "TypeSurfaceDb",
+            "TypeSurfaceOpResult",
+            "dispatch_bridge",
+            "shallow_relation_check",
+            "project_expr_surface_as_type_expr",
+            "solver_host_for_scope",
+            "owner_engine",
+            "expand_macro_types",
+            "expand_object_shape",
+            "expand_normalized_expr",
+            "MAX_TYPE_RESOLUTION_DEPTH",
+            "ParserArenaAdapter",
+            "ParserArenaBridgeHost",
+        ]),
+        "production code either uses a symbol or it is absent entirely",
+    ),
+];
 
-fn read_production_sources() -> Vec<(std::path::PathBuf, String)> {
-    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace parent")
-        .to_path_buf();
-    let crates_dir = workspace_root.join("crates");
-    let self_file = "project_semantic_dispatch_invariants_tests.rs";
-    let mut sources = Vec::new();
-    fn walk(
-        dir: &std::path::Path,
-        self_file: &str,
-        sources: &mut Vec<(std::path::PathBuf, String)>,
-    ) {
+/// The attribute a [`SourceRule::NotDeprecated`] rule inspects.
+const DEPRECATED_ATTRIBUTE: &str = "#[deprecated";
+
+/// Every production Rust source under `crates/`, in path order.
+fn production_source_paths() -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                let name = entry.file_name();
                 if matches!(
-                    name.to_string_lossy().as_ref(),
+                    entry.file_name().to_string_lossy().as_ref(),
                     "target" | "node_modules" | ".git"
                 ) {
                     continue;
                 }
-                walk(&p, self_file, sources);
+                walk(&p, out);
             } else if p.extension().is_some_and(|e| e == "rs") {
                 let fname = p.file_name().unwrap_or_default().to_string_lossy();
-                if fname == self_file {
+                if fname == "project_semantic_dispatch_invariants_tests.rs"
+                    || fname.ends_with("_tests.rs")
+                    || fname == "tests.rs"
+                {
                     continue;
                 }
-                if fname.ends_with("_tests.rs") || fname == "tests.rs" {
-                    continue;
-                }
-                let Ok(content) = std::fs::read_to_string(&p) else {
-                    continue;
-                };
-                sources.push((p, content));
+                out.push(p);
             }
         }
     }
-    walk(&crates_dir, self_file, &mut sources);
-    sources.sort_by(|a, b| a.0.cmp(&b.0));
-    sources
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace crates directory")
+        .to_path_buf();
+    let mut paths = Vec::new();
+    walk(&crates_dir, &mut paths);
+    paths.sort();
+    paths
 }
 
-fn retired_symbol_hits_in_production(symbols: &[&str]) -> Vec<String> {
-    let mut hits: Vec<String> = Vec::new();
-    for (p, lines) in production_code_lines() {
-        for (line_number, line) in lines {
-            for sym in symbols {
-                if line.contains(sym) {
-                    hits.push(format!(
-                        "{}:{}: retired `{}`",
-                        p.display(),
-                        line_number,
-                        sym
-                    ));
-                }
+/// Each rule's violations, in rule order, over one pass of `sources`.
+fn source_rule_violations(
+    rules: &[(&str, SourceRule, &str)],
+    sources: impl IntoIterator<Item = (std::path::PathBuf, String)>,
+) -> Vec<Vec<String>> {
+    let mut needles: Vec<&str> = vec![DEPRECATED_ATTRIBUTE];
+    for (_, rule, _) in rules {
+        for word in rule.words() {
+            if !needles.contains(word) {
+                needles.push(word);
             }
         }
     }
-    hits
-}
-
-#[test]
-fn subject_key_and_op_cache_types_deleted() {
-    // Identifier-absence invariant: the request-scoped
-    // query-identity subsystem (SubjectKey/OpKey and friends) must
-    // not appear in production code.
-    let hits = retired_symbol_hits_in_production(&[
-        "SubjectKey",
-        "SubjectId",
-        "ResolvedSubjectKey",
-        "ResolvedSubjectEntry",
-        "OpKey",
-    ]);
-    assert!(
-        hits.is_empty(),
-        "retired subject-key / op-cache types still present:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
-fn solver_caches_member_and_keyspace_deleted() {
-    // The retired `SolverCaches::member` / `.keyspace` projection
-    // caches. Check for field-name tokens that are unique to the
-    // retired struct. We also grep for the caches' key types.
-    let hits = retired_symbol_hits_in_production(&[
-        "projection_cache_member",
-        "projection_cache_keyspace",
-    ]);
-    assert!(
-        hits.is_empty(),
-        "retired SolverCaches::{{member, keyspace}} projection cache fields still present:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
-fn solver_caches_relation_field_deleted() {
-    // `SolverCaches.relation` was retired when the arena
-    // `relate.rs` engine lost its responsibility. The field should
-    // not appear in production code; any remaining relation cache
-    // lives in `SemanticGraphStore::relation_memo`.
-    let hits = retired_symbol_hits_in_production(&[
-        "SolverCaches::relation",
-        "caches.relation",
-        "solver_caches.relation",
-    ]);
-    assert!(
-        hits.is_empty(),
-        "retired SolverCaches.relation cache field still present:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
-fn projection_cache_and_active_projection_keys_deleted() {
-    let hits = retired_symbol_hits_in_production(&["ProjectionCacheKey", "active_projection_keys"]);
-    assert!(
-        hits.is_empty(),
-        "retired ProjectionCacheKey / active_projection_keys still present:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
-fn type_query_engine_has_no_shallow_caches() {
-    // Identifier-absence invariant: the shallow-cache field names
-    // (`shallow_field_expr_cache`, `shallow_imported_bare_ref_cache`,
-    // `shallow_transitive_ref_cache`, `instantiation_cache`) must
-    // not appear in production source.
-    let hits = retired_symbol_hits_in_production(&[
-        "shallow_field_expr_cache",
-        "shallow_imported_bare_ref_cache",
-        "shallow_transitive_ref_cache",
-        "instantiation_cache:",
-    ]);
-    assert!(
-        hits.is_empty(),
-        "TypeQueryEngine shallow-cache field names must not appear in production source:\n{}",
-        hits.join("\n")
-    );
-}
-
-// ============================================================================
-// Structural invariants — SolverTraceSummary + relation dispatch scope
-// ============================================================================
-
-#[test]
-fn solver_trace_summary_does_not_double_count_dispatch_metrics() {
-    // Structural invariant: `SolverTraceSummary` must not contain
-    // counters that duplicate dispatch-owned `SemanticGraphStats`
-    // fields. With the type entirely absent, the property holds
-    // trivially — verify by grep-absence.
-    let hits = retired_symbol_hits_in_production(&["SolverTraceSummary", "solver_trace_summary"]);
-    assert!(
-        hits.is_empty(),
-        "SolverTraceSummary still referenced in production code (double-count risk):\n{}",
-        hits.join("\n")
-    );
-}
-
-// ============================================================================
-// Zero-legacy
-// ============================================================================
-
-#[test]
-fn no_deprecated_attributes_on_retired_symbols() {
-    // Zero-legacy invariant: no `#[deprecated]` attribute may
-    // reference any of the symbol names below. Production code
-    // either uses these symbols (in which case they cannot be
-    // deprecated) or, if they are absent from the final design,
-    // they are absent entirely — not present-but-deprecated.
-    let retired = [
-        "TypeSolverHost",
-        "EvalEnvSolverHost",
-        "SessionSolverHost",
-        "TypeQueryEngine",
-        "TypeSurfaceDb",
-        "TypeSurfaceOpResult",
-        "dispatch_bridge",
-        "shallow_relation_check",
-        "project_expr_surface_as_type_expr",
-        "solver_host_for_scope",
-        "owner_engine",
-        "expand_macro_types",
-        "expand_object_shape",
-        "expand_normalized_expr",
-        "MAX_TYPE_RESOLUTION_DEPTH",
-        "ParserArenaAdapter",
-        "ParserArenaBridgeHost",
-    ];
-    let mut violations: Vec<String> = Vec::new();
-    for (p, content) in production_sources() {
+    let matcher = aho_corasick::AhoCorasick::new(&needles).expect("valid source needles");
+    let mut violations: Vec<Vec<String>> = vec![Vec::new(); rules.len()];
+    let mut counts: Vec<usize> = vec![0; rules.len()];
+    let mut present = vec![false; needles.len()];
+    for (path, content) in sources {
+        present.fill(false);
+        for hit in matcher.find_overlapping_iter(&content) {
+            present[hit.pattern().as_usize()] = true;
+        }
+        if !present.contains(&true) {
+            continue;
+        }
+        let holds = |word: &&str| {
+            present[needles
+                .iter()
+                .position(|needle| needle == word)
+                .expect("every rule word is a needle")]
+        };
+        let is_live = |line: &str| {
+            let trimmed = line.trim_start();
+            !(trimmed.starts_with("//") || trimmed.starts_with("/*"))
+        };
         let lines: Vec<&str> = content.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            if !line.contains("#[deprecated") {
-                continue;
-            }
-            // Scan the next few lines for a retired symbol mention.
-            let window_end = (i + 4).min(lines.len());
-            let window = lines[i..window_end].join("\n");
-            for sym in retired {
-                if window.contains(sym) {
-                    violations.push(format!(
-                        "{}:{}: #[deprecated] names retired symbol `{}`",
-                        p.display(),
-                        i + 1,
-                        sym
-                    ));
+        // Only the part below `crates/` decides: a checkout that itself sits
+        // under a `tests` directory holds no integration tests for it.
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        let below_crates = normalized
+            .rsplit_once("/crates/")
+            .map_or(normalized.as_str(), |(_, tail)| tail);
+        let in_integration_tests = below_crates.contains("/tests/");
+        for (index, (_, rule, _)) in rules.iter().enumerate() {
+            match rule {
+                SourceRule::Absent(symbols) => {
+                    let held: Vec<&str> = symbols.iter().copied().filter(holds).collect();
+                    if held.is_empty() {
+                        continue;
+                    }
+                    for (line_index, line) in lines.iter().enumerate() {
+                        if !is_live(line) {
+                            continue;
+                        }
+                        for symbol in &held {
+                            if line.contains(symbol) {
+                                violations[index].push(format!(
+                                    "{}:{}: retired `{symbol}`",
+                                    path.display(),
+                                    line_index + 1
+                                ));
+                            }
+                        }
+                    }
+                }
+                SourceRule::Count {
+                    needles: counted, ..
+                } => {
+                    if in_integration_tests {
+                        continue;
+                    }
+                    for needle in counted.iter().copied().filter(holds) {
+                        counts[index] += lines
+                            .iter()
+                            .filter(|line| is_live(line))
+                            .map(|line| line.matches(needle).count())
+                            .sum::<usize>();
+                    }
+                }
+                SourceRule::NotDeprecated(symbols) => {
+                    if !holds(&DEPRECATED_ATTRIBUTE) {
+                        continue;
+                    }
+                    for (line_index, line) in lines.iter().enumerate() {
+                        if !line.contains(DEPRECATED_ATTRIBUTE) {
+                            continue;
+                        }
+                        let window =
+                            lines[line_index..(line_index + 4).min(lines.len())].join("\n");
+                        for symbol in *symbols {
+                            if window.contains(symbol) {
+                                violations[index].push(format!(
+                                    "{}:{}: #[deprecated] names retired symbol `{symbol}`",
+                                    path.display(),
+                                    line_index + 1
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+    for (index, (_, rule, _)) in rules.iter().enumerate() {
+        if let SourceRule::Count { needles, expected } = rule {
+            if counts[index] != *expected {
+                violations[index].push(format!(
+                    "{needles:?}: expected {expected} live occurrence(s), found {}",
+                    counts[index]
+                ));
+            }
+        }
+    }
+    violations
+}
+
+#[test]
+fn production_source_keeps_retired_vocabulary_out_and_single_owners_single() {
+    let paths = production_source_paths();
     assert!(
-        violations.is_empty(),
-        "#[deprecated] attributes on retired symbols:\n{}",
-        violations.join("\n")
+        paths.len() > 1000,
+        "the production-source walk found only {} files; the rules cannot be trusted \
+         to see the tree",
+        paths.len()
+    );
+    let sources = paths.into_iter().filter_map(|path| {
+        let content = std::fs::read_to_string(&path).ok()?;
+        Some((path, content))
+    });
+    let violations = source_rule_violations(PRODUCTION_SOURCE_RULES, sources);
+    let failed: Vec<String> = PRODUCTION_SOURCE_RULES
+        .iter()
+        .zip(&violations)
+        .filter(|(_, found)| !found.is_empty())
+        .map(|((invariant, _, protects), found)| {
+            format!("{invariant} ({protects}):\n  {}", found.join("\n  "))
+        })
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "production source breaks {} rule(s):\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+}
+
+/// Each rule kind fails on what it exists to catch and passes the text it
+/// exempts: a live retired reference, a definition count off by one and a
+/// deprecated retired symbol each fail their rule, while the same text in a
+/// comment line, a count in a crate's `tests/` directory, and a deprecated
+/// symbol five lines below its attribute do not.
+#[test]
+fn production_source_rules_report_planted_violations_and_skip_exempt_text() {
+    const RULES: &[(&str, SourceRule, &str)] = &[
+        ("absent", SourceRule::Absent(&["RetiredName"]), ""),
+        (
+            "count",
+            SourceRule::Count {
+                needles: &["fn sole_owner("],
+                expected: 1,
+            },
+            "",
+        ),
+        (
+            "not deprecated",
+            SourceRule::NotDeprecated(&["RetiredName"]),
+            "",
+        ),
+    ];
+    let file = |path: &str, content: &str| (std::path::PathBuf::from(path), content.to_owned());
+    let clean = || {
+        vec![
+            // The one live definition sits in a checkout under a directory
+            // named `tests`; only a crate's own `tests/` directory is exempt
+            // from the count.
+            file(
+                "/work/tests/repo/crates/a/src/lib.rs",
+                "fn sole_owner() {}\n// RetiredName was here\n",
+            ),
+            file(
+                "/work/tests/repo/crates/a/tests/guard.rs",
+                "const N: &str = \"fn sole_owner(\";\n",
+            ),
+            file(
+                "/c/b/src/lib.rs",
+                "#[deprecated]\nfn a() {}\nfn b() {}\nfn c() {}\n/* RetiredName */\n",
+            ),
+        ]
+    };
+    assert_eq!(
+        source_rule_violations(RULES, clean()),
+        vec![Vec::<String>::new(); 3],
+        "comment lines, integration-test paths and text outside the attribute window \
+         are exempt"
+    );
+
+    let mut planted = clean();
+    planted.push(file(
+        "/c/d/src/lib.rs",
+        "struct RetiredName;\nfn sole_owner() {}\n",
+    ));
+    planted.push(file(
+        "/c/e/src/lib.rs",
+        "#[deprecated(note = \"RetiredName\")]\n",
+    ));
+    let violations = source_rule_violations(RULES, planted);
+    assert_eq!(
+        violations[0].len(),
+        2,
+        "the live reference fails `absent`, and so does the attribute line naming it: \
+         {:?}",
+        violations[0]
+    );
+    assert_eq!(
+        violations[1].len(),
+        1,
+        "a second definition fails `count`: {:?}",
+        violations[1]
+    );
+    assert_eq!(
+        violations[2].len(),
+        1,
+        "a deprecated retired symbol fails `not deprecated`: {:?}",
+        violations[2]
     );
 }
 
@@ -2762,7 +2772,8 @@ fn no_deprecated_attributes_on_retired_symbols() {
 /// Symbolic-stop absence invariant: there must be no `Applied`-stub
 /// short-circuit for open generic expansions. The entire `solve.rs`
 /// file is absent; the short-circuit cannot exist. Assert by file
-/// absence.
+/// absence; the walker identifier's absence is a production-source
+/// rule of the same name.
 #[test]
 fn open_generic_expansion_no_longer_short_circuits_to_applied_stub() {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2777,18 +2788,6 @@ fn open_generic_expansion_no_longer_short_circuits_to_applied_stub() {
          short-circuit for open generic expansion would have lived \
          here; its absence is the discriminating check"
     );
-    // Additionally: the walker method
-    // `collect_structural_property_descriptors_inner` that would have
-    // driven the stub must be absent from production code.
-    // (`resolve_node` is a common method name in other subsystems —
-    // matched below by the more-specific walker identifier.)
-    let hits =
-        retired_symbol_hits_in_production(&["collect_structural_property_descriptors_inner"]);
-    assert!(
-        hits.is_empty(),
-        "walker method identifier must not appear in production source:\n{}",
-        hits.join("\n")
-    );
 }
 
 /// Symbolic-indexed-access absence invariant: path projection
@@ -2796,7 +2795,9 @@ fn open_generic_expansion_no_longer_short_circuits_to_applied_stub() {
 /// `symbolic_indexed_access` wrapper. The canonical path runs through
 /// `PathWalker::walk`'s iterative worklist, which emits the canonical
 /// `SemanticNodeData::IndexedAccess` or continues into
-/// `build_indexed_access` via dispatch re-entry.
+/// `build_indexed_access` via dispatch re-entry. Asserted here by file
+/// absence; the helpers' absence is a production-source rule of the same
+/// name.
 #[test]
 fn path_projection_through_open_applied_does_not_short_circuit_to_symbolic_indexed_access() {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2809,19 +2810,6 @@ fn path_projection_through_open_applied_does_not_short_circuit_to_symbolic_index
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — the symbolic_indexed_access \
          short-circuit would have lived here"
-    );
-    // The symbolic-stop helpers must not appear in production code.
-    // `symbolic_indexed_access` is the stub name a walker would emit
-    // instead of re-dispatching.
-    let hits = retired_symbol_hits_in_production(&[
-        "symbolic_indexed_access",
-        "record_indexed_access_open_skip",
-        "indexed_access_open_skips",
-    ]);
-    assert!(
-        hits.is_empty(),
-        "symbolic-stop helpers must not appear in production source:\n{}",
-        hits.join("\n")
     );
 }
 
@@ -2850,8 +2838,8 @@ fn indexed_access_open_skips_counter_retired() {
 
 /// Budget-domain absence invariant: `SolveLimits::max_resolve_steps`
 /// is not part of the final design — there is no `resolve_steps`
-/// counter in dispatch. Assert by file absence + identifier
-/// absence.
+/// counter in dispatch. Asserted here by file absence; the identifiers'
+/// absence is a production-source rule of the same name.
 #[test]
 fn budget_domain_solver_resolve_steps_trips_cleanly() {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2865,18 +2853,13 @@ fn budget_domain_solver_resolve_steps_trips_cleanly() {
         "type_solver/solve.rs must not exist — `SolveLimits::max_resolve_steps` \
          would have lived here and has no dispatch-side successor"
     );
-    let hits = retired_symbol_hits_in_production(&["max_resolve_steps", "SolveLimits"]);
-    assert!(
-        hits.is_empty(),
-        "solver budget identifiers must not appear in production source:\n{}",
-        hits.join("\n")
-    );
 }
 
 /// Budget-domain absence invariant: `SolveLimits::max_arena_nodes`
 /// is not part of the final design. Dispatch uses the
 /// `SemanticGraphStore` interned node pool with no per-request cap.
-/// Assert by file absence + identifier absence.
+/// Asserted here by file absence; the identifier's absence is a
+/// production-source rule of the same name.
 #[test]
 fn budget_domain_solver_arena_nodes_trips_cleanly() {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2889,12 +2872,6 @@ fn budget_domain_solver_arena_nodes_trips_cleanly() {
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — `SolveLimits::max_arena_nodes` \
          would have lived here and has no dispatch-side successor"
-    );
-    let hits = retired_symbol_hits_in_production(&["max_arena_nodes"]);
-    assert!(
-        hits.is_empty(),
-        "solver arena-node budget identifier must not appear in production source:\n{}",
-        hits.join("\n")
     );
 }
 

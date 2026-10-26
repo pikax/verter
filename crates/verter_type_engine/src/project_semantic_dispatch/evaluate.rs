@@ -2182,6 +2182,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ) => true,
             Some(SemanticNodeData::InstantiationRef { base, .. }) => {
                 self.runtime_nominal_identity(base).is_some()
+                    || matches!(
+                        self.prepared_decl_kind(base),
+                        Some(
+                            verter_session_query::declarations::TypeDeclKind::Interface
+                                | verter_session_query::declarations::TypeDeclKind::Class
+                        )
+                    )
             }
             _ => false,
         }
@@ -2193,7 +2200,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// arguments as types, resolving the operators they write
     /// (`Promise<Awaited<T>>` at `T = string` prints `Promise<string>`). An
     /// argument that does not settle stays as written.
-    fn application_over_printed_arguments(
+    pub(super) fn application_over_printed_arguments(
         &self,
         application: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -2229,7 +2236,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// supplied arguments followed by every omitted defaulted one
     /// ([`Self::declared_application_arguments`]). The carrier itself when
     /// nothing is omitted or the defaults cannot be recovered.
-    fn declared_application(
+    pub(super) fn declared_application(
         &self,
         carrier: SemanticNodeId,
         identity: &crate::semantic_query::DeclIdentity,
