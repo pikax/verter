@@ -774,6 +774,57 @@ fn indexed_access_terminal_publishes_shallow() {
     );
 }
 
+#[test]
+fn generic_interface_identity_survives_component_meta_publication() {
+    let host = build_host(&[(
+        "/workspace/src/Identity.vue",
+        r#"<script setup lang="ts">
+interface Empty<T> {}
+interface Full<T> { value: T }
+interface Props {
+  state: Empty<string> & { count: number };
+  nested: [Empty<number> & { count: number }];
+  full: Full<string>;
+}
+defineProps<Props>();
+</script>"#,
+    )]);
+    for _ in 0..2 {
+        let guard = CaptureToken::start_for_query("interface_identity_publication");
+        let (meta, resolution) = host
+            .get_component_meta_with_resolution("/workspace/src/Identity.vue")
+            .expect("component publication");
+        let captured = guard.end();
+        assert!(!resolution.synthesis_should_suppress);
+        let expanded = published_expanded_dispatches(&captured.dispatch_log);
+        assert!(expanded.is_empty(), "unexpected expansion: {expanded:#?}");
+        for (name, application) in [
+            ("state", "Empty<string>"),
+            ("nested", "Empty<number>"),
+            ("full", "Full<string>"),
+        ] {
+            let prop = meta
+                .props
+                .iter()
+                .find(|prop| prop.name == name)
+                .expect("published prop");
+            let expr = crate::test_only::semantic_source_probe::shallow_type_expr(
+                &host,
+                "/workspace/src/Identity.vue",
+                prop.publication
+                    .source_position()
+                    .present()
+                    .expect("typed source"),
+            )
+            .expect("published source materializes");
+            let text = verter_type_expr::render_type_expr_display(&expr)
+                .unwrap()
+                .text;
+            assert!(text.contains(application), "{name}: {text}");
+        }
+    }
+}
+
 // ===========================================================================
 // #6 — behavioural architecture guard: publication never demands Expanded
 // ===========================================================================

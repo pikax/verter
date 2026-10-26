@@ -253,7 +253,7 @@ impl<T: InternDomain> WeakInternTable<T> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            slots: parking_lot::const_mutex(IndexTable {
+            slots: parking_lot::Mutex::new(IndexTable {
                 map: FxHashMap::with_hasher(rustc_hash::FxBuildHasher),
                 backing: None,
             }),
