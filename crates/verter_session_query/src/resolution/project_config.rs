@@ -148,22 +148,18 @@ impl ScriptTarget {
 }
 
 /// Canonicalise one tsconfig `lib` entry into the lib FILE name TypeScript
-/// loads for it: lowercase, the two historical aliases (`es6` → `es2015`,
-/// `es7` → `es2016`) resolved, then `lib.<name>.d.ts`. Pinned against the
-/// binary (re-measured on 7.1.0-beta): `["ES6", "DOM"]` loads
-/// `lib.es2015.d.ts` + `lib.dom.d.ts`;
-/// `["es7"]` loads `lib.es2016.d.ts`. A spelling the binary rejects
-/// (`TS6046`) still canonicalises by the same rule — it distinguishes the
-/// configuration without pretending to know the binary's accepted set.
+/// loads for it: the file TypeScript's library table maps the lowercased
+/// name to ([`crate::inputs::program_order::library_file_name`]). Pinned
+/// against the binary (re-measured on 7.1.0-beta): `["ES6", "DOM"]` loads
+/// `lib.es2015.d.ts` + `lib.dom.d.ts`; `["es7"]` loads `lib.es2016.d.ts`;
+/// `["esnext.array"]` loads `lib.es2026.array.d.ts`. A spelling the binary
+/// rejects (`TS6046`) canonicalises to `lib.<name>.d.ts` — it distinguishes
+/// the configuration without pretending to know the binary's accepted set.
 #[must_use]
 pub fn canonical_lib_file_name(spelling: &str) -> String {
     let lowered = spelling.trim().to_ascii_lowercase();
-    let name = match lowered.as_str() {
-        "es6" => "es2015",
-        "es7" => "es2016",
-        other => other,
-    };
-    format!("lib.{name}.d.ts")
+    crate::inputs::program_order::library_file_name(&lowered)
+        .map_or_else(|| format!("lib.{lowered}.d.ts"), str::to_owned)
 }
 
 /// The raw, spelling-level semantic options a single tsconfig (or an
