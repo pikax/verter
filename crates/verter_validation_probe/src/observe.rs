@@ -1479,7 +1479,12 @@ pub fn extract_observations_json(bytes: &[u8]) -> Result<String, FetchError> {
     {
         return Err(FetchError::Aborted("archive member is a link".into()));
     }
-    let name = file.name().to_string();
+    let name = file
+        .name()
+        .map_err(|error| {
+            FetchError::Aborted(format!("archive member name is unreadable: {error}"))
+        })?
+        .into_owned();
     if name != "observations.json" {
         return Err(FetchError::Aborted(format!(
             "archive member `{name}` is not observations.json"
@@ -2064,9 +2069,13 @@ mod tests {
         if let Some(at) = bytes.windows(4).position(|window| window == b"PK\x01\x02") {
             bytes[at + 24..at + 28].copy_from_slice(&ten);
         }
+        // The reader stops at the member's declared size: the 4096 inflated bytes
+        // are refused at the declared 10, before the 64-byte ceiling is reached.
         let error = extract_observations_json_capped(&bytes, 64).expect_err("underreported");
         assert!(
-            error.to_string().contains("byte ceiling") || error.to_string().contains("256 MiB"),
+            error
+                .to_string()
+                .contains("larger than its declared uncompressed size"),
             "{error}"
         );
     }
