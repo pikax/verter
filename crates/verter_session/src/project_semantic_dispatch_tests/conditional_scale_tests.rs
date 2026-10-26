@@ -190,6 +190,22 @@ fn named_probe_on_host(
     probe: &str,
     operations: usize,
 ) -> (BTreeSet<Literal>, Work, crate::VerterHost) {
+    let measured = named_probe_measured(source, probe, operations);
+    (measured.answer, measured.work, measured.host)
+}
+
+/// What one named probe answered and spent.
+struct Measured {
+    answer: BTreeSet<Literal>,
+    work: Work,
+    host: crate::VerterHost,
+    /// Operations charged against the request's fuse.
+    operations: u64,
+}
+
+/// [`named_probe_on_host`], also returning the operations charged against the
+/// fuse.
+fn named_probe_measured(source: &str, probe: &str, operations: usize) -> Measured {
     let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
         crate::HostConfig {
             projection_op_budget: operations,
@@ -209,13 +225,15 @@ fn named_probe_on_host(
     let _trace = enable_dispatch_trace_for_test();
     let probes_before = seam_need_probes_for_tests();
     let questions_before = seam_need_questions_for_tests();
-    let ((outcome, _), usage) =
-        verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
-            || {
-                host.resolve_named_symbol_with_audit(SCENARIO, "__Probe", None)
-                    .into_parts()
-            },
-        );
+    let (((outcome, _), usage), charged, _) =
+        verter_type_engine::request_budget::with_request_spend_capture_for_tests(|| {
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || {
+                    host.resolve_named_symbol_with_audit(SCENARIO, "__Probe", None)
+                        .into_parts()
+                },
+            )
+        });
     let node = outcome
         .expect("the named demand completes")
         .expect("the probe exists");
@@ -258,7 +276,12 @@ fn named_probe_on_host(
         ("substitutions", stats.substitute_memo_misses),
         ("decision need questions", seam_need_questions),
     ];
-    (literals, work, host)
+    Measured {
+        answer: literals,
+        work,
+        host,
+        operations: charged as u64,
+    }
 }
 
 fn short(expr: &TypeExpr) -> String {
@@ -320,48 +343,6 @@ fn route_tree_names_and_paths_answer_at_twenty_parents() {
     assert_answer("Paths over 20", &paths, &route_paths(20));
 }
 
-/// The route tree answers every name at the middle and largest listed
-/// sizes, with work linear from one to the other. Measured: 600 and 1,800
-/// string literals.
-#[test]
-fn route_tree_names_answer_at_every_size_with_linear_work() {
-    let work = [100, 300].map(|parents| {
-        let (names, work) = named_probe(
-            &route_tree(parents),
-            "Names<typeof routes>",
-            checker_instantiations_names(parents),
-        );
-        assert_answer(
-            &format!("Names over {parents}"),
-            &names,
-            &route_names(parents),
-        );
-        (parents, work)
-    });
-    assert_linear_growth("Names", work[0], work[1]);
-}
-
-/// The route tree answers every joined path, each a string the template
-/// builds, at the middle and largest listed sizes, with work linear from
-/// one to the other. Measured: 600 and 1,800 string literals.
-#[test]
-fn route_tree_paths_answer_at_every_size_with_linear_work() {
-    let work = [100, 300].map(|parents| {
-        let (paths, work) = named_probe(
-            &route_tree(parents),
-            "Paths<typeof routes>",
-            checker_instantiations_paths(parents),
-        );
-        assert_answer(
-            &format!("Paths over {parents}"),
-            &paths,
-            &route_paths(parents),
-        );
-        (parents, work)
-    });
-    assert_linear_growth("Paths", work[0], work[1]);
-}
-
 /// A conditional nested in a distributed branch over an `infer` binding sees
 /// the branch's member: each parent joins only its own children. Measured:
 /// `"/a" | "/a/x" | "/b" | "/b/y"`.
@@ -385,54 +366,6 @@ fn a_nested_conditional_over_a_distributed_infer_sees_one_member() {
         .map(|path| Literal::String(path.into()))
         .into();
     assert_answer("Paths over two parents", &paths, &expected);
-}
-
-/// The repeated-infer pattern answers at both listed sizes, with work
-/// linear from one to the other. Measured: the numbers `0` to `n - 1`.
-#[test]
-fn repeated_infer_answers_at_every_size_with_linear_work() {
-    let work = [100, 1000].map(|members| {
-        let (source, probe) = repeated_infer(members);
-        let (answer, work) = named_probe(
-            &source,
-            &probe,
-            checker_instantiations_repeated_infer(members),
-        );
-        assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
-        (members, work)
-    });
-    assert_linear_growth("Pat", work[0], work[1]);
-}
-
-/// The decision over a wide union reaches a read per member, two per member
-/// over its operand passes, and asks for each whether it is already one of
-/// its needs. Comparing a read with every need reached before it made that
-/// question quadratic in the members, which was most of the work at 6,000
-/// members; each question compares at most one stored need on average
-/// ([`named_probe`] checks it on every probe), and the questions grow with
-/// the members. Measured: the numbers `0` to `n - 1`.
-#[test]
-fn repeated_infer_decision_needs_grow_linearly_across_three_sizes() {
-    let work = [30, 100, 300].map(|members| {
-        let (source, probe) = repeated_infer(members);
-        let (answer, work) = named_probe(
-            &source,
-            &probe,
-            checker_instantiations_repeated_infer(members),
-        );
-        assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
-        let questions = work
-            .iter()
-            .find(|(what, _)| *what == "decision need questions")
-            .map(|(_, value)| *value);
-        assert!(
-            questions.is_some_and(|questions| questions > 0),
-            "Pat over {members}: the decision asked no need question"
-        );
-        (members, work)
-    });
-    assert_linear_growth("Pat", work[0], work[1]);
-    assert_linear_growth("Pat", work[1], work[2]);
 }
 
 /// Distributing the repeated-infer pattern relates each member to the
@@ -468,23 +401,6 @@ fn repeated_infer_retains_its_declarations_not_its_per_member_work() {
             "Pat over {members}: {entries} family-memo entries retained: {families:?}"
         );
     }
-}
-
-/// The distinct aliases answer at both listed sizes, with work linear from
-/// one to the other. Measured: the numbers `0` to `n - 1`.
-#[test]
-fn distinct_aliases_answer_at_every_size_with_linear_work() {
-    let work = [100, 1000].map(|members| {
-        let (source, probe) = distinct_aliases(members);
-        let (answer, work) = named_probe(&source, &probe, checker_instantiations_aliases(members));
-        assert_answer(
-            &format!("aliases over {members}"),
-            &answer,
-            &numbers(members),
-        );
-        (members, work)
-    });
-    assert_linear_growth("aliases", work[0], work[1]);
 }
 
 /// An `infer` through a chain of aliases answers at three depths, with work
@@ -565,27 +481,6 @@ fn one_request_builds_each_query_once() {
     }
 }
 
-/// The first level of `Names` over 2,000 parents answers every parent's
-/// name. Its `infer E` binds the union of the tree's 2,000 elements, each a
-/// distinct object holding a tuple of five more (28,000 nodes); building
-/// that union keys every element by its structure, however many nodes the
-/// elements hold, as the checker reads every constituent of a union it
-/// builds. Measured on TypeScript 7.0.2: `"r0" | … | "r1999"`, with no
-/// diagnostic.
-#[test]
-fn a_conditional_over_a_two_thousand_parent_tree_answers_every_parent() {
-    let parents = 2000;
-    let (names, _) = named_probe(
-        &route_tree(parents),
-        "typeof routes extends readonly (infer E)[] ? E extends { name: infer N } ? N : never : never",
-        verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
-    );
-    let expected = (0..parents)
-        .map(|i| Literal::String(format!("r{i}")))
-        .collect();
-    assert_answer("the first level over 2,000 parents", &names, &expected);
-}
-
 /// A template whose holes an `infer` binds to `null`, `undefined` or a
 /// union of literals is the strings it builds, as the checker's template
 /// construction folds those holes into its text. Measured on TypeScript
@@ -621,4 +516,294 @@ fn templates_built_at_substitution_fold_nullish_and_union_holes() {
         .map(Literal::String)
         .collect();
     assert_answer("a union prefix", &paths, &expected);
+}
+
+/// The gate version of a full-size growth test: the same demand at three
+/// small, equally spaced sizes. Each size answers exactly `expected`, its need
+/// questions compare at most one stored need on average (checked by
+/// [`named_probe_measured`]: comparing a read with every need before it is
+/// quadratic and fails at these sizes already), and every work counter and the
+/// operations charged against its fuse grow by the same amount per step, so the
+/// work is affine in the size (see [`crate::scale_gate`]).
+fn affine_probe_work(
+    label: &str,
+    sizes: [usize; 3],
+    demand: impl Fn(usize) -> (String, String, usize, BTreeSet<Literal>),
+) -> crate::scale_gate::AffineWork<'static> {
+    let measured = sizes.map(|size| {
+        let (source, probe, fuse, expected) = demand(size);
+        let measured = named_probe_measured(&source, &probe, fuse);
+        assert_answer(&format!("{label} over {size}"), &measured.answer, &expected);
+        measured
+    });
+    let mut counters: Vec<_> = (0..measured[0].work.len())
+        .map(|index| crate::scale_gate::Counter {
+            name: measured[0].work[index].0,
+            values: measured.each_ref().map(|m| m.work[index].1),
+        })
+        .collect();
+    counters.push(crate::scale_gate::Counter {
+        name: "charged operations",
+        values: measured.each_ref().map(|m| m.operations),
+    });
+    crate::scale_gate::AffineWork::new(label, sizes, counters)
+}
+
+/// The full-size test's checks, on the counts the affine work reaches at its
+/// sizes: every demand answers within its fuse, and each work counter grows at
+/// most 1.5 times faster than the size between consecutive full sizes.
+fn assert_full_size_work(
+    label: &str,
+    work: &crate::scale_gate::AffineWork<'static>,
+    full_sizes: &[usize],
+    fuse: impl Fn(usize) -> usize,
+) {
+    let at_size = |size: usize| -> (usize, Work) {
+        let counts = work.all_at(size);
+        let mut full = [("", 0); 7];
+        full.copy_from_slice(&counts[..7]);
+        (size, full)
+    };
+    for &size in full_sizes {
+        let operations = work.at("charged operations", size);
+        assert!(
+            operations <= fuse(size) as u64,
+            "{label} over {size} would charge {operations} operations, over its fuse of {}",
+            fuse(size)
+        );
+    }
+    for pair in full_sizes.windows(2) {
+        assert_linear_growth(label, at_size(pair[0]), at_size(pair[1]));
+    }
+}
+
+/// The route tree's names at 5, 10 and 15 parents: the gate version of the
+/// 100- and 300-parent test in the nightly scale tier.
+#[test]
+fn route_tree_names_work_is_affine_and_meets_the_full_size_bounds() {
+    let work = affine_probe_work("Names", [5, 10, 15], |parents| {
+        (
+            route_tree(parents),
+            "Names<typeof routes>".to_owned(),
+            checker_instantiations_names(parents),
+            route_names(parents),
+        )
+    });
+    assert_full_size_work("Names", &work, &[100, 300], checker_instantiations_names);
+}
+
+/// The route tree's joined paths at 5, 10 and 15 parents: the gate version of
+/// the 100- and 300-parent test in the nightly scale tier.
+#[test]
+fn route_tree_paths_work_is_affine_and_meets_the_full_size_bounds() {
+    let work = affine_probe_work("Paths", [5, 10, 15], |parents| {
+        (
+            route_tree(parents),
+            "Paths<typeof routes>".to_owned(),
+            checker_instantiations_paths(parents),
+            route_paths(parents),
+        )
+    });
+    assert_full_size_work("Paths", &work, &[100, 300], checker_instantiations_paths);
+}
+
+/// The repeated-infer pattern at 10, 20 and 30 members: the gate version of
+/// the 100- and 1,000-member test and of the 30-, 100- and 300-member decision
+/// need test in the nightly scale tier. Every size asks need questions.
+#[test]
+fn repeated_infer_work_is_affine_and_meets_the_full_size_bounds() {
+    let work = affine_probe_work("Pat", [10, 20, 30], |members| {
+        let (source, probe) = repeated_infer(members);
+        (
+            source,
+            probe,
+            checker_instantiations_repeated_infer(members),
+            numbers(members),
+        )
+    });
+    assert!(
+        work.at("decision need questions", 10) > 0,
+        "the decision must ask need questions"
+    );
+    let fuse = checker_instantiations_repeated_infer;
+    assert_full_size_work("Pat", &work, &[100, 1000], fuse);
+    assert_full_size_work("Pat", &work, &[30, 100, 300], fuse);
+}
+
+/// The distinct aliases at 10, 20 and 30 members: the gate version of the
+/// 100- and 1,000-member test in the nightly scale tier.
+#[test]
+fn distinct_aliases_work_is_affine_and_meets_the_full_size_bounds() {
+    let work = affine_probe_work("aliases", [10, 20, 30], |members| {
+        let (source, probe) = distinct_aliases(members);
+        (
+            source,
+            probe,
+            checker_instantiations_aliases(members),
+            numbers(members),
+        )
+    });
+    assert_full_size_work(
+        "aliases",
+        &work,
+        &[100, 1000],
+        checker_instantiations_aliases,
+    );
+}
+
+/// The first level of `Names` at 5, 10 and 15 parents: the gate version of
+/// the 2,000-parent test in the nightly scale tier. Keying each element of
+/// the bound union by its structure costs the same per parent, so the
+/// 2,000-parent tree answers within the default fuse.
+#[test]
+fn a_conditional_over_a_parent_tree_does_affine_work_and_fits_two_thousand_parents() {
+    let work = affine_probe_work("the first level", [5, 10, 15], |parents| {
+        (
+            route_tree(parents),
+            "typeof routes extends readonly (infer E)[] ? E extends { name: infer N } ? N : never : never"
+                .to_owned(),
+            verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
+            (0..parents)
+                .map(|i| Literal::String(format!("r{i}")))
+                .collect(),
+        )
+    });
+    assert_full_size_work("the first level", &work, &[2000], |_| {
+        verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET
+    });
+}
+
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// The route tree answers every name at the middle and largest listed
+    /// sizes, with work linear from one to the other. Measured: 600 and 1,800
+    /// string literals.
+    #[test]
+    fn route_tree_names_answer_at_every_size_with_linear_work() {
+        let work = [100, 300].map(|parents| {
+            let (names, work) = named_probe(
+                &route_tree(parents),
+                "Names<typeof routes>",
+                checker_instantiations_names(parents),
+            );
+            assert_answer(
+                &format!("Names over {parents}"),
+                &names,
+                &route_names(parents),
+            );
+            (parents, work)
+        });
+        assert_linear_growth("Names", work[0], work[1]);
+    }
+
+    /// The route tree answers every joined path, each a string the template
+    /// builds, at the middle and largest listed sizes, with work linear from
+    /// one to the other. Measured: 600 and 1,800 string literals.
+    #[test]
+    fn route_tree_paths_answer_at_every_size_with_linear_work() {
+        let work = [100, 300].map(|parents| {
+            let (paths, work) = named_probe(
+                &route_tree(parents),
+                "Paths<typeof routes>",
+                checker_instantiations_paths(parents),
+            );
+            assert_answer(
+                &format!("Paths over {parents}"),
+                &paths,
+                &route_paths(parents),
+            );
+            (parents, work)
+        });
+        assert_linear_growth("Paths", work[0], work[1]);
+    }
+
+    /// The repeated-infer pattern answers at both listed sizes, with work
+    /// linear from one to the other. Measured: the numbers `0` to `n - 1`.
+    #[test]
+    fn repeated_infer_answers_at_every_size_with_linear_work() {
+        let work = [100, 1000].map(|members| {
+            let (source, probe) = repeated_infer(members);
+            let (answer, work) = named_probe(
+                &source,
+                &probe,
+                checker_instantiations_repeated_infer(members),
+            );
+            assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
+            (members, work)
+        });
+        assert_linear_growth("Pat", work[0], work[1]);
+    }
+
+    /// The decision over a wide union reaches a read per member, two per member
+    /// over its operand passes, and asks for each whether it is already one of
+    /// its needs. Comparing a read with every need reached before it made that
+    /// question quadratic in the members, which was most of the work at 6,000
+    /// members; each question compares at most one stored need on average
+    /// ([`named_probe`] checks it on every probe), and the questions grow with
+    /// the members. Measured: the numbers `0` to `n - 1`.
+    #[test]
+    fn repeated_infer_decision_needs_grow_linearly_across_three_sizes() {
+        let work = [30, 100, 300].map(|members| {
+            let (source, probe) = repeated_infer(members);
+            let (answer, work) = named_probe(
+                &source,
+                &probe,
+                checker_instantiations_repeated_infer(members),
+            );
+            assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
+            let questions = work
+                .iter()
+                .find(|(what, _)| *what == "decision need questions")
+                .map(|(_, value)| *value);
+            assert!(
+                questions.is_some_and(|questions| questions > 0),
+                "Pat over {members}: the decision asked no need question"
+            );
+            (members, work)
+        });
+        assert_linear_growth("Pat", work[0], work[1]);
+        assert_linear_growth("Pat", work[1], work[2]);
+    }
+
+    /// The distinct aliases answer at both listed sizes, with work linear from
+    /// one to the other. Measured: the numbers `0` to `n - 1`.
+    #[test]
+    fn distinct_aliases_answer_at_every_size_with_linear_work() {
+        let work = [100, 1000].map(|members| {
+            let (source, probe) = distinct_aliases(members);
+            let (answer, work) =
+                named_probe(&source, &probe, checker_instantiations_aliases(members));
+            assert_answer(
+                &format!("aliases over {members}"),
+                &answer,
+                &numbers(members),
+            );
+            (members, work)
+        });
+        assert_linear_growth("aliases", work[0], work[1]);
+    }
+
+    /// The first level of `Names` over 2,000 parents answers every parent's
+    /// name. Its `infer E` binds the union of the tree's 2,000 elements, each a
+    /// distinct object holding a tuple of five more (28,000 nodes); building
+    /// that union keys every element by its structure, however many nodes the
+    /// elements hold, as the checker reads every constituent of a union it
+    /// builds. Measured on TypeScript 7.0.2: `"r0" | … | "r1999"`, with no
+    /// diagnostic.
+    #[test]
+    fn a_conditional_over_a_two_thousand_parent_tree_answers_every_parent() {
+        let parents = 2000;
+        let (names, _) = named_probe(
+            &route_tree(parents),
+            "typeof routes extends readonly (infer E)[] ? E extends { name: infer N } ? N : never : never",
+            verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
+        );
+        let expected = (0..parents)
+            .map(|i| Literal::String(format!("r{i}")))
+            .collect();
+        assert_answer("the first level over 2,000 parents", &names, &expected);
+    }
 }
