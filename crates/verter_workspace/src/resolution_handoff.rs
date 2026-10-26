@@ -461,32 +461,38 @@ pub(crate) fn drive_compat<F: Future<Output = Answer> + Unpin>(
     let stop = CancellationToken::default();
     let mut core = Core::new(waiter.registry().clone(), waiter, stop.clone(), build);
     let mut producer = None;
-    let answer = verter_execution::blocking::block_on_when_pending_with_interval(
-        verter_execution::blocking::WaitFamily::WorkspaceResolution,
-        cancelled.map(|_| std::time::Duration::from_millis(5)),
-        |waker| loop {
-            if cancelled.is_some_and(|f| f()) {
-                stop.cancel();
-            }
-            match core.poll(waker) {
-                Poll::Ready(Ok(Step::Value(value))) => return Poll::Ready(Ok(value)),
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(Step::Produce(work))) => producer = Some(work),
-                Poll::Pending => {}
-            }
-            if let Some(producer) = producer.as_mut() {
-                match producer.poll(waker) {
-                    Poll::Ready(Some(work)) => {
-                        work.run();
-                        continue;
-                    }
-                    Poll::Ready(None) => continue,
-                    Poll::Pending => return Poll::Pending,
+    let mut poll = |waker: &Waker| loop {
+        if cancelled.is_some_and(|f| f()) {
+            stop.cancel();
+        }
+        match core.poll(waker) {
+            Poll::Ready(Ok(Step::Value(value))) => return Poll::Ready(Ok(value)),
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(Step::Produce(work))) => producer = Some(work),
+            Poll::Pending => {}
+        }
+        if let Some(producer) = producer.as_mut() {
+            match producer.poll(waker) {
+                Poll::Ready(Some(work)) => {
+                    work.run();
+                    continue;
                 }
+                Poll::Ready(None) => continue,
+                Poll::Pending => return Poll::Pending,
             }
-            return Poll::Pending;
-        },
-    );
+        }
+        return Poll::Pending;
+    };
+    let family = verter_execution::blocking::WaitFamily::WorkspaceResolution;
+    let answer =
+        verter_execution::blocking::block_on_when_pending(family, |waker| match poll(waker) {
+            Poll::Ready(answer) => Poll::Ready(answer),
+            Poll::Pending => Poll::Ready(verter_execution::blocking::block_on(
+                family,
+                cancelled.map(|_| std::time::Duration::from_millis(5)),
+                &mut poll,
+            )),
+        });
     answer.unwrap_or_else(|error| {
         ResolutionOutcome::refused(
             None,

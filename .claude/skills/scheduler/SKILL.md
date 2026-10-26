@@ -52,6 +52,12 @@ Aggregate cancellation uses that same rail, including last-owner teardown,
 token probes and DAG cancellation; its latch changes immediately but callbacks
 wait for unlock. Transferred producers install their captured request context
 or clear every request slot when absent, restoring the driver's slots on exit.
+Admission and dispatch bind a scoped flight's existing owners with
+`CancellationToken::register_owners` under one aggregate registration hold.
+Cancelled requests in that batch cannot hide a live sibling through iteration
+order. Later owners use `register_owner`; neither entry point revives an
+aggregate that already lost every live owner. Empty batches leave internal,
+ownerless jobs live.
 Dropping a producer settles cancellation; dropping a subscriber detaches only
 its own owner. The host supplies its existing `TaskRegistry` through
 `with_executor_and_task_registry` / `new_sync_with_executor_and_task_registry`,

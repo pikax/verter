@@ -369,6 +369,9 @@ struct Shared<P: ?Sized> {
     /// Desired state can be ahead of this map: a held or failed write is not
     /// an application receipt.
     applied_files: StdRwLock<HashMap<String, Arc<str>>>,
+    /// Per-hub synchronization at the compensating receipt-removal fence.
+    #[cfg(test)]
+    compensation_receipt_release_started: Notify,
 }
 
 impl<P: ?Sized> Shared<P> {
@@ -548,6 +551,8 @@ where
             generated_unit_resolver: std::sync::OnceLock::new(),
             overlay: overlay::LazyOverlayCore::new(),
             applied_files: StdRwLock::new(HashMap::new()),
+            #[cfg(test)]
+            compensation_receipt_release_started: Notify::new(),
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
         let log_name = establisher.log_name();

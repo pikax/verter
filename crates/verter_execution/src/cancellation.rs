@@ -312,41 +312,102 @@ impl CancellationToken {
         request: Option<CancellationToken>,
         probed: &mut ProbedCancellations,
     ) -> Option<CancellationOwner> {
+        if self.state.cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        let state = Arc::new(CancellationOwnerState::new(request));
+        self.register_owner_states(std::slice::from_ref(&state), probed)
+            .then(|| CancellationOwner {
+                state,
+                aggregate: Arc::downgrade(&self.state),
+            })
+    }
+
+    /// Attach existing request owners in input order as one registration.
+    /// Cancellation probes cannot observe a partially registered batch. A
+    /// previously ownerless job stays live if any request in the batch is live;
+    /// a job that already lost all its owners cannot be revived. An empty batch
+    /// does not turn an ownerless internal job into an owned job.
+    pub fn register_owners(
+        &self,
+        requests: impl IntoIterator<Item = Option<CancellationToken>>,
+    ) -> Option<Vec<CancellationOwner>> {
+        self.register_owners_probed(requests, &mut ProbedCancellations::default())
+    }
+
+    /// Atomically attach an owner batch beneath an outer owner lock. Deliver
+    /// the returned notifications only after releasing that lock.
+    pub fn register_owners_deferred(
+        &self,
+        requests: impl IntoIterator<Item = Option<CancellationToken>>,
+    ) -> (Option<Vec<CancellationOwner>>, TakenWakers) {
+        let mut probed = ProbedCancellations::default();
+        let owners = self.register_owners_probed(requests, &mut probed);
+        (owners, probed.take_wakers())
+    }
+
+    fn register_owners_probed(
+        &self,
+        requests: impl IntoIterator<Item = Option<CancellationToken>>,
+        probed: &mut ProbedCancellations,
+    ) -> Option<Vec<CancellationOwner>> {
+        if self.state.cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        let states: Vec<_> = requests
+            .into_iter()
+            .map(|request| Arc::new(CancellationOwnerState::new(request)))
+            .collect();
+        self.register_owner_states(&states, probed).then(|| {
+            states
+                .into_iter()
+                .map(|state| CancellationOwner {
+                    state,
+                    aggregate: Arc::downgrade(&self.state),
+                })
+                .collect()
+        })
+    }
+
+    fn register_owner_states(
+        &self,
+        states: &[Arc<CancellationOwnerState>],
+        probed: &mut ProbedCancellations,
+    ) -> bool {
         let owners = self
             .state
             .owners
             .as_ref()
             .expect("request owners can be registered only on aggregate tokens");
         if self.state.cancelled.load(Ordering::Acquire) {
-            return None;
+            return false;
         }
-        let state = Arc::new(CancellationOwnerState {
-            active: AtomicBool::new(true),
-            request,
-            request_wake: Mutex::new(WakeRegistration::default()),
-        });
         let mut entries = owners.entries.lock();
-        // Linearize registration against `is_cancelled()`: once the aggregate
-        // has ever had owners, a gap with no live owner is terminal. Detect
-        // that gap here as well as in `is_cancelled()` so a late joiner cannot
-        // revive a job merely because no worker happened to poll between the
-        // final request cancellation and this registration attempt.
+        // Linearize registration against is_cancelled: a previously owned
+        // aggregate cannot be revived after its last live owner leaves.
         if self.state.cancelled.load(Ordering::Acquire) {
-            return None;
+            return false;
         }
         if owners.ever_registered.load(Ordering::Acquire) && !entries.any_live(probed) {
             if !self.state.cancelled.swap(true, Ordering::AcqRel) {
                 probed.0.push(Arc::clone(&self.state));
             }
             drop(entries);
-            return None;
+            return false;
         }
-        entries.push(Arc::downgrade(&state), probed);
-        owners.ever_registered.store(true, Ordering::Release);
+        for state in states {
+            entries.push(Arc::downgrade(state), probed);
+        }
+        if !states.is_empty() {
+            owners.ever_registered.store(true, Ordering::Release);
+        }
         drop(entries);
         // The owner's request cancelling may leave this aggregate with no
         // live owner: its token wakes the aggregate's re-evaluation.
-        if let Some(request) = state.request.as_ref() {
+        for state in states {
+            let Some(request) = state.request.as_ref() else {
+                continue;
+            };
             let wake = owners
                 .request_wake
                 .get_or_init(|| Waker::from(Arc::new(AggregateWake(Arc::downgrade(&self.state)))));
@@ -359,10 +420,7 @@ impl CancellationToken {
                 self.probe(probed);
             }
         }
-        Some(CancellationOwner {
-            state,
-            aggregate: Arc::downgrade(&self.state),
-        })
+        true
     }
 
     /// Trips the flag. Idempotent — calling more than once leaves the
@@ -462,6 +520,14 @@ impl CancellationToken {
 }
 
 impl CancellationOwnerState {
+    fn new(request: Option<CancellationToken>) -> Self {
+        Self {
+            active: AtomicBool::new(true),
+            request,
+            request_wake: Mutex::new(WakeRegistration::default()),
+        }
+    }
+
     /// Attached and its request (if any) not cancelled. Once false, never
     /// true again.
     fn is_live(&self, probed: &mut ProbedCancellations) -> bool {
