@@ -2521,20 +2521,22 @@ fn replayed_receipt(
     }
 }
 
-/// A chain's evidence grows with its length, never with its prefixes:
-/// every completed callee is answered by one receipt holding its own reads
-/// and the receipt of the callee it consumed, so each level's evidence has
-/// the same few entries at any depth, and the witness's published
-/// signature is its own reads and one receipt — the same length for 200
-/// levels as for 1,100, past the 1,024 entries a flat signature could hold
-/// and still admitted.
-///
-/// Oracle (the pinned TypeScript 7.0.2, `--strict`): `witness` is
-/// `{ v: number; tag: "c"; }` at every length.
+/// The same evidence at 101 and 120 levels: the gate version of the 200- and
+/// 1,100-level test in the nightly scale tier. Each level's receipt holds the
+/// one below it, so lost evidence fails at any length; the top receipt reaches
+/// every level; and a flattened chain, whose evidence would grow with its
+/// prefixes, gives the two lengths different shapes. The chains are past the
+/// checker's instantiation depth.
 #[test]
-fn a_chains_evidence_grows_linearly_in_its_length() {
+fn a_chains_evidence_keeps_one_size_from_101_to_120_levels() {
+    assert_chain_evidence_keeps_one_size(&[101, 120]);
+}
+
+/// At every one of `lengths`, a chain's evidence holds each level's receipt
+/// in the next, reaches every level from the top, and keeps one size.
+fn assert_chain_evidence_keeps_one_size(lengths: &[usize]) {
     let mut shapes = Vec::new();
-    for levels in [200usize, 1_100] {
+    for &levels in lengths {
         let (outcome, signature, replays) = chain_evidence(levels);
         assert_tagged_value(&outcome, &[number()]);
         let receipts: Vec<_> = replays.iter().map(replayed_receipt).collect();
@@ -3081,5 +3083,20 @@ mod nightly_scale {
                 );
             }
         }
+    }
+
+    /// A chain's evidence grows with its length, never with its prefixes:
+    /// every completed callee is answered by one receipt holding its own reads
+    /// and the receipt of the callee it consumed, so each level's evidence has
+    /// the same few entries at any depth, and the witness's published
+    /// signature is its own reads and one receipt — the same length for 200
+    /// levels as for 1,100, past the 1,024 entries a flat signature could hold
+    /// and still admitted.
+    ///
+    /// Oracle (the pinned TypeScript 7.0.2, `--strict`): `witness` is
+    /// `{ v: number; tag: "c"; }` at every length.
+    #[test]
+    fn a_chains_evidence_grows_linearly_in_its_length() {
+        assert_chain_evidence_keeps_one_size(&[200, 1_100]);
     }
 }
