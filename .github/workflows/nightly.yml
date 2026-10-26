@@ -141,8 +141,13 @@ jobs:
     name: Rust Test (nightly scale tier)
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # It only builds and tests: no write token, and none left in the checkout.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
