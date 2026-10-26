@@ -769,17 +769,41 @@ struct FilesystemResolutionRecorder<'a> {
 /// re-reads every path the attempt observed, and the bounded input preflight
 /// had already read many of them live moments earlier.
 ///
+/// A probe that finds a directory missing also answers every later probe
+/// beneath that directory as absent without reading the disk: a missing
+/// directory holds nothing, so that answer is the directory's absence as
+/// the pass observed it.
+///
 /// It belongs to one attempt's recorder and is dropped when the attempt
 /// seals its evidence, so no read outlives its attempt. It answers only
 /// while the workspace's content generation is the one it was created at.
-/// The admission's final validation never reads through it: a disk change
-/// that lands after a reused read is caught there, and the attempt restarts.
+/// The admission's final validation never reads through it: it re-checks
+/// live through a fresh pass of its own, so a disk change that lands after
+/// a reused read is caught there, and the attempt restarts.
 #[cfg(not(target_arch = "wasm32"))]
 struct AttemptLiveReads {
     content_generation: u64,
     probes: parking_lot::Mutex<HashMap<String, verter_session_query::resolution::PathProbe>>,
     realpaths: parking_lot::Mutex<HashMap<String, Option<String>>>,
     files: parking_lot::Mutex<HashMap<String, Option<Arc<str>>>>,
+    /// Directories a probe of this pass showed to be missing (or not a
+    /// directory). Every path beneath one is absent, answered without
+    /// reading the disk again: that answer is the directory's absence as
+    /// this pass observed it.
+    missing_directories: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Directories a probe of this pass showed to exist, so their children's
+    /// misses are not followed by a probe of the directory itself.
+    #[cfg(not(windows))]
+    present_directories: parking_lot::Mutex<std::collections::HashSet<String>>,
+}
+
+/// The parent directory of the canonical `key` whose absence may stand for
+/// its children: never a filesystem root (`/` spelled as the empty prefix, or
+/// a Windows drive `c:`), so one root-level miss cannot answer every path.
+#[cfg(not(target_arch = "wasm32"))]
+fn prunable_parent(key: &str) -> Option<&str> {
+    let parent = &key[..key.rfind('/')?];
+    (!parent.is_empty() && !parent.ends_with(':') && parent.contains('/')).then_some(parent)
 }
 
 /// On `wasm32` there is no live filesystem, so an attempt has no reads to keep.
@@ -794,7 +818,27 @@ impl AttemptLiveReads {
             probes: parking_lot::Mutex::default(),
             realpaths: parking_lot::Mutex::default(),
             files: parking_lot::Mutex::default(),
+            missing_directories: parking_lot::Mutex::default(),
+            #[cfg(not(windows))]
+            present_directories: parking_lot::Mutex::default(),
         }
+    }
+
+    /// Whether `key` lies beneath a directory this pass found missing.
+    /// Only directories [`prunable_parent`] admits are ever recorded.
+    fn beneath_missing_directory(&self, key: &str) -> bool {
+        let missing = self.missing_directories.lock();
+        if missing.is_empty() {
+            return false;
+        }
+        let mut directory = key;
+        while let Some(slash) = directory.rfind('/') {
+            directory = &directory[..slash];
+            if missing.contains(directory) {
+                return true;
+            }
+        }
+        false
     }
 
     fn in_generation(&self, workspace: &FilesystemWorkspace) -> bool {
@@ -823,14 +867,65 @@ impl AttemptLiveReads {
         Ok(value)
     }
 
+    /// The probe of `path`: reused when this pass already probed it, absent
+    /// without a read when it lies beneath a directory this pass found
+    /// missing, else read live. A live miss whose read shows the parent is
+    /// missing records the parent, so its other children cost no read.
     fn probe(
         &self,
         workspace: &FilesystemWorkspace,
         path: &str,
     ) -> std::io::Result<verter_session_query::resolution::PathProbe> {
-        self.reuse_or_read(workspace, &self.probes, path, || {
-            workspace.native_fs.probe_path_live(path)
-        })
+        use verter_session_query::resolution::PathProbe;
+        let key = observation_key(path);
+        let in_generation = self.in_generation(workspace);
+        if in_generation {
+            if let Some(probe) = self.probes.lock().get(&key) {
+                return Ok(*probe);
+            }
+            if self.beneath_missing_directory(&key) {
+                self.probes.lock().insert(key, PathProbe::Absent);
+                return Ok(PathProbe::Absent);
+            }
+        }
+        let (probe, parent_missing) = workspace.native_fs.probe_path_live_noting_parent(path)?;
+        if !in_generation || !self.in_generation(workspace) {
+            return Ok(probe);
+        }
+        self.probes.lock().insert(key.clone(), probe);
+        if let Some(parent) = prunable_parent(&key) {
+            #[cfg(not(windows))]
+            let parent_missing = parent_missing
+                || (probe == PathProbe::Absent && self.directory_is_missing(workspace, parent)?);
+            if parent_missing {
+                self.missing_directories.lock().insert(parent.to_owned());
+            }
+        }
+        Ok(probe)
+    }
+
+    /// Whether `directory` holds nothing, probed once per pass: where a plain
+    /// not-found says nothing about the parent, a miss is followed by one
+    /// probe of the parent itself.
+    #[cfg(not(windows))]
+    fn directory_is_missing(
+        &self,
+        workspace: &FilesystemWorkspace,
+        directory: &str,
+    ) -> std::io::Result<bool> {
+        if self.present_directories.lock().contains(directory) {
+            return Ok(false);
+        }
+        let probe = self.probe(workspace, directory)?;
+        let missing = matches!(
+            probe,
+            verter_session_query::resolution::PathProbe::Absent
+                | verter_session_query::resolution::PathProbe::File
+        );
+        if !missing {
+            self.present_directories.lock().insert(directory.to_owned());
+        }
+        Ok(missing)
     }
 
     fn realpath(
@@ -1083,6 +1178,7 @@ impl FilesystemWorkspace {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn independent_probe_path(
         &self,
         canonical_id: &str,
@@ -1616,12 +1712,21 @@ impl FrozenFilesystemResolutionReader<'_> {
         if !self.sealed_current() {
             return false;
         }
+        // The re-check reads live, through reads of its own: within this one
+        // pass a probe that finds a directory missing answers the other
+        // probes beneath it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let pass = AttemptLiveReads::new(self.workspace);
+        #[cfg(target_arch = "wasm32")]
+        let pass = AttemptLiveReads;
         self.files.iter().all(|(canonical, expected)| {
             self.workspace
                 .independent_file_bytes(canonical)
                 .is_ok_and(|actual| actual == *expected)
         }) && self.probes.iter().all(|(canonical, expected)| {
-            self.workspace.independent_probe_path(canonical) == *expected
+            self.workspace
+                .independent_probe_path_in(canonical, Some(&pass))
+                == *expected
         }) && self.realpaths.iter().all(|(canonical, expected)| {
             self.workspace
                 .independent_realpath(canonical)
