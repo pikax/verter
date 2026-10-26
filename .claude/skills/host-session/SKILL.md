@@ -101,8 +101,8 @@ back into the host for a service it was not given.
   nested metadata evaluation and the handed-out compile producer can still
   block. The [delivery boundary](../../../docs/arch/root-continuations.md#current-delivery-boundary)
   distinguishes the current API from complete root resumability.
-- `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
-  is the only route by which a workspace receives it, both at construction and on
+- `WorkspaceServices` holds the resolve-extension policy and shared task registry.
+  `WorkspaceServices::attach` injects both at construction and on
   `set_workspace`. Resident resolution state needs no service: every workspace
   Engine binds the process-local `ResolutionRetention` account at its own
   construction, and replacing it is a `test-support` seam only.

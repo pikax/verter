@@ -161,9 +161,7 @@ impl CanonicalEncoder {
 /// Domain-separated 256-bit digest of finished canonical bytes. An index,
 /// not identity authority: collision-sensitive comparisons use the full
 /// bytes. Identity newtypes retain both; see [`crate::identity`].
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CanonicalDigest([u8; 32]);
 
 impl CanonicalDigest {

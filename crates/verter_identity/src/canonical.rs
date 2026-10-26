@@ -8,7 +8,7 @@
 use crate::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 
 /// Digest-plus-full-bytes canonical identity payload.
-#[derive(Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Clone)]
 pub struct Canonical {
     digest: CanonicalDigest,
     bytes: Vec<u8>,

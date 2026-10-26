@@ -2,7 +2,7 @@ use crate::registered_source_authority::sha256;
 
 use super::carrier_inventory::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CarrierStructureHash([u8; 32]);
 
 impl CarrierStructureHash {

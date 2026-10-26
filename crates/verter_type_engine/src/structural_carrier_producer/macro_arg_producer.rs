@@ -116,8 +116,7 @@
 //! one's constraint / default (TS scoping).
 
 use std::cell::Cell;
-use std::sync::Arc;
-use verter_retention::pinned_heap::{PinnedOnce, StoragePin};
+use std::sync::{Arc, OnceLock};
 use verter_session_query::source::demand::ExpressionSourceDemand;
 use verter_type_expr::OwnedStr;
 
@@ -1254,87 +1253,15 @@ fn build_script_setup_seed_frames<M: verter_audit::observe::ObserveExec>(
 /// or query identity.
 #[derive(Debug, Clone)]
 pub struct MacroHotProduct {
-    storage: StoragePin,
     pub roots: crate::semantic_query_memo::node_roots::NodeRootSet,
     pub hot: HotTypeRef,
     pub prop_reference_heads: Arc<[Option<verter_type_expr::facts::AuthoredReferenceHeadFact>]>,
 }
 
-impl verter_retention::heap_size::HeapSize for MacroHotProduct {
-    fn heap_size<'t>(
-        &'t self,
-        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        let Self {
-            storage: _,
-            roots: _,
-            hot: _,
-            prop_reference_heads,
-        } = self;
-        // The graph root owner carries its own charge in its issuing graph.
-        prop_reference_heads.heap_size(meter)
-    }
-    fn pin_storage(&self, context: &verter_retention::pinned_heap::PinContext) -> bool {
-        self.storage.ensure(
-            self,
-            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
-            context,
-        );
-        true
-    }
-}
-impl MacroHotProduct {
-    fn charged(self) -> Self {
-        verter_retention::heap_size::HeapSize::pin_storage(&self, &Default::default());
-        self
-    }
-}
-
-struct PinnedMirrorValue {
-    value: Option<Arc<MacroHotProduct>>,
-    _storage: verter_retention::pinned_heap::PinnedHeap,
-}
-impl PinnedMirrorValue {
-    fn new(value: Option<Arc<MacroHotProduct>>) -> Self {
-        let storage = verter_retention::pinned_heap::PinnedHeap::measure(
-            &value,
-            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
-            &Default::default(),
-        );
-        Self {
-            value,
-            _storage: storage,
-        }
-    }
-}
-impl std::ops::Deref for PinnedMirrorValue {
-    type Target = Option<Arc<MacroHotProduct>>;
-    fn deref(&self) -> &Self::Target {
-        &self.value
-    }
-}
-
-impl verter_retention::heap_size::HeapSize for MacroSlot {
-    fn heap_size<'t>(
-        &'t self,
-        _meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        0
-    }
-}
-impl verter_retention::heap_size::HeapSize for MacroHotMirror {
-    fn heap_size<'t>(
-        &'t self,
-        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        self.cells.heap_size(meter)
-    }
-}
-
 /// Lazy, singleflight storage for one file's macro type-argument handles.
 #[derive(Default)]
 pub struct MacroHotMirror {
-    cells: Arc<PinnedOnce<Box<[MacroSlot]>>>,
+    cells: Arc<OnceLock<Box<[MacroSlot]>>>,
 }
 
 #[derive(Default)]
@@ -1342,12 +1269,12 @@ struct MacroSlot {
     /// The committed value, replaced only under `build_lock`: a committed
     /// handle a document close released is re-lowered in place (see
     /// [`committed_is_servable`]).
-    committed: arc_swap::ArcSwapOption<PinnedMirrorValue>,
+    committed: arc_swap::ArcSwapOption<Option<Arc<MacroHotProduct>>>,
     build_lock: parking_lot::Mutex<()>,
 }
 
 pub struct MacroMirrorAttachment {
-    cells: Arc<PinnedOnce<Box<[MacroSlot]>>>,
+    cells: Arc<OnceLock<Box<[MacroSlot]>>>,
     #[cfg(any(test, feature = "test-support"))]
     knobs: Arc<crate::engine_test_knobs::TestKnobs>,
 }
@@ -1397,7 +1324,7 @@ impl<'a> MacroMirrorSlot<'a> {
             .committed
             .load()
             .as_ref()
-            .map(|committed| committed.value.clone())
+            .map(|committed| committed.as_ref().clone())
     }
 
     fn lock_build(self) -> MacroMirrorBuildGuard<'a> {
@@ -1416,9 +1343,7 @@ struct MacroMirrorBuildGuard<'a> {
 
 impl MacroMirrorBuildGuard<'_> {
     fn commit(self, result: Option<Arc<MacroHotProduct>>) {
-        self.slot
-            .committed
-            .store(Some(Arc::new(PinnedMirrorValue::new(result))));
+        self.slot.committed.store(Some(Arc::new(result)));
     }
 }
 
@@ -1455,7 +1380,7 @@ impl std::fmt::Debug for MacroHotMirror {
 impl Clone for MacroHotMirror {
     fn clone(&self) -> Self {
         Self {
-            cells: Arc::new(PinnedOnce::new()),
+            cells: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -1699,17 +1624,13 @@ fn build_macro_hot_ref<M: verter_audit::observe::ObserveExec>(
         lower_type_expr_structural(graph, parsed_arg, scope, &lower_ctx)
             .ok()
             .map(|hot| {
-                Arc::new(
-                    MacroHotProduct {
-                        storage: Default::default(),
-                        roots: graph
-                            .root_nodes([hot.node()])
-                            .expect("lowered macro node is live"),
-                        hot,
-                        prop_reference_heads: Arc::from(prop_reference_heads),
-                    }
-                    .charged(),
-                )
+                Arc::new(MacroHotProduct {
+                    roots: graph
+                        .root_nodes([hot.node()])
+                        .expect("lowered macro node is live"),
+                    hot,
+                    prop_reference_heads: Arc::from(prop_reference_heads),
+                })
             }),
     )
 }

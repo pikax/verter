@@ -4,7 +4,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Where a class field's synthetic value is read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClassFieldValueSource {
     /// The initializer's type derives from a call: the indexed program
     /// expression at the initializer.
@@ -16,7 +16,7 @@ pub enum ClassFieldValueSource {
 
 /// The classification of every field of the classes one header walk
 /// indexed, by initializer offset.
-#[derive(Debug, Clone, Default, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClassFieldValues {
     /// The classes classified here, by span start.
     classes: FxHashSet<u32>,

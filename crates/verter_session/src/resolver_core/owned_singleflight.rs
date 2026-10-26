@@ -173,7 +173,9 @@ impl<K: Eq + Hash, V, E> SingleflightGroup<K, V, E> {
         if let Some(existing) = self.registry.get() {
             existing.share_authority_with(&registry);
         } else {
-            self.registry.set(registry).expect("resolver authority is composed once");
+            self.registry
+                .set(registry)
+                .expect("resolver authority is composed once");
         }
     }
 }
@@ -318,11 +320,7 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> Drop for FlightCore<K, V, E, F, R>
         self.cleanup();
     }
 }
-impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R>
-where
-    F: FnOnce() -> Result<V, E>,
-    R: FnOnce(&V) -> bool,
-{
+impl<K: Eq + Hash + Clone, V, E: Clone, F, R> FlightCore<K, V, E, F, R> {
     pub(super) fn poll(&mut self, waker: &Waker) -> CorePoll<K, V, E, F, R> {
         assert!(!self.finished, "resolver flight already completed");
         if self
@@ -377,11 +375,15 @@ where
                     let mut inner = state.inner.lock();
                     let leader = matches!(*inner, FlightInner::Pending);
                     let (task, answer) = if leader {
-                        let task = group
-                            .registry
-                            .get()
-                            .or_else(|| self.waiter.as_ref().map(ExecutionTask::registry))
-                            .map(TaskRegistry::register_task);
+                        let task = if self.compatibility {
+                            self.waiter.clone()
+                        } else {
+                            group
+                                .registry
+                                .get()
+                                .or_else(|| self.waiter.as_ref().map(ExecutionTask::registry))
+                                .map(TaskRegistry::register_task)
+                        };
                         let answer = Arc::new(Mutex::new(LeaderAnswer {
                             compatibility: self.compatibility,
                             ..LeaderAnswer::default()
@@ -516,17 +518,9 @@ impl<K: Eq + Hash + Clone, V, E: Clone, F, R> CoreProducer<K, V, E, F, R> {
         answer.wakers.take()
     }
 }
-impl<K: Eq + Hash + Clone, V, E: Clone, F, R> CoreProducer<K, V, E, F, R>
-where
-    F: FnOnce() -> Result<V, E>,
-    R: FnOnce(&V) -> bool,
-{
-    pub(super) fn run(mut self) {
+impl<K: Eq + Hash + Clone, V, E: Clone, F, R> CoreProducer<K, V, E, F, R> {
+    fn start(&mut self) -> bool {
         self.started = true;
-        let _scope = self
-            .task
-            .as_ref()
-            .map(|task| ExecutionScope::install(task.registry(), task));
         if let Some((_, _, state)) = &self.flight {
             let mut inner = state.inner.lock();
             if let FlightInner::Running { owner, .. } = &mut *inner {
@@ -538,10 +532,17 @@ where
                 if let Some((group, key, state)) = self.flight.take() {
                     group.unpin(&key, &state);
                 }
-                return;
+                return false;
             }
         }
-        let result = self.compute.take().expect("one producer computation")().map(Arc::new);
+        true
+    }
+
+    fn finish_result(mut self, result: Result<V, E>)
+    where
+        R: FnOnce(&V) -> bool,
+    {
+        let result = result.map(Arc::new);
         let keep = if self.flight.is_some() {
             matches!(&result, Ok(value) if self.retain.take().expect("retention policy")(value))
         } else {
@@ -574,6 +575,64 @@ where
             group.unpin(&key, &state);
         }
         wakes.wake();
+    }
+}
+
+impl<K: Eq + Hash + Clone, V, E: Clone, F, R> CoreProducer<K, V, E, F, R>
+where
+    F: FnOnce() -> Result<V, E>,
+    R: FnOnce(&V) -> bool,
+{
+    pub(super) fn run(mut self) {
+        let task = self.task.clone();
+        let _scope = task
+            .as_ref()
+            .map(|task| ExecutionScope::install(task.registry(), task));
+        if !self.start() {
+            return;
+        }
+        let result = self.compute.take().expect("one producer computation")();
+        self.finish_result(result);
+    }
+}
+
+impl<K: Eq + Hash + Clone, V, E: Clone, F, R> CoreProducer<K, V, E, F, R> {
+    pub(super) async fn run_pollable<Fut>(mut self)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<V, E>>,
+        R: FnOnce(&V) -> bool,
+    {
+        if !self.start() {
+            return;
+        }
+        let task = self.task.clone();
+        let compute = {
+            let _scope = task
+                .as_ref()
+                .map(|task| ExecutionScope::install(task.registry(), task));
+            self.compute.take().expect("one producer computation")()
+        };
+        let mut compute = std::pin::pin!(compute);
+        let result = std::future::poll_fn(|cx| {
+            let _scope = task
+                .as_ref()
+                .map(|task| ExecutionScope::install(task.registry(), task));
+            if let Some((_, _, state)) = &self.flight {
+                if let FlightInner::Running { owner, .. } = &mut *state.inner.lock() {
+                    *owner = Some(std::thread::current().id());
+                }
+            }
+            let result = compute.as_mut().poll(cx);
+            if let Some((_, _, state)) = &self.flight {
+                if let FlightInner::Running { owner, .. } = &mut *state.inner.lock() {
+                    *owner = None;
+                }
+            }
+            result
+        })
+        .await;
+        self.finish_result(result);
     }
 }
 impl<K: Eq + Hash + Clone, V, E: Clone, F, R> Drop for CoreProducer<K, V, E, F, R> {

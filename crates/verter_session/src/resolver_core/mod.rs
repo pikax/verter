@@ -2191,8 +2191,51 @@ where
             true,
         );
         loop {
-            match verter_execution::blocking::block_on(None, |waker| core.poll(waker)) {
+            match verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::ResolverFlight,
+                None,
+                |waker| core.poll(waker),
+            ) {
                 Ok(owned_singleflight::CoreStep::Produce(producer)) => producer.run(),
+                Ok(owned_singleflight::CoreStep::Value(value)) => return Ok(value),
+                Err(ResolverFlightError::Failed(error)) => return Err(error),
+                Err(_) => panic!("synchronous resolver dependency refused"),
+            }
+        }
+    }
+
+    /// Resolve through the owned flight state while allowing the producer's
+    /// computation to suspend. Task scope is installed for each producer poll.
+    pub async fn run_retaining_pollable<F, Fut, R>(
+        &self,
+        key: K,
+        token: StoreViewCompatToken,
+        compute: F,
+        retain: R,
+    ) -> Result<SingleflightRunResult<V>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<V, E>>,
+        R: FnOnce(&V) -> bool,
+    {
+        let registry = self.task_registry();
+        let waiter = verter_execution::tasks::ExecutionScope::current(registry)
+            .unwrap_or_else(|| registry.register_task());
+        let mut core = owned_singleflight::FlightCore::new(
+            self.shared(),
+            key,
+            token,
+            Some(waiter),
+            verter_execution::cancellation::CancellationToken::new(),
+            compute,
+            retain,
+            true,
+        );
+        loop {
+            match std::future::poll_fn(|cx| core.poll(cx.waker())).await {
+                Ok(owned_singleflight::CoreStep::Produce(producer)) => {
+                    producer.run_pollable().await
+                }
                 Ok(owned_singleflight::CoreStep::Value(value)) => return Ok(value),
                 Err(ResolverFlightError::Failed(error)) => return Err(error),
                 Err(_) => panic!("synchronous resolver dependency refused"),
@@ -3800,7 +3843,7 @@ mod tests {
             let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
             let (release, leader, state) = leader_in_compute(&group, retained);
             let (probe, waker) = flight_wake_probe(&group);
-            let mut join = FlightJoin::new(&state);
+            let mut join = FlightJoin::new(state.clone());
             assert!(join.poll(&waker).is_pending());
             assert!(join.poll(&waker).is_pending());
             assert_eq!(
@@ -3828,8 +3871,8 @@ mod tests {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let (release, leader, state) = leader_in_compute(&group, true);
         let (probe, waker) = flight_wake_probe(&group);
-        let mut dropped = FlightJoin::new(&state);
-        let mut kept = FlightJoin::new(&state);
+        let mut dropped = FlightJoin::new(state.clone());
+        let mut kept = FlightJoin::new(state.clone());
         assert!(dropped.poll(&waker).is_pending());
         assert!(kept.poll(&waker).is_pending());
         drop(dropped);
@@ -3852,7 +3895,7 @@ mod tests {
             let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
             let (release, leader, state) = leader_in_compute(&group, round % 2 == 0);
             let (probe, waker) = flight_wake_probe(&group);
-            let mut join = FlightJoin::new(&state);
+            let mut join = FlightJoin::new(state.clone());
             release.send(()).expect("release the leader");
             let answered_at_poll = join.poll(&waker).is_ready();
             leader.join().expect("the leader returns");

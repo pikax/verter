@@ -405,7 +405,7 @@ pub(crate) fn emit_parse_facts_counting_inventory(
 /// first observation, through the artifact's declaration-body memo —
 /// the lazy body fact path. Memoized per key in a shared side-store
 /// (`Arc`-shared with every clone of the owning [`FileFacts`]).
-#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone)]
 pub(crate) struct LazyBodyFactSource {
     memo: Arc<DeclBodyMemo>,
     lens: Arc<ShallowLens>,
@@ -440,12 +440,12 @@ impl LazyBodyFactSource {
             space: SymbolSpace::Type,
         } = key
         {
-            let read = self.memo.class_member_read_hashes_in(
+            let read = self.memo.class_member_read_hash_in(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 exporter.as_ref(),
                 member,
             );
-            let Some((outcome, display)) = read.value else {
+            let Some(outcome) = read.value else {
                 return SourceRead {
                     value: None,
                     refusal: read.refusal,
@@ -453,7 +453,7 @@ impl LazyBodyFactSource {
             };
             // A truncated fingerprint cannot certify the elements it did not
             // fully walk: decline, so the read keeps conservative evidence.
-            if outcome.budget_exceeded || display.budget_exceeded {
+            if outcome.budget_exceeded {
                 return SourceRead {
                     value: None,
                     refusal: read.refusal,
@@ -462,7 +462,7 @@ impl LazyBodyFactSource {
             let fact = Fact {
                 key: key.clone(),
                 semantic_hash: outcome.hash,
-                display_hash: display.hash,
+                display_hash: compute_display_hash(&outcome.hash),
             };
             self.computed.insert(key.clone(), fact.clone());
             return SourceRead {

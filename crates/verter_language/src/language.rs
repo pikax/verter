@@ -12,9 +12,7 @@ use crate::ids::{FrameworkAdapterId, LanguageId};
 /// `.mjs` dependencies (classic-script grammar) or mislabels CommonJS
 /// `.cjs` files (module grammar), so the neutral descriptor carries the
 /// kind explicitly.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum JsModuleKind {
     /// Module-or-script, decided by the presence of ESM syntax after
     /// parse (`.js`, `.jsx`).
@@ -35,9 +33,7 @@ pub enum JsModuleKind {
 /// This is descriptor data on [`FileLanguage::Script`]: it records what
 /// the extension says the file is. Parse-time source-type computation
 /// for embedded carrier scripts stays with the carrier's own parse data.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ScriptSourceType {
     /// TypeScript (`.ts`, `.mts`, `.cts`).
     Ts,
@@ -86,9 +82,7 @@ impl ScriptSourceType {
 /// the owning adapter so later stages can scope the adapter's module-level
 /// ambient typing (the rune surface) to exactly these files without
 /// classifying them as carriers.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScriptFlavor {
     /// An ordinary script with no framework involvement.
     Plain,
@@ -126,9 +120,7 @@ pub enum ScriptFlavor {
 /// insertion order or `Arc` address, so the order is stable across process
 /// runs. It is the ordering the fact-signature canonicaliser uses for
 /// `FileSourceEnv` facts.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FileLanguage {
     /// A script file — either plain or a framework adapter's standalone
     /// non-component module (see [`ScriptFlavor`]).

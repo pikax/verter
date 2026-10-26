@@ -1444,9 +1444,6 @@ pub struct PreparedDeclBundle {
     /// The engine's input record, minted on first read after admission:
     /// its own cell, held by the bundle (see [`Held`]).
     input_projection: OnceLock<Held<verter_session_query::inputs::prepared::PreparedInputRecord>>,
-    /// Immutable producing route witnesses, replayed even on committed
-    /// declaration slots and request-memo/shared/follower bundle hits.
-    resolution_facts: OnceLock<verter_session_query::facts::fact_cache::OwnedFactSignature>,
     /// The account the cells this bundle commits after admission are
     /// retained on.
     account: StoreAccount,
@@ -1477,16 +1474,15 @@ impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
     /// The bundle as admitted: both declaration caches' tables and its shared
     /// cells. What it commits afterwards — declarations, name tables, the
     /// engine's input record — is each its own cell, held by the bundle as
-    /// it fills ([`Held`]). The shared shallow state carries its own pin until its last artifact or
-    /// bundle holder drops; the identity pool likewise charges its own cells.
-    /// The bundle pays only for its handles to those shared owners.
+    /// it fills ([`Held`]). The file's shallow state is the file artifact
+    /// store's and the identity pool the project store's; the bundle shares
+    /// both, owns neither.
     fn heap_size<'t>(
         &'t self,
         meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
     ) -> usize {
         let Self {
             input_projection: _,
-            resolution_facts: _, // the witness rail owns its charge
             account: _,
             owner_whole_hash: _,
             prepared_type_decls,
@@ -1610,34 +1606,6 @@ fn base_table_heap<'t>(
 }
 
 impl PreparedDeclBundle {
-    pub(crate) fn seal_resolution_facts(
-        &self,
-        witness: Option<Vec<verter_session_query::facts::fact_cache::FactVersionRef>>,
-    ) {
-        if let Some(witness) = witness {
-            let _ = self.resolution_facts.set(witness.into());
-        }
-    }
-
-    pub(crate) fn observe_read(&self) {
-        super::owned_lowering_port::observe_whole_content(
-            &self.prepared_type_decls.canonical_id,
-            self.owner_whole_hash,
-        );
-        if let Some(facts) = self.resolution_facts.get() {
-            verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(facts);
-        } else if !self
-            .prepared_type_decls
-            .state
-            .owner_import_targets
-            .is_empty()
-        {
-            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
-                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
-            );
-        }
-    }
-
     pub(crate) fn input_record(&self) -> verter_session_query::inputs::prepared::PreparedInputRef {
         if let Some(record) = self.input_projection.get() {
             return record.value.clone();
@@ -1728,7 +1696,6 @@ pub fn build_prepared_decl_bundle(
     interner: &Arc<IdentityInterner>,
 ) -> PreparedDeclBundle {
     verter_audit::attribute_scope!(PreparedDeclBuild);
-    state.pin_storage();
     let dep_edges = DepEdges::new(dep_edges);
     let import_canonicalization = Arc::new(import_canonicalization);
 
@@ -1794,7 +1761,6 @@ pub fn build_prepared_decl_bundle(
     let owner_whole_hash = state.whole_hash;
     PreparedDeclBundle {
         input_projection: OnceLock::new(),
-        resolution_facts: OnceLock::new(),
         account: StoreAccount::default(),
         owner_whole_hash,
         prepared_type_decls: build_prepared_type_decl_cache(

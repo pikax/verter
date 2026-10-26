@@ -92,9 +92,7 @@ pub struct ProductExecutionGrants {
 ///
 /// Derived from a [`FrameworkEpoch`] type. Callers do not invent this
 /// independently of the register constructor's epoch type parameter.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FrameworkEpochId(std::sync::Arc<str>);
 
 impl FrameworkEpochId {

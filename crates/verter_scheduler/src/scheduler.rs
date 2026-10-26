@@ -627,7 +627,10 @@ impl Scheduler {
     ) -> Arc<Self> {
         let inbox = SubmissionInbox::new();
         let dag = new_dag_mutex(
-            SchedulerDag::with_budget(config.resolved_dag_budget()),
+            SchedulerDag::with_budget_and_registry(
+                config.resolved_dag_budget(),
+                task_registry.clone(),
+            ),
             inbox.sender.clone(),
         );
         let scheduler = Arc::new(Self {
@@ -742,7 +745,10 @@ impl Scheduler {
     ) -> Arc<Self> {
         let inbox = SubmissionInbox::new();
         let dag = new_dag_mutex(
-            SchedulerDag::with_budget(config.resolved_dag_budget()),
+            SchedulerDag::with_budget_and_registry(
+                config.resolved_dag_budget(),
+                task_registry.clone(),
+            ),
             inbox.sender.clone(),
         );
         Arc::new(Self {

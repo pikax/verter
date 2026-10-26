@@ -30,7 +30,6 @@ semantic-observe = [
 test-support = ["verter_session_query/test-support"]
 
 [dependencies]
-verter_retention = { path = "../verter_retention" }
 verter_session_query = { workspace = true }
 # The analyzer alone mints member-list anchors from live syntax nodes.
 verter_analyzer_mint = { workspace = true }

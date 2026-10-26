@@ -60,6 +60,7 @@ impl ScopedCacheFlight {
     }
 
     fn clear_owners(&self, state: &mut ScopedCacheFlightState) {
+        state.producer = None;
         for owner in state.owners.values() {
             if let Some(registration) = &owner.aggregate_registration {
                 self.delivery.deliver(vec![registration.detach_deferred()]);
@@ -115,6 +116,9 @@ impl ScopedCacheFlight {
         if state.aggregate.is_some() {
             return true;
         }
+        aggregate.set_wake_delivery(Arc::new(ScopedCancellationDelivery(Arc::downgrade(
+            &self.delivery,
+        ))));
         // These owners already coexist. Keep initialization live while attaching
         // them so a cancelled first entry cannot retire an existing sibling.
         let (initializing, wakes) = aggregate.register_owner_deferred(None);

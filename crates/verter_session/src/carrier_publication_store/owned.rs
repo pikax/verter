@@ -1011,44 +1011,48 @@ pub(super) fn drive(
     let mut handoff = OwnedPublication::new(store, accepted, request, waiter);
     let mut producer = None;
     let mut stopped = false;
-    verter_execution::blocking::block_on(None, |waker| {
-        if let Some(active) = &mut producer {
-            match PublicationProducer::poll(active, waker) {
-                Poll::Ready(PublicationProducerStep::Work(work)) => {
-                    work.run();
-                    waker.wake_by_ref();
+    verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::CarrierPublication,
+        None,
+        |waker| {
+            if let Some(active) = &mut producer {
+                match PublicationProducer::poll(active, waker) {
+                    Poll::Ready(PublicationProducerStep::Work(work)) => {
+                        work.run();
+                        waker.wake_by_ref();
+                    }
+                    Poll::Ready(PublicationProducerStep::Complete) => producer = None,
+                    Poll::Pending => {}
                 }
-                Poll::Ready(PublicationProducerStep::Complete) => producer = None,
-                Poll::Pending => {}
             }
-        }
-        if stopped {
-            return if producer.is_none() {
-                Poll::Ready(PublicationOutcome::Cancelled)
-            } else {
-                Poll::Pending
-            };
-        }
-        match handoff.poll(waker) {
-            Poll::Ready(Ok(PublicationStep::Produce(active))) => {
-                producer = Some(active);
-                waker.wake_by_ref();
-                Poll::Pending
+            if stopped {
+                return if producer.is_none() {
+                    Poll::Ready(PublicationOutcome::Cancelled)
+                } else {
+                    Poll::Pending
+                };
             }
-            Poll::Ready(Ok(PublicationStep::Outcome(outcome))) => Poll::Ready(outcome),
-            Poll::Ready(Err(PublicationError::Cancelled)) if producer.is_some() => {
-                stopped = true;
-                Poll::Pending
+            match handoff.poll(waker) {
+                Poll::Ready(Ok(PublicationStep::Produce(active))) => {
+                    producer = Some(active);
+                    waker.wake_by_ref();
+                    Poll::Pending
+                }
+                Poll::Ready(Ok(PublicationStep::Outcome(outcome))) => Poll::Ready(outcome),
+                Poll::Ready(Err(PublicationError::Cancelled)) if producer.is_some() => {
+                    stopped = true;
+                    Poll::Pending
+                }
+                Poll::Ready(Err(
+                    PublicationError::Cancelled | PublicationError::ProducerDropped,
+                )) => Poll::Ready(PublicationOutcome::Cancelled),
+                Poll::Ready(Err(PublicationError::Cycle | PublicationError::ProducerUnowned)) => {
+                    Poll::Ready(PublicationOutcome::RetryExhausted)
+                }
+                Poll::Pending => Poll::Pending,
             }
-            Poll::Ready(Err(PublicationError::Cancelled | PublicationError::ProducerDropped)) => {
-                Poll::Ready(PublicationOutcome::Cancelled)
-            }
-            Poll::Ready(Err(PublicationError::Cycle | PublicationError::ProducerUnowned)) => {
-                Poll::Ready(PublicationOutcome::RetryExhausted)
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    })
+        },
+    )
 }
 
 #[cfg(test)]

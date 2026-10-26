@@ -156,11 +156,30 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
                 .aggregate
                 .clone()
                 .expect("dispatch attaches the job token");
-            state.producer = Some((self.task.as_ref().expect("live task").clone(), self.owner_id));
+            state.producer = Some((
+                self.task.as_ref().expect("live task").clone(),
+                self.owner_id,
+            ));
             state.wakers.withdraw(&mut self.registration);
             // Followers that yielded before election must register their wait
             // edges now that the producer is known, even if it never runs.
-            self.scheduler.as_ref().expect("live scheduler").dag.deliver(vec![state.wakers.take()]);
+            let wakes = state.wakers.take();
+            drop(state);
+            let scheduler = self.scheduler.as_ref().expect("live scheduler");
+            {
+                let identity = self.identity.as_ref().expect("live identity");
+                let mut dag = scheduler.dag.lock();
+                if dag
+                    .cancellation_for(identity)
+                    .is_some_and(|current| current.same_source(&aggregate))
+                {
+                    dag.set_execution_task(
+                        identity,
+                        self.task.as_ref().expect("live task").clone(),
+                    );
+                }
+            }
+            scheduler.dag.deliver(vec![wakes]);
             return Poll::Ready(Ok(ScopedCacheNodeStep::Produce(ScopedCacheNodeProducer {
                 scheduler: Arc::clone(self.scheduler.as_ref().expect("live scheduler")),
                 identity: self.identity.as_ref().expect("live identity").clone(),
@@ -209,7 +228,9 @@ impl<T: Send + Sync + 'static> ScopedCacheNodeHandoff<T> {
         if let Some((producer, owner_id)) = &state.producer {
             if *owner_id != self.owner_id && self.wait.is_none() {
                 self.wait = Some(
-                    self.scheduler.as_ref().expect("live scheduler")
+                    self.scheduler
+                        .as_ref()
+                        .expect("live scheduler")
                         .task_registry
                         .register_wait(self.task.as_ref().expect("live task").id(), producer.id())
                         .map_err(|_| ScopedCacheNodeError::Reentrant)?,

@@ -187,12 +187,6 @@ impl VerterHost {
                     );
                 }
 
-                // The authored export table also contains unresolved local
-                // export specifiers. A spelling is a route, not a declaration
-                // in this owner; keep the missing binding a genuine miss.
-                if !state.declares_local_binding_in(*owner, symbol_name) {
-                    return Some(crate::resolver_core::RouteResult::Miss);
-                }
                 Some(crate::resolver_core::RouteResult::Resolved {
                     defining_canonical: provider_canonical.to_string(),
                     defining_owner: *owner,

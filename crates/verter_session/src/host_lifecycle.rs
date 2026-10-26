@@ -482,14 +482,6 @@ impl VerterHost {
         };
         #[cfg(test)]
         integrate_test_hooks::after_snapshot_capture();
-        if self
-            .derived_raw_cache()
-            .get(canonical_id)
-            .is_some_and(|derived| derived.eviction_epoch != eviction_epoch)
-        {
-            return false;
-        }
-
         let parsed_edges = Self::build_parsed_edges_from_analysis(
             canonical_id,
             &hd.parse.external_requests,

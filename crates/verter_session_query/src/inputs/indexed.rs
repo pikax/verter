@@ -16,7 +16,7 @@ use crate::source::snapshot::SnapshotKey;
 
 /// Identity of one observed indexed input: the snapshot it was read from, a
 /// per-observation id, and its language / parse identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexedInputIdentity {
     pub source: SnapshotKey,
     pub observation_id: u64,
@@ -25,7 +25,7 @@ pub struct IndexedInputIdentity {
 }
 
 /// The owned record of one served post-parse artifact.
-#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone)]
 pub struct IndexedInputRecord {
     pub identity: IndexedInputIdentity,
     pub whole_hash: Hash16,

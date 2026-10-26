@@ -1,6 +1,7 @@
 //! Owned scheduler-backed loading. Polling transfers host integration to the
 //! external caller; it never resolves workspace routes or drives a stage.
 
+use std::sync::Arc;
 use std::task::{Poll, Waker};
 use verter_execution::cancellation::CancellationToken;
 use verter_execution::dependency::DependencyStop;
@@ -182,11 +183,46 @@ impl VerterHost {
         self.provenance.ensure_loaded_calls.fetch_add(1, Relaxed);
         let project_generation = self.project_type_store.project_generation();
         let canonical = self.normalized_analysis_canonical(canonical).into_owned();
-        let (reload, pre_evict_hash, eviction_revision) = self
-            .derived_raw_cache()
-            .get(&canonical)
-            .map(|d| (d.evicted, d.evicted_whole_hash, d.eviction_revision()))
-            .unwrap_or((false, None, 0));
+        let (reload, pre_evict_hash, eviction_revision) = loop {
+            let reset_lock = self
+                .derived_raw_cache()
+                .get(&canonical)
+                .map(|derived| Arc::clone(&derived.eviction_reset));
+            let _reset = reset_lock.as_ref().map(|lock| lock.lock());
+            // The state is read under the lock its row owns: a row an
+            // eviction created, or replaced, after the lock lookup is read
+            // again under its own lock.
+            let observed = self.derived_raw_cache().get(&canonical).map(|d| {
+                (
+                    reset_lock
+                        .as_ref()
+                        .is_some_and(|lock| Arc::ptr_eq(lock, &d.eviction_reset)),
+                    d.evicted,
+                    d.evicted_whole_hash,
+                    d.eviction_revision(),
+                    d.eviction_reset_epoch,
+                )
+            });
+            if observed.is_some_and(|(owns_lock, ..)| !owns_lock) {
+                continue;
+            }
+            break match observed
+                .map(|(_, evicted, hash, epoch, reset)| (evicted, hash, epoch, reset))
+            {
+                Some((true, pre_evict_hash, epoch, reset_epoch)) => {
+                    if reset_epoch < epoch && !stop.is_cancelled() {
+                        self.scheduler.close_file(&canonical);
+                        if let Some(mut derived) = self.derived_raw_cache().get_mut(&canonical) {
+                            derived.eviction_reset_epoch = derived.eviction_reset_epoch.max(epoch);
+                        }
+                    }
+                    (true, pre_evict_hash, epoch)
+                }
+                Some((false, _, epoch, _)) => (false, None, epoch),
+                None => (false, None, 0),
+            };
+        };
+
         let source_version = self
             .scheduler
             .try_get_source(&canonical)
@@ -201,9 +237,6 @@ impl VerterHost {
         let request = if integrated || stop.is_cancelled() {
             None
         } else {
-            if reload {
-                self.scheduler.close_file(&canonical);
-            }
             Some(self.scheduler.begin_owned_request(
                 Request {
                     file_id: canonical.clone(),

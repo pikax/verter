@@ -9,9 +9,7 @@ use crate::FileLanguage;
 
 /// Canonical host file identity. The host supplies an already-normalized value;
 /// this leaf authority binds and digests it without performing path routing.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CanonicalFileId(Arc<str>);
 
 impl CanonicalFileId {
@@ -31,7 +29,7 @@ impl fmt::Display for CanonicalFileId {
 }
 
 /// Random identity of one registered-source authority lifetime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceAuthorityNamespaceId([u8; 16]);
 
 impl SourceAuthorityNamespaceId {
@@ -41,7 +39,7 @@ impl SourceAuthorityNamespaceId {
 }
 
 /// Domain-separated digest of a canonical file identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CanonicalIdentityDigest([u8; 32]);
 
 impl CanonicalIdentityDigest {
@@ -58,9 +56,7 @@ impl CanonicalIdentityDigest {
 }
 
 /// Host file-incarnation identity. Equality, not ordering, defines identity.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileIncarnation(u64);
 
 impl FileIncarnation {
@@ -74,9 +70,7 @@ impl FileIncarnation {
 }
 
 /// Source generation within a file incarnation.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceGeneration(u64);
 
 impl SourceGeneration {
@@ -90,7 +84,7 @@ impl SourceGeneration {
 }
 
 /// SHA-256 of the exact registered UTF-8 source bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WholeSourceHash([u8; 32]);
 
 impl WholeSourceHash {
@@ -104,7 +98,7 @@ impl WholeSourceHash {
 }
 
 /// Sealed identity projected from a validated registered snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RegisteredSourceSnapshotId {
     authority: SourceAuthorityNamespaceId,
     canonical_digest: CanonicalIdentityDigest,
@@ -141,7 +135,7 @@ impl RegisteredSourceSnapshotId {
 }
 
 /// Exact registered source state. Construction is confined to its authority.
-#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredSourceSnapshot {
     id: RegisteredSourceSnapshotId,
     canonical: CanonicalFileId,

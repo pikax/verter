@@ -3769,6 +3769,10 @@ impl StoreViewManager {
         }
     }
 
+    pub(crate) async fn base_view_pollable(&self, host: &VerterHost) -> StoreViewRead {
+        build_claim::pollable(host).await
+    }
+
     /// Publish a freshly-built coherent base view into `cached` under the
     /// snapshot publish/return invariant.
     ///
@@ -4873,7 +4877,7 @@ mod build_release_tests {
         let manager = Arc::new(StoreViewManager::new());
         let (claim, _) = BuildClaimGuard::claim(&manager, &mut manager.state.lock());
         let (counter, waker) = probe(&manager);
-        let mut release = BuildRelease::new(&manager, &mut manager.state.lock());
+        let mut release = BuildRelease::new(&manager, &manager.state.lock());
         assert!(release.poll(&waker).is_pending());
         assert!(release.poll(&waker).is_pending());
         assert_eq!(
@@ -4896,8 +4900,8 @@ mod build_release_tests {
         let manager = Arc::new(StoreViewManager::new());
         let (claim, _) = BuildClaimGuard::claim(&manager, &mut manager.state.lock());
         let (counter, waker) = probe(&manager);
-        let mut dropped = BuildRelease::new(&manager, &mut manager.state.lock());
-        let mut kept = BuildRelease::new(&manager, &mut manager.state.lock());
+        let mut dropped = BuildRelease::new(&manager, &manager.state.lock());
+        let mut kept = BuildRelease::new(&manager, &manager.state.lock());
         assert!(dropped.poll(&waker).is_pending());
         assert!(kept.poll(&waker).is_pending());
         drop(dropped);
@@ -4930,7 +4934,7 @@ mod build_release_tests {
             };
             claiming.recv().expect("the builder claims");
             let (counter, waker) = probe(&manager);
-            let mut release = BuildRelease::new(&manager, &mut manager.state.lock());
+            let mut release = BuildRelease::new(&manager, &manager.state.lock());
             start.wait();
             let answered_at_poll = release.poll(&waker).is_ready();
             builder.join().expect("the builder releases");

@@ -1624,8 +1624,12 @@ fn refresh_resolution_evidence(
     let task = engine.authority.current();
     let mut future =
         Box::pin(engine.refresh_resolution_evidence(reader, evidence, overlay, signature, &task));
-    verter_execution::blocking::block_on(None, |waker| {
-        std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
-    })
+    verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        None,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
     .expect("evidence refresh completes in its task authority");
 }

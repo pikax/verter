@@ -52,7 +52,6 @@ enum RequiredImportClosure {
 /// authority.
 #[derive(Debug, Clone)]
 pub struct ShallowFileState {
-    storage: verter_retention::pinned_heap::StoragePin,
     inputs: ShallowInputAssembly,
     decl_bodies: Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo>,
     type_deps_cache: verter_semantic_source::per_file_map::PerFileMap<
@@ -66,7 +65,7 @@ pub struct ShallowFileState {
 }
 
 #[derive(Debug, Default)]
-struct InputProjectionCell(verter_retention::pinned_heap::PinnedOnce<Arc<ShallowInputRecord>>);
+struct InputProjectionCell(std::sync::OnceLock<Arc<ShallowInputRecord>>);
 impl Clone for InputProjectionCell {
     fn clone(&self) -> Self {
         Self::default()
@@ -81,20 +80,12 @@ impl std::ops::Deref for ShallowFileState {
 }
 impl std::ops::DerefMut for ShallowFileState {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.storage.invalidate();
         self.input_projection = InputProjectionCell::default();
         &mut self.inputs
     }
 }
 
 impl ShallowFileState {
-    pub(crate) fn pin_storage(&self) {
-        self.storage.ensure(
-            self,
-            verter_retention::allocation::arc_block_bytes(std::mem::size_of::<Self>()),
-            &Default::default(),
-        );
-    }
     /// The published observation of this state's current facts, finalized
     /// once per assembled version: a mutation through `DerefMut` resets it,
     /// so changed facts are always a new observation.
@@ -104,31 +95,6 @@ impl ShallowFileState {
                 .0
                 .get_or_init(|| Arc::new(ShallowInputRecord::finalize(self.inputs.clone()))),
         )
-    }
-}
-
-impl verter_retention::heap_size::HeapSize for ShallowFileState {
-    fn heap_size<'t>(
-        &'t self,
-        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-    ) -> usize {
-        let Self {
-            storage: _,
-            inputs,
-            decl_bodies,
-            type_deps_cache: _,
-            synthesised_value_bodies,
-            route_surface_hash: _,
-            syntactic_route_interface_hash: _,
-            input_projection: _,
-        } = self;
-        inputs.heap_size(meter)
-            + decl_bodies.heap_size(meter)
-            + synthesised_value_bodies.heap_size(meter)
-    }
-    fn pin_storage(&self, _context: &verter_retention::pinned_heap::PinContext) -> bool {
-        self.pin_storage();
-        true
     }
 }
 
@@ -656,7 +622,6 @@ impl ShallowFileState {
             .map(|assignment| assignment.local.clone());
 
         Self {
-            storage: Default::default(),
             inputs: ShallowInputAssembly {
                 whole_hash,
                 exports,
@@ -693,7 +658,6 @@ impl ShallowFileState {
     /// the one the memo serves forever, which is why assembly never
     /// installs early.)
     fn install_shallow_lens_from_final_state(&self) {
-        self.pin_storage();
         self.decl_bodies
             .install_shallow_lens(Arc::new(crate::fact_emission::build_shallow_lens(self)));
         self.decl_bodies
@@ -1262,7 +1226,6 @@ impl ShallowFileState {
                 owner,
                 symbol_name: name.to_string(),
             });
-        self.pin_storage();
     }
 
     // -----------------------------------------------------------------------

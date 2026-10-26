@@ -1799,7 +1799,6 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
     // fingerprint a one-augmenter set would produce, so the assertion above is
     // not satisfied by an all-zero / constant hash.
     let one_augmenter = [AugmenterEntry {
-        population_hash: [0; 16],
         artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [0u8; 16]),
         parse_stable_hash: [7u8; 16],
     }];

@@ -93,14 +93,6 @@ use verter_session_query::facts::fact_cache::{
 use verter_session_query::facts::reuse::ReuseClass;
 use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CompletedSource {
-    whole_hash: Hash16,
-    // Required source-header evidence, admitted atomically with the hash.
-    // Artifact-only and session-overlay completions have no base version.
-    source_version: Option<verter_scheduler::node::SourceVersion>,
-}
-
 /// Per-request shadowing side maps recording additive loads that the
 /// request-entry [`HostStoreView`] does not track. Keys are retained for
 /// the request lifetime, while equal replacement is a no-op and changed
@@ -142,7 +134,7 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// shadowing state. The memo map below is deliberately excluded.
     overlay_id: OverlayId,
     revision: BracketedGeneration,
-    whole_hashes: RwLock<FxHashMap<String, CompletedSource>>,
+    whole_hashes: RwLock<FxHashMap<String, Hash16>>,
     /// Per-canonical derived hashes bundled by `DerivedFactKind` so a
     /// read can locate the entry with a `&str` lookup (no per-read
     /// owned tuple allocation).
@@ -175,7 +167,6 @@ pub(crate) struct CanonicalCompletionOverlay {
     whole_hashes_nonempty: AtomicBool,
     derived_hashes_nonempty: AtomicBool,
     file_facts_nonempty: AtomicBool,
-
     /// Request-scoped memo of prepared-decl bundles — the ONE
     /// request-world memo covering the base, session-overlay and
     /// `RequestOnly` worlds. See [`RequestBundleMemo`].
@@ -449,21 +440,6 @@ impl CanonicalCompletionOverlay {
     }
 
     fn write_whole_hash(&self, canonical: &str, whole_hash: Hash16) -> bool {
-        self.write_completed_source(canonical, |prior| {
-            prior
-                .filter(|entry| entry.whole_hash == whole_hash)
-                .unwrap_or(CompletedSource {
-                    whole_hash,
-                    source_version: None,
-                })
-        })
-    }
-
-    fn write_completed_source(
-        &self,
-        canonical: &str,
-        update: impl FnOnce(Option<CompletedSource>) -> CompletedSource,
-    ) -> bool {
         let mut whole = self.whole_hashes.write();
         self.whole_hashes_nonempty.store(true, Ordering::Release);
         #[cfg(test)]
@@ -474,8 +450,7 @@ impl CanonicalCompletionOverlay {
                 "the presence flag must be published while the map write lock is held"
             );
         }
-        let entry = update(whole.get(canonical).copied());
-        whole.insert(canonical.to_owned(), entry) != Some(entry)
+        whole.insert(canonical.to_owned(), whole_hash) != Some(whole_hash)
     }
 
     fn write_route_hash(&self, canonical: &str, route_hash: Hash16) -> bool {
@@ -679,12 +654,14 @@ impl CanonicalCompletionOverlay {
         // scheduler first, then the host's `effective_file_state`
         // fallback for canonicals that exist only in the artifact
         // store.
-        let source = host.scheduler().try_get_source(canonical);
-        let source_version = source.as_ref().map(|source| source.version());
-        let whole_hash = source.as_ref().map(|source| source.whole_hash).or_else(|| {
-            host.effective_file_state(canonical, None)
-                .map(|state| state.whole_hash)
-        });
+        let whole_hash = host
+            .scheduler()
+            .try_get_source(canonical)
+            .map(|source| source.whole_hash)
+            .or_else(|| {
+                host.effective_file_state(canonical, None)
+                    .map(|state| state.whole_hash)
+            });
 
         let Some(whole_hash) = whole_hash else {
             // No tracked content for this canonical — nothing to
@@ -695,7 +672,7 @@ impl CanonicalCompletionOverlay {
             return;
         };
 
-        self.write_completion_entry(host, canonical, whole_hash, source_version, None);
+        self.write_completion_entry(host, canonical, whole_hash, None);
     }
 
     /// Write the completion-overlay entries for a session-overlaid
@@ -712,7 +689,7 @@ impl CanonicalCompletionOverlay {
     ) {
         let overlay_identity = host.overlay_artifact_identity(canonical);
         let file_artifacts = overlay_identity.lookup_overlay_artifacts(host, view);
-        self.write_completion_entry(host, canonical, overlay_hash, None, file_artifacts);
+        self.write_completion_entry(host, canonical, overlay_hash, file_artifacts);
     }
 
     /// Write the completion-overlay entries for `(canonical, whole_hash)`.
@@ -724,13 +701,8 @@ impl CanonicalCompletionOverlay {
         host: &crate::VerterHost,
         canonical: &str,
         whole_hash: verter_session_query::analysis::types::Hash16,
-        source_version: Option<verter_scheduler::node::SourceVersion>,
         file_artifacts: Option<Arc<crate::file_artifact_store::FileArtifacts>>,
     ) {
-        let completed = CompletedSource {
-            whole_hash,
-            source_version,
-        };
         // Per-canonical `IndexedReady` projection — populates `file_facts`
         // and the authored `Route` derived-hash entry. For a
         // session-overlaid canonical the caller passes the overlay
@@ -756,7 +728,7 @@ impl CanonicalCompletionOverlay {
         // wrote all three). Writing them again changes nothing, and would
         // compare the stored facts with these structurally — a walk over
         // every fact the file registers, on every serve of the file.
-        if self.lookup_completed_source(canonical) == Some(completed)
+        if self.lookup_whole_hash(canonical) == Some(whole_hash)
             && file_artifacts.as_ref().is_some_and(|file_artifacts| {
                 self.lookup_file_facts(canonical).is_some_and(|facts| {
                     Arc::ptr_eq(&facts, &file_artifacts.facts) || facts == file_artifacts.facts
@@ -786,7 +758,7 @@ impl CanonicalCompletionOverlay {
         // its effective shadowing spans three maps. A reader can therefore
         // never name a population for a partially-published completion.
         self.revision.mutate(|| {
-            let mut changed = self.write_completed_source(canonical, |_| completed);
+            let mut changed = self.write_whole_hash(canonical, whole_hash);
             if let Some(file_artifacts) = file_artifacts {
                 changed |= self.write_file_facts(canonical, Arc::clone(&file_artifacts.facts));
             }
@@ -800,11 +772,6 @@ impl CanonicalCompletionOverlay {
     }
 
     fn lookup_whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
-        self.lookup_completed_source(canonical_id)
-            .map(|entry| entry.whole_hash)
-    }
-
-    fn lookup_completed_source(&self, canonical_id: &str) -> Option<CompletedSource> {
         // Fast path: if no completion has written to this map within
         // the request, skip the `RwLock::read` + map lookup entirely.
         if !self.whole_hashes_nonempty.load(Ordering::Acquire) {
@@ -842,7 +809,7 @@ impl CanonicalCompletionOverlay {
     /// when `host.current_store_view_epoch() != base.mutation_epoch()`.
     #[cfg(test)]
     pub(crate) fn peek_whole_hash_for_tests(&self, canonical_id: &str) -> Option<Hash16> {
-        self.lookup_whole_hash(canonical_id)
+        self.whole_hashes.read().get(canonical_id).copied()
     }
 
     /// Test-only: directly insert a `(canonical, whole_hash)` entry into
@@ -1848,22 +1815,6 @@ impl<'a> RequestStoreView<'a> {
     fn check_parse_domain(&self, fact: &ParseFactRef) -> LeafCheck {
         if !self.base_is_current {
             return LeafCheck::Invalid;
-        }
-        if matches!(
-            fact.key,
-            verter_session_query::facts::FactKey::DirectDeclarationExport { .. }
-        ) {
-            return match self.overlay.lookup_completed_source(&fact.canonical_id) {
-                Some(completed) => match completed.source_version {
-                    Some(version) => self.base.check_direct_declaration_export_for_content(
-                        fact,
-                        Some(completed.whole_hash),
-                        Some(version),
-                    ),
-                    None => LeafCheck::Invalid,
-                },
-                None => self.base.check_parse_domain(fact),
-            };
         }
         match self.overlay.lookup_file_facts(&fact.canonical_id) {
             // Shadowing: overlay `FileFacts` are authoritative for the

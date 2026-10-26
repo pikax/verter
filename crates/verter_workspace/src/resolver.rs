@@ -967,9 +967,13 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
         run,
         None,
     ));
-    verter_execution::blocking::block_on(None, |waker| {
-        std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
-    })
+    verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        None,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
 }
 
 async fn drive_attempt_with_bounded_io_async<T>(
@@ -1450,9 +1454,13 @@ pub(crate) fn resolve_tracked_in_project(
         project,
         None,
     ));
-    verter_execution::blocking::block_on(None, |waker| {
-        std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
-    })
+    verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        None,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
 }
 
 pub(crate) async fn resolve_tracked_in_project_async(
@@ -1518,9 +1526,13 @@ pub(crate) fn resolve_for_project_tracked(
         },
         None,
     ));
-    verter_execution::blocking::block_on(None, |waker| {
-        std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
-    })
+    verter_execution::blocking::block_on(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        None,
+        |waker| {
+            std::future::Future::poll(future.as_mut(), &mut std::task::Context::from_waker(waker))
+        },
+    )
 }
 
 pub(crate) struct ProjectRequest<'a> {

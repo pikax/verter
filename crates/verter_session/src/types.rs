@@ -3816,13 +3816,8 @@ pub struct DerivedRawState {
     /// matches pre-fix behavior.
     pub(crate) evicted_whole_hash: Option<Hash16>,
 
-    /// How many times this file has been evicted. A reload clears
-    /// `evicted` only when no eviction has landed since it started, so an
-    /// eviction during a reload leaves the file evicted for the next reload.
-    pub(crate) eviction_epoch: u64,
-
     /// The eviction whose pre-eviction scheduler snapshot a reload has
-    /// already reset. Below `eviction_epoch`, the next reload resets the
+    /// already reset. Below `eviction_revision`, the next reload resets the
     /// scheduler before loading; at it, a reload joins the reset one.
     pub(crate) eviction_reset_epoch: u64,
 

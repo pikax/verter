@@ -1,6 +1,6 @@
 use super::*;
-use crate::source_loader::MemorySourceLoader;
 use crate::dag::ResourceClass;
+use crate::source_loader::MemorySourceLoader;
 use std::sync::atomic::AtomicUsize;
 use std::task::{Poll, Wake, Waker};
 
@@ -93,10 +93,7 @@ fn dropping_the_last_scoped_owner_releases_its_edge_before_notifying_the_produce
     }
     let scheduler = scheduler();
     let waiter = scheduler.task_registry.register_task();
-    let mut root = {
-        let _scope = ExecutionScope::install(&scheduler.task_registry, &waiter);
-        scheduler.begin_scoped_cache_node::<u64>(request()).unwrap()
-    };
+    let mut root = scheduler.begin_scoped_cache_node::<u64>(request()).unwrap();
     assert!(root.poll(Waker::noop()).is_pending());
     scheduler.drive_all();
     let Poll::Ready(Ok(ScopedCacheNodeStep::Produce(producer))) = root.poll(Waker::noop()) else {
@@ -108,15 +105,22 @@ fn dropping_the_last_scoped_owner_releases_its_edge_before_notifying_the_produce
         .unwrap()
         .clone();
     let aggregate = flight.state.lock().aggregate.clone().unwrap();
+    let producer_task = flight.state.lock().producer.as_ref().unwrap().0.clone();
+    let mut follower = {
+        let _scope = ExecutionScope::install(&scheduler.task_registry, &waiter);
+        scheduler.begin_scoped_cache_node::<u64>(request()).unwrap()
+    };
+    assert!(follower.poll(Waker::noop()).is_pending());
+    drop(root);
     let observed = Arc::new(AtomicUsize::new(0));
     let waker = Waker::from(Arc::new(Probe {
         waiter,
-        producer: flight.task.clone(),
+        producer: producer_task,
         observed: observed.clone(),
     }));
     let mut stop = aggregate.subscribe();
     assert!(stop.poll(&waker).is_pending());
-    drop(root);
+    drop(follower);
     assert_eq!(
         observed.load(Ordering::SeqCst),
         1,
@@ -303,7 +307,12 @@ fn scoped_and_completion_waits_share_one_cycle_authority() {
         .scoped_cache_flights
         .get(&request().identity())
         .unwrap()
-        .task
+        .state
+        .lock()
+        .producer
+        .as_ref()
+        .unwrap()
+        .0
         .clone();
     let other = scheduler.task_registry.register_task();
     let (handle, sender) = completion_pair::<u64>();
@@ -319,7 +328,7 @@ fn scoped_and_completion_waits_share_one_cycle_authority() {
         follower.poll(Waker::noop()),
         Poll::Ready(Err(ScopedCacheNodeError::Reentrant))
     ));
-    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 2);
+    assert_eq!(scheduler.task_registry.wait_graph_occupancy().edges, 1);
     sender.send(CompletionState::Ready(7));
     assert!(matches!(
         completion.poll(Waker::noop()),
@@ -611,7 +620,6 @@ fn a_higher_priority_scoped_follower_upgrades_the_admitted_job() {
     );
 }
 
-
 #[test]
 fn transferred_producer_clears_an_unrelated_executor_request() {
     use verter_execution::request_context::{
@@ -674,7 +682,6 @@ fn transferred_producer_clears_an_unrelated_executor_request() {
         }
     }
 }
-
 
 #[test]
 fn aggregate_cancellation_wakes_after_scoped_teardown_unlocks() {
@@ -751,7 +758,6 @@ fn aggregate_cancellation_wakes_after_scoped_teardown_unlocks() {
     }
 }
 
-
 #[test]
 fn producer_election_wakes_followers_to_register_task_waits() {
     let scheduler = scheduler();
@@ -795,7 +801,6 @@ fn producer_election_wakes_followers_to_register_task_waits() {
     assert_eq!(scheduler.task_registry.active_task_count_for_tests(), 0);
 }
 
-
 #[test]
 fn suspended_same_task_reentry_is_refused_on_another_thread() {
     let scheduler = scheduler();
@@ -832,9 +837,9 @@ fn suspended_same_task_reentry_is_refused_on_another_thread() {
         Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) if *value == 53
     ));
     drop((root, nested, task));
+    scheduler.quiesce();
     assert_eq!(scheduler.task_registry.active_task_count_for_tests(), 0);
 }
-
 
 #[test]
 fn scoped_task_waits_release_on_follower_drop_cancellation_reset_and_producer_failure() {
@@ -916,7 +921,6 @@ fn scoped_task_waits_release_on_follower_drop_cancellation_reset_and_producer_fa
     }
 }
 
-
 #[test]
 fn settling_a_scoped_producer_notifies_capacity_blocked_dispatch() {
     use crate::caller_kind::CallerKind;
@@ -977,7 +981,6 @@ fn settling_a_scoped_producer_notifies_capacity_blocked_dispatch() {
     }
 }
 
-
 #[test]
 fn a_pending_scoped_dependency_borrows_its_active_workers_capacity() {
     let scheduler = Scheduler::test_new_sync(
@@ -1017,7 +1020,6 @@ fn a_pending_scoped_dependency_borrows_its_active_workers_capacity() {
     );
     assert_eq!(scheduler.dag.lock().in_flight_cpu_permits(), 0);
 }
-
 
 #[test]
 fn final_capacity_release_wakes_progress_subscribers_after_lifecycle_unlock() {

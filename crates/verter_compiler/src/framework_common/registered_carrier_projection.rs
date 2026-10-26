@@ -1,13 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-fn carrier_heap<'t>(
-    carrier: &'t Arc<dyn CarrierParse>,
-    meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
-) -> usize {
-    meter.shared_arc(carrier, |value, meter| value.heap_size(meter))
-}
-
 use verter_language::carrier_grammar::{AcceptedRegisteredCarrierSource, CarrierGrammarConfig};
 use verter_language::parse_artifact::carrier_inventory::*;
 use verter_language::{
@@ -89,7 +82,7 @@ fn carrier_style_dialect(lang: Option<StyleLang>) -> StyleDialect {
 /// `pub(crate)` `carrier_ref`/`carrier_arc`/`erased_carrier_for_adapter`
 /// methods below) — there is no free-standing token that could be
 /// re-minted or handed to an unrelated caller.
-#[derive(Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Clone)]
 pub struct RegisteredCarrierPayload {
     inner: Arc<RegisteredCarrierPayloadInner>,
 }
@@ -98,7 +91,6 @@ pub struct RegisteredCarrierPayload {
 ///
 /// The private state and carrier fields make direct construction impossible.
 /// Geometry-sensitive consumers receive only this registered form.
-#[derive(verter_retention::heap_size::HeapSize)]
 pub struct FrameworkParseArtifact {
     adapter_id: FrameworkAdapterId,
     language_id: LanguageId,
@@ -432,9 +424,7 @@ impl std::fmt::Debug for FrameworkParseArtifact {
     }
 }
 
-#[derive(verter_retention::heap_size::HeapSize)]
 struct RegisteredCarrierPayloadInner {
-    #[heap_size(with = "carrier_heap")]
     carrier: Arc<dyn CarrierParse>,
     adapter_id: FrameworkAdapterId,
     language_id: LanguageId,

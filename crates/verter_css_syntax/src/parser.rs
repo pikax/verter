@@ -71,10 +71,9 @@ impl SourceSize {
     }
 }
 
-#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone)]
 pub struct CssSource {
     text: Arc<str>,
-    #[heap_size(inline)]
     size: SourceSize,
 }
 

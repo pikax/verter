@@ -27,26 +27,6 @@ use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 use verter_type_engine::request_context::{ObserveExec, Uncaptured};
 
-fn observe_availability(
-    canonical: &str,
-    serve: &crate::host_manage::prepared_decl::IndexedReadyServe,
-) {
-    if !serve.store_published {
-        note_non_cacheable_read_fan_out(NonCacheableReadReason::FencedServe);
-    }
-    // This port exposes only availability, not the source payload or its
-    // parse key (which includes a content ID). Use the exact served route
-    // interface; the content-consuming ports own their narrower/broader proof.
-    observe_fan_out(FactVersionRef::Parse(ParseFactRef {
-        canonical_id: canonical.into(),
-        key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
-        lane: verter_session_query::facts::FactLane::Semantic,
-        expected_hash: crate::resolver_store::syntactic_route_interface_hash(
-            &serve.indexed.shallow_state,
-        ),
-    }));
-}
-
 /// The capability types every host request context hands out: the source's
 /// owned expression-demand handle and the host's live workspace slot. Base
 /// and overlay contexts share them, so request structures carrying them are
@@ -199,31 +179,14 @@ impl IndexedInputs for crate::VerterHost {
 
     #[inline]
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
-        crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id).map(|serve| {
-            super::owned_lowering_port::observe_whole_content(
-                canonical_id,
-                serve.indexed.whole_hash,
-            );
-            self.source_input_leases.retain(serve)
-        })
-    }
-
-    fn source_is_available(&self, canonical: &str) -> bool {
-        crate::VerterHost::ensure_indexed_ready_serve(self, canonical).is_some_and(|serve| {
-            observe_availability(canonical, &serve);
-            true
-        })
+        crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id)
+            .map(|serve| self.source_input_leases.retain(serve))
     }
 
     #[inline]
     fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
-        crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id).map(|serve| {
-            super::owned_lowering_port::observe_whole_content(
-                canonical_id,
-                serve.indexed.whole_hash,
-            );
-            self.source_input_leases.retain(serve)
-        })
+        crate::VerterHost::ensure_indexed_ready_serve(self, canonical_id)
+            .map(|serve| self.source_input_leases.retain(serve))
     }
 
     #[inline]
@@ -233,10 +196,8 @@ impl IndexedInputs for crate::VerterHost {
 
     #[inline]
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>> {
-        crate::VerterHost::shallow_file_state(self, canonical_id).map(|state| {
-            super::owned_lowering_port::observe_whole_content(canonical_id, state.whole_hash);
-            self.source_input_leases.retain_shallow(state)
-        })
+        crate::VerterHost::shallow_file_state(self, canonical_id)
+            .map(|state| self.source_input_leases.retain_shallow(state))
     }
 
     #[inline]
@@ -255,9 +216,7 @@ impl IndexedInputs for crate::VerterHost {
 
     #[inline]
     fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
-        let snapshot = crate::VerterHost::get_raw_analysis_snapshot(self, canonical)?;
-        super::owned_lowering_port::observe_analysis_revision(canonical, &snapshot.anchor_revision);
-        Some(snapshot)
+        crate::VerterHost::get_raw_analysis_snapshot(self, canonical)
     }
     /// Authoritative current content hash for `canonical` — the hash
     /// source [`Self::indexed_for_current_content`] pins against.
@@ -493,10 +452,8 @@ impl RouteLookup for crate::VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<Arc<verter_session_query::inputs::shallow::ShallowInputRecord>> {
-        crate::VerterHost::routed_shallow_state(self, canonical_id).map(|state| {
-            super::owned_lowering_port::observe_whole_content(canonical_id, state.whole_hash);
-            self.source_input_leases.retain_shallow(state)
-        })
+        crate::VerterHost::routed_shallow_state(self, canonical_id)
+            .map(|state| self.source_input_leases.retain_shallow(state))
     }
 
     #[inline]
@@ -948,26 +905,12 @@ where
             self.0.complete_canonical(canonical_id);
         }
         result.map(|serve| {
-            super::owned_lowering_port::observe_whole_content(
-                canonical_id,
-                serve.indexed.whole_hash,
-            );
             self.0
                 .request_view()
                 .overlay()
                 .input_artifacts
                 .retain(serve)
         })
-    }
-
-    fn source_is_available(&self, canonical: &str) -> bool {
-        self.0
-            .materialize_indexed_ready_serve(canonical)
-            .is_some_and(|serve| {
-                self.0.complete_canonical(canonical);
-                observe_availability(canonical, &serve);
-                true
-            })
     }
 
     /// Base-store read, deliberately NOT the request view's overlay-priority
@@ -983,10 +926,6 @@ where
             canonical_id,
         )
         .map(|serve| {
-            super::owned_lowering_port::observe_whole_content(
-                canonical_id,
-                serve.indexed.whole_hash,
-            );
             self.0
                 .request_view()
                 .overlay()
@@ -1055,7 +994,6 @@ where
         self.0
             .indexed_for_current_content(canonical)
             .map(|indexed| {
-                super::owned_lowering_port::observe_whole_content(canonical, indexed.whole_hash);
                 self.0
                     .request_view()
                     .overlay()
@@ -1092,13 +1030,11 @@ where
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::get_raw_analysis_snapshot"
         );
-        let snapshot = crate::VerterHost::get_raw_analysis_snapshot_in::<L::Observe>(
+        crate::VerterHost::get_raw_analysis_snapshot_in::<L::Observe>(
             self.0.host(),
             self.0.capture_targets(),
             canonical,
-        )?;
-        super::owned_lowering_port::observe_analysis_revision(canonical, &snapshot.anchor_revision);
-        Some(snapshot)
+        )
     }
 }
 
@@ -1480,8 +1416,6 @@ use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
 impl<L: RequestBoundLifecycle>
     verter_type_engine::resolver_core::fact_validation_port::LiveFactValidation
     for RequestBoundAdapter<L>
-where
-    Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
     type Clocks = crate::resolver_store::WorkspaceSlotClocks;
     fn request_snapshot(
@@ -1492,84 +1426,7 @@ where
     }
 }
 
-impl<L> RequestBoundAdapter<L> {
-    /// Complete edited parse facts before the view captures its validation
-    /// epoch. Indexing during a leaf check would tear that epoch instead.
-    fn prepare_validation_inputs(&self, facts: &[FactVersionRef]) -> Result<(), usize>
-    where
-        L: RequestBoundLifecycle,
-        Self: verter_type_engine::resolver_core::request_ports::OwnedLowering,
-    {
-        let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
-        let population_ready = std::cell::Cell::new(false);
-        facts.iter().enumerate().try_for_each(|(index, fact)| {
-            let valid = verter_session_query::facts::fact_cache::validates_through_receipts(
-                fact,
-                &mut walk,
-                |leaf| {
-                    if let FactVersionRef::RouteSurface(fact) = leaf {
-                        if let verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
-                            target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern,
-                        } = &fact.key {
-                            if !population_ready.replace(true) {
-                                self.0.host().ingest_program_ambient_roots();
-                            }
-                            let population_decl = crate::global_contributors::population_fact_decl_name(
-                                *target_kind_tag, external_specifier.as_ref().map(|s| s.as_ref()), wildcard_pattern.as_ref().map(|s| s.as_ref()));
-                            if population_decl.is_none() {
-                                let Some(target) = crate::resolver_store::augmentation_target_kind_from_shape(
-                                    *target_kind_tag, external_specifier.as_ref().map(|s| s.as_ref()),
-                                    resolved_relative_canonical.as_deref(), wildcard_pattern.as_ref().map(|s| s.as_ref())) else {
-                                    return false;
-                                };
-                                // Materialize through the same target population owner as
-                                // cold evaluation. The captured root may still name a
-                                // formerly empty set; both current and captured proofs
-                                // must agree before that receipt can be reused.
-                                let (key, current, _) = verter_type_engine::resolver_core::request_ports::OwnedLowering::augmentation_index_with_resolutions(self, target);
-                                if current.fingerprint != fact.expected_hash
-                                    || !self.0.host().project_type_store().indexed()
-                                        .get_augmenter_set(&key).is_some_and(|published| std::sync::Arc::ptr_eq(&published, &current)) {
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-                    let FactVersionRef::Parse(parse) = leaf else {
-                        return true;
-                    };
-                    if matches!(
-                        parse.key,
-                        verter_session_query::facts::FactKey::DirectDeclarationExport { .. }
-                    ) {
-                        self.0.complete_canonical(&parse.canonical_id);
-                        return true;
-                    }
-                    let Some(serve) = self.0.materialize_indexed_ready_serve(&parse.canonical_id)
-                    else {
-                        return false;
-                    };
-                    if !serve.store_published
-                        || self
-                            .0
-                            .authoritative_current_content_hash(&parse.canonical_id)
-                            != Some(serve.indexed.whole_hash)
-                    {
-                        return false;
-                    }
-                    self.0.complete_canonical(&parse.canonical_id);
-                    true
-                },
-            );
-            valid.then_some(()).ok_or(index)
-        })
-    }
-}
-
-impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L>
-where
-    Self: sealed::Sealed + sealed::RequestBoundSealed,
-{
+impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     fn publication_input_fingerprint(&self) -> Option<u64> {
         self.0.request_view().publication_input_fingerprint()
     }
@@ -1639,15 +1496,11 @@ where
     }
     fn validates(&self, fact: &FactVersionRef) -> bool {
         verter_type_engine::count_resolver_context_call!("FactValidation::validates");
-        self.prepare_validation_inputs(std::slice::from_ref(fact))
-            .is_ok()
-            && self.0.request_view().validates(fact)
+        self.0.request_view().validates(fact)
     }
     fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
         verter_type_engine::count_resolver_context_call!("FactValidation::validates_parse_domain");
-        self.prepare_validation_inputs(&[FactVersionRef::Parse(fact.clone())])
-            .is_ok()
-            && self.0.request_view().validates_parse_domain(fact)
+        self.0.request_view().validates_parse_domain(fact)
     }
     fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
         verter_type_engine::count_resolver_context_call!(
@@ -1659,9 +1512,7 @@ where
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_route_surface_domain"
         );
-        self.prepare_validation_inputs(&[FactVersionRef::RouteSurface(fact.clone())])
-            .is_ok()
-            && self.0.request_view().validates_route_surface_domain(fact)
+        self.0.request_view().validates_route_surface_domain(fact)
     }
     fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool {
         verter_type_engine::count_resolver_context_call!(
@@ -1741,8 +1592,7 @@ where
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_fact_signature"
         );
-        self.prepare_validation_inputs(sig).is_ok()
-            && self.0.request_view().validates_fact_signature(sig)
+        self.0.request_view().validates_fact_signature(sig)
     }
     fn validate_fact_signature(
         &self,
@@ -1750,7 +1600,6 @@ where
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
         verter_type_engine::count_resolver_context_call!("FactValidation::validate_fact_signature");
-        self.prepare_validation_inputs(sig)?;
         self.0
             .request_view()
             .validate_fact_signature(sig, self_root_canonicals)
@@ -1763,11 +1612,9 @@ where
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_fact_signature_with_self_roots"
         );
-        self.prepare_validation_inputs(sig).is_ok()
-            && self
-                .0
-                .request_view()
-                .validates_fact_signature_with_self_roots(sig, self_root_canonicals)
+        self.0
+            .request_view()
+            .validates_fact_signature_with_self_roots(sig, self_root_canonicals)
     }
     fn validates_retained_signature_with_self_roots(
         &self,
@@ -1777,11 +1624,9 @@ where
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_retained_signature_with_self_roots"
         );
-        self.prepare_validation_inputs(sig).is_ok()
-            && self
-                .0
-                .request_view()
-                .validates_retained_signature(sig, self_root_canonicals)
+        self.0
+            .request_view()
+            .validates_retained_signature(sig, self_root_canonicals)
     }
     fn promote_route_completion(
         &self,

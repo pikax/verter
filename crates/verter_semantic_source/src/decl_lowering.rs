@@ -1265,7 +1265,12 @@ impl DeclLoweringService {
         if let Some(work) = handoff.work.take_work() {
             work.run();
         }
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker)).0
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
+        .0
     }
 
     /// [`Self::acquire_lease`] as a pollable handoff to the worker owning
@@ -1313,7 +1318,11 @@ impl DeclLoweringService {
         if let Some(work) = handoff.work.take_work() {
             work.run();
         }
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker))
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
     }
 
     /// [`Self::acquire_lease_and_run`] as a pollable handoff to the worker
@@ -1722,7 +1731,11 @@ impl DeclLoweringService {
         if let Some(work) = handoff.work.take_work() {
             work.run();
         }
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker))
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
     }
 
     /// [`Self::run_leased`] as a pollable handoff to the worker owning
@@ -1820,7 +1833,11 @@ impl DeclLoweringService {
         if let Some(work) = handoff.work.take_work() {
             work.run();
         }
-        verter_execution::blocking::block_on(None, |waker| handoff.poll(waker))
+        verter_execution::blocking::block_on(
+            verter_execution::blocking::WaitFamily::DeclLowering,
+            None,
+            |waker| handoff.poll(waker),
+        )
     }
 
     /// [`Self::run_leased_batch`] as one pollable handoff per occupied

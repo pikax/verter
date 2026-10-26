@@ -65,7 +65,7 @@ pub(crate) fn parse_svelte_fragments(token: &str) -> Option<SvelteFragments> {
 
 /// The concrete Svelte carrier: the parsed component behind the erasure seam,
 /// plus the typed lowering of its plain-attribute `{expr}` values.
-#[derive(Debug, verter_retention::heap_size::HeapSize)]
+#[derive(Debug)]
 pub struct SvelteParseCarrier {
     parsed: Arc<ParsedSvelte>,
     attribute_expressions: SvelteAttributeExpressions,

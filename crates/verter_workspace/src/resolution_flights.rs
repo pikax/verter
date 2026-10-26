@@ -43,8 +43,6 @@ pub(crate) struct FlightLease<K: Hash + Eq + Clone, T> {
     key: K,
     flight: Arc<Flight<T>>,
     settled: bool,
-    /// The claiming thread's lease count holds this lease.
-    _thread: std::marker::PhantomData<*const ()>,
 }
 pub(crate) struct FlightSubscription<T> {
     flight: Arc<Flight<T>>,
@@ -87,7 +85,6 @@ impl<K: Hash + Eq + Clone, T> ResolutionFlights<K, T> {
             key: key.clone(),
             flight,
             settled: false,
-            _thread: std::marker::PhantomData,
         })
     }
     pub(crate) fn len(&self) -> usize {

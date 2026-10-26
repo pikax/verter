@@ -569,7 +569,7 @@ impl FilesystemWorkspace {
                         &mut input_ledger,
                         &|| {
                             let valid = frozen.revalidate();
-                            final_valid.set(valid);
+                            final_valid.store(valid, Ordering::Release);
                             valid
                         },
                     )

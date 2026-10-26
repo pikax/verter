@@ -216,9 +216,9 @@ impl<'m, M: FactMeter> FactMeasure<'m, M> {
     fn fact_key(&mut self, key: &FactKey) -> usize {
         let m = &mut *self.meter;
         match key {
-            FactKey::Export { name: n, .. }
-            | FactKey::LocalDecl { name: n, .. }
-            | FactKey::DirectDeclarationExport { name: n } => m.leaf_name(&n.0),
+            FactKey::Export { name: n, .. } | FactKey::LocalDecl { name: n, .. } => {
+                m.leaf_name(&n.0)
+            }
             FactKey::ExportAlias { exported_as, .. } => m.leaf_name(&exported_as.0),
             FactKey::Member {
                 exporter, name: n, ..

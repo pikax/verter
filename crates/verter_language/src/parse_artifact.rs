@@ -31,7 +31,7 @@ pub mod carrier_inventory;
 pub mod carrier_structure_hash;
 
 /// Role of an embedded carrier script region (closed set).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScriptRegionKind {
     /// Per-component-instance script (Vue `<script setup>`, Svelte
     /// instance `<script>`).
@@ -51,7 +51,7 @@ pub enum ScriptRegionKind {
 /// Astro: frontmatter is always TS), so session-side source-type
 /// computation reads the common surface uniformly and never needs a
 /// carrier downcast.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScriptRegion {
     /// Content byte range of the region, carrier-file-absolute.
     pub span: Span,
@@ -62,21 +62,21 @@ pub struct ScriptRegion {
 }
 
 /// One template region of a carrier file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TemplateRegion {
     /// Content byte range of the region, carrier-file-absolute.
     pub span: Span,
 }
 
 /// One style region of a carrier file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StyleRegion {
     /// Content byte range of the region, carrier-file-absolute.
     pub span: Span,
 }
 
 /// Block kind an external link substitutes for (closed set).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExternalLinkKind {
     /// External script source (`<script src="…">`).
     Script,
@@ -87,7 +87,7 @@ pub enum ExternalLinkKind {
 }
 
 /// An external-source reference declared by a carrier block.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExternalLink {
     /// Which block kind the link substitutes for.
     pub kind: ExternalLinkKind,
@@ -98,7 +98,7 @@ pub struct ExternalLink {
 }
 
 /// Severity of a neutral carrier-parse diagnostic (closed set).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LanguageDiagnosticSeverity {
     /// A parse problem.
     Error,
@@ -113,9 +113,7 @@ pub enum LanguageDiagnosticSeverity {
 /// Display text is intentionally excluded from diagnostic ordering. Frontends
 /// encode the values used to render that text here so equivalent diagnostics
 /// retain a deterministic order across runs and insertion paths.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DiagnosticArg {
     /// Boolean argument.
     Bool(bool),
@@ -133,7 +131,7 @@ pub enum DiagnosticArg {
 ///
 /// Defined HERE (not borrowed from a compiler crate) so the leaf
 /// crate's `verter_span`-only dependency claim holds.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LanguageDiagnostic {
     /// Carrier-file-absolute byte range the diagnostic refers to.
     pub span: Span,
@@ -315,7 +313,7 @@ pub enum SyntaxReject {
 }
 
 /// Typed framework-neutral metadata shared by every carrier parse.
-#[derive(Debug, Clone, Default, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FrameworkParseCommon {
     /// Sole framework-neutral geometry authority.
     pub inventory: Arc<CarrierBlockInventory>,
@@ -461,10 +459,9 @@ const fn source_span(span: carrier_inventory::SourceSpan) -> Span {
 ///
 /// Implemented by each adapter's concrete carrier (e.g. the
 /// compiler-owned `VueParseCarrier`). The trait is an erasure seam, not
-/// an API: the hidden `Any` bridges serve the doc-hidden downcast helpers.
-/// Every carrier also supplies exhaustive heap measurement, so an erased
-/// parser payload cannot silently disappear from its retaining owner's charge.
-pub trait CarrierParse: Any + Send + Sync + verter_retention::heap_size::HeapSize {
+/// an API: the only member is the hidden `Any` bridge the doc-hidden
+/// downcast helpers use.
+pub trait CarrierParse: Any + Send + Sync {
     /// Hidden `Any` bridge for the doc-hidden downcast helpers.
     #[doc(hidden)]
     fn __verter_as_any(&self) -> &dyn Any;
@@ -558,7 +555,7 @@ mod tests {
     use super::*;
     use crate::FileLanguage;
 
-    #[derive(Debug, verter_retention::heap_size::HeapSize)]
+    #[derive(Debug)]
     struct TestCarrier {
         value: u32,
     }
@@ -572,7 +569,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug, verter_retention::heap_size::HeapSize)]
+    #[derive(Debug)]
     struct OtherCarrier;
 
     impl CarrierParse for OtherCarrier {
