@@ -45,9 +45,9 @@
     "@verter/type-ir": "workspace:^"
   },
   "devDependencies": {
-    "@types/node": "^25.9.1",
+    "@types/node": "^26.6.5",
     "glob": "^13.0.6",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.7"
+    "vitest": "^5.0.5"
   }
 }

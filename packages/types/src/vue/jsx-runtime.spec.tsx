@@ -1,3 +1,4 @@
+import { it } from "vitest";
 import "../index";
 
 declare global {
@@ -13,14 +14,16 @@ declare global {
 
 declare const Child: new () => { $props: { label: string } };
 
-// Nested Vue content is slot content. A competing ambient React
-// `ElementChildrenAttribute` must not turn it into a checked `children` prop.
-const intrinsic = <div class="card">content</div>;
-const component = <Child label="ok">slot content</Child>;
+it("checks nested Vue content as slot content beside a React JSX namespace", () => {
+  // Nested Vue content is slot content. A competing ambient React
+  // `ElementChildrenAttribute` must not turn it into a checked `children` prop.
+  const intrinsic = <div class="card">content</div>;
+  const component = <Child label="ok">slot content</Child>;
 
-// @ts-expect-error React's attribute spelling must not leak into Vue JSX.
-const reactOnly = <div className="card" />;
+  // @ts-expect-error React's attribute spelling must not leak into Vue JSX.
+  const reactOnly = <div className="card" />;
 
-void intrinsic;
-void component;
-void reactOnly;
+  void intrinsic;
+  void component;
+  void reactOnly;
+});

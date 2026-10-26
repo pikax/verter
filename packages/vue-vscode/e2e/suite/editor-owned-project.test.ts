@@ -313,7 +313,7 @@ function readRelayAdvertisement(log: string): RelayAdvertisement {
   assert.ok(controlDir, `Missing Native Preview rendezvous in log:\n${log.slice(-4_000)}`);
   const entries = fs.readdirSync(controlDir);
   const verdict = verifySharedArmedHandshake({ logText: log, controlDirEntries: entries });
-  assert.ok(verdict.ok, verdict.reason);
+  if (!verdict.ok) assert.fail(verdict.reason);
   assert.strictEqual(verdict.advertisements.length, 1);
   const raw = JSON.parse(
     fs.readFileSync(path.join(controlDir, verdict.advertisements[0]), "utf8"),

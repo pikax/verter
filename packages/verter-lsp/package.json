@@ -42,8 +42,8 @@
     "@verter/binary-launcher": "workspace:^"
   },
   "devDependencies": {
-    "@types/node": "^25.9.1",
-    "vitest": "^4.1.7"
+    "@types/node": "^26.6.5",
+    "vitest": "^5.0.5"
   },
   "optionalDependencies": {
     "@verter/lsp-darwin-arm64": "workspace:*",

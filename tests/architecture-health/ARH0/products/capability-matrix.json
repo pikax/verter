@@ -97,24 +97,24 @@
       "capability": "bundler-host-plugin",
       "status": "implemented",
       "engine": "vite (dev/test surface for unplugin)",
-      "version": "8.0.14",
+      "version": "8.3.5",
       "versionSource": "pnpm-lock.yaml",
       "consumers": [
         "packages/unplugin"
       ],
-      "uncertainty": "manifest specifier ^8.0.14 (packages/unplugin devDependencies) resolved by pnpm-lock; unplugin targets Vite/Rollup/webpack/esbuild/rspack/Rolldown/Farm, only the Vite dev pin is asserted here",
+      "uncertainty": "manifest specifier ^8.3.5 (packages/unplugin devDependencies) resolved by pnpm-lock; unplugin targets Vite/Rollup/webpack/esbuild/rspack/Rolldown/Farm, only the Vite dev pin is asserted here",
       "versionProperty": "importers.packages/unplugin.devDependencies.vite"
     },
     {
       "capability": "nuxt-project-profile",
       "status": "implemented",
       "engine": "@nuxt/kit",
-      "version": "4.4.6",
+      "version": "4.6.2",
       "versionSource": "pnpm-lock.yaml",
       "consumers": [
         "packages/nuxt"
       ],
-      "uncertainty": "manifest specifier ^4.4.6 (packages/nuxt dependencies) resolved by pnpm-lock",
+      "uncertainty": "manifest specifier ^4.6.2 (packages/nuxt dependencies) resolved by pnpm-lock",
       "versionProperty": "importers.packages/nuxt.dependencies.@nuxt/kit"
     },
     {

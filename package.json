@@ -94,8 +94,8 @@
     "@bufbuild/buf": "1.70.0",
     "@bufbuild/protoc-gen-es": "2.12.0",
     "@hyrious/esbuild-plugin-commonjs": "^0.2.6",
-    "@vscode/vsce": "^3.9.1",
-    "esbuild": "^0.28.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
     "esbuild-plugin-alias": "^0.2.1",
     "esbuild-plugin-alias-path": "^2.0.2",
     "git-cliff": "2.14.2",
@@ -105,7 +105,7 @@
     "shx": "0.4.0",
     "svelte": "5.56.10",
     "typescript": "7.0.2",
-    "vitest": "^4.1.7",
+    "vitest": "^5.0.5",
     "vue": "3.6.0-rc.5"
   },
   "lint-staged": {
