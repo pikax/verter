@@ -179,6 +179,9 @@ describe("issue #90 — generated loader per-platform optional-dependency fallba
     expect(result.acceptedPublishedDepRequests).toEqual([]);
     // It threw the napi "cannot find native binding" terminal error.
     expect(result.threwMessage).toMatch(/native binding/i);
+    // Every load error the loader collected is a real resolution miss, not a
+    // gap in the sandbox (a missing `require.resolve` surfaces as a TypeError).
+    expect(result.threwCauseChain.join("\n")).not.toMatch(/is not a function/);
   });
 
   // ---- Accepted-not-attempted discrimination ----

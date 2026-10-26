@@ -317,10 +317,24 @@ export function probeLoaderForPlatform(
     return moduleNotFound(id);
   };
 
+  // `require.resolve` answers exactly as `require` does: the published
+  // optional-dependency packages (and their package.json) resolve, and every
+  // other id misses with MODULE_NOT_FOUND. The loader preflights its WASI
+  // fallbacks (`./verter-native.wasi.cjs`, `@verter/native-wasm32-wasi`)
+  // through it, and none of those exist in a real install either.
+  const fakeResolve = (id: string): string => {
+    const base = id.endsWith("/package.json") ? id.slice(0, -"/package.json".length) : id;
+    if (base.startsWith("@verter/native-") && published.has(base)) {
+      return join(PACKAGE_DIR, "node_modules", id);
+    }
+    return moduleNotFound(id);
+  };
+  const sandboxRequire = Object.assign(fakeRequire, { resolve: fakeResolve });
+
   const moduleObj = { exports: {} as Record<string, unknown> };
   const sandbox: Record<string, unknown> = {
     process: makeFakeProcess(fake),
-    require: fakeRequire,
+    require: sandboxRequire,
     module: moduleObj,
     exports: moduleObj.exports,
     __dirname: join(PACKAGE_DIR, "dist"),
