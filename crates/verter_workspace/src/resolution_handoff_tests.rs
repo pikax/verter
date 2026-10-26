@@ -258,12 +258,13 @@ fn filesystem_discovery_and_frozen_replay_survive_migration_between_work_slices(
         .to_str()
         .unwrap()
         .replace('\\', "/");
-    let expected = dir
-        .path()
-        .join("dep.ts")
-        .to_str()
-        .unwrap()
-        .replace('\\', "/");
+    let expected = verter_session_query::resolution::normalize_canonical_id(
+        &dir.path()
+            .join("dep.ts")
+            .to_str()
+            .unwrap()
+            .replace('\\', "/"),
+    );
     let (_, waker) = waker();
     let mut root = ws.clone().begin_resolution(
         query,

@@ -2017,7 +2017,14 @@ where
     K: Eq + Hash,
 {
     fn default() -> Self {
-        Self::with_task_registry(verter_execution::tasks::TaskRegistry::default())
+        Self {
+            flights: Arc::new(Mutex::new(FlightTable::default())),
+            registry: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(test)]
+            non_retained_seam_hook: Arc::new(SeamHookSlot::default()),
+            #[cfg(test)]
+            joiner_park_tx: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -2039,7 +2046,8 @@ where
 
     /// The registry whose tasks lead and join this group's flights.
     pub(crate) fn task_registry(&self) -> &verter_execution::tasks::TaskRegistry {
-        self.registry.get().expect("flight registry is composed")
+        self.registry
+            .get_or_init(verter_execution::tasks::TaskRegistry::default)
     }
 }
 

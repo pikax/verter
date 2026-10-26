@@ -511,8 +511,6 @@ impl VerterHost {
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
-        // Scoped cache producers and semantic producers share one cycle authority.
-        let task_registry = verter_execution::tasks::TaskRegistry::default();
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
