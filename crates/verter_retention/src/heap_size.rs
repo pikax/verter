@@ -24,7 +24,8 @@
 
 use std::sync::Arc;
 
-use super::word_set::WordSet;
+use super::pinned_heap::PinContext;
+use super::shared::CallerHold;
 
 pub use verter_retention_derive::HeapSize;
 
@@ -57,17 +58,18 @@ pub trait IterativeNode {
 /// offered to, and the iterative nodes still to measure.
 pub struct HeapMeter<'h, 't> {
     handles: &'h mut AliasSet,
-    raw: WordSet,
+    raw: AliasSet,
     pending: Vec<(&'t dyn IterativeNode, Option<usize>)>,
     walking: bool,
-    pins: Option<&'h std::cell::RefCell<crate::pinned_heap::Collector>>,
+    pin_context: Option<&'h PinContext>,
+    pins: Vec<CallerHold>,
     allocation: Option<usize>,
     allocations: Vec<PendingAllocation<'t>>,
 }
 
 struct PendingAllocation<'t> {
     bytes: usize,
-    register: Box<dyn FnOnce(usize) -> crate::shared::CallerHold + 't>,
+    register: Box<dyn FnOnce(&PinContext, usize) -> CallerHold + 't>,
 }
 
 impl<'h, 't> HeapMeter<'h, 't> {
@@ -75,21 +77,19 @@ impl<'h, 't> HeapMeter<'h, 't> {
     pub fn new(handles: &'h mut AliasSet) -> Self {
         Self {
             handles,
-            raw: WordSet::new(),
+            raw: AliasSet::new(),
             pending: Vec::new(),
             walking: false,
-            pins: None,
+            pin_context: None,
+            pins: Vec::new(),
             allocation: None,
             allocations: Vec::new(),
         }
     }
 
-    pub(crate) fn pinning(
-        handles: &'h mut AliasSet,
-        pins: &'h std::cell::RefCell<crate::pinned_heap::Collector>,
-    ) -> Self {
+    pub(crate) fn pinning(handles: &'h mut AliasSet, context: &'h PinContext) -> Self {
         Self {
-            pins: Some(pins),
+            pin_context: Some(context),
             ..Self::new(handles)
         }
     }
@@ -114,15 +114,23 @@ impl<'h, 't> HeapMeter<'h, 't> {
         if !self.first(value) {
             return None;
         }
+        Some(self.measure_shared_arc(value, measure))
+    }
+
+    /// Measure an allocation already recorded in this walk's visited set.
+    fn measure_shared_arc<T: ?Sized + Send + Sync + 'static>(
+        &mut self,
+        value: &'t Arc<T>,
+        measure: impl FnOnce(&'t T, &mut HeapMeter<'_, 't>) -> usize,
+    ) -> usize {
         let inline = arc_block_bytes(std::mem::size_of_val(&**value));
-        let Some(pins) = self.pins else {
-            return Some(inline + measure(value, self));
-        };
-        let context = pins.borrow().context.clone();
+        if self.pin_context.is_none() {
+            return inline + measure(value, self);
+        }
         let index = self.allocations.len();
         self.allocations.push(PendingAllocation {
             bytes: inline,
-            register: Box::new(move |bytes| {
+            register: Box::new(move |context, bytes| {
                 context
                     .aliases
                     .pin_caller(context.account(), value, |_| bytes)
@@ -132,18 +140,19 @@ impl<'h, 't> HeapMeter<'h, 't> {
         let bytes = measure(value, self);
         self.allocations[index].bytes += bytes;
         self.allocation = previous;
-        Some(0)
+        0
     }
 
     /// Settle registrations after the single iterative walk has attributed
     /// every deferred node to the allocation that owns its backing.
-    pub(crate) fn finish_pins(self) {
-        if let Some(pins) = self.pins {
+    pub(crate) fn finish_pins(mut self) -> Vec<CallerHold> {
+        if let Some(context) = self.pin_context {
             for allocation in self.allocations {
-                let hold = (allocation.register)(allocation.bytes);
-                pins.borrow_mut().pins.push(hold);
+                let hold = (allocation.register)(context, allocation.bytes);
+                self.pins.push(hold);
             }
         }
+        self.pins
     }
 
     /// `true` the first time the raw allocation of `arc` is offered.
@@ -158,11 +167,7 @@ impl<'h, 't> HeapMeter<'h, 't> {
              delivered value must be an owned handle charged by itself",
             std::any::type_name::<T>()
         );
-        let address = Arc::as_ptr(arc).cast::<()>() as u64;
-        match self.pins {
-            Some(pins) => pins.borrow_mut().seen.insert(address),
-            None => self.raw.insert(address),
-        }
+        self.raw.first_allocation(arc)
     }
 
     /// The handle set owned allocations are offered to.
@@ -176,10 +181,9 @@ impl<'h, 't> HeapMeter<'h, 't> {
     pub fn arc_str_bytes(&mut self, value: &Arc<str>) -> usize {
         if crate::allocation::is_shared_empty_str(value) || !self.first(value) {
             0
-        } else if let Some(pins) = self.pins {
-            let context = pins.borrow().context.clone();
+        } else if let Some(context) = self.pin_context {
             let hold = context.aliases.pin_leaf(context.account(), value);
-            pins.borrow_mut().pins.push(hold);
+            self.pins.push(hold);
             0
         } else {
             arc_block_bytes(value.len())
@@ -395,13 +399,15 @@ impl<T: HeapSize + Send + Sync + 'static> HeapSize for Arc<[T]> {
 
 impl<T: HeapSize + Send + Sync + 'static> HeapSize for Arc<T> {
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
-        if let Some(pins) = meter.pins {
-            let context = pins.borrow().context.clone();
-            if (**self).pin_storage(&context) {
+        if !meter.first(self) {
+            return 0;
+        }
+        if let Some(context) = meter.pin_context {
+            if (**self).pin_storage(context) {
                 return 0;
             }
         }
-        meter.shared_arc(self, |value, meter| value.heap_size(meter))
+        meter.measure_shared_arc(self, |value, meter| value.heap_size(meter))
     }
 }
 

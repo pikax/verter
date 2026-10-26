@@ -30,7 +30,10 @@ charge until its last release. The cell's adjacent pin covers only backing
 that cannot escape independently.
 
 `StoragePin` lives inside its owning record, including when that record is
-shared through Arc. Its root block and unique backing use `GranularPin` with
+shared through Arc. A `OnceLock` seals its measurement at publication; only
+exclusive mutation resets it. Each walk checks an embedded owner once per
+distinct allocation, before following another alias. Its root block and unique
+backing use `GranularPin` with
 1 KiB granules and the existing less-than-two-granule shrink convention.
 Aliased raw allocations use the registry's ordinary exact reservation and
 backing convention. One iterative worklist attributes deferred nodes to their
@@ -81,9 +84,12 @@ registrations leaves no capacity charged. The release boundary also waits for
 every scheduler stage task to drop the file node and snapshots its closure
 captured: a task wakes its waiters before it returns.
 
-`HeapMeter.pending`, `allocation` and `allocations` are transient REQUIRED
-accounting traversal state, discarded before publication. `EmbeddedStorage`
-and the derive's pin hook route REQUIRED accounting to the record's single
+`HeapMeter.raw`, `pending`, `allocation`, `allocations` and `pins` are transient
+REQUIRED accounting traversal state, discarded before publication. The walker
+borrows one `pin_context` throughout settlement and uses the common inline
+alias set before allocating a visited table. It owns its work state directly;
+deferred registrations borrow that context rather than cloning it per allocation.
+`EmbeddedStorage` and the derive's pin hook route REQUIRED accounting to the record's single
 embedded owner. The scoped default-context override and the executor's
 `pin_context` field are test-support injection only, absent from shipped
 builds; they add no production observation or retained store.
