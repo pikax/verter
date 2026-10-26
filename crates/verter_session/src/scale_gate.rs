@@ -139,3 +139,52 @@ impl<'a> PolynomialWork<'a> {
             .collect()
     }
 }
+
+/// The work `run` spends on `host`, by the engine's deterministic counters:
+/// the operations charged against the request's fuse, the connected work,
+/// and the host graph's relation checks, cold builds, instantiations,
+/// decided conditionals and substitutions.
+pub(crate) fn measured_work<R>(
+    host: &crate::VerterHost,
+    run: impl FnOnce() -> R,
+) -> (R, Vec<(&'static str, u64)>) {
+    let graph = host.project_type_store().semantic_graph();
+    let before = graph.stats_snapshot();
+    let ((result, usage), charged, _) =
+        verter_type_engine::request_budget::with_request_spend_capture_for_tests(|| {
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(run)
+        });
+    let after = graph.stats_snapshot();
+    let work = vec![
+        ("charged operations", charged as u64),
+        ("connected work", usage.work as u64),
+        (
+            "relation checks",
+            after.relation_check_count - before.relation_check_count,
+        ),
+        ("cold builds", after.misses - before.misses),
+        (
+            "instantiations",
+            after.instantiate_count - before.instantiate_count,
+        ),
+        (
+            "decided conditionals",
+            after.conditional_decided_count - before.conditional_decided_count,
+        ),
+        (
+            "substitutions",
+            after.substitute_memo_misses - before.substitute_memo_misses,
+        ),
+    ];
+    (result, work)
+}
+
+/// The counters of `work` measured at each gate size, by name.
+pub(crate) fn counters(work: &[Vec<(&'static str, u64)>]) -> Vec<Counter<'static>> {
+    (0..work[0].len())
+        .map(|index| Counter {
+            name: work[0][index].0,
+            values: work.iter().map(|counts| counts[index].1).collect(),
+        })
+        .collect()
+}
