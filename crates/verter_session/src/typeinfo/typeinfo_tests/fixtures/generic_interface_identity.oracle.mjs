@@ -5,10 +5,13 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { version } from "typescript";
-import { API, NodeBuilderFlags } from "typescript/unstable/sync";
+import { API, NodeBuilderFlags } from "typescript/sync";
 
-assert.equal(version, "7.0.2");
-// Native TypeScript 7.0.2 definitions: typescript/dist/enums/nodeBuilderFlags.enum.d.ts.
+const pin = JSON.parse(
+  readFileSync(new URL("../../../../../../package.json", import.meta.url), "utf8"),
+).devDependencies.typescript;
+assert.equal(version, pin, "re-measure this oracle on TypeScript upgrades");
+// The pinned native definitions: typescript/dist/enums/nodeBuilderFlags.enum.d.ts.
 // NoTruncation keeps the full answer; InTypeAlias prints the alias's underlying type.
 const displayFlags = NodeBuilderFlags.NoTruncation | NodeBuilderFlags.InTypeAlias;
 const dir = mkdtempSync(join(tmpdir(), "verter-interface-identity-")).replaceAll("\\", "/");
@@ -46,11 +49,13 @@ try {
           files: ["probe.ts"],
         }),
       );
-      const api = new API({ cwd: dir });
-      try {
-        const snapshot = api.updateSnapshot({ openProjects: [config] });
-        try {
-          const project = snapshot.getProject(config);
+      // The API and its snapshot are disposed when their blocks end (the API
+      // last), and neither is touched after it is disposed.
+      using api = new API({ cwd: dir });
+      {
+        using snapshot = api.createSnapshot({ openProjects: [config] });
+        {
+          const project = snapshot.getConfiguredProject(config);
           assert.deepEqual(project.program.getSemanticDiagnostics(), []);
           const typeOf = (name) => {
             const at = source.indexOf(`type ${name} =`) + "type ".length;
@@ -135,11 +140,7 @@ try {
           console.log(
             JSON.stringify({ strictNullChecks, noImplicitAny, diagnostics: [], answers }),
           );
-        } finally {
-          snapshot.dispose();
         }
-      } finally {
-        api.close();
       }
     }
   }
